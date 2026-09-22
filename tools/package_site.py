@@ -384,6 +384,13 @@ def load_src_map():
 
 def main():
     global SRC_OF
+    # v2 站点的首页 / 样式由 build_course.py + assets/style.css 维护，
+    # 本脚本会把它们整体覆盖回旧版，所以先做一次护栏检查。
+    _idx = os.path.join(SITE, "index.html")
+    if os.path.isfile(_idx) and "course-index.js" in open(_idx, encoding="utf-8", errors="replace").read():
+        print("检测到 v2 赛博风首页，本脚本会把它覆盖成旧版，已拒绝运行。")
+        print("v2 的构建方式是：python tools/build_course.py && python tools/package_course.py")
+        return 2
     SRC_OF = load_src_map()
     report = json.load(open(os.path.join(SITE, "build-report.json"), encoding="utf-8"))
     titles = report["titles"]
