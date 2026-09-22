@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Windows (WSL2) Guide · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/windows-wsl-quickstart</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="windows-wsl2-guide">Windows (WSL2) Guide</h1>
+<p>Hermes Agent now supports <strong>both</strong> native Windows and WSL2.  This page covers the WSL2 path; for the native PowerShell install see the dedicated <strong><a href="windows-native.html">Windows (Native) Guide</a></strong>.</p>
+<p><strong>When to pick WSL2 over native:</strong>
+- You want to use the dashboard's embedded terminal (<code>/chat</code> tab) — that pane requires a POSIX PTY and is WSL2-only.
+- You're doing POSIX-heavy development work and want your Hermes sessions to share the same filesystem / paths as your dev tools.
+- You already have a WSL2 environment and don't want to maintain a second install.</p>
+<p><strong>When native is fine (or better):</strong>
+- Interactive chat, gateway (Telegram/Discord/etc.), cron scheduler, browser tool, MCP servers, and most Hermes features all run natively on Windows.
+- You don't want to think about crossing the WSL↔Windows boundary every time you reference a file or open a URL.</p>
+<p>In WSL2 there are effectively two computers in play: your Windows host, and a Linux VM managed by WSL.  Most confusion comes from not being sure which one you're on at any moment.</p>
+<p>This guide covers the parts of that split that specifically affect Hermes: installing WSL2, getting files back and forth between Windows and Linux, networking in both directions, and the pitfalls people actually hit.</p>
+<div class="admonition adm-info"><p class="adm-title">简体中文</p>
+<p>A Chinese-language walkthrough of the minimum install path is maintained on this same page — switch via the <strong>language</strong> menu (top right) and select <strong>简体中文</strong>.</p>
+</div>
+<h2 id="why-wsl2-vs-native-windows">Why WSL2 (vs. native Windows)</h2>
+<p>The native Windows install runs in Windows directly: your Windows terminal (PowerShell, Windows Terminal, etc.), Windows filesystem paths (<code>C:\Users\…</code>), and Windows processes.  Hermes uses Git Bash to run shell commands, which is how Claude Code and other agents handle Windows today — it sidesteps the POSIX-vs-Windows gap without a full rewrite.</p>
+<!-- no-tmp: ok — lists /tmp as a POSIX feature WSL provides -->
+<p>WSL2 runs a real Linux kernel in a lightweight VM, so Hermes inside it is essentially identical to running on Ubuntu.  That's valuable when you want a real POSIX environment: <code>fork</code>, <code>/tmp</code>, UNIX sockets, signal semantics, PTY-backed terminals, shells like <code>bash</code>/<code>zsh</code>, and tools like <code>rg</code>, <code>git</code>, <code>ffmpeg</code> that behave the way they do on Linux.</p>
+<p>Practical consequences of WSL2:</p>
+<ul>
+<li>The Hermes CLI, gateway, sessions, memory, skills, and tool runtimes all live inside the Linux VM.</li>
+<li>Windows programs (browsers, native apps, Chrome with your logged-in profile) live outside it.</li>
+<li>Every time you want the two to talk — share files, open URLs, control Chrome, hit a local model server, expose the Hermes gateway to your phone — you cross a boundary. Those boundaries are what this guide is about.</li>
+</ul>
+<h2 id="install-wsl2">Install WSL2</h2>
+<p>From an <strong>Admin PowerShell</strong> or Windows Terminal:</p>
+<div class="highlight"><pre><span></span><code><span class="n">wsl</span> <span class="p">-</span><span class="n">-install</span>
+</code></pre></div>
+
+<p>On a fresh Windows 10 22H2+ or Windows 11 box this installs the WSL2 kernel, the Virtual Machine Platform feature, and a default Ubuntu distro. Reboot when prompted. After reboot Ubuntu will open and ask for a Linux username + password — this is a <strong>new Linux user</strong>, unrelated to your Windows account.</p>
+<p>Verify you're actually on WSL2 (not legacy WSL1):</p>
+<div class="highlight"><pre><span></span><code><span class="n">wsl</span> <span class="p">-</span><span class="n">-list</span> <span class="p">-</span><span class="n">-verbose</span>
+</code></pre></div>
+
+<p>You should see <code>VERSION  2</code>. If a distro shows <code>VERSION  1</code>, convert it:</p>
+<div class="highlight"><pre><span></span><code><span class="n">wsl</span> <span class="p">-</span><span class="n">-set-version</span> <span class="n">Ubuntu</span> <span class="n">2</span>
+<span class="n">wsl</span> <span class="p">-</span><span class="n">-set-default-version</span> <span class="n">2</span>
+</code></pre></div>
+
+<p>Hermes does not work reliably on WSL1 — WSL1 translates Linux syscalls on the fly and some behaviors (procfs, signals, network) diverge from real Linux.</p>
+<h3 id="distro-choice">Distro choice</h3>
+<p>Ubuntu (LTS) is what we test against. Debian works. Arch and NixOS work for people who want them, but the one-line installer assumes a Debian-derived <code>apt</code> system — see the <a href="../getting-started/nix-setup.html">Nix setup guide</a> for that path.</p>
+<h3 id="enable-systemd-recommended">Enable systemd (recommended)</h3>
+<p>The hermes gateway (and anything else you want to keep running) is easier to manage with systemd. On modern WSL, enable it once inside your distro:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>tee<span class="w"> </span>/etc/wsl.conf<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<span class="s">[boot]</span>
+<span class="s">systemd=true</span>
+
+<span class="s">[interop]</span>
+<span class="s">enabled=true</span>
+<span class="s">appendWindowsPath=true</span>
+
+<span class="s">[automount]</span>
+<span class="s">options = &quot;metadata,umask=22,fmask=11&quot;</span>
+<span class="s">EOF</span>
+</code></pre></div>
+
+<p>Then from PowerShell:</p>
+<div class="highlight"><pre><span></span><code><span class="n">wsl</span> <span class="p">-</span><span class="n">-shutdown</span>
+</code></pre></div>
+
+<p>Reopen your WSL terminal. <code>ps -p 1 -o comm=</code> should print <code>systemd</code>.</p>
+<p>The <code>metadata</code> mount option above is important — without it, files on <code>/mnt/c/...</code> can't store real Linux permission bits, which breaks things like <code>chmod +x</code> on scripts under Windows paths.</p>
+<h3 id="install-hermes-inside-wsl">Install Hermes inside WSL</h3>
+<p>Once you have a WSL2 shell open:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-fsSL<span class="w"> </span>https://hermes-agent.nousresearch.com/install.sh<span class="w"> </span><span class="p">|</span><span class="w"> </span>bash
+<span class="nb">source</span><span class="w"> </span>~/.bashrc
+hermes
+</code></pre></div>
+
+<p>The installer treats WSL2 as plain Linux — nothing WSL-specific is needed. See <a href="../getting-started/installation.html">Installation</a> for the full layout.</p>
+<h2 id="filesystem-crossing-the-windows--wsl2-boundary">Filesystem: crossing the Windows ↔ WSL2 boundary</h2>
+<p>This is the part that trips up the most people. There are <strong>two filesystems</strong>, and where you put your files matters — for performance, correctness, and what tools can see.</p>
+<h3 id="the-two-directions">The two directions</h3>
+<table>
+<thead>
+<tr>
+<th>Direction</th>
+<th>Path inside</th>
+<th>Path you use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Windows disk, seen from WSL</td>
+<td><code>C:\Users\you\Documents</code></td>
+<td><code>/mnt/c/Users/you/Documents</code></td>
+</tr>
+<tr>
+<td>WSL disk, seen from Windows</td>
+<td><code>/home/you/code</code></td>
+<td><code>\\wsl$\Ubuntu\home\you\code</code> (or <code>\\wsl.localhost\Ubuntu\...</code> on newer builds)</td>
+</tr>
+</tbody>
+</table>
+<p>Both are real, both work, but they are <strong>not the same filesystem</strong> — they're bridged by a 9P network protocol under the hood. That has real performance and semantic consequences.</p>
+<h3 id="where-to-put-hermes-and-your-projects">Where to put Hermes and your projects</h3>
+<p><strong>Rule of thumb: keep everything Linux-ish inside the Linux filesystem.</strong></p>
+<ul>
+<li>Your Hermes install (<code>~/.hermes/</code>) — Linux side. The installer already does this.</li>
+<li>Your git repos that you work on from WSL — Linux side (<code>~/code/...</code>, <code>~/projects/...</code>).</li>
+<li>Your models, datasets, venvs — Linux side.</li>
+</ul>
+<p>What you get by following this rule:</p>
+<ul>
+<li><strong>Fast I/O.</strong> Operations on <code>/mnt/c/...</code> go through 9P and are 10–100× slower than native ext4. <code>git status</code> on a 10k-file repo that feels instant under <code>~/code</code> can take 15+ seconds under <code>/mnt/c</code>.</li>
+<li><strong>Correct permissions.</strong> Linux permission bits are a best-effort emulation on <code>/mnt/c</code>. Things like <code>ssh</code> refusing a key with "bad permissions" or <code>chmod +x</code> silently failing are common.</li>
+<li><strong>Reliable file watchers.</strong> inotify across 9P is flaky — file watchers (dev servers, test runners) routinely miss changes on <code>/mnt/c</code>.</li>
+<li><strong>No case-sensitivity surprises.</strong> Windows paths are case-insensitive by default; Linux is case-sensitive. Projects with both <code>Readme.md</code> and <code>README.md</code> behave differently depending which side you're on.</li>
+</ul>
+<p>Put things on <code>/mnt/c</code> only when you <strong>need</strong> a file to live on the Windows side — e.g., you want to open it from a Windows GUI app, or Windows Chrome's DevTools MCP needs the current directory to be a Windows-reachable path.</p>
+<h3 id="getting-files-back-and-forth">Getting files back and forth</h3>
+<p><strong>From Windows → into WSL:</strong> easiest is to open Explorer and type <code>\\wsl.localhost\Ubuntu</code> in the address bar. You can then drag-drop into <code>\home\&lt;you&gt;\...</code>. Or from PowerShell:</p>
+<div class="highlight"><pre><span></span><code><span class="n">wsl</span> <span class="nb">cp </span><span class="p">/</span><span class="n">mnt</span><span class="p">/</span><span class="n">c</span><span class="p">/</span><span class="n">Users</span><span class="p">/</span><span class="n">you</span><span class="p">/</span><span class="n">Downloads</span><span class="p">/</span><span class="n">file</span><span class="p">.</span><span class="n">pdf</span> <span class="p">~/</span><span class="n">incoming</span><span class="p">/</span>
+</code></pre></div>
+
+<p><strong>From WSL → into Windows:</strong> copy to <code>/mnt/c/Users/&lt;you&gt;/...</code> and it shows up in Windows Explorer immediately:</p>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>~/reports/output.pdf<span class="w"> </span>/mnt/c/Users/you/Desktop/
+</code></pre></div>
+
+<p><strong>Open a WSL file in a Windows app</strong> (GUI editor, browser, etc.): use <code>explorer.exe</code> or <code>wslview</code>:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>apt<span class="w"> </span>install<span class="w"> </span>wslu<span class="w">     </span><span class="c1"># once — gives you wslview, wslpath, wslopen, etc.</span>
+wslview<span class="w"> </span>~/reports/output.pdf<span class="w">    </span><span class="c1"># opens with the Windows default handler</span>
+explorer.exe<span class="w"> </span>.<span class="w">                  </span><span class="c1"># opens the current WSL dir in Windows Explorer</span>
+</code></pre></div>
+
+<p><strong>Convert paths between the two universes:</strong></p>
+<div class="highlight"><pre><span></span><code>wslpath<span class="w"> </span>-w<span class="w"> </span>~/code/project<span class="w">        </span><span class="c1"># → \\wsl.localhost\Ubuntu\home\you\code\project</span>
+wslpath<span class="w"> </span>-u<span class="w"> </span><span class="s1">&#39;C:\Users\you&#39;</span><span class="w">        </span><span class="c1"># → /mnt/c/Users/you</span>
+</code></pre></div>
+
+<h3 id="line-endings-boms-and-git">Line endings, BOMs, and git</h3>
+<p>If you edit files on the Windows side with a Windows editor, they may get <code>CRLF</code> line endings. When <code>bash</code> or Python on the Linux side reads them, shell scripts break with <code>bad interpreter: /bin/bash^M</code> and Python can fail on BOM'd <code>.env</code> files.</p>
+<p>The fix is a sane git config inside WSL (not on Windows):</p>
+<div class="highlight"><pre><span></span><code>git<span class="w"> </span>config<span class="w"> </span>--global<span class="w"> </span>core.autocrlf<span class="w"> </span>input
+git<span class="w"> </span>config<span class="w"> </span>--global<span class="w"> </span>core.eol<span class="w"> </span>lf
+</code></pre></div>
+
+<p>For files that already have CRLF:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>apt<span class="w"> </span>install<span class="w"> </span>dos2unix
+dos2unix<span class="w"> </span>path/to/script.sh
+</code></pre></div>
+
+<h3 id="clone-inside-wsl-or-on-mntc">"Clone inside WSL or on <code>/mnt/c</code>?"</h3>
+<p>Clone inside WSL. Always, unless you have a specific reason not to. A typical Hermes workflow (<code>hermes chat</code>, tool calls that <code>rg</code>/<code>ripgrep</code> the repo, file watchers, background gateway) will be dramatically faster and more reliable against <code>~/code/myrepo</code> than <code>/mnt/c/Users/you/myrepo</code>.</p>
+<p>One exception: <strong>MCP bridges that launch Windows binaries.</strong> If you're using <code>chrome-devtools-mcp</code> through <code>cmd.exe</code> (see <a href="../guides/use-mcp-with-hermes.html#wsl2-bridge-hermes-in-wsl-to-windows-chrome">MCP guide: WSL → Windows Chrome</a>), Windows may complain with a <code>UNC</code> warning if Hermes's current working directory is <code>~</code>. In that case, start Hermes from somewhere under <code>/mnt/c/</code> so the Windows process has a drive-letter cwd.</p>
+<h2 id="networking-wsl--windows">Networking: WSL ↔ Windows</h2>
+<p>WSL2 runs in a lightweight VM with its own network stack. That means <code>localhost</code> inside WSL is <strong>not the same as</strong> <code>localhost</code> on Windows — they're two separate hosts from the network's point of view. You need to decide, for each service, which direction traffic flows and pick the right bridge.</p>
+<p>Two cases come up constantly.</p>
+<h3 id="case-1--hermes-in-wsl-talks-to-a-service-on-windows">Case 1 — Hermes in WSL talks to a service on Windows</h3>
+<p>Most common: you're running <strong>Ollama, LM Studio, or a llama-server on Windows</strong>, and Hermes (inside WSL) needs to hit it.</p>
+<p>The canonical how-to for this lives in the providers guide: <strong><a href="../integrations/providers.html#wsl2-networking-windows-users">WSL2 Networking for Local Models →</a></strong></p>
+<p>Short version:</p>
+<ul>
+<li><strong>Windows 11 22H2+:</strong> turn on mirrored networking mode (<code>networkingMode=mirrored</code> in <code>%USERPROFILE%\.wslconfig</code>, then <code>wsl --shutdown</code>). <code>localhost</code> then works in both directions.</li>
+<li><strong>Windows 10 or older builds:</strong> use the Windows host IP (the default gateway of WSL's virtual network) and make sure the server on Windows binds to <code>0.0.0.0</code>, not just <code>127.0.0.1</code>. Windows Firewall usually also needs a rule for the port.</li>
+</ul>
+<p>For the full table (Ollama / LM Studio / vLLM / SGLang bind addresses, firewall rule one-liners, dynamic IP helpers, Hyper-V firewall workaround), follow the link above — don't duplicate it.</p>
+<h3 id="case-2--something-on-windows-or-your-lan-talks-to-hermes-in-wsl">Case 2 — Something on Windows (or your LAN) talks to Hermes in WSL</h3>
+<p>This is the reverse direction and is less documented elsewhere, but it's what you need for:</p>
+<ul>
+<li>Using the Hermes <strong>web dashboard</strong> from a Windows browser.</li>
+<li>Using the <strong>OpenAI-compatible API server</strong> (exposed by <code>hermes gateway</code> when <code>API_SERVER_ENABLED=true</code>) from a Windows-side tool. See the <a href="features/api-server.html">API Server feature page</a>.</li>
+<li>Testing a <strong>messaging gateway</strong> (Telegram, Discord, etc.) where the platform pings a local webhook URL — usually you'd use <code>cloudflared</code>/<code>ngrok</code> rather than raw port forwarding.</li>
+</ul>
+<h4 id="subcase-2a-from-the-windows-host-itself">Subcase 2a: from the Windows host itself</h4>
+<p>On <strong>Windows 11 22H2+ with mirrored mode enabled</strong>, there is nothing to do. A process in WSL that binds to <code>0.0.0.0:8080</code> (or even <code>127.0.0.1:8080</code>) is reachable from a Windows browser at <code>http://localhost:8080</code>. WSL publishes the bind back to the host automatically.</p>
+<p>On <strong>NAT mode</strong> (Windows 10 / older Windows 11), the default "localhost forwarding" in WSL2 will generally forward Linux-side <code>127.0.0.1</code> binds to Windows <code>localhost</code>, so a Hermes service started with <code>--host 127.0.0.1</code> is usually reachable as <code>http://localhost:PORT</code> from Windows. If it isn't:</p>
+<ul>
+<li>Bind to <code>0.0.0.0</code> explicitly inside WSL.</li>
+<li>Find the WSL VM's IP with <code>ip -4 addr show eth0 | grep inet</code> and hit that from Windows.</li>
+</ul>
+<h4 id="subcase-2b-from-another-device-on-your-lan-phone-tablet-another-pc">Subcase 2b: from another device on your LAN (phone, tablet, another PC)</h4>
+<p>This is the real pain. Traffic flows <strong>LAN device → Windows host → WSL VM</strong>, and you have to set up both hops:</p>
+<ol>
+<li>
+<p><strong>Bind on all interfaces inside WSL.</strong> A process listening on <code>127.0.0.1</code> will never be reachable from outside the VM. Use <code>0.0.0.0</code>.</p>
+</li>
+<li>
+<p><strong>Port-forward Windows → WSL VM.</strong> In mirrored mode this is automatic. In NAT mode you have to do it yourself, per port, in Admin PowerShell:</p>
+</li>
+</ol>
+<p>```powershell
+   # Grab the WSL VM's current IP (it changes on every WSL restart under NAT)
+   $wslIp = (wsl hostname -I).Trim().Split(' ')[0]</p>
+<p># Forward Windows port 8080 → WSL:8080
+   netsh interface portproxy add v4tov4 <code>listenaddress=0.0.0.0 listenport=8080</code>
+     connectaddress=$wslIp connectport=8080</p>
+<p># Allow it through Windows Firewall
+   New-NetFirewallRule -DisplayName "Hermes WSL 8080" `
+     -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow
+   ```</p>
+<p>Remove later with <code>netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=8080</code>.</p>
+<ol>
+<li><strong>Point the LAN device at <code>http://&lt;windows-lan-ip&gt;:8080</code>.</strong></li>
+</ol>
+<p>Because the WSL VM IP drifts on each restart in NAT mode, a one-shot rule survives only until the next <code>wsl --shutdown</code>. For anything persistent, either use mirrored mode or put the port-proxy step in a script that runs at Windows login.</p>
+<p>For webhooks from cloud messaging providers (Telegram <code>setWebhook</code>, Slack events, etc.), don't fight port-forwarding — use <code>cloudflared</code> tunnels. See the <a href="messaging/webhooks.html">webhooks guide</a>.</p>
+<h2 id="running-hermes-services-long-term-on-windows">Running Hermes services long-term on Windows</h2>
+<p>The Hermes <a href="features/tool-gateway.html">Tool Gateway</a> and the API server are long-lived processes. In WSL2 you have a few options for keeping them up.</p>
+<h3 id="desktop-shortcut-for-opening-hermes-quickly">Desktop shortcut for opening Hermes quickly</h3>
+<p>If you just want a double-click launcher for an interactive Hermes shell, create
+it on the Windows side and have it jump into WSL for you:</p>
+<ol>
+<li>Right-click the Windows desktop and choose <strong>New -&gt; Shortcut</strong>.</li>
+<li>For the target, use your distro name (replace <code>Ubuntu</code> if needed):</li>
+</ol>
+<p><code>text
+   wt.exe -w 0 -p "Ubuntu" wsl.exe -d Ubuntu --cd ~ -- bash -ic "hermes"</code></p>
+<ol>
+<li>Name it something obvious like <code>Hermes</code>.</li>
+</ol>
+<p>That opens Windows Terminal, starts your WSL distro, drops you in your Linux
+home directory, and launches Hermes. If <code>hermes</code> is not on PATH yet, open WSL
+once manually and run <code>source ~/.bashrc</code>, or replace the command with
+<code>uv run hermes</code> inside your project checkout.</p>
+<p>Optional polish:</p>
+<ul>
+<li><strong>Custom icon:</strong> open <strong>Properties -&gt; Change Icon</strong> and point it at an <code>.ico</code>
+  file, such as the Hermes favicon from the repo.</li>
+<li><strong>Pinned launcher:</strong> once the shortcut works, pin it to Start or Taskbar so
+  you do not have to browse for it again.</li>
+</ul>
+<h3 id="inside-wsl-with-systemd-recommended">Inside WSL with systemd (recommended)</h3>
+<p>If you enabled systemd per the setup section above, <code>hermes gateway</code> and the API server work the way they do on any Linux machine. Use the gateway setup wizard:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>setup
+</code></pre></div>
+
+<p>It will offer to install a systemd user unit so the gateway comes up automatically when WSL starts.</p>
+<h3 id="making-wsl-itself-start-on-windows-login">Making WSL itself start on Windows login</h3>
+<p>WSL's VM only stays alive while something is using it. To keep your gateway reachable without a terminal window open, boot a WSL process at Windows login via Task Scheduler:</p>
+<ul>
+<li><strong>Trigger:</strong> At log on (your user).</li>
+<li><strong>Action:</strong> Start a program</li>
+<li>Program: <code>C:\Windows\System32\wsl.exe</code></li>
+<li>Arguments: <code>-d Ubuntu --exec /bin/sh -c "sleep infinity"</code></li>
+</ul>
+<p>That keeps the VM alive so the systemd-managed gateway stays running. On Windows 11, the newer <code>wsl --install --no-launch</code> + auto-start flows also work; the <code>sleep infinity</code> trick is the portable version.</p>
+<h2 id="gpu-passthrough-local-models">GPU passthrough (local models)</h2>
+<p>WSL2 supports <strong>NVIDIA</strong> GPUs natively since WSL kernel 5.10.43+ — install the standard NVIDIA driver on Windows (do <strong>not</strong> install a Linux NVIDIA driver inside WSL), and <code>nvidia-smi</code> inside WSL will see the GPU. From there, CUDA toolkits, <code>torch</code>, <code>vllm</code>, <code>sglang</code>, and <code>llama-server</code> build against the real GPU as usual.</p>
+<p>AMD ROCm and Intel Arc support inside WSL2 is still evolving and outside Hermes's test matrix — it may work with current drivers but we don't have a recipe to recommend.</p>
+<p>If you're running a <strong>Windows-native</strong> local-model server (Ollama for Windows, LM Studio) that already uses your GPU through Windows drivers, you don't need WSL GPU passthrough at all — just follow Case 1 above and hit it over the network from WSL.</p>
+<h2 id="common-pitfalls">Common pitfalls</h2>
+<p><strong>"Connection refused" to my Windows-hosted Ollama / LM Studio.</strong>
+See <a href="../integrations/providers.html#wsl2-networking-windows-users">WSL2 Networking</a>. Ninety percent of the time the server is bound to <code>127.0.0.1</code> and needs <code>0.0.0.0</code> (Ollama: <code>OLLAMA_HOST=0.0.0.0</code>), or you're missing a firewall rule.</p>
+<p><strong>Massive slowness on <code>git status</code> / <code>hermes chat</code> in a repo.</strong>
+You're probably working under <code>/mnt/c/...</code>. Move the repo to <code>~/code/...</code> (Linux side). Order-of-magnitude faster.</p>
+<p><strong><code>bad interpreter: /bin/bash^M</code> on scripts.</strong>
+CRLF line endings from a Windows editor. <code>dos2unix script.sh</code>, and set <code>core.autocrlf input</code> in your WSL git config.</p>
+<p><strong>"UNC paths are not supported" warning from Windows binaries launched via MCP.</strong>
+Hermes's cwd is inside the Linux filesystem, and Windows <code>cmd.exe</code> doesn't know what to do with it. Start Hermes from <code>/mnt/c/...</code> for that session, or use a wrapper that <code>cd</code>s to a Windows-reachable path before invoking the Windows executable.</p>
+<p><strong>Clock drift after sleep/hibernate.</strong>
+WSL2's clock can lag by minutes after the host resumes from sleep, which breaks anything cert-based (OAuth, HTTPS APIs). Fix it on demand:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>hwclock<span class="w"> </span>-s
+</code></pre></div>
+
+<p>Or install <code>ntpdate</code> and run it at login.</p>
+<p><strong>DNS stops working after enabling mirrored mode, or when a VPN is connected.</strong>
+Mirrored mode proxies host network settings into WSL — if Windows DNS is funky (VPN split-tunnel, corporate resolver), WSL inherits that. Workaround: override <code>resolv.conf</code> manually (set <code>generateResolvConf=false</code> in <code>/etc/wsl.conf</code>, then write your own <code>/etc/resolv.conf</code> with <code>1.1.1.1</code> or your VPN's DNS).</p>
+<p><strong><code>hermes</code> not found after running the installer.</strong>
+The installer adds <code>~/.local/bin</code> to your shell's PATH via <code>~/.bashrc</code>. You need to <code>source ~/.bashrc</code> (or open a new terminal) for it to take effect in the current session.</p>
+<p><strong>Windows Defender is slow on WSL files.</strong>
+Defender scans files via the 9P bridge when accessed from Windows, which magnifies the slowness of <code>/mnt/c</code>-style cross-boundary access. If you only touch WSL files from inside WSL, this doesn't matter. If you use Windows tools against <code>\\wsl$\...</code> frequently, consider excluding the WSL distro path from real-time scanning.</p>
+<p><strong>Running out of disk.</strong>
+WSL2 stores its VM disk as a sparse VHDX under <code>%LOCALAPPDATA%\Packages\...</code>. It grows but doesn't auto-shrink when you delete files. To reclaim space: <code>wsl --shutdown</code>, then from an Admin PowerShell run <code>Optimize-VHD -Path &lt;path-to-ext4.vhdx&gt; -Mode Full</code> (requires Hyper-V tools) — or the simpler <code>diskpart</code> path documented on the WSL docs.</p>
+<h2 id="where-to-go-next">Where to go next</h2>
+<ul>
+<li><strong><a href="../getting-started/installation.html">Installation</a></strong> — actual install steps (Linux/WSL2/Termux all use the same installer).</li>
+<li><strong><a href="../integrations/providers.html#wsl2-networking-windows-users">Integrations → Providers → WSL2 Networking</a></strong> — the canonical networking deep-dive for local model servers.</li>
+<li><strong><a href="../guides/use-mcp-with-hermes.html#wsl2-bridge-hermes-in-wsl-to-windows-chrome">MCP guide → WSL → Windows Chrome</a></strong> — controlling your signed-in Windows Chrome from Hermes in WSL.</li>
+<li><strong><a href="features/tool-gateway.html">Tool Gateway</a></strong> and <strong><a href="features/web-dashboard.html">Web Dashboard</a></strong> — the long-lived services you'll most often want to expose from WSL to the rest of your network.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/windows-wsl-quickstart</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#why-wsl2-vs-native-windows">Why WSL2 (vs. native Windows)</a></li>
+<li class="lvl2"><a href="#install-wsl2">Install WSL2</a></li>
+<li class="lvl3"><a href="#distro-choice">Distro choice</a></li>
+<li class="lvl3"><a href="#enable-systemd-recommended">Enable systemd (recommended)</a></li>
+<li class="lvl3"><a href="#install-hermes-inside-wsl">Install Hermes inside WSL</a></li>
+<li class="lvl2"><a href="#filesystem-crossing-the-windows--wsl2-boundary">Filesystem: crossing the Windows ↔ WSL2 boundary</a></li>
+<li class="lvl3"><a href="#the-two-directions">The two directions</a></li>
+<li class="lvl3"><a href="#where-to-put-hermes-and-your-projects">Where to put Hermes and your projects</a></li>
+<li class="lvl3"><a href="#getting-files-back-and-forth">Getting files back and forth</a></li>
+<li class="lvl3"><a href="#line-endings-boms-and-git">Line endings, BOMs, and git</a></li>
+<li class="lvl3"><a href="#clone-inside-wsl-or-on-mntc">&quot;Clone inside WSL or on /mnt/c?&quot;</a></li>
+<li class="lvl2"><a href="#networking-wsl--windows">Networking: WSL ↔ Windows</a></li>
+<li class="lvl3"><a href="#case-1--hermes-in-wsl-talks-to-a-service-on-windows">Case 1 — Hermes in WSL talks to a service on Windows</a></li>
+<li class="lvl3"><a href="#case-2--something-on-windows-or-your-lan-talks-to-hermes-in-wsl">Case 2 — Something on Windows (or your LAN) talks to Hermes in WSL</a></li>
+<li class="lvl2"><a href="#running-hermes-services-long-term-on-windows">Running Hermes services long-term on Windows</a></li>
+<li class="lvl3"><a href="#desktop-shortcut-for-opening-hermes-quickly">Desktop shortcut for opening Hermes quickly</a></li>
+<li class="lvl3"><a href="#inside-wsl-with-systemd-recommended">Inside WSL with systemd (recommended)</a></li>
+<li class="lvl3"><a href="#making-wsl-itself-start-on-windows-login">Making WSL itself start on Windows login</a></li>
+<li class="lvl2"><a href="#gpu-passthrough-local-models">GPU passthrough (local models)</a></li>
+<li class="lvl2"><a href="#common-pitfalls">Common pitfalls</a></li>
+<li class="lvl2"><a href="#where-to-go-next">Where to go next</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

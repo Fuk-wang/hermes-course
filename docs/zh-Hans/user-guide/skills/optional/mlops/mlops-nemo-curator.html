@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nemo Curator — 用于 LLM 训练的 GPU 加速数据整理工具 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/optional/mlops/mlops-nemo-curator</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="nemo-curator">Nemo Curator</h1>
+<p>用于 LLM 训练的 GPU 加速数据整理工具。支持文本/图像/视频/音频。具备模糊去重（速度提升 16×）、质量过滤（30+ 启发式规则）、语义去重、PII 脱敏、NSFW 检测等功能。通过 RAPIDS 跨 GPU 扩展。适用于准备高质量训练数据集、清洗网络数据或对大型语料库去重。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>可选 — 通过 <code>hermes skills install official/mlops/nemo-curator</code> 安装</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>optional-skills/mlops/nemo-curator</code></td>
+</tr>
+<tr>
+<td>版本</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>作者</td>
+<td>Orchestra Research</td>
+</tr>
+<tr>
+<td>许可证</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>依赖项</td>
+<td><code>nemo-curator</code>, <code>cudf</code>, <code>dask</code>, <code>rapids</code></td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos</td>
+</tr>
+<tr>
+<td>标签</td>
+<td><code>Data Processing</code>, <code>NeMo Curator</code>, <code>Data Curation</code>, <code>GPU Acceleration</code>, <code>Deduplication</code>, <code>Quality Filtering</code>, <code>NVIDIA</code>, <code>RAPIDS</code>, <code>PII Redaction</code>, <code>Multimodal</code>, <code>LLM Training Data</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发该 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。</p>
+</div>
+<h1 id="nemo-curator---gpu-加速数据整理">NeMo Curator - GPU 加速数据整理</h1>
+<p>NVIDIA 用于为 LLM 准备高质量训练数据的工具包。</p>
+<h2 id="何时使用-nemo-curator">何时使用 NeMo Curator</h2>
+<p><strong>在以下情况下使用 NeMo Curator：</strong>
+- 从网络抓取数据（Common Crawl）准备 LLM 训练数据
+- 需要快速去重（比 CPU 快 16×）
+- 整理多模态数据集（文本、图像、视频、音频）
+- 过滤低质量或有害内容
+- 跨 GPU 集群扩展数据处理</p>
+<p><strong>性能</strong>：
+- <strong>16× 更快</strong>的模糊去重（8TB RedPajama v2）
+- <strong>降低 40% TCO</strong>（总拥有成本），优于 CPU 方案
+- <strong>近线性扩展</strong>，跨 GPU 节点</p>
+<p><strong>以下情况请使用替代方案</strong>：
+- <strong>datatrove</strong>：基于 CPU 的开源数据处理
+- <strong>dolma</strong>：Allen AI 的数据工具包
+- <strong>Ray Data</strong>：通用 ML 数据处理（无数据整理专项功能）</p>
+<h2 id="快速开始">快速开始</h2>
+<h3 id="安装">安装</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 文本整理（CUDA 12）</span>
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;nemo-curator[text_cuda12]&quot;</span>
+
+<span class="c1"># 所有模态</span>
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;nemo-curator[all_cuda12]&quot;</span>
+
+<span class="c1"># 仅 CPU（较慢）</span>
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;nemo-curator[cpu]&quot;</span>
+</code></pre></div>
+
+<h3 id="基础文本整理流水线">基础文本整理流水线</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScoreFilter</span><span class="p">,</span> <span class="n">Modify</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.datasets</span><span class="w"> </span><span class="kn">import</span> <span class="n">DocumentDataset</span>
+
+<span class="c1"># 加载数据</span>
+<span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">({</span><span class="s2">&quot;text&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;Good document&quot;</span><span class="p">,</span> <span class="s2">&quot;Bad doc&quot;</span><span class="p">,</span> <span class="s2">&quot;Excellent text&quot;</span><span class="p">]})</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">DocumentDataset</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>
+
+<span class="c1"># 质量过滤</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">quality_score</span><span class="p">(</span><span class="n">doc</span><span class="p">):</span>
+    <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="n">doc</span><span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">())</span> <span class="o">&gt;</span> <span class="mi">5</span>  <span class="c1"># Filter short docs</span>
+
+<span class="n">filtered</span> <span class="o">=</span> <span class="n">ScoreFilter</span><span class="p">(</span><span class="n">quality_score</span><span class="p">)(</span><span class="n">dataset</span><span class="p">)</span>
+
+<span class="c1"># 去重</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modules</span><span class="w"> </span><span class="kn">import</span> <span class="n">ExactDuplicates</span>
+<span class="n">deduped</span> <span class="o">=</span> <span class="n">ExactDuplicates</span><span class="p">()(</span><span class="n">filtered</span><span class="p">)</span>
+
+<span class="c1"># 保存</span>
+<span class="n">deduped</span><span class="o">.</span><span class="n">to_parquet</span><span class="p">(</span><span class="s2">&quot;curated_data/&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="数据整理流水线">数据整理流水线</h2>
+<h3 id="阶段-1质量过滤">阶段 1：质量过滤</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.filters</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">WordCountFilter</span><span class="p">,</span>
+    <span class="n">RepeatedLinesFilter</span><span class="p">,</span>
+    <span class="n">UrlRatioFilter</span><span class="p">,</span>
+    <span class="n">NonAlphaNumericFilter</span>
+<span class="p">)</span>
+
+<span class="c1"># 应用 30+ 启发式过滤器</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScoreFilter</span>
+
+<span class="c1"># 词数过滤</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">WordCountFilter</span><span class="p">(</span><span class="n">min_words</span><span class="o">=</span><span class="mi">50</span><span class="p">,</span> <span class="n">max_words</span><span class="o">=</span><span class="mi">100000</span><span class="p">))</span>
+
+<span class="c1"># 去除重复内容</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">RepeatedLinesFilter</span><span class="p">(</span><span class="n">max_repeated_line_fraction</span><span class="o">=</span><span class="mf">0.3</span><span class="p">))</span>
+
+<span class="c1"># URL 比例过滤</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">UrlRatioFilter</span><span class="p">(</span><span class="n">max_url_ratio</span><span class="o">=</span><span class="mf">0.2</span><span class="p">))</span>
+</code></pre></div>
+
+<h3 id="阶段-2去重">阶段 2：去重</h3>
+<p><strong>精确去重</strong>：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modules</span><span class="w"> </span><span class="kn">import</span> <span class="n">ExactDuplicates</span>
+
+<span class="c1"># 删除完全重复项</span>
+<span class="n">deduped</span> <span class="o">=</span> <span class="n">ExactDuplicates</span><span class="p">(</span><span class="n">id_field</span><span class="o">=</span><span class="s2">&quot;id&quot;</span><span class="p">,</span> <span class="n">text_field</span><span class="o">=</span><span class="s2">&quot;text&quot;</span><span class="p">)(</span><span class="n">dataset</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>模糊去重</strong>（GPU 上速度提升 16×）：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modules</span><span class="w"> </span><span class="kn">import</span> <span class="n">FuzzyDuplicates</span>
+
+<span class="c1"># MinHash + LSH 去重</span>
+<span class="n">fuzzy_dedup</span> <span class="o">=</span> <span class="n">FuzzyDuplicates</span><span class="p">(</span>
+    <span class="n">id_field</span><span class="o">=</span><span class="s2">&quot;id&quot;</span><span class="p">,</span>
+    <span class="n">text_field</span><span class="o">=</span><span class="s2">&quot;text&quot;</span><span class="p">,</span>
+    <span class="n">num_hashes</span><span class="o">=</span><span class="mi">260</span><span class="p">,</span>      <span class="c1"># MinHash parameters</span>
+    <span class="n">num_buckets</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span>
+    <span class="n">hash_method</span><span class="o">=</span><span class="s2">&quot;md5&quot;</span>
+<span class="p">)</span>
+
+<span class="n">deduped</span> <span class="o">=</span> <span class="n">fuzzy_dedup</span><span class="p">(</span><span class="n">dataset</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>语义去重</strong>：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modules</span><span class="w"> </span><span class="kn">import</span> <span class="n">SemanticDuplicates</span>
+
+<span class="c1"># 基于 embedding（向量嵌入）的去重</span>
+<span class="n">semantic_dedup</span> <span class="o">=</span> <span class="n">SemanticDuplicates</span><span class="p">(</span>
+    <span class="n">id_field</span><span class="o">=</span><span class="s2">&quot;id&quot;</span><span class="p">,</span>
+    <span class="n">text_field</span><span class="o">=</span><span class="s2">&quot;text&quot;</span><span class="p">,</span>
+    <span class="n">embedding_model</span><span class="o">=</span><span class="s2">&quot;sentence-transformers/all-MiniLM-L6-v2&quot;</span><span class="p">,</span>
+    <span class="n">threshold</span><span class="o">=</span><span class="mf">0.8</span>  <span class="c1"># Cosine similarity threshold</span>
+<span class="p">)</span>
+
+<span class="n">deduped</span> <span class="o">=</span> <span class="n">semantic_dedup</span><span class="p">(</span><span class="n">dataset</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="阶段-3pii-脱敏">阶段 3：PII 脱敏</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modules</span><span class="w"> </span><span class="kn">import</span> <span class="n">Modify</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modifiers</span><span class="w"> </span><span class="kn">import</span> <span class="n">PIIRedactor</span>
+
+<span class="c1"># 脱敏个人身份信息（PII）</span>
+<span class="n">pii_redactor</span> <span class="o">=</span> <span class="n">PIIRedactor</span><span class="p">(</span>
+    <span class="n">supported_entities</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;EMAIL_ADDRESS&quot;</span><span class="p">,</span> <span class="s2">&quot;PHONE_NUMBER&quot;</span><span class="p">,</span> <span class="s2">&quot;PERSON&quot;</span><span class="p">,</span> <span class="s2">&quot;LOCATION&quot;</span><span class="p">],</span>
+    <span class="n">anonymize_action</span><span class="o">=</span><span class="s2">&quot;replace&quot;</span>  <span class="c1"># or &quot;redact&quot;</span>
+<span class="p">)</span>
+
+<span class="n">redacted</span> <span class="o">=</span> <span class="n">Modify</span><span class="p">(</span><span class="n">pii_redactor</span><span class="p">)(</span><span class="n">dataset</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="阶段-4分类器过滤">阶段 4：分类器过滤</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.classifiers</span><span class="w"> </span><span class="kn">import</span> <span class="n">QualityClassifier</span>
+
+<span class="c1"># 质量分类</span>
+<span class="n">quality_clf</span> <span class="o">=</span> <span class="n">QualityClassifier</span><span class="p">(</span>
+    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;nvidia/quality-classifier-deberta&quot;</span><span class="p">,</span>
+    <span class="n">batch_size</span><span class="o">=</span><span class="mi">256</span><span class="p">,</span>
+    <span class="n">device</span><span class="o">=</span><span class="s2">&quot;cuda&quot;</span>
+<span class="p">)</span>
+
+<span class="c1"># 过滤低质量文档</span>
+<span class="n">high_quality</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="k">lambda</span> <span class="n">doc</span><span class="p">:</span> <span class="n">quality_clf</span><span class="p">(</span><span class="n">doc</span><span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">])</span> <span class="o">&gt;</span> <span class="mf">0.5</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="gpu-加速">GPU 加速</h2>
+<h3 id="gpu-与-cpu-性能对比">GPU 与 CPU 性能对比</h3>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>CPU（16 核）</th>
+<th>GPU（A100）</th>
+<th>加速比</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>模糊去重（8TB）</td>
+<td>120 小时</td>
+<td>7.5 小时</td>
+<td>16×</td>
+</tr>
+<tr>
+<td>精确去重（1TB）</td>
+<td>8 小时</td>
+<td>0.5 小时</td>
+<td>16×</td>
+</tr>
+<tr>
+<td>质量过滤</td>
+<td>2 小时</td>
+<td>0.2 小时</td>
+<td>10×</td>
+</tr>
+</tbody>
+</table>
+<h3 id="多-gpu-扩展">多 GPU 扩展</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_client</span>
+
+<span class="c1"># 初始化 GPU 集群</span>
+<span class="n">client</span> <span class="o">=</span> <span class="n">get_client</span><span class="p">(</span><span class="n">cluster_type</span><span class="o">=</span><span class="s2">&quot;gpu&quot;</span><span class="p">,</span> <span class="n">n_workers</span><span class="o">=</span><span class="mi">8</span><span class="p">)</span>
+
+<span class="c1"># 使用 8 块 GPU 处理</span>
+<span class="n">deduped</span> <span class="o">=</span> <span class="n">FuzzyDuplicates</span><span class="p">(</span><span class="o">...</span><span class="p">)(</span><span class="n">dataset</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="多模态数据整理">多模态数据整理</h2>
+<h3 id="图像整理">图像整理</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.image</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">AestheticFilter</span><span class="p">,</span>
+    <span class="n">NSFWFilter</span><span class="p">,</span>
+    <span class="n">CLIPEmbedder</span>
+<span class="p">)</span>
+
+<span class="c1"># 美学评分</span>
+<span class="n">aesthetic_filter</span> <span class="o">=</span> <span class="n">AestheticFilter</span><span class="p">(</span><span class="n">threshold</span><span class="o">=</span><span class="mf">5.0</span><span class="p">)</span>
+<span class="n">filtered_images</span> <span class="o">=</span> <span class="n">aesthetic_filter</span><span class="p">(</span><span class="n">image_dataset</span><span class="p">)</span>
+
+<span class="c1"># NSFW 检测</span>
+<span class="n">nsfw_filter</span> <span class="o">=</span> <span class="n">NSFWFilter</span><span class="p">(</span><span class="n">threshold</span><span class="o">=</span><span class="mf">0.9</span><span class="p">)</span>
+<span class="n">safe_images</span> <span class="o">=</span> <span class="n">nsfw_filter</span><span class="p">(</span><span class="n">filtered_images</span><span class="p">)</span>
+
+<span class="c1"># 生成 CLIP embedding</span>
+<span class="n">clip_embedder</span> <span class="o">=</span> <span class="n">CLIPEmbedder</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;openai/clip-vit-base-patch32&quot;</span><span class="p">)</span>
+<span class="n">image_embeddings</span> <span class="o">=</span> <span class="n">clip_embedder</span><span class="p">(</span><span class="n">safe_images</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="视频整理">视频整理</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.video</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">SceneDetector</span><span class="p">,</span>
+    <span class="n">ClipExtractor</span><span class="p">,</span>
+    <span class="n">InternVideo2Embedder</span>
+<span class="p">)</span>
+
+<span class="c1"># 场景检测</span>
+<span class="n">scene_detector</span> <span class="o">=</span> <span class="n">SceneDetector</span><span class="p">(</span><span class="n">threshold</span><span class="o">=</span><span class="mf">27.0</span><span class="p">)</span>
+<span class="n">scenes</span> <span class="o">=</span> <span class="n">scene_detector</span><span class="p">(</span><span class="n">video_dataset</span><span class="p">)</span>
+
+<span class="c1"># 提取片段</span>
+<span class="n">clip_extractor</span> <span class="o">=</span> <span class="n">ClipExtractor</span><span class="p">(</span><span class="n">min_duration</span><span class="o">=</span><span class="mf">2.0</span><span class="p">,</span> <span class="n">max_duration</span><span class="o">=</span><span class="mf">10.0</span><span class="p">)</span>
+<span class="n">clips</span> <span class="o">=</span> <span class="n">clip_extractor</span><span class="p">(</span><span class="n">scenes</span><span class="p">)</span>
+
+<span class="c1"># 生成 embedding</span>
+<span class="n">video_embedder</span> <span class="o">=</span> <span class="n">InternVideo2Embedder</span><span class="p">()</span>
+<span class="n">video_embeddings</span> <span class="o">=</span> <span class="n">video_embedder</span><span class="p">(</span><span class="n">clips</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="音频整理">音频整理</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.audio</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">ASRInference</span><span class="p">,</span>
+    <span class="n">WERFilter</span><span class="p">,</span>
+    <span class="n">DurationFilter</span>
+<span class="p">)</span>
+
+<span class="c1"># ASR 转录</span>
+<span class="n">asr</span> <span class="o">=</span> <span class="n">ASRInference</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;nvidia/stt_en_fastconformer_hybrid_large_pc&quot;</span><span class="p">)</span>
+<span class="n">transcribed</span> <span class="o">=</span> <span class="n">asr</span><span class="p">(</span><span class="n">audio_dataset</span><span class="p">)</span>
+
+<span class="c1"># 按 WER（词错误率）过滤</span>
+<span class="n">wer_filter</span> <span class="o">=</span> <span class="n">WERFilter</span><span class="p">(</span><span class="n">max_wer</span><span class="o">=</span><span class="mf">0.3</span><span class="p">)</span>
+<span class="n">high_quality_audio</span> <span class="o">=</span> <span class="n">wer_filter</span><span class="p">(</span><span class="n">transcribed</span><span class="p">)</span>
+
+<span class="c1"># 时长过滤</span>
+<span class="n">duration_filter</span> <span class="o">=</span> <span class="n">DurationFilter</span><span class="p">(</span><span class="n">min_duration</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">max_duration</span><span class="o">=</span><span class="mf">30.0</span><span class="p">)</span>
+<span class="n">filtered_audio</span> <span class="o">=</span> <span class="n">duration_filter</span><span class="p">(</span><span class="n">high_quality_audio</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="常见模式">常见模式</h2>
+<h3 id="网络抓取数据整理common-crawl">网络抓取数据整理（Common Crawl）</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScoreFilter</span><span class="p">,</span> <span class="n">Modify</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.filters</span><span class="w"> </span><span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modules</span><span class="w"> </span><span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.datasets</span><span class="w"> </span><span class="kn">import</span> <span class="n">DocumentDataset</span>
+
+<span class="c1"># 加载 Common Crawl 数据</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">DocumentDataset</span><span class="o">.</span><span class="n">read_parquet</span><span class="p">(</span><span class="s2">&quot;common_crawl/*.parquet&quot;</span><span class="p">)</span>
+
+<span class="c1"># 流水线</span>
+<span class="n">pipeline</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="c1"># 1. 质量过滤</span>
+    <span class="n">WordCountFilter</span><span class="p">(</span><span class="n">min_words</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">max_words</span><span class="o">=</span><span class="mi">50000</span><span class="p">),</span>
+    <span class="n">RepeatedLinesFilter</span><span class="p">(</span><span class="n">max_repeated_line_fraction</span><span class="o">=</span><span class="mf">0.2</span><span class="p">),</span>
+    <span class="n">SymbolToWordRatioFilter</span><span class="p">(</span><span class="n">max_symbol_to_word_ratio</span><span class="o">=</span><span class="mf">0.3</span><span class="p">),</span>
+    <span class="n">UrlRatioFilter</span><span class="p">(</span><span class="n">max_url_ratio</span><span class="o">=</span><span class="mf">0.3</span><span class="p">),</span>
+
+    <span class="c1"># 2. 语言过滤</span>
+    <span class="n">LanguageIdentificationFilter</span><span class="p">(</span><span class="n">target_languages</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;en&quot;</span><span class="p">]),</span>
+
+    <span class="c1"># 3. 去重</span>
+    <span class="n">ExactDuplicates</span><span class="p">(</span><span class="n">id_field</span><span class="o">=</span><span class="s2">&quot;id&quot;</span><span class="p">,</span> <span class="n">text_field</span><span class="o">=</span><span class="s2">&quot;text&quot;</span><span class="p">),</span>
+    <span class="n">FuzzyDuplicates</span><span class="p">(</span><span class="n">id_field</span><span class="o">=</span><span class="s2">&quot;id&quot;</span><span class="p">,</span> <span class="n">text_field</span><span class="o">=</span><span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="n">num_hashes</span><span class="o">=</span><span class="mi">260</span><span class="p">),</span>
+
+    <span class="c1"># 4. PII 脱敏</span>
+    <span class="n">PIIRedactor</span><span class="p">(),</span>
+
+    <span class="c1"># 5. NSFW 过滤</span>
+    <span class="n">NSFWClassifier</span><span class="p">(</span><span class="n">threshold</span><span class="o">=</span><span class="mf">0.8</span><span class="p">)</span>
+<span class="p">]</span>
+
+<span class="c1"># 执行</span>
+<span class="k">for</span> <span class="n">stage</span> <span class="ow">in</span> <span class="n">pipeline</span><span class="p">:</span>
+    <span class="n">dataset</span> <span class="o">=</span> <span class="n">stage</span><span class="p">(</span><span class="n">dataset</span><span class="p">)</span>
+
+<span class="c1"># 保存</span>
+<span class="n">dataset</span><span class="o">.</span><span class="n">to_parquet</span><span class="p">(</span><span class="s2">&quot;curated_common_crawl/&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="分布式处理">分布式处理</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_client</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dask_cuda</span><span class="w"> </span><span class="kn">import</span> <span class="n">LocalCUDACluster</span>
+
+<span class="c1"># 多 GPU 集群</span>
+<span class="n">cluster</span> <span class="o">=</span> <span class="n">LocalCUDACluster</span><span class="p">(</span><span class="n">n_workers</span><span class="o">=</span><span class="mi">8</span><span class="p">)</span>
+<span class="n">client</span> <span class="o">=</span> <span class="n">get_client</span><span class="p">(</span><span class="n">cluster</span><span class="o">=</span><span class="n">cluster</span><span class="p">)</span>
+
+<span class="c1"># 处理大型数据集</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">DocumentDataset</span><span class="o">.</span><span class="n">read_parquet</span><span class="p">(</span><span class="s2">&quot;s3://large_dataset/*.parquet&quot;</span><span class="p">)</span>
+<span class="n">deduped</span> <span class="o">=</span> <span class="n">FuzzyDuplicates</span><span class="p">(</span><span class="o">...</span><span class="p">)(</span><span class="n">dataset</span><span class="p">)</span>
+
+<span class="c1"># 清理</span>
+<span class="n">client</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+<span class="n">cluster</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</code></pre></div>
+
+<h2 id="性能基准">性能基准</h2>
+<h3 id="模糊去重8tb-redpajama-v2">模糊去重（8TB RedPajama v2）</h3>
+<ul>
+<li><strong>CPU（256 核）</strong>：120 小时</li>
+<li><strong>GPU（8× A100）</strong>：7.5 小时</li>
+<li><strong>加速比</strong>：16×</li>
+</ul>
+<h3 id="精确去重1tb">精确去重（1TB）</h3>
+<ul>
+<li><strong>CPU（64 核）</strong>：8 小时</li>
+<li><strong>GPU（4× A100）</strong>：0.5 小时</li>
+<li><strong>加速比</strong>：16×</li>
+</ul>
+<h3 id="质量过滤100gb">质量过滤（100GB）</h3>
+<ul>
+<li><strong>CPU（32 核）</strong>：2 小时</li>
+<li><strong>GPU（2× A100）</strong>：0.2 小时</li>
+<li><strong>加速比</strong>：10×</li>
+</ul>
+<h2 id="成本对比">成本对比</h2>
+<p><strong>基于 CPU 的数据整理</strong>（AWS c5.18xlarge × 10）：
+- 费用：$3.60/小时 × 10 = $36/小时
+- 处理 8TB 耗时：120 小时
+- <strong>合计</strong>：$4,320</p>
+<p><strong>基于 GPU 的数据整理</strong>（AWS p4d.24xlarge × 2）：
+- 费用：$32.77/小时 × 2 = $65.54/小时
+- 处理 8TB 耗时：7.5 小时
+- <strong>合计</strong>：$491.55</p>
+<p><strong>节省</strong>：降低 89%（节省 $3,828）</p>
+<h2 id="支持的数据格式">支持的数据格式</h2>
+<ul>
+<li><strong>输入</strong>：Parquet、JSONL、CSV</li>
+<li><strong>输出</strong>：Parquet（推荐）、JSONL</li>
+<li><strong>WebDataset</strong>：用于多模态的 TAR 归档</li>
+</ul>
+<h2 id="使用场景">使用场景</h2>
+<p><strong>生产部署</strong>：
+- NVIDIA 使用 NeMo Curator 准备 Nemotron-4 训练数据
+- 已整理的开源数据集：RedPajama v2、The Pile</p>
+<h2 id="参考资料">参考资料</h2>
+<ul>
+<li><strong><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/nemo-curator/references/filtering.md" class="ext" target="_blank" rel="noopener">过滤指南</a></strong> - 30+ 质量过滤器与启发式规则</li>
+<li><strong><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/nemo-curator/references/deduplication.md" class="ext" target="_blank" rel="noopener">去重指南</a></strong> - 精确、模糊、语义去重方法</li>
+</ul>
+<h2 id="资源">资源</h2>
+<ul>
+<li><strong>GitHub</strong>：https://github.com/NVIDIA/NeMo-Curator ⭐ 500+</li>
+<li><strong>文档</strong>：https://docs.nvidia.com/nemo-framework/user-guide/latest/datacuration/</li>
+<li><strong>版本</strong>：0.4.0+</li>
+<li><strong>许可证</strong>：Apache 2.0</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/optional/mlops/mlops-nemo-curator</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#何时使用-nemo-curator">何时使用 NeMo Curator</a></li>
+<li class="lvl2"><a href="#快速开始">快速开始</a></li>
+<li class="lvl3"><a href="#安装">安装</a></li>
+<li class="lvl3"><a href="#基础文本整理流水线">基础文本整理流水线</a></li>
+<li class="lvl2"><a href="#数据整理流水线">数据整理流水线</a></li>
+<li class="lvl3"><a href="#阶段-1质量过滤">阶段 1：质量过滤</a></li>
+<li class="lvl3"><a href="#阶段-2去重">阶段 2：去重</a></li>
+<li class="lvl3"><a href="#阶段-3pii-脱敏">阶段 3：PII 脱敏</a></li>
+<li class="lvl3"><a href="#阶段-4分类器过滤">阶段 4：分类器过滤</a></li>
+<li class="lvl2"><a href="#gpu-加速">GPU 加速</a></li>
+<li class="lvl3"><a href="#gpu-与-cpu-性能对比">GPU 与 CPU 性能对比</a></li>
+<li class="lvl3"><a href="#多-gpu-扩展">多 GPU 扩展</a></li>
+<li class="lvl2"><a href="#多模态数据整理">多模态数据整理</a></li>
+<li class="lvl3"><a href="#图像整理">图像整理</a></li>
+<li class="lvl3"><a href="#视频整理">视频整理</a></li>
+<li class="lvl3"><a href="#音频整理">音频整理</a></li>
+<li class="lvl2"><a href="#常见模式">常见模式</a></li>
+<li class="lvl3"><a href="#网络抓取数据整理common-crawl">网络抓取数据整理（Common Crawl）</a></li>
+<li class="lvl3"><a href="#分布式处理">分布式处理</a></li>
+<li class="lvl2"><a href="#性能基准">性能基准</a></li>
+<li class="lvl3"><a href="#模糊去重8tb-redpajama-v2">模糊去重（8TB RedPajama v2）</a></li>
+<li class="lvl3"><a href="#精确去重1tb">精确去重（1TB）</a></li>
+<li class="lvl3"><a href="#质量过滤100gb">质量过滤（100GB）</a></li>
+<li class="lvl2"><a href="#成本对比">成本对比</a></li>
+<li class="lvl2"><a href="#支持的数据格式">支持的数据格式</a></li>
+<li class="lvl2"><a href="#使用场景">使用场景</a></li>
+<li class="lvl2"><a href="#参考资料">参考资料</a></li>
+<li class="lvl2"><a href="#资源">资源</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Discord · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/messaging/discord</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="discord-设置">Discord 设置</h1>
+<p>Hermes Agent 以机器人形式与 Discord 集成，让你可以通过私信或服务器频道与 AI 助手对话。机器人接收你的消息，通过 Hermes Agent 管道（包括工具调用、记忆和推理）进行处理，并实时响应。它支持文本、语音消息、文件附件和斜杠命令。</p>
+<p>在开始设置之前，先介绍大多数人最想了解的内容：Hermes 进入服务器后的行为方式。</p>
+<h2 id="hermes-的行为方式">Hermes 的行为方式</h2>
+<table>
+<thead>
+<tr>
+<th>上下文</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>私信（DM）</strong></td>
+<td>Hermes 响应每条消息，无需 <code>@提及</code>。每个私信有独立的会话。</td>
+</tr>
+<tr>
+<td><strong>服务器频道</strong></td>
+<td>默认情况下，Hermes 仅在被 <code>@提及</code> 时响应。如果你在频道中发帖但未提及它，Hermes 会忽略该消息。</td>
+</tr>
+<tr>
+<td><strong>自由响应频道</strong></td>
+<td>你可以通过 <code>DISCORD_FREE_RESPONSE_CHANNELS</code> 将特定频道设为无需提及，或通过 <code>DISCORD_REQUIRE_MENTION=false</code> 全局禁用提及要求。这些频道中的消息会直接回复——自动创建线程功能会被跳过，使频道保持轻量级聊天状态。</td>
+</tr>
+<tr>
+<td><strong>线程（Thread）</strong></td>
+<td>Hermes 在同一线程中回复。提及规则仍然适用，除非该线程或其父频道被配置为自由响应。线程的会话历史与父频道相互隔离。</td>
+</tr>
+<tr>
+<td><strong>多用户共享频道</strong></td>
+<td>默认情况下，Hermes 为安全和清晰起见，在频道内按用户隔离会话历史。在同一频道中交谈的两个人不会共享同一份对话记录，除非你明确禁用该功能。</td>
+</tr>
+<tr>
+<td><strong>提及其他用户的消息</strong></td>
+<td>当 <code>DISCORD_IGNORE_NO_MENTION</code> 为 <code>true</code>（默认值）时，如果消息 @提及了其他用户但<strong>未</strong>提及机器人，Hermes 保持沉默。这可防止机器人介入针对其他人的对话。如果你希望机器人响应所有消息而不管提及了谁，请设置为 <code>false</code>。此设置仅适用于服务器频道，不适用于私信。</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>如果你想要一个普通的机器人帮助频道，让用户无需每次都 @标记就能与 Hermes 对话，请将该频道添加到 <code>DISCORD_FREE_RESPONSE_CHANNELS</code>。</p>
+</div>
+<h3 id="discord-gateway网关模型">Discord Gateway（网关）模型</h3>
+<p>Hermes 在 Discord 上不是无状态回复的 webhook（网络钩子）。它通过完整的消息网关运行，这意味着每条传入消息都会经过：</p>
+<ol>
+<li>授权验证（<code>DISCORD_ALLOWED_USERS</code>）</li>
+<li>提及 / 自由响应检查</li>
+<li>会话查找</li>
+<li>会话记录加载</li>
+<li>正常的 Hermes agent 执行，包括工具、记忆和斜杠命令</li>
+<li>将响应发送回 Discord</li>
+</ol>
+<p>这一点很重要，因为在繁忙服务器中的行为取决于 Discord 路由和 Hermes 会话策略两者。</p>
+<h3 id="discord-中的会话模型">Discord 中的会话模型</h3>
+<p>默认情况下：</p>
+<ul>
+<li>每个私信有独立的会话</li>
+<li>每个服务器线程有独立的会话命名空间</li>
+<li>共享频道中的每个用户在该频道内有独立的会话</li>
+</ul>
+<p>因此，如果 Alice 和 Bob 都在 <code>#research</code> 中与 Hermes 对话，即使他们使用的是同一个可见的 Discord 频道，Hermes 默认也会将其视为独立的对话。</p>
+<p>这由 <code>config.yaml</code> 控制：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>仅当你明确希望整个房间共享一个对话时，才将其设置为 <code>false</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>共享会话对协作房间可能有用，但这也意味着：</p>
+<ul>
+<li>用户共享上下文增长和 token（令牌）成本</li>
+<li>一个人的长时间重度工具任务会使所有人的上下文膨胀</li>
+<li>一个人正在进行的运行可能会中断同一房间中另一个人的后续操作</li>
+</ul>
+<h3 id="中断与并发">中断与并发</h3>
+<p>Hermes 按会话键跟踪正在运行的 agent。</p>
+<p>使用默认的 <code>group_sessions_per_user: true</code> 时：</p>
+<ul>
+<li>Alice 中断自己正在进行的请求只影响她在该频道中的会话</li>
+<li>Bob 可以继续在同一频道中交谈，不会继承 Alice 的历史记录或中断 Alice 的运行</li>
+</ul>
+<p>使用 <code>group_sessions_per_user: false</code> 时：</p>
+<ul>
+<li>整个房间共享该频道/线程的一个正在运行的 agent 槽位</li>
+<li>不同人的后续消息可能会相互中断或排队等待</li>
+</ul>
+<p>本指南将引导你完成完整的设置流程——从在 Discord 开发者门户创建机器人到发送第一条消息。</p>
+<h3 id="discord-gateway-websocket-健康">Discord Gateway WebSocket 健康</h3>
+<p>Discord REST 与 Gateway WebSocket 是独立传输。REST 请求成功不代表机器人仍能接收 Gateway 事件。Hermes 会组合检查 ready 状态、client/socket 关闭状态、socket 是否打开、heartbeat ACK 年龄和有限 heartbeat latency。</p>
+<p>连续异常达到阈值后，适配器只上报一次可重试失败；现有 Gateway 重连器创建新适配器，不会启动第二个无限重连循环。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">websocket_liveness_interval_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">15</span>
+<span class="w">  </span><span class="nt">websocket_liveness_failure_threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+<span class="w">  </span><span class="nt">websocket_heartbeat_ack_max_age_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60</span>
+<span class="w">  </span><span class="nt">websocket_max_latency_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span>
+<span class="w">  </span><span class="nt">websocket_event_max_silence_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">14400</span>
+</code></pre></div>
+
+<p>旧的 <code>liveness_interval_seconds</code> / <code>liveness_failure_threshold</code> 仅作为迁移别名保留，不再表示 REST probe。</p>
+<p><code>websocket_event_max_silence_seconds</code> 是唯一的例外：它只守护"事件分发"这一个维度，设为 <code>0</code> 仅停用该检查——ready/ACK/延迟检测继续生效。一条连接可以在保持 ESTABLISHED 并正常应答心跳的同时，不再投递任何 Gateway 事件（心跳 ACK 是不带事件类型的帧，任何传输层检查都看不到这种状态）。默认值 4 小时对应实际故障的观察窗口；安静的服务器可能数小时没有任何事件，除非明确了解自身流量，否则请保持该阈值宽松。</p>
+<h2 id="第一步创建-discord-应用">第一步：创建 Discord 应用</h2>
+<ol>
+<li>前往 <a href="https://discord.com/developers/applications" class="ext" target="_blank" rel="noopener">Discord 开发者门户</a> 并使用你的 Discord 账号登录。</li>
+<li>点击右上角的 <strong>New Application</strong>。</li>
+<li>输入应用名称（例如"Hermes Agent"）并接受开发者服务条款。</li>
+<li>点击 <strong>Create</strong>。</li>
+</ol>
+<p>你将进入 <strong>General Information</strong> 页面。记下 <strong>Application ID</strong>——稍后构建邀请 URL 时需要用到。</p>
+<h2 id="第二步创建机器人">第二步：创建机器人</h2>
+<ol>
+<li>在左侧边栏中，点击 <strong>Bot</strong>。</li>
+<li>Discord 会自动为你的应用创建一个机器人用户。你会看到机器人的用户名，可以自定义。</li>
+<li>在 <strong>Authorization Flow</strong> 下：</li>
+<li>将 <strong>Public Bot</strong> 设置为 <strong>ON</strong>——使用 Discord 提供的邀请链接时需要此设置（推荐）。这允许 Installation 标签页生成默认授权 URL。</li>
+<li>将 <strong>Require OAuth2 Code Grant</strong> 保持为 <strong>OFF</strong>。</li>
+</ol>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>你可以在此页面为机器人设置自定义头像和横幅，这是用户在 Discord 中看到的样子。</p>
+</div>
+<div class="admonition adm-info"><p class="adm-title">私有机器人替代方案</p>
+<p>如果你希望保持机器人私有（Public Bot = OFF），则<strong>必须</strong>在第五步中使用<strong>手动 URL</strong> 方法，而不是 Installation 标签页。Discord 提供的链接需要启用 Public Bot。</p>
+</div>
+<h2 id="第三步启用特权网关-intent意图">第三步：启用特权网关 Intent（意图）</h2>
+<p>这是整个设置过程中最关键的步骤。如果没有启用正确的 intent，你的机器人将连接到 Discord，但<strong>无法读取消息内容</strong>。</p>
+<p>在 <strong>Bot</strong> 页面，向下滚动到 <strong>Privileged Gateway Intents</strong>。你会看到三个开关：</p>
+<table>
+<thead>
+<tr>
+<th>Intent</th>
+<th>用途</th>
+<th>是否必需？</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Presence Intent</strong></td>
+<td>查看用户在线/离线状态</td>
+<td>可选</td>
+</tr>
+<tr>
+<td><strong>Server Members Intent</strong></td>
+<td>访问成员列表、解析用户名</td>
+<td><strong>必需</strong></td>
+</tr>
+<tr>
+<td><strong>Message Content Intent</strong></td>
+<td>读取消息的文本内容</td>
+<td><strong>必需</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>将 Server Members Intent 和 Message Content Intent 都切换为 ON。</strong></p>
+<ul>
+<li>没有 <strong>Message Content Intent</strong>，你的机器人会收到消息事件，但消息文本为空——机器人实际上看不到你输入的内容。</li>
+<li>没有 <strong>Server Members Intent</strong>，机器人无法解析允许用户列表中的用户名，可能无法识别是谁在发消息。</li>
+</ul>
+<div class="admonition adm-warning"><p class="adm-title">这是 Discord 机器人不工作的第一大原因</p>
+<p>如果你的机器人在线但从不响应消息，<strong>Message Content Intent</strong> 几乎可以肯定是被禁用了。返回 <a href="https://discord.com/developers/applications" class="ext" target="_blank" rel="noopener">开发者门户</a>，选择你的应用 → Bot → Privileged Gateway Intents，确保 <strong>Message Content Intent</strong> 已切换为 ON。点击 <strong>Save Changes</strong>。</p>
+</div>
+<p><strong>关于服务器数量：</strong>
+- 如果你的机器人在<strong>少于 100 个服务器</strong>中，可以自由切换 intent。
+- 如果你的机器人在 <strong>100 个或更多服务器</strong>中，Discord 要求你提交验证申请才能使用特权 intent。对于个人使用，这不是问题。</p>
+<p>点击页面底部的 <strong>Save Changes</strong>。</p>
+<h2 id="第四步获取机器人-token">第四步：获取机器人 Token</h2>
+<p>机器人 token（令牌）是 Hermes Agent 用于以你的机器人身份登录的凭据。仍在 <strong>Bot</strong> 页面：</p>
+<ol>
+<li>在 <strong>Token</strong> 部分，点击 <strong>Reset Token</strong>。</li>
+<li>如果你的 Discord 账号启用了双重身份验证，请输入你的 2FA 代码。</li>
+<li>Discord 将显示你的新 token。<strong>立即复制它。</strong></li>
+</ol>
+<div class="admonition adm-warning"><p class="adm-title">Token 仅显示一次</p>
+<p>Token 只显示一次。如果丢失，你需要重置并生成新的 token。切勿公开分享你的 token 或将其提交到 Git——任何拥有此 token 的人都可以完全控制你的机器人。</p>
+</div>
+<p>将 token 存储在安全的地方（例如密码管理器）。你将在第八步中用到它。</p>
+<h2 id="第五步生成邀请-url">第五步：生成邀请 URL</h2>
+<p>你需要一个 OAuth2 URL 来将机器人邀请到你的服务器。有两种方式：</p>
+<h3 id="方式-a使用-installation-标签页推荐">方式 A：使用 Installation 标签页（推荐）</h3>
+<div class="admonition adm-note"><p class="adm-title">需要 Public Bot</p>
+<p>此方法要求在第二步中将 <strong>Public Bot</strong> 设置为 <strong>ON</strong>。如果你将 Public Bot 设置为 OFF，请改用下面的手动 URL 方法。</p>
+</div>
+<ol>
+<li>在左侧边栏中，点击 <strong>Installation</strong>。</li>
+<li>在 <strong>Installation Contexts</strong> 下，启用 <strong>Guild Install</strong>。</li>
+<li>对于 <strong>Install Link</strong>，选择 <strong>Discord Provided Link</strong>。</li>
+<li>在 Guild Install 的 <strong>Default Install Settings</strong> 下：</li>
+<li><strong>Scopes</strong>：选择 <code>bot</code> 和 <code>applications.commands</code></li>
+<li><strong>Permissions</strong>：选择下面列出的权限。</li>
+</ol>
+<h3 id="方式-b手动-url">方式 B：手动 URL</h3>
+<p>你可以使用以下格式直接构建邀请 URL：</p>
+<div class="highlight"><pre><span></span><code>https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&amp;scope=bot+applications.commands&amp;permissions=309237763136
+</code></pre></div>
+
+<p>将 <code>YOUR_APP_ID</code> 替换为第一步中的 Application ID。</p>
+<h3 id="所需权限">所需权限</h3>
+<p>以下是机器人所需的最低权限：</p>
+<ul>
+<li><strong>View Channels</strong> — 查看其有权访问的频道</li>
+<li><strong>Send Messages</strong> — 响应你的消息</li>
+<li><strong>Embed Links</strong> — 格式化富文本响应</li>
+<li><strong>Attach Files</strong> — 发送图片、音频和文件输出</li>
+<li><strong>Read Message History</strong> — 维护对话上下文</li>
+</ul>
+<h3 id="推荐的附加权限">推荐的附加权限</h3>
+<ul>
+<li><strong>Send Messages in Threads</strong> — 在线程对话中响应</li>
+<li><strong>Create Public Threads</strong> - create threads</li>
+<li><strong>Add Reactions</strong> — 对消息添加反应以示确认</li>
+</ul>
+<h3 id="权限整数">权限整数</h3>
+<table>
+<thead>
+<tr>
+<th>级别</th>
+<th>权限整数</th>
+<th>包含内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>最低</td>
+<td><code>117760</code></td>
+<td>View Channels、Send Messages、Read Message History、Attach Files</td>
+</tr>
+<tr>
+<td>推荐</td>
+<td><code>309237763136</code></td>
+<td>以上所有权限，加上 Embed Links、Send Messages in Threads、Add Reactions, Create Public Threads</td>
+</tr>
+</tbody>
+</table>
+<h2 id="第六步邀请到你的服务器">第六步：邀请到你的服务器</h2>
+<ol>
+<li>在浏览器中打开邀请 URL（来自 Installation 标签页或你构建的手动 URL）。</li>
+<li>在 <strong>Add to Server</strong> 下拉菜单中，选择你的服务器。</li>
+<li>点击 <strong>Continue</strong>，然后点击 <strong>Authorize</strong>。</li>
+<li>如有提示，完成 CAPTCHA 验证。</li>
+</ol>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>你需要在 Discord 服务器上拥有 <strong>Manage Server</strong> 权限才能邀请机器人。如果你在下拉菜单中看不到你的服务器，请让服务器管理员使用邀请链接。</p>
+</div>
+<p>授权后，机器人将出现在你服务器的成员列表中（在你启动 Hermes 网关之前，它会显示为离线）。</p>
+<h2 id="第七步找到你的-discord-用户-id">第七步：找到你的 Discord 用户 ID</h2>
+<p>Hermes Agent 使用你的 Discord 用户 ID 来控制谁可以与机器人交互。查找方式：</p>
+<ol>
+<li>打开 Discord（桌面或网页应用）。</li>
+<li>前往 <strong>Settings</strong> → <strong>Advanced</strong> → 将 <strong>Developer Mode</strong> 切换为 <strong>ON</strong>。</li>
+<li>关闭设置。</li>
+<li>右键点击你自己的用户名（在消息中、成员列表中或你的个人资料中）→ <strong>Copy User ID</strong>。</li>
+</ol>
+<p>你的用户 ID 是一个类似 <code>284102345871466496</code> 的长数字。</p>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>开发者模式还允许你以相同方式复制<strong>频道 ID</strong> 和<strong>服务器 ID</strong>——右键点击频道或服务器名称并选择 Copy ID。如果你想手动设置主频道，将需要频道 ID。</p>
+</div>
+<h2 id="第八步配置-hermes-agent">第八步：配置 Hermes Agent</h2>
+<h3 id="方式-a交互式设置推荐">方式 A：交互式设置（推荐）</h3>
+<p>运行引导式设置命令：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>setup
+</code></pre></div>
+
+<p>在提示时选择 <strong>Discord</strong>，然后在询问时粘贴你的机器人 token 和用户 ID。</p>
+<h3 id="方式-b手动配置">方式 B：手动配置</h3>
+<p>将以下内容添加到你的 <code>~/.hermes/.env</code> 文件：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 必填</span>
+<span class="nv">DISCORD_BOT_TOKEN</span><span class="o">=</span>your-bot-token
+<span class="nv">DISCORD_ALLOWED_USERS</span><span class="o">=</span><span class="m">284102345871466496</span>
+
+<span class="c1"># 多个允许用户（逗号分隔）</span>
+<span class="c1"># DISCORD_ALLOWED_USERS=284102345871466496,198765432109876543</span>
+</code></pre></div>
+
+<p>然后启动网关：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>机器人应在几秒钟内在 Discord 中上线。发送一条消息——私信或在它可以看到的频道中——进行测试。</p>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>你可以在后台运行 <code>hermes gateway</code> 或将其作为 systemd 服务以持续运行。详情请参阅部署文档。</p>
+</div>
+<h2 id="配置参考">配置参考</h2>
+<p>Discord 行为通过两个文件控制：<strong><code>~/.hermes/.env</code></strong> 用于凭据和环境级开关，<strong><code>~/.hermes/config.yaml</code></strong> 用于结构化设置。当两者都设置时，环境变量始终优先于 config.yaml 的值。</p>
+<h3 id="环境变量env">环境变量（<code>.env</code>）</h3>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>是否必填</th>
+<th>默认值</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DISCORD_BOT_TOKEN</code></td>
+<td><strong>是</strong></td>
+<td>—</td>
+<td>来自 <a href="https://discord.com/developers/applications" class="ext" target="_blank" rel="noopener">Discord 开发者门户</a> 的机器人 token。</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOWED_USERS</code></td>
+<td><strong>是</strong></td>
+<td>—</td>
+<td>允许与机器人交互的 Discord 用户 ID，逗号分隔。没有此项<strong>或</strong> <code>DISCORD_ALLOWED_ROLES</code>，网关将拒绝所有用户。</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOWED_ROLES</code></td>
+<td>否</td>
+<td>—</td>
+<td>Discord 角色 ID，逗号分隔。拥有其中任一角色的成员即被授权——与 <code>DISCORD_ALLOWED_USERS</code> 为 OR 语义。连接时自动启用 <strong>Server Members Intent</strong>。适用于管理团队频繁变动的场景：新管理员一旦被授予角色即可获得访问权限，无需推送配置。</td>
+</tr>
+<tr>
+<td><code>DISCORD_HOME_CHANNEL</code></td>
+<td>否</td>
+<td>—</td>
+<td>机器人发送主动消息（cron 输出、提醒、通知）的频道 ID。</td>
+</tr>
+<tr>
+<td><code>DISCORD_HOME_CHANNEL_NAME</code></td>
+<td>否</td>
+<td><code>"Home"</code></td>
+<td>主频道在日志和状态输出中的显示名称。</td>
+</tr>
+<tr>
+<td><code>DISCORD_COMMAND_SYNC_POLICY</code></td>
+<td>否</td>
+<td><code>"safe"</code></td>
+<td>控制原生斜杠命令启动同步。<code>"safe"</code> 对现有全局命令进行差异比较，仅更新已更改的内容，当 Discord 元数据更改无法通过补丁应用时重新创建命令。<code>"bulk"</code> 保留旧的 <code>tree.sync()</code> 行为。<code>"off"</code> 完全跳过启动同步。</td>
+</tr>
+<tr>
+<td><code>DISCORD_REQUIRE_MENTION</code></td>
+<td>否</td>
+<td><code>true</code></td>
+<td>为 <code>true</code> 时，机器人仅在服务器频道中被 <code>@提及</code> 时响应。设置为 <code>false</code> 可响应每个频道中的所有消息。</td>
+</tr>
+<tr>
+<td><code>DISCORD_THREAD_REQUIRE_MENTION</code></td>
+<td>否</td>
+<td><code>false</code></td>
+<td>为 <code>true</code> 时，禁用线程内的提及快捷方式——线程与频道的门控方式相同，即使机器人已经参与其中，也需要 <code>@提及</code>。当多个机器人共享一个线程且你希望每个机器人仅在明确 <code>@提及</code> 时触发时使用此设置。</td>
+</tr>
+<tr>
+<td><code>DISCORD_FREE_RESPONSE_CHANNELS</code></td>
+<td>否</td>
+<td>—</td>
+<td>机器人无需 <code>@提及</code> 即可响应的频道 ID，逗号分隔，即使 <code>DISCORD_REQUIRE_MENTION</code> 为 <code>true</code> 也适用。</td>
+</tr>
+<tr>
+<td><code>DISCORD_IGNORE_NO_MENTION</code></td>
+<td>否</td>
+<td><code>true</code></td>
+<td>为 <code>true</code> 时，如果消息 <code>@提及</code> 了其他用户但<strong>未</strong>提及机器人，机器人保持沉默。防止机器人介入针对其他人的对话。仅适用于服务器频道，不适用于私信。</td>
+</tr>
+<tr>
+<td><code>DISCORD_AUTO_THREAD</code></td>
+<td>否</td>
+<td><code>true</code></td>
+<td>为 <code>true</code> 时，自动为文本频道中的每次 <code>@提及</code> 创建新线程，使每个对话相互隔离（类似 Slack 行为）。已在线程或私信中的消息不受影响。</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_BOTS</code></td>
+<td>否</td>
+<td><code>"none"</code></td>
+<td>控制机器人如何处理来自其他 Discord 机器人的消息。<code>"none"</code> — 忽略所有其他机器人。<code>"mentions"</code> — 仅接受 <code>@提及</code> Hermes 的机器人消息。<code>"all"</code> — 接受所有机器人消息。</td>
+</tr>
+<tr>
+<td><code>DISCORD_REACTIONS</code></td>
+<td>否</td>
+<td><code>true</code></td>
+<td>为 <code>true</code> 时，机器人在处理过程中为消息添加 emoji 反应（开始时 👀，成功时 ✅，出错时 ❌）。设置为 <code>false</code> 可完全禁用反应。</td>
+</tr>
+<tr>
+<td><code>DISCORD_IGNORED_CHANNELS</code></td>
+<td>否</td>
+<td>—</td>
+<td>机器人<strong>永不</strong>响应的频道 ID，逗号分隔，即使被 <code>@提及</code> 也不响应。优先于所有其他频道设置。</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOWED_CHANNELS</code></td>
+<td>否</td>
+<td>—</td>
+<td>频道 ID，逗号分隔。设置后，机器人<strong>仅</strong>在这些频道（以及允许的私信）中响应。覆盖 <code>config.yaml</code> 中的 <code>discord.allowed_channels</code>。与 <code>DISCORD_IGNORED_CHANNELS</code> 结合使用可表达允许/拒绝规则。</td>
+</tr>
+<tr>
+<td><code>DISCORD_NO_THREAD_CHANNELS</code></td>
+<td>否</td>
+<td>—</td>
+<td>机器人直接在频道中响应而不创建线程的频道 ID，逗号分隔。仅在 <code>DISCORD_AUTO_THREAD</code> 为 <code>true</code> 时有效。</td>
+</tr>
+<tr>
+<td><code>DISCORD_HISTORY_BACKFILL</code></td>
+<td>否</td>
+<td><code>true</code></td>
+<td>为 <code>true</code> 时，当机器人被提及时，将最近的频道滚动历史（自机器人上次响应以来）前置到用户消息中。恢复机器人在 <code>require_mention</code> 模式下会错过的上下文。在私信和自由响应频道中跳过。设置为 <code>false</code> 可禁用。</td>
+</tr>
+<tr>
+<td><code>DISCORD_HISTORY_BACKFILL_LIMIT</code></td>
+<td>否</td>
+<td><code>50</code></td>
+<td>组装回填块时向后扫描的最大消息数。实际上扫描通常会更早停止——在机器人自己在频道中的最后一条消息处。</td>
+</tr>
+<tr>
+<td><code>DISCORD_REPLY_TO_MODE</code></td>
+<td>否</td>
+<td><code>"first"</code></td>
+<td>控制回复引用行为：<code>"off"</code> — 从不回复原始消息，<code>"first"</code> — 仅在第一个消息块上添加回复引用（默认），<code>"all"</code> — 在每个块上都添加回复引用。</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_MENTION_EVERYONE</code></td>
+<td>否</td>
+<td><code>false</code></td>
+<td>为 <code>false</code>（默认）时，即使响应中包含这些 token，机器人也无法 ping <code>@everyone</code> 或 <code>@here</code>。设置为 <code>true</code> 可重新启用。参见下方<a href="../../../user-guide/messaging/discord.html#mention-control" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">提及控制</a>。</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_MENTION_ROLES</code></td>
+<td>否</td>
+<td><code>false</code></td>
+<td>为 <code>false</code>（默认）时，机器人无法 ping <code>@role</code> 提及。设置为 <code>true</code> 可允许。</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_MENTION_USERS</code></td>
+<td>否</td>
+<td><code>true</code></td>
+<td>为 <code>true</code>（默认）时，机器人可以通过 ID ping 单个用户。</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_MENTION_REPLIED_USER</code></td>
+<td>否</td>
+<td><code>true</code></td>
+<td>为 <code>true</code>（默认）时，回复消息会 ping 原始作者。</td>
+</tr>
+<tr>
+<td><code>DISCORD_PROXY</code></td>
+<td>否</td>
+<td>—</td>
+<td>Discord 连接的代理 URL（HTTP、WebSocket、REST）。覆盖 <code>HTTPS_PROXY</code>/<code>ALL_PROXY</code>。支持 <code>http://</code>、<code>https://</code> 和 <code>socks5://</code> 协议。</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_ANY_ATTACHMENT</code></td>
+<td>否</td>
+<td><code>false</code></td>
+<td>为 <code>true</code> 时，机器人接受任何文件类型的附件（不仅限于内置的 PDF/文本/zip/office 允许列表）。未知类型会被缓存到磁盘，并以 <code>application/octet-stream</code> MIME 类型作为本地路径提供给 agent，以便它可以使用 <code>terminal</code> / <code>read_file</code> / <code>ffprobe</code> 等工具检查。</td>
+</tr>
+<tr>
+<td><code>DISCORD_MAX_ATTACHMENT_BYTES</code></td>
+<td>否</td>
+<td><code>33554432</code></td>
+<td>网关将下载并缓存的每个附件的最大字节数。默认 32 MiB。设置为 <code>0</code> 表示无上限（附件在写入时保存在内存中，因此无限制会带来真实的内存成本）。</td>
+</tr>
+<tr>
+<td><code>HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS</code></td>
+<td>否</td>
+<td><code>0.6</code></td>
+<td>适配器在刷新排队文本块之前等待的宽限窗口。用于平滑流式输出。</td>
+</tr>
+<tr>
+<td><code>HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS</code></td>
+<td>否</td>
+<td><code>2.0</code></td>
+<td>当单条消息超过 Discord 长度限制时，分割块之间的延迟。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="配置文件configyaml">配置文件（<code>config.yaml</code>）</h3>
+<p><code>~/.hermes/config.yaml</code> 中的 <code>discord</code> 部分与上述环境变量对应。config.yaml 设置作为默认值应用——如果已设置等效的环境变量，则环境变量优先。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Discord 特定设置</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">           </span><span class="c1"># 在服务器频道中需要 @提及</span>
+<span class="w">  </span><span class="nt">thread_require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># 为 true 时，线程中也需要 @提及（多机器人线程）</span>
+<span class="w">  </span><span class="nt">free_response_channels</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">      </span><span class="c1"># 逗号分隔的频道 ID（或 YAML 列表）</span>
+<span class="w">  </span><span class="nt">auto_thread</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">               </span><span class="c1"># 在 @提及 时自动创建线程</span>
+<span class="w">  </span><span class="nt">reactions</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">                 </span><span class="c1"># 处理过程中添加 emoji 反应</span>
+<span class="w">  </span><span class="nt">ignored_channels</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">            </span><span class="c1"># 机器人永不响应的频道 ID</span>
+<span class="w">  </span><span class="nt">no_thread_channels</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">          </span><span class="c1"># 机器人不创建线程直接响应的频道 ID</span>
+<span class="w">  </span><span class="nt">history_backfill</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">          </span><span class="c1"># 在提及时前置最近的频道滚动历史（默认：true）</span>
+<span class="w">  </span><span class="nt">history_backfill_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">50</span><span class="w">      </span><span class="c1"># 向后扫描的最大消息数（默认：50）</span>
+<span class="w">  </span><span class="nt">missed_message_backfill</span><span class="p">:</span><span class="w">        </span><span class="c1"># 重新处理断线期间遗漏的消息（需主动启用）</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">    </span><span class="nt">channels</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">                  </span><span class="c1"># 留空时使用 free_response_channels</span>
+<span class="w">    </span><span class="nt">window_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">21600</span><span class="w">         </span><span class="c1"># 最多回溯 6 小时</span>
+<span class="w">    </span><span class="nt">limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100</span><span class="w">                    </span><span class="c1"># 每次重连的全局扫描上限</span>
+<span class="w">    </span><span class="nt">max_dispatches</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span><span class="w">            </span><span class="c1"># 每次重连的恢复分发上限</span>
+<span class="w">  </span><span class="nt">channel_prompts</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span><span class="w">             </span><span class="c1"># 每个频道的临时系统 prompt（提示词）</span>
+<span class="w">  </span><span class="nt">allow_mentions</span><span class="p">:</span><span class="w">                 </span><span class="c1"># 机器人允许 ping 的内容（安全默认值）</span>
+<span class="w">    </span><span class="nt">everyone</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">               </span><span class="c1"># @everyone / @here ping（默认：false）</span>
+<span class="w">    </span><span class="nt">roles</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">                  </span><span class="c1"># @role ping（默认：false）</span>
+<span class="w">    </span><span class="nt">users</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">                   </span><span class="c1"># @user ping（默认：true）</span>
+<span class="w">    </span><span class="nt">replied_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">            </span><span class="c1"># 回复引用会 ping 作者（默认：true）</span>
+
+<span class="c1"># 会话隔离（适用于所有网关平台，不仅限于 Discord）</span>
+<span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">     </span><span class="c1"># 在共享频道中按用户隔离会话</span>
+</code></pre></div>
+
+<h4 id="discordrequire_mention"><code>discord.require_mention</code></h4>
+<p><strong>类型：</strong> 布尔值 — <strong>默认值：</strong> <code>true</code></p>
+<p>启用后，机器人仅在服务器频道中被直接 <code>@提及</code> 时响应。无论此设置如何，私信始终会得到响应。</p>
+<h4 id="discordthread_require_mention"><code>discord.thread_require_mention</code></h4>
+<p><strong>类型：</strong> 布尔值 — <strong>默认值：</strong> <code>false</code></p>
+<p>默认情况下，一旦机器人参与了某个线程（通过 <code>@提及</code> 自动创建或回复过一次），它就会继续响应该线程中的每条后续消息，无需再次 <code>@提及</code>。这对于一对一对话来说是正确的默认行为。</p>
+<p>在<strong>多机器人线程</strong>中，用户每次只与一个机器人交流，这个默认行为会成为隐患——线程中的每个其他机器人也会对每条消息触发，消耗额度并刷屏。将 <code>thread_require_mention: true</code> 设置为禁用线程内快捷方式，使线程与频道的门控方式相同。显式 <code>@提及</code> 仍然有效。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">thread_require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">    </span><span class="c1"># 多机器人设置</span>
+</code></pre></div>
+
+<h4 id="discordfree_response_channels"><code>discord.free_response_channels</code></h4>
+<p><strong>类型：</strong> 字符串或列表 — <strong>默认值：</strong> <code>""</code></p>
+<p>机器人无需 <code>@提及</code> 即可响应所有消息的频道 ID。接受逗号分隔的字符串或 YAML 列表：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 字符串格式</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">free_response_channels</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;1234567890,9876543210&quot;</span>
+
+<span class="c1"># 列表格式</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">free_response_channels</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1234567890</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">9876543210</span>
+</code></pre></div>
+
+<p>如果线程的父频道在此列表中，该线程也变为无需提及。</p>
+<p>自由响应频道还会<strong>跳过自动创建线程</strong>——机器人直接回复而不是为每条消息创建新线程。这使频道可用作轻量级聊天界面。如果你想要线程行为，不要将频道列为自由响应（改用普通的 <code>@提及</code> 流程）。</p>
+<h4 id="discordauto_thread"><code>discord.auto_thread</code></h4>
+<p><strong>类型：</strong> 布尔值 — <strong>默认值：</strong> <code>true</code></p>
+<p>启用后，普通文本频道中的每次 <code>@提及</code> 都会自动为对话创建新线程。这保持主频道整洁，并为每个对话提供独立的会话历史。一旦创建线程，该线程中的后续消息不需要 <code>@提及</code>——机器人知道它已经在参与其中。对于多机器人设置，将 <a href="#discordthread_require_mention"><code>thread_require_mention</code></a> 设置为 <code>true</code> 可禁用此线程内快捷方式。</p>
+<p>在现有线程或私信中发送的消息不受此设置影响。<code>discord.free_response_channels</code> 或 <code>discord.no_thread_channels</code> 中列出的频道也会绕过自动创建线程，改为直接回复。</p>
+<h4 id="discordreactions"><code>discord.reactions</code></h4>
+<p><strong>类型：</strong> 布尔值 — <strong>默认值：</strong> <code>true</code></p>
+<p>控制机器人是否为消息添加 emoji 反应作为视觉反馈：
+- 👀 机器人开始处理你的消息时添加
+- ✅ 响应成功发送时添加
+- ❌ 处理过程中发生错误时添加</p>
+<p>如果你觉得反应令人分心，或者机器人的角色没有 <strong>Add Reactions</strong> 权限，请禁用此功能。</p>
+<h4 id="discordignored_channels"><code>discord.ignored_channels</code></h4>
+<p><strong>类型：</strong> 字符串或列表 — <strong>默认值：</strong> <code>[]</code></p>
+<p>机器人<strong>永不</strong>响应的频道 ID，即使被直接 <code>@提及</code> 也不响应。这具有最高优先级——如果频道在此列表中，机器人会静默忽略那里的所有消息，无论 <code>require_mention</code>、<code>free_response_channels</code> 或任何其他设置如何。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 字符串格式</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">ignored_channels</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;1234567890,9876543210&quot;</span>
+
+<span class="c1"># 列表格式</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">ignored_channels</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1234567890</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">9876543210</span>
+</code></pre></div>
+
+<p>如果线程的父频道在此列表中，该线程中的消息也会被忽略。</p>
+<h4 id="discordno_thread_channels"><code>discord.no_thread_channels</code></h4>
+<p><strong>类型：</strong> 字符串或列表 — <strong>默认值：</strong> <code>[]</code></p>
+<p>机器人直接在频道中响应而不自动创建线程的频道 ID。仅在 <code>auto_thread</code> 为 <code>true</code>（默认值）时有效。在这些频道中，机器人像普通消息一样直接回复，而不是创建新线程。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">no_thread_channels</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1234567890</span><span class="w">  </span><span class="c1"># 机器人在此处直接回复</span>
+</code></pre></div>
+
+<p>适用于专门用于机器人交互的频道，在这些频道中线程会增加不必要的噪音。</p>
+<h4 id="discordchannel_prompts"><code>discord.channel_prompts</code></h4>
+<p><strong>类型：</strong> 映射 — <strong>默认值：</strong> <code>{}</code></p>
+<p>每个频道的临时系统 prompt（提示词），在匹配的 Discord 频道或线程的每次对话轮次中注入，不会持久化到对话记录历史中。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">channel_prompts</span><span class="p">:</span>
+<span class="w">    </span><span class="s">&quot;1234567890&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">      </span><span class="no">This channel is for research tasks. Prefer deep comparisons,</span>
+<span class="w">      </span><span class="no">citations, and concise synthesis.</span>
+<span class="w">    </span><span class="s">&quot;9876543210&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">      </span><span class="no">This forum is for therapy-style support. Be warm, grounded,</span>
+<span class="w">      </span><span class="no">and non-judgmental.</span>
+</code></pre></div>
+
+<p>行为：
+- 精确的线程/频道 ID 匹配优先。
+- 如果消息到达线程或论坛帖子内，且该线程没有明确条目，Hermes 会回退到父频道/论坛 ID。
+- Prompt 在运行时临时应用，因此更改后立即影响后续轮次，无需重写过去的会话历史。</p>
+<h4 id="discordhistory_backfill"><code>discord.history_backfill</code></h4>
+<p><strong>类型：</strong> 布尔值 — <strong>默认值：</strong> <code>true</code></p>
+<p>启用后，机器人在每次 <code>@提及</code> 时恢复错过的频道消息。当 <code>require_mention: true</code> 时，机器人只处理直接标记它的消息——频道中的其他所有内容对会话记录都是不可见的。历史回填在触发时向后扫描最近的频道历史，收集机器人上次响应与当前提及之间的消息，并将其作为上下文包含进来。</p>
+<p>按界面的行为：</p>
+<ul>
+<li><strong>服务器频道</strong>（使用 <code>require_mention: true</code>）：回填扫描自机器人上次响应以来的频道。当其他参与者在机器人未被提及时发帖时很有用。</li>
+<li><strong>线程</strong>：回填仅扫描该线程——Discord 对线程的 <code>channel.history()</code> 只返回该线程的消息，不包括父频道。这是正确的范围，因为线程通常是自包含的对话。</li>
+<li><strong>私信</strong>：跳过。每条私信消息都会触发机器人，因此会话记录已经完整——没有提及间隙需要填补。</li>
+<li><strong>自由响应频道</strong>和<strong>机器人自动创建的线程</strong>：出于同样的原因跳过——没有提及门控意味着没有间隙。</li>
+</ul>
+<p>每用户会话（<code>group_sessions_per_user: true</code>，默认值）也受益：用户的会话缺少其他频道参与者发布的上下文以及用户在标记机器人之前自己的消息。回填填补了这两个间隙。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">history_backfill</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># 默认</span>
+</code></pre></div>
+
+<p>关闭方式：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">history_backfill</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>注意：</strong> 机器人处理<em>过程中</em>到达的消息（在触发和响应之间）不会被捕获。这是一个可接受的简化——用户可以重新发送或再次标记。</p>
+</blockquote>
+<h4 id="discordhistory_backfill_limit"><code>discord.history_backfill_limit</code></h4>
+<p><strong>类型：</strong> 整数 — <strong>默认值：</strong> <code>50</code></p>
+<p>恢复频道上下文时向后扫描的最大消息数。实际上扫描通常会更早停止——在机器人自己在频道中的最后一条消息处，这是轮次之间的自然边界。此限制是冷启动和长间隙（最近历史中不存在先前机器人消息）的安全上限。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">history_backfill</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">history_backfill_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">50</span>
+</code></pre></div>
+
+<h4 id="discordmissed_message_backfill"><code>discord.missed_message_backfill</code></h4>
+<p><strong>类型：</strong> 对象 — <strong>默认值：</strong> 禁用</p>
+<p>Discord 的 WebSocket 恢复窗口可能在重启或网络中断时过期。在此期间发送的消息不会作为实时网关事件交付。启用后，Hermes 会在 Discord 重连后扫描一组有界的频道与线程历史记录，并将尚未处理的消息交给与实时事件相同的授权、提及、频道、去重和分发流程。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">missed_message_backfill</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">channels</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;123456789012345678&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">window_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3600</span>
+<span class="w">    </span><span class="nt">limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100</span>
+<span class="w">    </span><span class="nt">max_dispatches</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span>
+</code></pre></div>
+
+<p>如果 <code>channels</code> 留空，Hermes 会使用 <code>discord.free_response_channels</code>。只有当机器人确实需要检查所有可访问的服务器文字频道时才设置为 <code>"*"</code>。恢复账本按配置文件存储在 <code>gateway/discord_message_recovery.db</code>，避免已成功回复的消息在后续重启时再次执行。</p>
+<h4 id="group_sessions_per_user"><code>group_sessions_per_user</code></h4>
+<p><strong>类型：</strong> 布尔值 — <strong>默认值：</strong> <code>true</code></p>
+<p>这是一个全局网关设置（非 Discord 专用），控制同一频道中的用户是否获得隔离的会话历史。</p>
+<p>为 <code>true</code> 时：Alice 和 Bob 在 <code>#research</code> 中交谈，各自与 Hermes 有独立的对话。为 <code>false</code> 时：整个频道共享一份对话记录和一个正在运行的 agent 槽位。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>有关每种模式的完整含义，请参阅上方的<a href="../../../user-guide/messaging/discord.html#session-model-in-discord" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">会话模型</a>部分。</p>
+<h4 id="displaytool_progress"><code>display.tool_progress</code></h4>
+<p><strong>类型：</strong> 字符串 — <strong>默认值：</strong> <code>"all"</code> — <strong>可选值：</strong> <code>off</code>、<code>new</code>、<code>all</code>、<code>verbose</code></p>
+<p>控制机器人在处理过程中是否在聊天中发送进度消息（例如"正在读取文件……"、"正在运行终端命令……"）。这是适用于所有平台的全局网关设置。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">display</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">tool_progress</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;all&quot;</span><span class="w">    </span><span class="c1"># off | new | all | verbose</span>
+</code></pre></div>
+
+<ul>
+<li><code>off</code> — 不发送进度消息</li>
+<li><code>new</code> — 每次轮次只显示第一个工具调用</li>
+<li><code>all</code> — 显示所有工具调用（在网关消息中截断为 40 个字符）</li>
+<li><code>verbose</code> — 显示完整的工具调用详情（可能产生较长的消息）</li>
+</ul>
+<h4 id="displaytool_progress_command"><code>display.tool_progress_command</code></h4>
+<p><strong>类型：</strong> 布尔值 — <strong>默认值：</strong> <code>false</code></p>
+<p>启用后，在网关中提供 <code>/verbose</code> 斜杠命令，让你无需编辑 config.yaml 即可循环切换工具进度模式（<code>off → new → all → verbose → off</code>）。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">display</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">tool_progress_command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<h2 id="斜杠命令访问控制">斜杠命令访问控制</h2>
+<p>默认情况下，每个允许的用户都可以运行每个斜杠命令。要将你的允许列表分为<strong>管理员</strong>（完整斜杠命令访问权限）和<strong>普通用户</strong>（仅你明确启用的命令），请在 Discord 平台的 <code>extra</code> 块中添加 <code>allow_admin_from</code> 和 <code>user_allowed_commands</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">discord</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">        </span><span class="c1"># 现有用户允许列表（不变）</span>
+<span class="w">        </span><span class="nt">allow_from</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;123456789012345678&quot;</span><span class="w">  </span><span class="c1"># 管理员用户 ID</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;999888777666555444&quot;</span><span class="w">  </span><span class="c1"># 普通用户 ID</span>
+
+<span class="w">        </span><span class="c1"># 新增 — 管理员可访问所有斜杠命令（内置 + 插件）</span>
+<span class="w">        </span><span class="nt">allow_admin_from</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;123456789012345678&quot;</span>
+
+<span class="w">        </span><span class="c1"># 新增 — 非管理员允许用户只能运行这些斜杠命令。</span>
+<span class="w">        </span><span class="c1"># /help 和 /whoami 始终允许，以便用户查看其访问权限。</span>
+<span class="w">        </span><span class="nt">user_allowed_commands</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">status</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">model</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">history</span>
+
+<span class="w">        </span><span class="c1"># 可选：为服务器频道设置单独的管理员/命令列表</span>
+<span class="w">        </span><span class="nt">group_allow_admin_from</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;123456789012345678&quot;</span>
+<span class="w">        </span><span class="nt">group_user_allowed_commands</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">status</span>
+</code></pre></div>
+
+<p><strong>行为：</strong></p>
+<ul>
+<li>在某个范围（私信或服务器频道）的 <code>allow_admin_from</code> 中的用户可以通过实时命令注册表运行<strong>每个</strong>已注册的斜杠命令——内置的和插件注册的都包括。</li>
+<li>不在 <code>allow_admin_from</code> 中的用户只能运行 <code>user_allowed_commands</code> 中列出的命令，加上始终允许的基础命令：<code>/help</code> 和 <code>/whoami</code>。</li>
+<li>普通聊天（非斜杠消息）不受影响。非管理员用户仍然可以正常与 agent 对话；他们只是无法触发任意命令。</li>
+<li><strong>向后兼容：</strong> 如果某个范围未设置 <code>allow_admin_from</code>，则该范围的斜杠命令门控被禁用。现有安装无需任何更改即可继续工作。</li>
+<li>私信管理员状态不意味着服务器频道管理员状态。每个范围有自己的管理员列表。</li>
+</ul>
+<p>使用 <code>/whoami</code> 查看当前范围、你的级别（管理员 / 用户 / 无限制）以及你可以运行的斜杠命令。</p>
+<h2 id="交互式模型选择器">交互式模型选择器</h2>
+<p>在 Discord 频道中不带参数发送 <code>/model</code> 以打开基于下拉菜单的模型选择器：</p>
+<ol>
+<li><strong>提供商选择</strong> — 显示可用提供商的 Select 下拉菜单（最多 25 个）。</li>
+<li><strong>模型选择</strong> — 显示所选提供商模型的第二个下拉菜单（最多 25 个）。</li>
+</ol>
+<p>选择器在 120 秒后超时。只有授权用户（<code>DISCORD_ALLOWED_USERS</code> 中的用户）才能与其交互。如果你知道模型名称，可以直接输入 <code>/model &lt;名称&gt;</code>。</p>
+<h2 id="技能的原生斜杠命令">技能的原生斜杠命令</h2>
+<p>Hermes 自动将已安装的技能注册为<strong>原生 Discord 应用命令</strong>。这意味着技能会出现在 Discord 的自动补全 <code>/</code> 菜单中，与内置命令并列。</p>
+<ul>
+<li>每个技能成为一个 Discord 斜杠命令（例如 <code>/code-review</code>、<code>/ascii-art</code>）</li>
+<li>技能接受一个可选的 <code>args</code> 字符串参数</li>
+<li>Discord 每个机器人有 100 个应用命令的限制——如果你的技能数量超过可用槽位，多余的技能会被跳过并在日志中显示警告</li>
+<li>技能在机器人启动时与内置命令（如 <code>/model</code>、<code>/reset</code> 和 <code>/bg</code>）一起注册</li>
+</ul>
+<p>无需额外配置——通过 <code>hermes skills install</code> 安装的任何技能都会在下次网关重启时自动注册为 Discord 斜杠命令。</p>
+<h3 id="禁用斜杠命令注册">禁用斜杠命令注册</h3>
+<p>如果你针对同一个 Discord 应用运行多个 Hermes 网关（例如测试环境 + 生产环境），只有其中一个应该拥有全局斜杠命令注册——否则最后启动的那个会覆盖之前的注册，导致注册状态不稳定。在"从属"网关上关闭斜杠注册：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">discord</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">slash_commands</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># 默认：true</span>
+</code></pre></div>
+
+<p>在"主"网关上保持 <code>true</code> 可维持正常行为——为内置命令和已安装技能提供全局 <code>/</code> 菜单命令。</p>
+<h2 id="发送媒体send_message--media-标签">发送媒体（<code>send_message</code> + <code>MEDIA:</code> 标签）</h2>
+<p>Discord 适配器通过 <code>send_message</code> 工具和 agent 发出的内联 <code>MEDIA:/path/to/file</code> 标签，支持所有常见媒体类型的原生文件上传：</p>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>发送方式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>图片（PNG/JPG/WebP）</td>
+<td>原生 Discord 图片附件，带内联预览</td>
+</tr>
+<tr>
+<td>动态 GIF</td>
+<td><code>send_animation</code> 以 <code>animation.gif</code> 上传，使 Discord 内联播放（而非静态缩略图）</td>
+</tr>
+<tr>
+<td>视频（MP4/MOV）</td>
+<td><code>send_video</code> — 原生视频播放器</td>
+</tr>
+<tr>
+<td>音频 / 语音</td>
+<td><code>send_voice</code> — 尽可能使用原生语音消息，否则使用文件附件</td>
+</tr>
+<tr>
+<td>文档（PDF/ZIP/docx 等）</td>
+<td><code>send_document</code> — 带下载按钮的原生附件</td>
+</tr>
+</tbody>
+</table>
+<p>Discord 的每次上传大小限制取决于服务器的加成等级（免费 25 MB，最高 500 MB）。如果 Hermes 收到 HTTP 413，适配器会回退到指向本地缓存路径的链接，而不是静默失败。</p>
+<h2 id="接收任意文件类型">接收任意文件类型</h2>
+<p>默认情况下，机器人缓存与内置允许列表匹配的上传——图片、音频、视频、PDF、文本/markdown/csv/log、JSON/XML/YAML/TOML、zip、docx/xlsx/pptx。其他任何内容（<code>.wav</code>、<code>.bin</code>、自定义扩展名的转储文件）都会被记录为 <code>Unsupported document type</code> 并在 agent 看到之前被丢弃。</p>
+<p>要接受任意文件类型，启用 <code>discord.allow_any_attachment</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">allow_any_attachment</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="c1"># 可选 — 提高/禁用每文件大小上限。默认为 32 MiB。</span>
+<span class="w">  </span><span class="c1"># 整个文件在缓存时保存在内存中，因此无限制</span>
+<span class="w">  </span><span class="c1"># 上传会带来真实的内存成本。</span>
+<span class="w">  </span><span class="nt">max_attachment_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">33554432</span><span class="w">   </span><span class="c1"># 字节；0 = 无限制</span>
+</code></pre></div>
+
+<p>启用该标志后，任何上传的文件都会被下载、缓存到 <code>~/.hermes/cache/documents/</code> 下，并以 <code>application/octet-stream</code> MIME 类型的 <code>DOCUMENT</code> 类型消息事件提供给 agent。Agent 收到指向本地路径的上下文说明（通过 <code>to_agent_visible_cache_path</code> 为 Docker/Modal 沙盒终端自动转换），可以使用 <code>terminal</code>（<code>ffprobe</code>、<code>unzip</code>、<code>file</code>、<code>strings</code> 等）或 <code>read_file</code> 检查文件。文件内容<strong>不会</strong>内联到 prompt 中——只有路径——因此二进制上传不会撑爆上下文窗口。</p>
+<p>已在允许列表中的已知文本格式（<code>.txt</code>、<code>.md</code>、<code>.log</code>）继续自动注入最多 100 KiB 的内容；启用该标志后此行为不变。</p>
+<p>等效环境变量：<code>DISCORD_ALLOW_ANY_ATTACHMENT=true</code> 和 <code>DISCORD_MAX_ATTACHMENT_BYTES=33554432</code>（或 <code>0</code> 表示无上限）。</p>
+<div class="admonition adm-warning"><p class="adm-title">无限制的内存成本</p>
+<p>禁用大小上限（<code>max_attachment_bytes: 0</code>）意味着用户可以向机器人上传数 GB 的文件，网关会尽职地在缓存到磁盘时将其缓冲到内存中。仅在受信任的单用户安装中设置此项。对于共享机器人，保持默认的 32 MiB 或保守地提高上限。</p>
+</div>
+<h2 id="交互式提示clarify">交互式提示（clarify）</h2>
+<p>当 agent 调用 <code>clarify</code> 工具时——询问你偏好哪种方式、获取任务后反馈或在非平凡决策前确认——Discord 会以<strong>每个选项一个按钮</strong>的形式渲染问题：</p>
+<blockquote>
+<p>我应该为仪表板使用哪个框架？</p>
+<p>[1. Next.js] [2. Remix] [3. Astro] [其他（输入答案）]</p>
+</blockquote>
+<p>点击编号按钮作答，或点击<strong>其他</strong>输入自由格式的响应（你在该频道中发送的下一条消息将成为答案）。开放式的 <code>clarify</code> 调用（没有预设选项）会跳过按钮，直接捕获你的下一条消息。</p>
+<p>按钮在做出选择后会自动禁用，防止重复点击导致重复解析提示。通过 <code>~/.hermes/config.yaml</code> 中的 <code>agent.clarify_timeout</code> 配置响应超时（默认 <code>3600</code> 秒；<code>0</code> 或更小 = 不限时）。如果你在超时内没有响应，agent 会以一条哨兵消息解除阻塞并自行调整，而不是一直挂起。</p>
+<h2 id="主频道">主频道</h2>
+<p>你可以指定一个"主频道"，机器人在此发送主动消息（例如 cron 任务输出、提醒和通知）。有两种设置方式：</p>
+<h3 id="使用斜杠命令">使用斜杠命令</h3>
+<p>在机器人所在的任意 Discord 频道中输入 <code>/sethome</code>。该频道即成为主频道。</p>
+<h3 id="手动配置">手动配置</h3>
+<p>将以下内容添加到你的 <code>~/.hermes/.env</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">DISCORD_HOME_CHANNEL</span><span class="o">=</span><span class="m">123456789012345678</span>
+<span class="nv">DISCORD_HOME_CHANNEL_NAME</span><span class="o">=</span><span class="s2">&quot;#bot-updates&quot;</span>
+</code></pre></div>
+
+<p>将 ID 替换为实际的频道 ID（开启开发者模式后右键点击 → Copy Channel ID）。</p>
+<h2 id="语音消息">语音消息</h2>
+<p>Hermes Agent 支持 Discord 语音消息：</p>
+<ul>
+<li><strong>传入语音消息</strong>使用配置的 STT 提供商自动转录：本地 <code>faster-whisper</code>（无需密钥）、Groq Whisper（<code>GROQ_API_KEY</code>）或 OpenAI Whisper（<code>VOICE_TOOLS_OPENAI_KEY</code>）。</li>
+<li><strong>文字转语音</strong>：使用 <code>/voice tts</code> 让机器人在文字回复的同时发送语音音频响应。</li>
+<li><strong>Discord 语音频道</strong>：Hermes 还可以加入语音频道，聆听用户说话，并在频道中回话。</li>
+</ul>
+<p>完整的设置和操作指南，请参阅：
+- <a href="../features/voice-mode.html">语音模式</a>
+- <a href="../../guides/use-voice-mode-with-hermes.html">与 Hermes 使用语音模式</a></p>
+<h2 id="论坛频道">论坛频道</h2>
+<p>Discord 论坛频道（类型 15）不接受直接消息——论坛中的每个帖子都必须是线程。Hermes 自动检测论坛频道，并在需要发送消息时创建新的线程帖子，因此 <code>send_message</code>、TTS、图片、语音消息和文件附件都无需 agent 进行特殊处理即可正常工作。</p>
+<ul>
+<li><strong>线程名称</strong>从消息的第一行派生（去除 markdown 标题前缀，上限 100 个字符）。当消息仅包含附件时，文件名用作备用线程名称。</li>
+<li><strong>附件</strong>随新线程的起始消息一起发送——无需单独上传步骤，不会出现部分发送。</li>
+<li><strong>一次调用，一个线程</strong>：每次论坛发送都会创建一个新线程。因此，连续向同一论坛发送消息会产生独立的线程。</li>
+<li><strong>检测分三层</strong>：首先是频道目录缓存，其次是进程本地探测缓存，最后是实时 <code>GET /channels/{id}</code> 探测（其结果在进程生命周期内被记忆化）。</li>
+</ul>
+<p>刷新目录（在暴露该功能的平台上使用 <code>/channels refresh</code>，或重启网关）会将机器人启动后创建的任何论坛频道填充到缓存中。</p>
+<h2 id="故障排除">故障排除</h2>
+<h3 id="机器人在线但不响应消息">机器人在线但不响应消息</h3>
+<p><strong>原因</strong>：Message Content Intent 被禁用。</p>
+<p><strong>解决方法</strong>：前往<a href="https://discord.com/developers/applications" class="ext" target="_blank" rel="noopener">开发者门户</a> → 你的应用 → Bot → Privileged Gateway Intents → 启用 <strong>Message Content Intent</strong> → Save Changes。重启网关。</p>
+<h3 id="启动时出现disallowed-intents错误">启动时出现"Disallowed Intents"错误</h3>
+<p><strong>原因</strong>：你的代码请求了开发者门户中未启用的 intent。</p>
+<p><strong>解决方法</strong>：在 Bot 设置中启用所有三个 Privileged Gateway Intents（Presence、Server Members、Message Content），然后重启。</p>
+<h3 id="机器人看不到特定频道中的消息">机器人看不到特定频道中的消息</h3>
+<p><strong>原因</strong>：机器人的角色没有查看该频道的权限。</p>
+<p><strong>解决方法</strong>：在 Discord 中，前往频道设置 → Permissions → 为机器人的角色添加 <strong>View Channel</strong> 和 <strong>Read Message History</strong> 权限。</p>
+<h3 id="403-forbidden-错误">403 Forbidden 错误</h3>
+<p><strong>原因</strong>：机器人缺少所需权限。</p>
+<p><strong>解决方法</strong>：使用第五步中的 URL 以正确权限重新邀请机器人，或在 Server Settings → Roles 中手动调整机器人的角色权限。</p>
+<h3 id="机器人离线">机器人离线</h3>
+<p><strong>原因</strong>：Hermes 网关未运行，或 token 不正确。</p>
+<p><strong>解决方法</strong>：检查 <code>hermes gateway</code> 是否正在运行。验证 <code>.env</code> 文件中的 <code>DISCORD_BOT_TOKEN</code>。如果你最近重置了 token，请更新它。</p>
+<h3 id="user-not-allowed--机器人忽略你">"User not allowed" / 机器人忽略你</h3>
+<p><strong>原因</strong>：你的用户 ID 不在 <code>DISCORD_ALLOWED_USERS</code> 中。</p>
+<p><strong>解决方法</strong>：将你的用户 ID 添加到 <code>~/.hermes/.env</code> 中的 <code>DISCORD_ALLOWED_USERS</code> 并重启网关。</p>
+<h3 id="同一频道中的用户意外共享上下文">同一频道中的用户意外共享上下文</h3>
+<p><strong>原因</strong>：<code>group_sessions_per_user</code> 被禁用，或平台无法为该上下文中的消息提供用户 ID。</p>
+<p><strong>解决方法</strong>：在 <code>~/.hermes/config.yaml</code> 中进行以下设置并重启网关：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>如果你有意想要共享房间对话，则保持关闭——只需预期会有共享的对话记录历史和共享的中断行为。</p>
+<h2 id="安全">安全</h2>
+<div class="admonition adm-warning"><p class="adm-title">警告</p>
+<p>始终设置 <code>DISCORD_ALLOWED_USERS</code>（或 <code>DISCORD_ALLOWED_ROLES</code>）以限制谁可以与机器人交互。没有任何一项，网关默认拒绝所有用户作为安全措施。只授权你信任的人——授权用户对 agent 的功能拥有完全访问权限，包括工具调用和系统访问。</p>
+</div>
+<h3 id="基于角色的访问控制">基于角色的访问控制</h3>
+<p>对于通过角色而非个人用户列表管理访问权限的服务器（管理团队、支持人员、内部工具），使用 <code>DISCORD_ALLOWED_ROLES</code>——逗号分隔的角色 ID 列表。拥有其中任一角色的成员即被授权。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env — 与 DISCORD_ALLOWED_USERS 配合使用或替代使用</span>
+<span class="nv">DISCORD_ALLOWED_ROLES</span><span class="o">=</span><span class="m">987654321098765432</span>,876543210987654321
+</code></pre></div>
+
+<p>语义：</p>
+<ul>
+<li><strong>与用户允许列表为 OR 关系。</strong> 如果用户 ID 在 <code>DISCORD_ALLOWED_USERS</code> 中<strong>或</strong>拥有 <code>DISCORD_ALLOWED_ROLES</code> 中的任一角色，则该用户被授权。</li>
+<li><strong>自动启用 Server Members Intent。</strong> 设置 <code>DISCORD_ALLOWED_ROLES</code> 后，机器人在连接时启用 Members intent——Discord 需要此 intent 才能在成员记录中发送角色信息。</li>
+<li><strong>角色 ID，不是名称。</strong> 从 Discord 获取：<strong>用户设置 → 高级 → 开启开发者模式</strong>，然后右键点击任意角色 → <strong>Copy Role ID</strong>。</li>
+<li><strong>私信回退。</strong> 在私信中，角色检查会扫描共同服务器；在任何共享服务器中拥有允许角色的用户在私信中也被授权。</li>
+</ul>
+<p>当管理团队频繁变动时，这是首选模式——新管理员一旦被授予角色即可获得访问权限，无需编辑 <code>.env</code> 或重启网关。</p>
+<h3 id="提及控制">提及控制</h3>
+<p>默认情况下，Hermes 会阻止机器人 ping <code>@everyone</code>、<code>@here</code> 和角色提及，即使其回复中包含这些 token 也不例外。这可防止措辞不当的 prompt 或回显的用户内容向整个服务器发送垃圾消息。个人 <code>@user</code> ping 和回复引用 ping（"回复……"小标签）保持启用，以便正常对话仍然有效。</p>
+<p>你可以通过环境变量或 <code>config.yaml</code> 放宽这些默认值：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">allow_mentions</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">everyone</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">      </span><span class="c1"># 允许机器人 ping @everyone / @here</span>
+<span class="w">    </span><span class="nt">roles</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">         </span><span class="c1"># 允许机器人 ping @role 提及</span>
+<span class="w">    </span><span class="nt">users</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">          </span><span class="c1"># 允许机器人 ping 个人 @user</span>
+<span class="w">    </span><span class="nt">replied_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># 回复消息时 ping 原始作者</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env — 环境变量优先于 config.yaml</span>
+<span class="nv">DISCORD_ALLOW_MENTION_EVERYONE</span><span class="o">=</span><span class="nb">false</span>
+<span class="nv">DISCORD_ALLOW_MENTION_ROLES</span><span class="o">=</span><span class="nb">false</span>
+<span class="nv">DISCORD_ALLOW_MENTION_USERS</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">DISCORD_ALLOW_MENTION_REPLIED_USER</span><span class="o">=</span><span class="nb">true</span>
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>除非你确切知道为什么需要，否则将 <code>everyone</code> 和 <code>roles</code> 保持为 <code>false</code>。LLM 很容易在看似正常的响应中生成字符串 <code>@everyone</code>；没有此保护，这将通知你服务器的每个成员。</p>
+</div>
+<p>有关保护 Hermes Agent 部署的更多信息，请参阅<a href="../security.html">安全指南</a>。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/messaging/discord</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#hermes-的行为方式">Hermes 的行为方式</a></li>
+<li class="lvl3"><a href="#discord-gateway网关模型">Discord Gateway（网关）模型</a></li>
+<li class="lvl3"><a href="#discord-中的会话模型">Discord 中的会话模型</a></li>
+<li class="lvl3"><a href="#中断与并发">中断与并发</a></li>
+<li class="lvl3"><a href="#discord-gateway-websocket-健康">Discord Gateway WebSocket 健康</a></li>
+<li class="lvl2"><a href="#第一步创建-discord-应用">第一步：创建 Discord 应用</a></li>
+<li class="lvl2"><a href="#第二步创建机器人">第二步：创建机器人</a></li>
+<li class="lvl2"><a href="#第三步启用特权网关-intent意图">第三步：启用特权网关 Intent（意图）</a></li>
+<li class="lvl2"><a href="#第四步获取机器人-token">第四步：获取机器人 Token</a></li>
+<li class="lvl2"><a href="#第五步生成邀请-url">第五步：生成邀请 URL</a></li>
+<li class="lvl3"><a href="#方式-a使用-installation-标签页推荐">方式 A：使用 Installation 标签页（推荐）</a></li>
+<li class="lvl3"><a href="#方式-b手动-url">方式 B：手动 URL</a></li>
+<li class="lvl3"><a href="#所需权限">所需权限</a></li>
+<li class="lvl3"><a href="#推荐的附加权限">推荐的附加权限</a></li>
+<li class="lvl3"><a href="#权限整数">权限整数</a></li>
+<li class="lvl2"><a href="#第六步邀请到你的服务器">第六步：邀请到你的服务器</a></li>
+<li class="lvl2"><a href="#第七步找到你的-discord-用户-id">第七步：找到你的 Discord 用户 ID</a></li>
+<li class="lvl2"><a href="#第八步配置-hermes-agent">第八步：配置 Hermes Agent</a></li>
+<li class="lvl3"><a href="#方式-a交互式设置推荐">方式 A：交互式设置（推荐）</a></li>
+<li class="lvl3"><a href="#方式-b手动配置">方式 B：手动配置</a></li>
+<li class="lvl2"><a href="#配置参考">配置参考</a></li>
+<li class="lvl3"><a href="#环境变量env">环境变量（.env）</a></li>
+<li class="lvl3"><a href="#配置文件configyaml">配置文件（config.yaml）</a></li>
+<li class="lvl2"><a href="#斜杠命令访问控制">斜杠命令访问控制</a></li>
+<li class="lvl2"><a href="#交互式模型选择器">交互式模型选择器</a></li>
+<li class="lvl2"><a href="#技能的原生斜杠命令">技能的原生斜杠命令</a></li>
+<li class="lvl3"><a href="#禁用斜杠命令注册">禁用斜杠命令注册</a></li>
+<li class="lvl2"><a href="#发送媒体send_message--media-标签">发送媒体（send_message + MEDIA: 标签）</a></li>
+<li class="lvl2"><a href="#接收任意文件类型">接收任意文件类型</a></li>
+<li class="lvl2"><a href="#交互式提示clarify">交互式提示（clarify）</a></li>
+<li class="lvl2"><a href="#主频道">主频道</a></li>
+<li class="lvl3"><a href="#使用斜杠命令">使用斜杠命令</a></li>
+<li class="lvl3"><a href="#手动配置">手动配置</a></li>
+<li class="lvl2"><a href="#语音消息">语音消息</a></li>
+<li class="lvl2"><a href="#论坛频道">论坛频道</a></li>
+<li class="lvl2"><a href="#故障排除">故障排除</a></li>
+<li class="lvl3"><a href="#机器人在线但不响应消息">机器人在线但不响应消息</a></li>
+<li class="lvl3"><a href="#启动时出现disallowed-intents错误">启动时出现&quot;Disallowed Intents&quot;错误</a></li>
+<li class="lvl3"><a href="#机器人看不到特定频道中的消息">机器人看不到特定频道中的消息</a></li>
+<li class="lvl3"><a href="#403-forbidden-错误">403 Forbidden 错误</a></li>
+<li class="lvl3"><a href="#机器人离线">机器人离线</a></li>
+<li class="lvl3"><a href="#user-not-allowed--机器人忽略你">&quot;User not allowed&quot; / 机器人忽略你</a></li>
+<li class="lvl3"><a href="#同一频道中的用户意外共享上下文">同一频道中的用户意外共享上下文</a></li>
+<li class="lvl2"><a href="#安全">安全</a></li>
+<li class="lvl3"><a href="#基于角色的访问控制">基于角色的访问控制</a></li>
+<li class="lvl3"><a href="#提及控制">提及控制</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slime Rl Training — 使用 slime（Megatron+SGLang 框架）进行 LLM RL 后训练的指导 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/optional/mlops/mlops-slime</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="slime-rl-training">Slime Rl Training</h1>
+<p>使用 slime（Megatron+SGLang 框架）进行 LLM RL（强化学习）后训练的指导。适用于训练 GLM 模型、实现自定义数据生成工作流，或需要 Megatron-LM 紧密集成以进行 RL 扩展的场景。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>可选 — 通过 <code>hermes skills install official/mlops/slime</code> 安装</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>optional-skills/mlops/slime</code></td>
+</tr>
+<tr>
+<td>版本</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>作者</td>
+<td>Orchestra Research</td>
+</tr>
+<tr>
+<td>许可证</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>依赖</td>
+<td><code>sglang-router&gt;=0.2.3</code>, <code>ray</code>, <code>torch&gt;=2.0.0</code>, <code>transformers&gt;=4.40.0</code></td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos</td>
+</tr>
+<tr>
+<td>标签</td>
+<td><code>Reinforcement Learning</code>, <code>Megatron-LM</code>, <code>SGLang</code>, <code>GRPO</code>, <code>Post-Training</code>, <code>GLM</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。</p>
+</div>
+<h1 id="slime面向-rl-扩展的-llm-后训练框架">slime：面向 RL 扩展的 LLM 后训练框架</h1>
+<p>slime 是清华大学 THUDM 团队开发的 LLM 后训练框架，为 GLM-4.5、GLM-4.6 和 GLM-4.7 提供支持。它将 Megatron-LM（用于训练）与 SGLang（用于高吞吐量 rollout 生成）相连接。</p>
+<h2 id="何时使用-slime">何时使用 slime</h2>
+<p><strong>在以下情况下选择 slime：</strong>
+- 需要 Megatron-LM 原生训练配合 SGLang 推理
+- 需要带有灵活数据缓冲区的自定义数据生成工作流
+- 训练 GLM、Qwen3、DeepSeek V3 或 Llama 3 模型
+- 需要具有生产级支持（Z.ai）的研究级框架</p>
+<p><strong>在以下情况下考虑替代方案：</strong>
+- 需要企业级稳定性功能 → 使用 <strong>miles</strong>
+- 需要灵活的后端切换 → 使用 <strong>verl</strong>
+- 需要 PyTorch 原生抽象 → 使用 <strong>torchforge</strong></p>
+<h2 id="核心特性">核心特性</h2>
+<ul>
+<li><strong>训练</strong>：Megatron-LM，支持完整并行（TP、PP、DP、SP）</li>
+<li><strong>Rollout</strong>：基于 SGLang 的高吞吐量生成，带 router</li>
+<li><strong>数据缓冲区</strong>：灵活的 prompt 管理与样本存储</li>
+<li><strong>模型</strong>：GLM-4.x、Qwen3、DeepSeek V3/R1、Llama 3</li>
+</ul>
+<h2 id="架构概览">架构概览</h2>
+<!-- ascii-guard-ignore -->
+
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────────────┐
+│                    Data Buffer                          │
+│ - Prompt initialization and management                  │
+│ - Custom data generation and filtering                  │
+│ - Rollout sample storage                                │
+└─────────────┬───────────────────────────┬───────────────┘
+              │                           │
+┌─────────────▼───────────┐ ┌─────────────▼───────────────┐
+│ Training (Megatron-LM)  │ │ Rollout (SGLang + Router)   │
+│ - Actor model training  │ │ - Response generation       │
+│ - Critic (optional)     │ │ - Reward/verifier output    │
+│ - Weight sync to rollout│ │ - Multi-turn support        │
+└─────────────────────────┘ └─────────────────────────────┘
+</code></pre></div>
+
+<!-- ascii-guard-ignore-end -->
+
+<h2 id="安装">安装</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># 推荐：Docker</span>
+docker<span class="w"> </span>pull<span class="w"> </span>slimerl/slime:latest
+docker<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>--gpus<span class="w"> </span>all<span class="w"> </span>--ipc<span class="o">=</span>host<span class="w"> </span>--shm-size<span class="o">=</span>16g<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-it<span class="w"> </span>slimerl/slime:latest<span class="w"> </span>/bin/bash
+
+<span class="c1"># 容器内</span>
+<span class="nb">cd</span><span class="w"> </span>/root/slime<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span>.<span class="w"> </span>--no-deps
+</code></pre></div>
+
+<h3 id="从源码安装">从源码安装</h3>
+<div class="highlight"><pre><span></span><code>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/THUDM/slime.git
+<span class="nb">cd</span><span class="w"> </span>slime
+pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements.txt
+pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span>.
+</code></pre></div>
+
+<h2 id="快速开始grpo-训练">快速开始：GRPO 训练</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># 加载模型配置</span>
+<span class="nb">source</span><span class="w"> </span>scripts/models/qwen3-4B.sh
+
+<span class="c1"># 启动训练</span>
+python<span class="w"> </span>train.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--actor-num-nodes<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--actor-num-gpus-per-node<span class="w"> </span><span class="m">4</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--rollout-num-gpus<span class="w"> </span><span class="m">4</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--advantage-estimator<span class="w"> </span>grpo<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--use-kl-loss<span class="w"> </span>--kl-loss-coef<span class="w"> </span><span class="m">0</span>.001<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--rollout-batch-size<span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--n-samples-per-prompt<span class="w"> </span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--global-batch-size<span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--num-rollout<span class="w"> </span><span class="m">3000</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--prompt-data<span class="w"> </span>/path/to/data.jsonl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="si">${</span><span class="nv">MODEL_ARGS</span><span class="p">[@]</span><span class="si">}</span><span class="w"> </span><span class="si">${</span><span class="nv">CKPT_ARGS</span><span class="p">[@]</span><span class="si">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="工作流-1标准-grpo-训练">工作流 1：标准 GRPO 训练</h2>
+<p>使用此工作流通过组相对优势（group-relative advantages）训练推理模型。</p>
+<h3 id="前置条件清单">前置条件清单</h3>
+<ul>
+<li>[ ] Docker 环境，或已安装 Megatron-LM + SGLang</li>
+<li>[ ] 模型检查点（HuggingFace 或 Megatron 格式）</li>
+<li>[ ] JSONL 格式的训练数据</li>
+</ul>
+<h3 id="第一步准备数据">第一步：准备数据</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># data.jsonl 格式</span>
+<span class="p">{</span><span class="s2">&quot;prompt&quot;</span><span class="p">:</span> <span class="s2">&quot;What is 2 + 2?&quot;</span><span class="p">,</span> <span class="s2">&quot;label&quot;</span><span class="p">:</span> <span class="s2">&quot;4&quot;</span><span class="p">}</span>
+<span class="p">{</span><span class="s2">&quot;prompt&quot;</span><span class="p">:</span> <span class="s2">&quot;Solve: 3x = 12&quot;</span><span class="p">,</span> <span class="s2">&quot;label&quot;</span><span class="p">:</span> <span class="s2">&quot;x = 4&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>或使用对话格式：</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+    <span class="s2">&quot;prompt&quot;</span><span class="p">:</span> <span class="p">[</span>
+        <span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;system&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;You are a math tutor.&quot;</span><span class="p">},</span>
+        <span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;What is 15 + 27?&quot;</span><span class="p">}</span>
+    <span class="p">],</span>
+    <span class="s2">&quot;label&quot;</span><span class="p">:</span> <span class="s2">&quot;42&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="第二步配置模型">第二步：配置模型</h3>
+<p>选择预配置的模型脚本：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 列出可用模型</span>
+ls<span class="w"> </span>scripts/models/
+<span class="c1"># glm4-9B.sh, qwen3-4B.sh, qwen3-30B-A3B.sh, deepseek-v3.sh, llama3-8B.sh, ...</span>
+
+<span class="c1"># 加载你的模型</span>
+<span class="nb">source</span><span class="w"> </span>scripts/models/qwen3-4B.sh
+</code></pre></div>
+
+<h3 id="第三步启动训练">第三步：启动训练</h3>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>train.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--actor-num-nodes<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--actor-num-gpus-per-node<span class="w"> </span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--rollout-num-gpus<span class="w"> </span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--advantage-estimator<span class="w"> </span>grpo<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--use-kl-loss<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--kl-loss-coef<span class="w"> </span><span class="m">0</span>.001<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--prompt-data<span class="w"> </span>/path/to/train.jsonl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--input-key<span class="w"> </span>prompt<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--label-key<span class="w"> </span>label<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--apply-chat-template<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--rollout-batch-size<span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--n-samples-per-prompt<span class="w"> </span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--global-batch-size<span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--num-rollout<span class="w"> </span><span class="m">3000</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--save-interval<span class="w"> </span><span class="m">100</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--eval-interval<span class="w"> </span><span class="m">50</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="si">${</span><span class="nv">MODEL_ARGS</span><span class="p">[@]</span><span class="si">}</span>
+</code></pre></div>
+
+<h3 id="第四步监控训练">第四步：监控训练</h3>
+<ul>
+<li>[ ] 查看 TensorBoard：<code>tensorboard --logdir outputs/</code></li>
+<li>[ ] 确认奖励曲线持续上升</li>
+<li>[ ] 监控各节点 GPU 利用率</li>
+</ul>
+<hr />
+<h2 id="工作流-2异步训练">工作流 2：异步训练</h2>
+<p>使用异步模式通过重叠 rollout 与训练来提高吞吐量。</p>
+<h3 id="何时使用异步模式">何时使用异步模式</h3>
+<ul>
+<li>大型模型生成时间较长</li>
+<li>同步模式下 GPU 空闲时间较多</li>
+<li>有足够内存用于缓冲</li>
+</ul>
+<h3 id="启动异步训练">启动异步训练</h3>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>train_async.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--actor-num-nodes<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--actor-num-gpus-per-node<span class="w"> </span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--rollout-num-gpus<span class="w"> </span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--advantage-estimator<span class="w"> </span>grpo<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--async-buffer-size<span class="w"> </span><span class="m">4</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--prompt-data<span class="w"> </span>/path/to/train.jsonl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="si">${</span><span class="nv">MODEL_ARGS</span><span class="p">[@]</span><span class="si">}</span>
+</code></pre></div>
+
+<h3 id="异步专用参数">异步专用参数</h3>
+<div class="highlight"><pre><span></span><code>--async-buffer-size<span class="w"> </span><span class="m">4</span><span class="w">        </span><span class="c1"># 缓冲的 rollout 数量</span>
+--update-weights-interval<span class="w"> </span><span class="m">2</span><span class="w">  </span><span class="c1"># 每 N 次 rollout 同步一次权重</span>
+</code></pre></div>
+
+<hr />
+<h2 id="工作流-3多轮-agentic-训练">工作流 3：多轮 Agentic 训练</h2>
+<p>使用此工作流训练具备工具调用或多步推理能力的 agent。</p>
+<h3 id="前置条件">前置条件</h3>
+<ul>
+<li>[ ] 用于多轮逻辑的自定义 generate 函数</li>
+<li>[ ] 工具/环境接口</li>
+</ul>
+<h3 id="第一步定义自定义-generate-函数">第一步：定义自定义 Generate 函数</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># custom_generate.py</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">custom_generate</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="n">samples</span><span class="p">,</span> <span class="n">evaluation</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;带工具调用的多轮生成。&quot;&quot;&quot;</span>
+    <span class="k">for</span> <span class="n">sample</span> <span class="ow">in</span> <span class="n">samples</span><span class="p">:</span>
+        <span class="n">conversation</span> <span class="o">=</span> <span class="n">sample</span><span class="o">.</span><span class="n">prompt</span>
+
+        <span class="k">for</span> <span class="n">turn</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">max_turns</span><span class="p">):</span>
+            <span class="c1"># 生成响应</span>
+            <span class="n">response</span> <span class="o">=</span> <span class="k">await</span> <span class="n">generate_single</span><span class="p">(</span><span class="n">conversation</span><span class="p">)</span>
+
+            <span class="c1"># 检查工具调用</span>
+            <span class="n">tool_call</span> <span class="o">=</span> <span class="n">extract_tool_call</span><span class="p">(</span><span class="n">response</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">tool_call</span><span class="p">:</span>
+                <span class="n">tool_result</span> <span class="o">=</span> <span class="n">execute_tool</span><span class="p">(</span><span class="n">tool_call</span><span class="p">)</span>
+                <span class="n">conversation</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;assistant&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="n">response</span><span class="p">})</span>
+                <span class="n">conversation</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;tool&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="n">tool_result</span><span class="p">})</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="k">break</span>
+
+        <span class="n">sample</span><span class="o">.</span><span class="n">response</span> <span class="o">=</span> <span class="n">response</span>
+        <span class="n">sample</span><span class="o">.</span><span class="n">reward</span> <span class="o">=</span> <span class="n">compute_reward</span><span class="p">(</span><span class="n">sample</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">samples</span>
+</code></pre></div>
+
+<h3 id="第二步使用自定义函数启动">第二步：使用自定义函数启动</h3>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>train.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--custom-generate-function-path<span class="w"> </span>custom_generate.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--max-turns<span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--prompt-data<span class="w"> </span>/path/to/agent_data.jsonl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="si">${</span><span class="nv">MODEL_ARGS</span><span class="p">[@]</span><span class="si">}</span>
+</code></pre></div>
+
+<p>完整的多轮搜索示例请参见 <code>examples/search-r1/</code>。</p>
+<hr />
+<h2 id="配置参考">配置参考</h2>
+<h3 id="三类参数">三类参数</h3>
+<p>slime 使用三种类型的参数：</p>
+<p><strong>1. Megatron 参数</strong>（直接传入）：</p>
+<div class="highlight"><pre><span></span><code>--tensor-model-parallel-size<span class="w"> </span><span class="m">2</span>
+--pipeline-model-parallel-size<span class="w"> </span><span class="m">1</span>
+--num-layers<span class="w"> </span><span class="m">32</span>
+--hidden-size<span class="w"> </span><span class="m">4096</span>
+</code></pre></div>
+
+<p><strong>2. SGLang 参数</strong>（以 <code>--sglang-</code> 为前缀）：</p>
+<div class="highlight"><pre><span></span><code>--sglang-mem-fraction-static<span class="w"> </span><span class="m">0</span>.8
+--sglang-context-length<span class="w"> </span><span class="m">8192</span>
+--sglang-log-level<span class="w"> </span>INFO
+</code></pre></div>
+
+<p><strong>3. slime 参数</strong>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 资源分配</span>
+--actor-num-nodes<span class="w"> </span><span class="m">1</span>
+--actor-num-gpus-per-node<span class="w"> </span><span class="m">8</span>
+--rollout-num-gpus<span class="w"> </span><span class="m">8</span>
+--colocate<span class="w">  </span><span class="c1"># 训练与推理共享 GPU</span>
+
+<span class="c1"># 数据</span>
+--prompt-data<span class="w"> </span>/path/to/data.jsonl
+--input-key<span class="w"> </span>prompt
+--label-key<span class="w"> </span>label
+
+<span class="c1"># 训练循环</span>
+--num-rollout<span class="w"> </span><span class="m">3000</span>
+--rollout-batch-size<span class="w"> </span><span class="m">32</span>
+--n-samples-per-prompt<span class="w"> </span><span class="m">8</span>
+--global-batch-size<span class="w"> </span><span class="m">256</span>
+
+<span class="c1"># 算法</span>
+--advantage-estimator<span class="w"> </span>grpo<span class="w">  </span><span class="c1"># 或：gspo, ppo, reinforce_plus_plus</span>
+--use-kl-loss
+--kl-loss-coef<span class="w"> </span><span class="m">0</span>.001
+</code></pre></div>
+
+<h3 id="关键约束">关键约束</h3>
+<div class="highlight"><pre><span></span><code>rollout_batch_size × n_samples_per_prompt = global_batch_size × num_steps_per_rollout
+</code></pre></div>
+
+<p>示例：32 × 8 = 256 × 1</p>
+<hr />
+<h2 id="数据缓冲区系统">数据缓冲区系统</h2>
+<p>slime 的数据缓冲区支持灵活的数据管理：</p>
+<h3 id="基础数据源">基础数据源</h3>
+<div class="highlight"><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">RolloutDataSource</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_samples</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">num_samples</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;从数据集中获取 prompt。&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">sample</span><span class="p">(</span><span class="n">num_samples</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_samples</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">samples</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;生成后调用（默认为空操作）。&quot;&quot;&quot;</span>
+        <span class="k">pass</span>
+</code></pre></div>
+
+<h3 id="带缓冲区的数据源离线策略">带缓冲区的数据源（离线策略）</h3>
+<div class="highlight"><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">RolloutDataSourceWithBuffer</span><span class="p">(</span><span class="n">RolloutDataSource</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">buffer</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_samples</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">samples</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;存储已生成的样本以供复用。&quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">buffer</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">samples</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">buffer_filter</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">args</span><span class="p">,</span> <span class="n">buffer</span><span class="p">,</span> <span class="n">num_samples</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;自定义选择逻辑（优先级、分层等）。&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="n">select_best</span><span class="p">(</span><span class="n">buffer</span><span class="p">,</span> <span class="n">num_samples</span><span class="p">)</span>
+</code></pre></div>
+
+<hr />
+<h2 id="常见问题与解决方案">常见问题与解决方案</h2>
+<h3 id="问题sglang-引擎崩溃">问题：SGLang 引擎崩溃</h3>
+<p><strong>现象</strong>：推理引擎在训练中途退出</p>
+<p><strong>解决方案</strong>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 启用容错</span>
+--use-fault-tolerance
+
+<span class="c1"># 增加内存分配</span>
+--sglang-mem-fraction-static<span class="w"> </span><span class="m">0</span>.85
+
+<span class="c1"># 减小批大小</span>
+--rollout-batch-size<span class="w"> </span><span class="m">16</span>
+</code></pre></div>
+
+<h3 id="问题权重同步超时">问题：权重同步超时</h3>
+<p><strong>现象</strong>：rollout 后训练挂起</p>
+<p><strong>解决方案</strong>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 增大同步间隔</span>
+--update-weights-interval<span class="w"> </span><span class="m">5</span>
+
+<span class="c1"># 使用 colocate 模式（无网络传输）</span>
+--colocate
+</code></pre></div>
+
+<h3 id="问题训练时-oom">问题：训练时 OOM</h3>
+<p><strong>现象</strong>：反向传播时 CUDA OOM</p>
+<p><strong>解决方案</strong>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 启用梯度检查点</span>
+--recompute-activations
+
+<span class="c1"># 减小 micro-batch 大小</span>
+--micro-batch-size<span class="w"> </span><span class="m">1</span>
+
+<span class="c1"># 启用序列并行</span>
+--sequence-parallel
+</code></pre></div>
+
+<h3 id="问题数据加载缓慢">问题：数据加载缓慢</h3>
+<p><strong>现象</strong>：数据获取期间 GPU 空闲</p>
+<p><strong>解决方案</strong>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 增加数据 worker 数量</span>
+--num-data-workers<span class="w"> </span><span class="m">4</span>
+
+<span class="c1"># 使用流式数据集</span>
+--streaming-data
+</code></pre></div>
+
+<hr />
+<h2 id="支持的模型">支持的模型</h2>
+<table>
+<thead>
+<tr>
+<th>模型系列</th>
+<th>配置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GLM</td>
+<td>GLM-4.5、GLM-4.6、GLM-4.7、GLM-Z1-9B</td>
+</tr>
+<tr>
+<td>Qwen</td>
+<td>Qwen3（4B、8B、30B-A3B）、Qwen3-MoE、Qwen2.5</td>
+</tr>
+<tr>
+<td>DeepSeek</td>
+<td>V3、V3.1、R1</td>
+</tr>
+<tr>
+<td>Llama</td>
+<td>Llama 3（8B、70B）</td>
+</tr>
+<tr>
+<td>其他</td>
+<td>Kimi K2、Moonlight-16B</td>
+</tr>
+</tbody>
+</table>
+<p>每个模型在 <code>scripts/models/</code> 中均有预配置脚本。</p>
+<hr />
+<h2 id="进阶主题">进阶主题</h2>
+<h3 id="co-location-模式">Co-location 模式</h3>
+<p>训练与推理共享 GPU 以减少内存占用：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>train.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--colocate<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--actor-num-gpus-per-node<span class="w"> </span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--sglang-mem-fraction-static<span class="w"> </span><span class="m">0</span>.4<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="si">${</span><span class="nv">MODEL_ARGS</span><span class="p">[@]</span><span class="si">}</span>
+</code></pre></div>
+
+<h3 id="自定义奖励模型">自定义奖励模型</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># custom_rm.py</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">CustomRewardModel</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model_path</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="o">=</span> <span class="n">load_model</span><span class="p">(</span><span class="n">model_path</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">compute_reward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">prompts</span><span class="p">,</span> <span class="n">responses</span><span class="p">):</span>
+        <span class="n">inputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tokenize</span><span class="p">(</span><span class="n">prompts</span><span class="p">,</span> <span class="n">responses</span><span class="p">)</span>
+        <span class="n">scores</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">scores</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>--custom-rm-path<span class="w"> </span>custom_rm.py
+</code></pre></div>
+
+<h3 id="多任务评估">多任务评估</h3>
+<div class="highlight"><pre><span></span><code>--eval-prompt-data<span class="w"> </span>aime<span class="w"> </span>/path/to/aime.jsonl<span class="w"> </span><span class="se">\</span>
+--eval-prompt-data<span class="w"> </span>gsm8k<span class="w"> </span>/path/to/gsm8k.jsonl<span class="w"> </span><span class="se">\</span>
+--n-samples-per-eval-prompt<span class="w"> </span><span class="m">16</span>
+</code></pre></div>
+
+<hr />
+<h2 id="资源">资源</h2>
+<ul>
+<li><strong>文档</strong>：https://thudm.github.io/slime/</li>
+<li><strong>GitHub</strong>：https://github.com/THUDM/slime</li>
+<li><strong>博客</strong>：https://lmsys.org/blog/2025-07-09-slime/</li>
+<li><strong>示例</strong>：参见 <code>examples/</code> 目录，包含 14+ 个完整示例</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/optional/mlops/mlops-slime</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#何时使用-slime">何时使用 slime</a></li>
+<li class="lvl2"><a href="#核心特性">核心特性</a></li>
+<li class="lvl2"><a href="#架构概览">架构概览</a></li>
+<li class="lvl2"><a href="#安装">安装</a></li>
+<li class="lvl3"><a href="#从源码安装">从源码安装</a></li>
+<li class="lvl2"><a href="#快速开始grpo-训练">快速开始：GRPO 训练</a></li>
+<li class="lvl2"><a href="#工作流-1标准-grpo-训练">工作流 1：标准 GRPO 训练</a></li>
+<li class="lvl3"><a href="#前置条件清单">前置条件清单</a></li>
+<li class="lvl3"><a href="#第一步准备数据">第一步：准备数据</a></li>
+<li class="lvl3"><a href="#第二步配置模型">第二步：配置模型</a></li>
+<li class="lvl3"><a href="#第三步启动训练">第三步：启动训练</a></li>
+<li class="lvl3"><a href="#第四步监控训练">第四步：监控训练</a></li>
+<li class="lvl2"><a href="#工作流-2异步训练">工作流 2：异步训练</a></li>
+<li class="lvl3"><a href="#何时使用异步模式">何时使用异步模式</a></li>
+<li class="lvl3"><a href="#启动异步训练">启动异步训练</a></li>
+<li class="lvl3"><a href="#异步专用参数">异步专用参数</a></li>
+<li class="lvl2"><a href="#工作流-3多轮-agentic-训练">工作流 3：多轮 Agentic 训练</a></li>
+<li class="lvl3"><a href="#前置条件">前置条件</a></li>
+<li class="lvl3"><a href="#第一步定义自定义-generate-函数">第一步：定义自定义 Generate 函数</a></li>
+<li class="lvl3"><a href="#第二步使用自定义函数启动">第二步：使用自定义函数启动</a></li>
+<li class="lvl2"><a href="#配置参考">配置参考</a></li>
+<li class="lvl3"><a href="#三类参数">三类参数</a></li>
+<li class="lvl3"><a href="#关键约束">关键约束</a></li>
+<li class="lvl2"><a href="#数据缓冲区系统">数据缓冲区系统</a></li>
+<li class="lvl3"><a href="#基础数据源">基础数据源</a></li>
+<li class="lvl3"><a href="#带缓冲区的数据源离线策略">带缓冲区的数据源（离线策略）</a></li>
+<li class="lvl2"><a href="#常见问题与解决方案">常见问题与解决方案</a></li>
+<li class="lvl3"><a href="#问题sglang-引擎崩溃">问题：SGLang 引擎崩溃</a></li>
+<li class="lvl3"><a href="#问题权重同步超时">问题：权重同步超时</a></li>
+<li class="lvl3"><a href="#问题训练时-oom">问题：训练时 OOM</a></li>
+<li class="lvl3"><a href="#问题数据加载缓慢">问题：数据加载缓慢</a></li>
+<li class="lvl2"><a href="#支持的模型">支持的模型</a></li>
+<li class="lvl2"><a href="#进阶主题">进阶主题</a></li>
+<li class="lvl3"><a href="#co-location-模式">Co-location 模式</a></li>
+<li class="lvl3"><a href="#自定义奖励模型">自定义奖励模型</a></li>
+<li class="lvl3"><a href="#多任务评估">多任务评估</a></li>
+<li class="lvl2"><a href="#资源">资源</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

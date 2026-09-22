@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desktop Plugin SDK (@hermes/plugin-sdk) · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/desktop-plugin-sdk</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="desktop-plugin-sdk">Desktop Plugin SDK</h1>
+<p>The native <a href="../user-guide/desktop.html">Hermes Desktop</a> app is contribution-driven: every
+surface in the window — panes, routes, sidebar nav, status-bar items, palette
+entries, keybinds, themes — registers into one central registry. Core registers
+its surfaces exactly the way a plugin does, so the plugin story is the real one,
+not a bolted-on afterthought.</p>
+<p>A <strong>desktop plugin</strong> is a single ESM file that default-exports a <code>HermesPlugin</code>.
+It imports one module — <code>@hermes/plugin-sdk</code> — and gets everything: the app's
+live state, the gateway JSON-RPC door, a scoped REST/socket backend namespace,
+React Query, and the app's own UI kit so plugin UI looks native by default. No
+repo clone, no <code>npm run build</code>, no patching app source. Drop the file in
+<code>$HERMES_HOME/desktop-plugins/&lt;id&gt;/plugin.js</code> and the app loads it within seconds
+and hot-reloads every save.</p>
+<div class="admonition adm-warning"><p class="adm-title">This is not the web-dashboard plugin SDK</p>
+<p>"Plugin" means several unrelated things across Hermes. This page is the <strong>native
+desktop app</strong> (<code>hermes desktop</code>) SDK — the <code>@hermes/plugin-sdk</code> module and
+<code>$HERMES_HOME/desktop-plugins/</code>. The <strong>web dashboard</strong> (<code>hermes dashboard</code>) has
+its own, unrelated plugin system on <code>window.__HERMES_PLUGIN_SDK__</code> with a
+<code>manifest.json</code> — documented at
+<a href="../user-guide/features/extending-the-dashboard.html">Extending the Dashboard</a>. Python
+CLI/gateway plugins are documented at <a href="plugins.html">Build a Hermes Plugin</a>.
+The three do not share code, APIs, or delivery. Only the backend <code>plugin_api.py</code>
+namespace (<code>/api/plugins/&lt;id&gt;</code>) is shared between the desktop and dashboard SDKs.</p>
+</div>
+<h2 id="mental-model">Mental model</h2>
+<p>The SDK follows the VS Code module model. A plugin author imports exactly one
+module and never touches app internals (they are lint-fenced out of a bundled
+plugin, and fail to resolve in a disk plugin). Capability comes in tiers:</p>
+<ul>
+<li><strong><code>host.state.*</code></strong> — readonly views over the app's live state (nanostore
+  atoms): active session, per-session turn-busy, cwd, gateway socket status,
+  model, profile, viewport. <code>gateway</code> is the WebSocket, not turn-busy.</li>
+<li><strong><code>host.*</code> actions</strong> — curated safe verbs: toast, navigate, tail logs,
+  restart the gateway, subscribe to the gateway event stream.</li>
+<li><strong><code>host.request</code></strong> — the gateway JSON-RPC door: sessions, config, skills,
+  cron — everything the app itself calls.</li>
+<li><strong><code>ctx.rest</code> / <code>ctx.socket</code></strong> — your plugin's own backend namespace
+  (<code>/api/plugins/&lt;id&gt;</code>) if you ship a <code>plugin_api.py</code>.</li>
+<li><strong><code>ui.*</code></strong> — the design language: the app's real components, theme variables,
+  icons, and formatters, so your UI matches the app pixel-for-pixel.</li>
+</ul>
+<h2 id="two-delivery-modes">Two delivery modes</h2>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Where</th>
+<th>Who</th>
+<th>Build step</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Disk</strong> (recommended)</td>
+<td><code>$HERMES_HOME/desktop-plugins/&lt;id&gt;/plugin.js</code></td>
+<td>users, agents</td>
+<td>none — plain ESM, loaded uncompiled</td>
+</tr>
+<tr>
+<td><strong>Unified package</strong></td>
+<td><code>$HERMES_HOME/plugins/&lt;id&gt;/desktop/plugin.js</code></td>
+<td>plugins that also ship agent-side code</td>
+<td>none — same disk pipeline</td>
+</tr>
+<tr>
+<td><strong>Bundled</strong></td>
+<td><code>apps/desktop/src/plugins/&lt;id&gt;/plugin.tsx</code></td>
+<td>in-tree, shipped with the app</td>
+<td>the app's own Vite build</td>
+</tr>
+</tbody>
+</table>
+<p>All three take the same <code>HermesPlugin</code> contract, appear in <strong>Capabilities → Plugins</strong>,
+and enable/disable live. A unified package is just the disk door scanning inside
+your agent plugin's folder — see
+<a href="#one-package-both-sdks">One package, both SDKs</a>. Everything on this page is
+written against the disk door (what you and the agent write);
+<a href="#bundled-plugins">Bundled plugins</a> notes the two
+differences. Radio ships as a bundled SDK-only plugin, off by default. Enable it
+in <strong>Capabilities → Plugins</strong> for free live streams, station search, and status-bar
+playback controls with an audio-reactive waveform. It uses the existing plugin
+toggle and contributes nothing while disabled. Reference demos live in the companion
+<a href="https://github.com/NousResearch/hermes-example-plugins" class="ext" target="_blank" rel="noopener"><code>hermes-example-plugins</code></a>
+repo.</p>
+<h2 id="quick-start--your-first-plugin">Quick start — your first plugin</h2>
+<p>Create <code>$HERMES_HOME/desktop-plugins/hello/plugin.js</code> (that's <code>~/.hermes/...</code>
+by default). Desktop plugins are app-level — one root for every profile, gateway,
+or remote machine the window connects to. The folder name must equal the plugin <code>id</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// ~/.hermes/desktop-plugins/hello/plugin.js</span>
+
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">HelloPane</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">gateway</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">useValue</span><span class="p">(</span><span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">gateway</span><span class="p">)</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">jsxs</span><span class="p">(</span><span class="s1">&#39;div&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">className</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;flex h-full flex-col gap-2 p-3 text-sm&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">children</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="nx">jsx</span><span class="p">(</span><span class="s1">&#39;div&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">className</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;font-medium&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">children</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Hello, Hermes&#39;</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">      </span><span class="nx">jsx</span><span class="p">(</span><span class="s1">&#39;div&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">className</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;text-(--ui-text-tertiary)&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">children</span><span class="o">:</span><span class="w"> </span><span class="sb">`gateway: </span><span class="si">${</span><span class="nx">gateway</span><span class="si">}</span><span class="sb">`</span>
+<span class="w">      </span><span class="p">})</span>
+<span class="w">    </span><span class="p">]</span>
+<span class="w">  </span><span class="p">})</span>
+<span class="p">}</span>
+
+<span class="k">export</span><span class="w"> </span><span class="k">default</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;hello&#39;</span><span class="p">,</span><span class="w"> </span><span class="c1">// must match the folder name</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Hello&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">register</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">register</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pane&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;panes&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">title</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;hello&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">placement</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;right&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">width</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;260px&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">render</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">jsx</span><span class="p">(</span><span class="nx">HelloPane</span><span class="p">,</span><span class="w"> </span><span class="p">{})</span>
+<span class="w">    </span><span class="p">})</span>
+<span class="w">    </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">register</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;chip&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;statusBar.right&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">order</span><span class="o">:</span><span class="w"> </span><span class="mf">130</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">render</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span>
+<span class="w">        </span><span class="nx">jsx</span><span class="p">(</span><span class="s1">&#39;button&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;button&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">className</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;px-1.5 text-[0.6875rem] text-(--ui-text-tertiary)&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">onClick</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">haptic</span><span class="p">(</span><span class="s1">&#39;tap&#39;</span><span class="p">)</span>
+<span class="w">            </span><span class="nx">host</span><span class="p">.</span><span class="nx">notify</span><span class="p">({</span><span class="w"> </span><span class="nx">kind</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;info&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Hello from my plugin!&#39;</span><span class="w"> </span><span class="p">})</span>
+<span class="w">          </span><span class="p">},</span>
+<span class="w">          </span><span class="nx">children</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;hello&#39;</span>
+<span class="w">        </span><span class="p">})</span>
+<span class="w">    </span><span class="p">})</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Save it. The app watches <code>desktop-plugins/</code>, loads the file within a few seconds,
+and hot-reloads every later save in place. If it doesn't appear, run ⌘K →
+<strong>Reload desktop plugins</strong>. If loading fails, a toast names the error — fix and
+save again.</p>
+<div class="admonition adm-note"><p class="adm-title">No JSX, no build</p>
+<p>The disk file is loaded <strong>uncompiled</strong>, so JSX syntax will not parse. Write UI
+with <code>jsx()</code> / <code>jsxs()</code> calls from <code>react/jsx-runtime</code> (or <code>React.createElement</code>).
+The only importable specifiers are <code>@hermes/plugin-sdk</code>, <code>react</code>, and
+<code>react/jsx-runtime</code> — everything else fails to resolve, on purpose.</p>
+</div>
+<h2 id="the-plugin-contract">The plugin contract</h2>
+<p>A plugin default-exports a <code>HermesPlugin</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">interface</span><span class="w"> </span><span class="nx">HermesPlugin</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="cm">/** Stable slug — becomes the `plugin:&lt;id&gt;` source and the id namespace. */</span>
+<span class="w">  </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span>
+<span class="w">  </span><span class="cm">/** Human name for Settings / about UI. Defaults to `id`. */</span>
+<span class="w">  </span><span class="nx">name?</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span>
+<span class="w">  </span><span class="cm">/** Registers on load when the user hasn&#39;t chosen (default true). Set false</span>
+<span class="cm">   *  for opt-in plugins: they inventory in Capabilities ▸ Plugins, off until the</span>
+<span class="cm">   *  user flips the switch. */</span>
+<span class="w">  </span><span class="nx">defaultEnabled?</span><span class="o">:</span><span class="w"> </span><span class="kt">boolean</span>
+<span class="w">  </span><span class="cm">/** Called once at load; wire contributions through `ctx`. */</span>
+<span class="w">  </span><span class="nx">register</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="o">:</span><span class="w"> </span><span class="kt">PluginContext</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ow">void</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><code>register</code> receives a <strong>scoped</strong> <code>PluginContext</code>. It never touches the registry
+directly — the context auto-tags provenance (<code>source: 'plugin:&lt;id&gt;'</code>) and
+namespaces every contribution id (<code>&lt;id&gt;:&lt;localId&gt;</code>), so two plugins can never
+collide.</p>
+<div class="highlight"><pre><span></span><code><span class="kd">interface</span><span class="w"> </span><span class="nx">PluginContext</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="cm">/** Resolved source tag, e.g. `&#39;plugin:hello&#39;`. */</span>
+<span class="w">  </span><span class="k">readonly</span><span class="w"> </span><span class="nx">source</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span>
+<span class="w">  </span><span class="cm">/** Register one contribution (id namespaced, source stamped). Returns a disposer. */</span>
+<span class="w">  </span><span class="nx">register</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">c</span><span class="o">:</span><span class="w"> </span><span class="kt">PluginContribution</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ow">void</span>
+<span class="w">  </span><span class="cm">/** Register several at once; the returned disposer removes all of them. */</span>
+<span class="w">  </span><span class="nx">registerMany</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">cs</span><span class="o">:</span><span class="w"> </span><span class="kt">PluginContribution</span><span class="p">[])</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ow">void</span>
+<span class="w">  </span><span class="cm">/** REST to this plugin&#39;s own backend namespace (`/api/plugins/&lt;id&gt;`). */</span>
+<span class="w">  </span><span class="nx">rest</span><span class="o">:</span><span class="w"> </span><span class="o">&lt;</span><span class="nx">T</span><span class="o">&gt;</span><span class="p">(</span><span class="nx">path</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">opts?</span><span class="o">:</span><span class="w"> </span><span class="kt">PluginRestOptions</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nb">Promise</span><span class="o">&lt;</span><span class="nx">T</span><span class="o">&gt;</span>
+<span class="w">  </span><span class="cm">/** Live WebSocket to this plugin&#39;s own namespace. Returns a disposer. */</span>
+<span class="w">  </span><span class="nx">socket</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">path</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">onMessage</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="kt">unknown</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ow">void</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ow">void</span>
+<span class="w">  </span><span class="cm">/** Gateway event stream by type (`&#39;*&#39;` = all). Tracked: removed on unload/reload/disable. */</span>
+<span class="w">  </span><span class="nx">onEvent</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="kr">type</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">listener</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">event</span><span class="o">:</span><span class="w"> </span><span class="kt">GatewayEvent</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ow">void</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ow">void</span>
+<span class="w">  </span><span class="cm">/** The curated OS door: native notification, open-external, reveal-in-file-manager, clipboard. */</span>
+<span class="w">  </span><span class="nx">os</span><span class="o">:</span><span class="w"> </span><span class="kt">PluginOs</span>
+<span class="w">  </span><span class="cm">/** Plugin-scoped JSON persistence (keys live under `hermes.plugin.&lt;id&gt;.`). */</span>
+<span class="w">  </span><span class="nx">storage</span><span class="o">:</span><span class="w"> </span><span class="kt">PluginStorage</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>A <strong>contribution</strong> is the one primitive every surface shares:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">interface</span><span class="w"> </span><span class="nx">Contribution</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="w">          </span><span class="c1">// you write the local id; the host namespaces it</span>
+<span class="w">  </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="w">        </span><span class="c1">// WHERE it goes (a contribution-area constant)</span>
+<span class="w">  </span><span class="nx">title?</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span>
+<span class="w">  </span><span class="nx">order?</span><span class="o">:</span><span class="w"> </span><span class="kt">number</span><span class="w">      </span><span class="c1">// sort within the area (lower = earlier)</span>
+<span class="w">  </span><span class="nx">when</span><span class="o">?:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="kt">boolean</span><span class="w"> </span><span class="c1">// dynamic visibility; re-evaluated by the area</span>
+<span class="w">  </span><span class="nx">enabled?</span><span class="o">:</span><span class="w"> </span><span class="kt">boolean</span>
+<span class="w">  </span><span class="nx">render</span><span class="o">?:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">ReactNode</span><span class="w">  </span><span class="c1">// the component to mount</span>
+<span class="w">  </span><span class="nx">data?</span><span class="o">:</span><span class="w"> </span><span class="kt">unknown</span><span class="w">      </span><span class="c1">// area-specific payload (see the cookbook)</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>You provide <code>render</code>, <code>data</code>, or both, depending on the area.</p>
+<h2 id="contribution-areas--the-cookbook">Contribution areas — the cookbook</h2>
+<p>Import the area constants from the SDK; each area has its own <code>data</code> payload.</p>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th><code>area</code></th>
+<th>You provide</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Layout pane</td>
+<td><code>PANES_AREA</code> (<code>'panes'</code>)</td>
+<td><code>title</code> + <code>render</code> + <code>data: { placement, dock?, width?, height? }</code></td>
+</tr>
+<tr>
+<td>Full page</td>
+<td><code>ROUTES_AREA</code></td>
+<td><code>data: { path }</code> + <code>render</code></td>
+</tr>
+<tr>
+<td>Sidebar nav</td>
+<td><code>SIDEBAR_NAV_AREA</code></td>
+<td><code>data: { path, label, codicon }</code></td>
+</tr>
+<tr>
+<td>Status bar</td>
+<td><code>STATUSBAR_AREAS.left</code> / <code>.right</code></td>
+<td><code>render</code> (or <code>data</code> as <code>StatusbarItem</code>)</td>
+</tr>
+<tr>
+<td>Title bar</td>
+<td><code>TITLEBAR_AREAS.left</code> / <code>.center</code> / <code>.right</code></td>
+<td><code>data</code> as <code>TitlebarTool</code>, or a mount-scoped <code>&lt;Contribute&gt;</code></td>
+</tr>
+<tr>
+<td>Page header</td>
+<td><code>WORKSPACE_PAGE_HEADER_AREA</code></td>
+<td><code>render</code> via a mount-scoped <code>&lt;Contribute&gt;</code> inside your page</td>
+</tr>
+<tr>
+<td>⌘K palette</td>
+<td><code>PALETTE_AREA</code></td>
+<td><code>data: PaletteContribution</code></td>
+</tr>
+<tr>
+<td>Keybind</td>
+<td><code>KEYBINDS_AREA</code></td>
+<td><code>data: KeybindContribution</code></td>
+</tr>
+<tr>
+<td>Theme</td>
+<td><code>THEMES_AREA</code></td>
+<td><code>data</code> as a <code>DesktopTheme</code></td>
+</tr>
+<tr>
+<td>Composer</td>
+<td><code>COMPOSER_AREAS.*</code></td>
+<td>render slots, or middleware / attachment providers</td>
+</tr>
+</tbody>
+</table>
+<h3 id="panes">Panes</h3>
+<p>A pane is a tile in the layout tree. <code>placement</code> is the semantic role — the pane
+stacks (as tabs) with existing panes of that role; the user can drag it anywhere
+afterward.</p>
+<div class="highlight"><pre><span></span><code><span class="nx">ctx</span><span class="p">.</span><span class="nx">register</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pane&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;panes&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">title</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;my pane&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">placement</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;right&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">width</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;260px&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">render</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">jsx</span><span class="p">(</span><span class="nx">MyPane</span><span class="p">,</span><span class="w"> </span><span class="p">{})</span>
+<span class="p">})</span>
+</code></pre></div>
+
+<p><code>placement</code> is <code>'main' | 'left' | 'right' | 'top' | 'bottom'</code>. To land on a
+specific <strong>edge</strong> instead of stacking, add a <code>dock</code> gesture — the same thing as
+dragging onto a pane's drop chip:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Below the conversation, 200px tall.</span>
+<span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">placement</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;bottom&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">dock</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">pane</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;workspace&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">pos</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;bottom&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">height</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;200px&#39;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><code>dock.pane</code> is any pane id (<code>workspace</code> is the main thread; also <code>sessions</code>,
+<code>terminal</code>, <code>files</code>, <code>review</code>, <code>logs</code>); <code>dock.pos</code> is
+<code>'top' | 'bottom' | 'left' | 'right' | 'center'</code>. Declare a <code>width</code>/<code>height</code> so
+the pane doesn't claim half the zone.</p>
+<p>Closing the only pane contributed by a plugin disables that plugin, which can
+be re-enabled from <strong>Capabilities → Plugins</strong>. When a plugin contributes multiple
+panes, closing one dismisses only that pane and leaves the plugin's other panes,
+commands, and middleware active. <strong>Reset layout</strong> restores dismissed contributed
+panes.</p>
+<h3 id="pages-and-sidebar-nav">Pages and sidebar nav</h3>
+<p>A route mounts a full page in the workspace pane, like any built-in view. Pair it
+with a sidebar nav row (and/or a palette command) to make it reachable.</p>
+<div class="highlight"><pre><span></span><code><span class="nx">ctx</span><span class="p">.</span><span class="nx">registerMany</span><span class="p">([</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;page&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="nx">ROUTES_AREA</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">path</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;/my-page&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">render</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">jsx</span><span class="p">(</span><span class="nx">MyPage</span><span class="p">,</span><span class="w"> </span><span class="p">{})</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;nav&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="nx">SIDEBAR_NAV_AREA</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">path</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;/my-page&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">label</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;My Page&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">codicon</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;project&#39;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">])</span>
+</code></pre></div>
+
+<p><code>codicon</code> is a <a href="https://microsoft.github.io/vscode-codicons/dist/codicon.html" class="ext" target="_blank" rel="noopener">VS Code codicon</a>
+id. Navigate to a route from anywhere with <code>host.navigate('/my-page')</code>.</p>
+<h3 id="status-bar-and-title-bar">Status bar and title bar</h3>
+<p>Status-bar items render into the left or right cluster of the bottom bar.
+Simplest is a <code>render</code> function; for a plain button use <code>data</code> as a
+<code>StatusbarItem</code> (<code>{ id, label?, icon?, detail?, variant?, menuItems?, … }</code>).</p>
+<div class="highlight"><pre><span></span><code><span class="nx">ctx</span><span class="p">.</span><span class="nx">register</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;count&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="nx">STATUSBAR_AREAS</span><span class="p">.</span><span class="nx">right</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">order</span><span class="o">:</span><span class="w"> </span><span class="mf">120</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">render</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">jsx</span><span class="p">(</span><span class="nx">MyStatus</span><span class="p">,</span><span class="w"> </span><span class="p">{})</span>
+<span class="p">})</span>
+</code></pre></div>
+
+<p>Title-bar tools live in <code>TITLEBAR_AREAS.left | .center | .right</code> as <code>TitlebarTool</code>
+data (<code>{ id, label, icon, active?, onSelect? }</code>).</p>
+<p>Title-bar slots are <strong>permanent mount points</strong>: a component you register there
+stays mounted while the user moves between the chat and full pages (Capabilities,
+Messaging, Artifacts, contributed routes), so a <code>useEffect</code> that injects global
+side effects (a <code>&lt;style&gt;</code> tag, <code>html[data-*]</code> attributes, a <code>MutationObserver</code>)
+runs its setup once per registration and its cleanup once at dispose — never
+mid-navigation.</p>
+<p>Controls that belong to ONE page (the Kanban board switcher) go in
+<code>WORKSPACE_PAGE_HEADER_AREA</code> instead: it renders in the workspace panel's
+tab-header row while that page is on screen and is empty otherwise. Register it
+with a mount-scoped <code>&lt;Contribute&gt;</code> (below) so it leaves with the page.</p>
+<h3 id="palette-commands-and-keybinds">Palette commands and keybinds</h3>
+<div class="highlight"><pre><span></span><code><span class="nx">ctx</span><span class="p">.</span><span class="nx">registerMany</span><span class="p">([</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;open&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="nx">PALETTE_AREA</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;my-page.open&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">label</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Open My Page&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">keywords</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;my&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;page&#39;</span><span class="p">],</span>
+<span class="w">      </span><span class="nx">run</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">host</span><span class="p">.</span><span class="nx">navigate</span><span class="p">(</span><span class="s1">&#39;/my-page&#39;</span><span class="p">)</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;refresh&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="nx">KEYBINDS_AREA</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;my-page.refresh&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">label</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Refresh My Page&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">category</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;My Plugin&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">defaults</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;mod+shift+r&#39;</span><span class="p">],</span>
+<span class="w">      </span><span class="nx">run</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ow">void</span><span class="w"> </span><span class="nx">doRefresh</span><span class="p">()</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">])</span>
+</code></pre></div>
+
+<p>Keybinds are user-rebindable in settings; <code>defaults</code> is just the initial binding.</p>
+<h3 id="themes">Themes</h3>
+<p>A theme contribution ships a full <code>DesktopTheme</code> as its <code>data</code> (name, label,
+colors, …). It appears in the theme picker like a built-in.</p>
+<div class="highlight"><pre><span></span><code><span class="nx">ctx</span><span class="p">.</span><span class="nx">register</span><span class="p">({</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;noir&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="nx">THEMES_AREA</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">myDesktopTheme</span><span class="w"> </span><span class="p">})</span>
+</code></pre></div>
+
+<p>Registering a theme lists it; it does not select it. <code>useTheme()</code> reads the
+painted appearance (<code>theme</code>, <code>themeName</code>, <code>availableThemes</code>, <code>resolvedMode</code>) and
+changes it (<code>setTheme</code>, <code>setMode</code>, <code>previewTheme</code>) from a component:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">function</span><span class="w"> </span><span class="nx">ThemePicker</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">availableThemes</span><span class="p">,</span><span class="w"> </span><span class="nx">setTheme</span><span class="p">,</span><span class="w"> </span><span class="nx">themeName</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">useTheme</span><span class="p">()</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">availableThemes</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">t</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="o">&lt;</span><span class="nx">Button</span><span class="w"> </span><span class="nx">key</span><span class="o">=</span><span class="p">{</span><span class="nx">t</span><span class="p">.</span><span class="nx">name</span><span class="p">}</span><span class="w"> </span><span class="nx">disabled</span><span class="o">=</span><span class="p">{</span><span class="nx">t</span><span class="p">.</span><span class="nx">name</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">themeName</span><span class="p">}</span><span class="w"> </span><span class="nx">onClick</span><span class="o">=</span><span class="p">{()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">setTheme</span><span class="p">(</span><span class="nx">t</span><span class="p">.</span><span class="nx">name</span><span class="p">)}</span><span class="o">&gt;</span>
+<span class="w">      </span><span class="p">{</span><span class="nx">t</span><span class="p">.</span><span class="nx">label</span><span class="p">}</span>
+<span class="w">    </span><span class="o">&lt;</span><span class="err">/Button&gt;</span>
+<span class="w">  </span><span class="p">))</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>A switch driven by something other than a render — a gateway connecting, a
+socket event, any <code>host.onEvent</code> callback — has no component to hang the hook
+on. Use <code>requestTheme(name)</code> there. An unresolvable name is refused rather than
+coerced to the default skin, so the return value doubles as the availability
+check and a wrong name can never silently reset someone's appearance:</p>
+<div class="highlight"><pre><span></span><code><span class="nx">host</span><span class="p">.</span><span class="nx">onEvent</span><span class="p">(</span><span class="s1">&#39;gateway.ready&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">requestTheme</span><span class="p">(</span><span class="s1">&#39;noir&#39;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">host</span><span class="p">.</span><span class="nx">notifyError</span><span class="p">(</span><span class="s1">&#39;Connected, but the noir theme is not installed.&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">})</span>
+</code></pre></div>
+
+<p>Both doors persist per profile, so a plugin-driven switch sticks exactly like a
+manual pick. To tint the <em>active</em> theme rather than replace it, use
+<code>setAccentOverride(hex)</code> and clear it in <code>ctx.onDispose</code> — the standalone
+<a href="https://github.com/NousResearch/hermes-desktop-accent-picker" class="ext" target="_blank" rel="noopener">Accent Picker</a>
+plugin is the worked example (it is also a complete, installable disk plugin).</p>
+<h3 id="composer-extensions">Composer extensions</h3>
+<p><code>COMPOSER_AREAS</code> (<code>top</code>, <code>bottom</code>, <code>leading</code>, <code>actions</code>, <code>attachments</code>,
+<code>middleware</code>) let a plugin add controls around the message composer, provide an
+attachment source, or transform a draft before it is sent (<code>ComposerMiddleware</code>
+with a <code>handler(draft) =&gt; draft | null</code>).</p>
+<h3 id="transcript-directives--inline-components-the-model-addresses">Transcript directives — inline components the model addresses</h3>
+<p><code>TRANSCRIPT_DIRECTIVE_AREA</code> makes the transcript itself a contribution area.
+Register a named directive and the agent can render your component inline in
+an assistant message by emitting a paragraph of the form <code>::name{key="value"}</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nx">ctx</span><span class="p">.</span><span class="nx">register</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;task-card&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="nx">TRANSCRIPT_DIRECTIVE_AREA</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;task&#39;</span><span class="p">,</span><span class="w"> </span><span class="c1">// the model writes ::task{id=&quot;BB-12&quot;}</span>
+<span class="w">    </span><span class="nx">render</span><span class="o">:</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">attrs</span><span class="p">,</span><span class="w"> </span><span class="nx">streaming</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">jsx</span><span class="p">(</span><span class="nx">TaskCard</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">taskId</span><span class="o">:</span><span class="w"> </span><span class="nx">attrs</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">streaming</span><span class="w"> </span><span class="p">})</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">})</span>
+</code></pre></div>
+
+<p>Rules the host enforces so the surface stays safe:</p>
+<ul>
+<li>The directive must be the <strong>entire paragraph</strong> — <code>::name</code> mid-prose stays
+  prose, so plugin components can never hijack running text.</li>
+<li>Attributes are <strong>untrusted model output</strong> (<code>key="value"</code> pairs, string-only).
+  Validate your own fields; render nothing on garbage rather than guessing.</li>
+<li>An <strong>unclaimed</strong> directive (no plugin registered for the name) renders as
+  the plain paragraph it always was — nothing breaks when a plugin is off.</li>
+<li>Renders are wrapped in the contribution error boundary: a throw degrades to
+  an inline error chip, never a dead message.</li>
+<li>First registration wins on a name collision; namespace adventurous names
+  with your slug (<code>myplugin-board</code>, not <code>board</code>).</li>
+</ul>
+<p>Core ships one directive as the reference consumer: <code>::preview{file="…"}</code>
+renders the workspace HTML file <strong>live inside the message</strong> — a sandboxed
+<code>srcdoc</code> iframe with an opaque origin (scripts run and the widget is fully
+interactive; no reach into the app, its storage, or the bridge). The frame
+sizes itself to the content (height live, width adopted from the content's
+intrinsic span, flush left in the message flow), and a theme prelude hands
+the document the app's resolved tokens (<code>--foreground</code>, <code>--muted-foreground</code>,
+<code>--accent</code>, <code>--border</code>, <code>--card</code>), the app font, and a transparent
+background — so widget-shaped HTML reads as native while a full page keeps
+its own design. Non-HTML targets and remote gateways fall back to the
+classic preview card. Tell the agent about your directive in a skill (that's
+how it learns to emit it).</p>
+<p>Previewed widgets can also <strong>talk back</strong>. Inside the frame,
+<code>window.hermes.send('get-price eth')</code> (or a declarative
+<code>&lt;button data-hermes-send="get-price eth"&gt;</code> — no script needed) hands that
+prompt to the agent as a user turn, off-screen: no bubble takes up the
+transcript, the widget updating is the visible response. The turn is still
+real — it wakes the agent, rides the composer's steer/queue rules, and
+persists (typed <code>hidden</code>) so resume and the session DB keep the full record.
+Prompts are trimmed, capped at 500 chars, and throttled to one per second
+per frame.</p>
+<h3 id="mount-scoped-chrome-contribute">Mount-scoped chrome (<code>Contribute</code>)</h3>
+<p><code>ctx.register</code> is for <strong>permanent</strong> contributions. When chrome should live and
+die with a component that's already on screen (a page's own header control
+leaves when the page unmounts), render <code>&lt;Contribute&gt;</code> inside it instead:</p>
+<div class="highlight"><pre><span></span><code><span class="nx">jsx</span><span class="p">(</span><span class="nx">Contribute</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">area</span><span class="o">:</span><span class="w"> </span><span class="nx">WORKSPACE_PAGE_HEADER_AREA</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;my-page:switcher&#39;</span><span class="p">,</span><span class="w"> </span><span class="c1">// namespace with your slug</span>
+<span class="w">  </span><span class="nx">children</span><span class="o">:</span><span class="w"> </span><span class="nx">jsx</span><span class="p">(</span><span class="nx">MySwitcher</span><span class="p">,</span><span class="w"> </span><span class="p">{})</span>
+<span class="p">})</span>
+</code></pre></div>
+
+<p>It registers on mount and disposes on unmount automatically.</p>
+<h2 id="host-api">Host API</h2>
+<p>Everything on <code>host</code> is reachable from anywhere in a plugin. State atoms are
+readonly — read with <code>.get()</code> in handlers, subscribe with <code>useValue(atom)</code> in
+components.</p>
+<div class="highlight"><pre><span></span><code><span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">activeSessionId</span><span class="w">  </span><span class="c1">// ReadableAtom&lt;string | null&gt;</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">awaitingResponse</span><span class="w"> </span><span class="c1">// ReadableAtom&lt;boolean&gt;  true until the first assistant payload</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">busy</span><span class="w">             </span><span class="c1">// ReadableAtom&lt;boolean&gt;  focused chat is working after a send</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">busyBySession</span><span class="w">    </span><span class="c1">// ReadableAtom&lt;Record&lt;string, boolean&gt;&gt;  runtime id → mid-turn</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">focusedSessionId</span><span class="w"> </span><span class="c1">// ReadableAtom&lt;string | null&gt;  (runtime id of the FOCUSED session — tile-aware; prefer for session.* RPC)</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">focusedSessionProfile</span><span class="w"> </span><span class="c1">// ReadableAtom&lt;string&gt;  (owner profile of the focused chat — prefer over `profile` for per-bot/profile readouts)</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">focusedStoredSessionId</span><span class="w"> </span><span class="c1">// ReadableAtom&lt;string | null&gt;  (durable id — navigation / session-list matching)</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">focusedUsage</span><span class="w">     </span><span class="c1">// ReadableAtom&lt;UsageStats | null&gt;  (live streamed usage of the focused session, no RPC needed)</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">cwd</span><span class="w">              </span><span class="c1">// ReadableAtom&lt;string&gt;</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">gateway</span><span class="w">          </span><span class="c1">// ReadableAtom&lt;string&gt;  socket state (&#39;idle&#39; | &#39;connecting&#39; | &#39;open&#39; | …)</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">model</span><span class="w">            </span><span class="c1">// ReadableAtom&lt;string&gt;</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">profile</span><span class="w">          </span><span class="c1">// ReadableAtom&lt;string&gt;</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">viewport</span><span class="w">         </span><span class="c1">// ReadableAtom&lt;{ width, height, narrow }&gt;</span>
+</code></pre></div>
+
+<p><code>host.state.gateway</code> is the WebSocket connection, not whether a chat turn is
+running. A session can be mid-turn while the socket is <code>open</code>; another session
+can be idle at the same time. Disable composer or plugin actions from the
+<strong>focused session's</strong> turn-busy (<code>host.state.busyBySession[sessionId]</code>, or that
+session's <code>view.$busy</code>) — never from <code>gateway</code>, and never from a process-global
+busy flag.</p>
+<div class="highlight"><pre><span></span><code><span class="nx">host</span><span class="p">.</span><span class="nx">notify</span><span class="p">({</span><span class="w"> </span><span class="nx">kind</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="p">,</span><span class="w"> </span><span class="nx">title</span><span class="o">?</span><span class="p">,</span><span class="w"> </span><span class="nx">detail</span><span class="o">?</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">?</span><span class="w"> </span><span class="p">})</span><span class="w">  </span><span class="c1">// toast; returns id</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">notifyError</span><span class="p">(</span><span class="nx">error</span><span class="p">,</span><span class="w"> </span><span class="nx">fallbackMessage</span><span class="p">)</span><span class="w">                   </span><span class="c1">// toast an error</span>
+<span class="nx">ctx</span><span class="p">.</span><span class="nx">os</span><span class="p">.</span><span class="nx">notify</span><span class="p">({</span><span class="w"> </span><span class="nx">title</span><span class="p">,</span><span class="w"> </span><span class="nx">body</span><span class="o">?</span><span class="p">,</span><span class="w"> </span><span class="nx">silent</span><span class="o">?</span><span class="p">,</span><span class="w"> </span><span class="nx">icon</span><span class="o">?</span><span class="p">,</span><span class="w"> </span><span class="nx">activate</span><span class="o">?</span><span class="p">,</span><span class="w"> </span><span class="nx">onActivate</span><span class="o">?</span><span class="p">,</span><span class="w"> </span><span class="nx">actions</span><span class="o">?</span><span class="w"> </span><span class="p">})</span>
+<span class="w">                                           </span><span class="c1">// native OS notification (attributed to your plugin)</span>
+<span class="nx">ctx</span><span class="p">.</span><span class="nx">os</span><span class="p">.</span><span class="nx">openExternal</span><span class="p">(</span><span class="nx">url</span><span class="p">)</span><span class="w">                   </span><span class="c1">// OS default handler (browser, mail, spotify:) → Promise&lt;boolean&gt;</span>
+<span class="nx">ctx</span><span class="p">.</span><span class="nx">os</span><span class="p">.</span><span class="nx">revealPath</span><span class="p">(</span><span class="nx">path</span><span class="p">)</span><span class="w">                    </span><span class="c1">// reveal in Finder / Explorer → Promise&lt;boolean&gt;</span>
+<span class="nx">ctx</span><span class="p">.</span><span class="nx">os</span><span class="p">.</span><span class="nx">writeClipboard</span><span class="p">(</span><span class="nx">text</span><span class="p">)</span><span class="w">                </span><span class="c1">// system clipboard → Promise&lt;boolean&gt;</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">navigate</span><span class="p">(</span><span class="s1">&#39;/route&#39;</span><span class="p">)</span><span class="w">                    </span><span class="c1">// hash-route navigation</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">openSession</span><span class="p">(</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">profile</span><span class="o">?</span><span class="p">,</span><span class="w"> </span><span class="nx">intent</span><span class="o">?</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="c1">// open a stored session core-style;</span>
+<span class="w">                                           </span><span class="c1">//   profile: soft-swap to that profile&#39;s backend first</span>
+<span class="w">                                           </span><span class="c1">//   intent: &#39;in-place&#39; (default) | &#39;stack&#39; | &#39;tab&#39; | &#39;window&#39;</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">newChat</span><span class="p">(</span><span class="nx">profile</span><span class="o">?</span><span class="p">)</span><span class="w">                     </span><span class="c1">// fresh chat draft, optionally in another profile</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">openWorkspace</span><span class="p">(</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">render</span><span class="p">,</span><span class="w"> </span><span class="nx">title</span><span class="o">?</span><span class="p">,</span><span class="w"> </span><span class="nx">minWidth</span><span class="o">?</span><span class="p">,</span><span class="w"> </span><span class="nx">onClose</span><span class="o">?</span><span class="w"> </span><span class="p">})</span>
+<span class="w">                                           </span><span class="c1">// dock a plugin-rendered tab into the MAIN</span>
+<span class="w">                                           </span><span class="c1">//   workspace zone and reveal it; returns a disposer</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">paneVisibility</span><span class="p">(</span><span class="nx">paneId</span><span class="p">)</span><span class="w">                </span><span class="c1">// ReadableAtom&lt;boolean&gt; — is a contributed pane</span>
+<span class="w">                                           </span><span class="c1">//   actually on screen (its zone&#39;s active tab)?</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">onEvent</span><span class="p">(</span><span class="kr">type</span><span class="p">,</span><span class="w"> </span><span class="nx">fn</span><span class="p">)</span><span class="w">                     </span><span class="c1">// gateway event stream (&#39;*&#39; = all); returns disposer.</span>
+<span class="w">                                           </span><span class="c1">//   Calls made during register() are retired with the</span>
+<span class="w">                                           </span><span class="c1">//   plugin; elsewhere prefer ctx.onEvent (always tracked)</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">logs</span><span class="p">(...)</span><span class="w">                             </span><span class="c1">// tail an app log file</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">status</span><span class="p">()</span><span class="w">                              </span><span class="c1">// one-shot system status snapshot</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">restartGateway</span><span class="p">()</span><span class="w">                      </span><span class="c1">// restart the backend gateway</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">profileRoutes</span><span class="p">()</span><span class="w">                       </span><span class="c1">// [{ profile, targetProfile, connectionId, mode }]</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">requestProfile</span><span class="o">&lt;</span><span class="nx">T</span><span class="o">&gt;</span><span class="p">(</span><span class="nx">route</span><span class="p">,</span><span class="w"> </span><span class="nx">method</span><span class="p">,</span><span class="w"> </span><span class="nx">params</span><span class="o">?</span><span class="p">)</span><span class="w">   </span><span class="c1">// registry-routed RPC; no foreground swap</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">requestProfile</span><span class="o">&lt;</span><span class="nx">T</span><span class="o">&gt;</span><span class="p">(</span><span class="nx">profile</span><span class="p">,</span><span class="w"> </span><span class="nx">method</span><span class="p">,</span><span class="w"> </span><span class="nx">params</span><span class="o">?</span><span class="p">)</span><span class="w"> </span><span class="c1">// legacy v1/local overload</span>
+<span class="nx">host</span><span class="p">.</span><span class="nx">request</span><span class="o">&lt;</span><span class="nx">T</span><span class="o">&gt;</span><span class="p">(</span><span class="nx">method</span><span class="p">,</span><span class="w"> </span><span class="nx">params</span><span class="o">?</span><span class="p">)</span><span class="w">           </span><span class="c1">// active-gateway JSON-RPC — the real power</span>
+</code></pre></div>
+
+<p><code>host.request</code> is the same JSON-RPC the app itself uses (sessions, config, skills,
+cron, kanban, …). <code>host.requestProfile</code> accepts a descriptor from
+<code>host.profileRoutes()</code> and routes that RPC through its exact registry source and
+profile without changing the active chat or gateway. The profile-only overload is
+retained only for the sole-local/legacy topology; registry-aware plugins should pass
+the descriptor so two sources exposing the same profile name cannot collide.</p>
+<p><code>host.openWorkspace(id, { render, title?, minWidth?, onClose? })</code> docks a
+plugin-rendered view into the <strong>main workspace zone</strong> — the same center area
+session tiles and previews use — as a tab, and reveals it. Re-calling it with
+the same <code>id</code> refreshes the content in place and re-fronts the tab instead of
+opening a duplicate. Closing the tab (the tab's Close control or ⌘W) tears the
+registration down and fires your <code>onClose</code>; the returned disposer closes it
+programmatically. Feature-detect it (<code>typeof host.openWorkspace ===
+'function'</code>) and fall back to a regular contributed pane on older desktop
+builds — Bot Mode's group-chat rooms are the reference consumer (main-window
+takeover when available, in-panel view otherwise).</p>
+<p><code>host.paneVisibility(paneId)</code> returns a readonly reactive atom that is <code>true</code>
+while a contributed pane is actually on screen: present in the layout tree,
+not dismissed or hidden, its zone un-minimized, and holding its zone's active
+tab slot (a lone pane in its own zone counts). The id is the
+contribution-scoped pane id, <code>&lt;pluginId&gt;:&lt;paneId&gt;</code>. Atoms are memoized per id,
+so calling it in render is safe. Use it to register companion UI only while
+your pane is visible — Bot Mode's Cronjobs pane is the reference consumer: it
+registers while the Bots pane holds the sidebar tab and unregisters when the
+user tabs back to Sessions. Feature-detect on older desktops
+(<code>typeof host.paneVisibility === 'function'</code>) and fall back to
+always-registered behavior.</p>
+<p><code>host.profileRoutes()</code> inventories every registered source in the current connection
+registry. Connect-on-demand SSH sources expose a credential-free <code>default</code> seed
+route without opening a tunnel, so a plugin can be the first caller that dials them;
+an SSH <code>remoteProfile</code> remains the route's backend <code>targetProfile</code>. <code>connectionId</code>
+is the registry routing identity;
+pair it with <code>profile</code> for keys and persistence. Endpoint, token, SSH host/key, and
+other raw connection fields never cross the plugin IPC boundary. <code>profile</code> is the
+source-local route used
+for requests; <code>targetProfile</code> is the backend Hermes profile served by that route.
+They differ when a route explicitly maps to another backend profile (for example an
+SSH <code>remoteProfile</code> override or a legacy per-profile URL alias). This distinction
+preserves backend identity without exposing connection secrets.</p>
+<p>Profile-shaped plugins get first-class methods too:
+<code>profiles.list</code> (each profile + its most recent conversation as
+<code>last_session</code>; pass <code>include_sessions: false</code> to skip the per-profile DB
+probe; pass <code>preferred_session_ids: { profileName: sessionId }</code> for an
+exact, existence-checked lookup of one pinned session per profile — each
+named row gains a <code>preferred_session</code> summary that resolves hidden rows
+and compression lineages to their live tip, or <code>null</code> when the id is
+definitively gone; older gateways ignore the param and omit the field)
+and <code>profiles.create</code> (<code>name</code>, <code>description</code>, <code>clone_from</code>,
+<code>clone_all</code>, <code>no_skills</code>, <code>soul</code>, optional <code>model</code> + <code>provider</code> pin) — the
+ws twins of the dashboard's <code>/api/profiles</code> REST routes.
+<code>host.state.busy</code> is the focused chat's live turn (thinking and streaming).
+<code>host.state.awaitingResponse</code> stays true from send until the first assistant
+payload. Both follow the chat the user is actually looking at — the focused
+session tile when one holds focus, else the primary workspace chat (the same
+signal the statusbar's busy pulse reads). Subscribe in a component:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">busy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">useValue</span><span class="p">(</span><span class="nx">host</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">busy</span><span class="p">)</span>
+</code></pre></div>
+
+<p>For token-level detail, listen with <code>host.onEvent</code> (<code>message.start</code>,
+<code>message.delta</code>, <code>message.complete</code>).</p>
+<p><code>host.onEvent</code> streams live gateway events (message deltas,
+session lifecycle, tool activity). Listeners are isolated — a throw in your
+listener can't affect app dispatch. Every <code>host</code> door is async-safe: a sync throw
+from an internal helper (e.g. no desktop bridge in a plain browser) becomes a
+rejection your <code>.catch()</code> sees, never an error-boundary crash.</p>
+<p><code>ctx.os</code> is the curated OS door — every way a plugin reaches outside the app
+window, in one namespace attributed to your plugin. <code>ctx.os.notify</code> posts a
+<strong>native OS notification</strong> — the same Electron pipeline the app's own
+approval/turn alerts use. It fires only while the user is away from Hermes
+(backgrounded / unfocused); use <code>host.notify</code> for the in-app toast when
+they're looking at the app. Users can silence it per device under Settings ▸
+Notifications ▸ "Plugin notifications", and repeats from the same plugin are
+throttled, so treat it as a signal for genuinely notable events — not a log.</p>
+<p>Rich presentation + activation (extends the original <code>ctx.os</code> door):</p>
+<div class="highlight"><pre><span></span><code><span class="nx">ctx</span><span class="p">.</span><span class="nx">os</span><span class="p">.</span><span class="nx">notify</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">title</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;New match found&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Someone matched your signal&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">icon</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;/abs/path/to/icon.png&#39;</span><span class="p">,</span><span class="w"> </span><span class="c1">// Electron Notification icon</span>
+<span class="w">  </span><span class="c1">// Body click → focus Hermes + navigate. Same vocabulary as OS deep links:</span>
+<span class="w">  </span><span class="nx">activate</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;hermes://index-network/intent/1&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="c1">// or: activate: &#39;/index-network/intent/1&#39;</span>
+<span class="w">  </span><span class="c1">// or: activate: { path: &#39;/index-network/intent/1&#39; }</span>
+<span class="w">  </span><span class="nx">onActivate</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">focusLocalState</span><span class="p">(</span><span class="s1">&#39;1&#39;</span><span class="p">),</span><span class="w"> </span><span class="c1">// optional renderer callback</span>
+<span class="w">  </span><span class="nx">actions</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;open&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">label</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Open&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">activate</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;hermes://index-network/intent/1&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;dismiss&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">label</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Dismiss&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">onAction</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">dismiss</span><span class="p">(</span><span class="s1">&#39;1&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="p">})</span>
+</code></pre></div>
+
+<p><code>activate</code> is deeplink-compatible: <code>hermes://index-network/intent/1</code> and the
+hash path <code>/index-network/intent/1</code> resolve to the same in-app route (and the
+same <code>hermes://…</code> URL works as an OS deep link). Action buttons only render on
+signed macOS builds; elsewhere the body click still activates. Navigation only
+happens on user click — never from a background event alone.</p>
+<p>The other doors (<code>openExternal</code>, <code>revealPath</code>, <code>writeClipboard</code>) resolve
+<code>false</code> instead of throwing when the capability isn't available (older desktop
+shell, plain browser) — branch on the result rather than sniffing the bridge.</p>
+<h2 id="data-layer--react-query--nanostores">Data layer — React Query + nanostores</h2>
+<p>Plugins share the app's single <code>QueryClient</code>, so plugin queries cache, dedupe,
+poll, and invalidate exactly like core screens — never hand-roll a fetch loop.</p>
+<div class="highlight"><pre><span></span><code><span class="kd">function</span><span class="w"> </span><span class="nx">MyPanel</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="nx">isLoading</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">useQuery</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">queryKey</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;my-plugin&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;items&#39;</span><span class="p">],</span>
+<span class="w">    </span><span class="nx">queryFn</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">host</span><span class="p">.</span><span class="nx">request</span><span class="p">(</span><span class="s1">&#39;my.list&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{})</span>
+<span class="w">  </span><span class="p">})</span>
+<span class="w">  </span><span class="c1">// …</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>For state shared between a trigger and its panel (or a poll loop), use <code>atom</code> /
+<code>computed</code> — the same primitive <code>host.state</code> uses. Subscribe in the leaf that
+renders the value with <code>useValue</code>. To invalidate a query from <strong>outside</strong> React
+(e.g. a <code>ctx.socket</code> frame arriving), import the shared <code>queryClient</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nx">ctx</span><span class="p">.</span><span class="nx">socket</span><span class="p">(</span><span class="s1">&#39;/events&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">queryClient</span><span class="p">.</span><span class="nx">invalidateQueries</span><span class="p">({</span><span class="w"> </span><span class="nx">queryKey</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;my-plugin&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;items&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">})</span>
+<span class="p">})</span>
+</code></pre></div>
+
+<h2 id="the-ui-kit-and-theming">The UI kit and theming</h2>
+<p>Import the app's real components directly so your UI is native by default:</p>
+<blockquote>
+<p><code>Button</code>, <code>Input</code>, <code>Textarea</code>, <code>Select*</code>, <code>Switch</code>, <code>Checkbox</code>,
+<code>SegmentedControl</code>, <code>Tabs*</code>, <code>Dialog*</code>, <code>ConfirmDialog</code>, <code>DropdownMenu*</code>,
+<code>ContextMenu*</code>, <code>Popover*</code>, <code>Tip</code>/<code>Tooltip*</code>, <code>Badge</code>, <code>Kbd</code>/<code>KbdGroup</code>,
+<code>SearchField</code>, <code>ScrollArea</code>, <code>Separator</code>, <code>Skeleton</code>, <code>GlyphSpinner</code>, <code>Loader</code>,
+<code>EmptyState</code>, <code>ErrorState</code>, <code>CopyButton</code>, <code>StatusDot</code>, <code>LogView</code>, <code>Codicon</code>,
+<code>DecodeText</code>.</p>
+</blockquote>
+<p>Plus helpers: <code>cn</code> (class merge), <code>icons.*</code> (the app's lucide set), <code>haptic</code>,
+<code>profileColor</code> / <code>profileColorSoft</code> (deterministic identity colors), the time
+formatters <code>relativeTime</code> / <code>fmtDateTime</code> / <code>fmtDayTime</code> / <code>coarseElapsed</code>,
+<code>useI18n</code> (localized copy — your plugin stays translatable), and
+<code>evaluateRuntimeReadiness</code>.</p>
+<p><strong>Style with theme variables, never hardcoded colors.</strong> Panes already sit on the
+app's editor background — leave the background alone and use vars for everything
+else: <code>var(--ui-text-secondary)</code>, <code>var(--ui-text-tertiary)</code>,
+<code>var(--ui-text-quaternary)</code>, <code>var(--ui-stroke-secondary)</code>, <code>var(--ui-accent)</code>.
+For canvas drawing, resolve them once with
+<code>getComputedStyle(canvas).getPropertyValue('--ui-accent')</code>. This is what makes a
+plugin reskin automatically with every theme.</p>
+<h2 id="a-backend-for-your-plugin">A backend for your plugin</h2>
+<p>If your plugin needs server-side work, ship a Python <code>plugin_api.py</code> and reach it
+through <code>ctx.rest</code> / <code>ctx.socket</code> — a namespace scoped to your plugin <strong>by
+construction</strong>.</p>
+<h3 id="one-package-both-sdks">One package, both SDKs</h3>
+<p>A feature that needs a desktop UI <strong>and</strong> agent-side code (a Python plugin, its
+backend routes, skills) doesn't have to ship as two co-dependent installs. Put a
+<code>desktop/plugin.js</code> inside the agent package. When the package lands in any
+local <code>plugins/</code> root (default home or a profile), the Electron main process
+copies that half into <code>$HERMES_HOME/desktop-plugins/&lt;id&gt;/</code> beside a
+<code>.hermes-package.json</code> marker, and the renderer loads it through the exact same
+pipeline as the standalone disk door (hot reload included):</p>
+<div class="highlight"><pre><span></span><code>~/.hermes/plugins/&lt;id&gt;/           # ONE installable folder
+├── plugin.yaml                   # the agent half: tools, hooks, commands
+├── skills/…
+├── dashboard/
+│   ├── manifest.json             # { &quot;name&quot;: &quot;&lt;id&gt;&quot;, &quot;api&quot;: &quot;plugin_api.py&quot; }
+│   └── plugin_api.py             # backend routes → /api/plugins/&lt;id&gt;/
+└── desktop/
+    └── plugin.js                 # the desktop half: panes, commands, ctx.rest
+</code></pre></div>
+
+<p>The <code>desktop/plugin.js</code> half is an ordinary disk plugin — same contract, same
+imports, same <code>ctx.rest('/…')</code> reaching the <code>plugin_api.py</code> sitting beside it.
+Installing, sharing, or removing the feature is one folder: the app-root copy
+is refreshed when the source <code>plugin.js</code> changes (<code>hermes plugins update</code>, or
+<strong>Rescan</strong>) and removed when the package folder disappears. The copy is what
+makes the desktop half <strong>app-level</strong>: it exists once, however many profiles
+carry the package, and it never appears or disappears when the user switches
+the Capabilities profile selector. The renderer never scans <code>plugins/</code> itself.
+The marker records the package name and its origin (catalog sidecar or git
+remote), which is what the <strong>Install here</strong> button on the Plugins page uses to
+install the agent half into another profile. The copy is staged beside the
+target and renamed into place, so an interrupted copy (a transient file lock, a
+crash mid-copy) never leaves a half-written folder behind; a leftover
+<code>desktop-plugins/&lt;id&gt;/</code> that has no marker and no <code>plugin.js</code> is treated as
+such damage and replaced on the next <strong>Rescan</strong>, while a marker-less folder
+that <em>does</em> hold a <code>plugin.js</code> is a standalone plugin you installed by hand and
+is never overwritten.</p>
+<p>Two enable switches still apply, on purpose, and both default to <strong>off</strong>: the
+desktop half ships opt-in — it inventories in <strong>Capabilities → Plugins</strong> but stays
+disabled until the user toggles it — matching the Python half's
+<code>plugins.enabled</code> gate in <code>config.yaml</code> (the security boundary below). Dropping
+a package into <code>~/.hermes/plugins</code> is inert on every surface until the user
+says otherwise. The desktop half degrades gracefully when the backend half is
+off — <code>ctx.rest</code> returns errors, not crashes.</p>
+<div class="admonition adm-note"><p class="adm-title">Note</p>
+<p>The copy is local to the machine the desktop app runs on. Against a remote
+backend, the remote box's <code>~/.hermes/plugins</code> is not reachable as a filesystem —
+only locally installed packages contribute a desktop half this way. For a
+remote backend the install dialog clones the desktop half separately into
+<code>desktop-plugins/</code>, the same as a desktop-only repo. A package whose agent half
+was installed on the remote host without that clone shows its Desktop half as
+<strong>unavailable (remote backend)</strong> on the Plugins page — not as a pending copy —
+and the tooltip points at <strong>Install from Git</strong> with the Desktop target checked.</p>
+</div>
+<h3 id="install-link">Distributing with an install link</h3>
+<p>Ship your plugin repo (agent half, desktop half, or both) and link to it with
+the <code>hermes://</code> scheme — a plain anchor on your website or README:</p>
+<div class="highlight"><pre><span></span><code><span class="p">&lt;</span><span class="nt">a</span> <span class="na">href</span><span class="o">=</span><span class="s">&quot;hermes://plugin/install?repo=owner/repo&amp;enable=1&quot;</span><span class="p">&gt;</span>Install in Hermes<span class="p">&lt;/</span><span class="nt">a</span><span class="p">&gt;</span>
+</code></pre></div>
+
+<p>The user gets a confirmation dialog (repo id, source links, a probe of what
+the repo ships) and picks components before anything is installed — deep links
+never auto-install. <code>force=1</code> replaces an existing install; dev builds use
+<code>hermes-dev://</code>. Full link reference:
+<a href="../user-guide/features/plugins.html#one-click-install-links-desktop">One-click install links</a>.</p>
+<h3 id="the-python-side">The Python side</h3>
+<p>Desktop plugins reuse the dashboard plugin backend mount. Put the backend in a
+<code>dashboard/</code> subfolder of a regular Hermes plugin and declare it in a
+<code>manifest.json</code>:</p>
+<div class="highlight"><pre><span></span><code>~/.hermes/plugins/&lt;id&gt;/
+└── dashboard/
+    ├── manifest.json      # { &quot;name&quot;: &quot;&lt;id&gt;&quot;, &quot;api&quot;: &quot;plugin_api.py&quot; }
+    └── plugin_api.py      # exports `router = APIRouter()`
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># plugin_api.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fastapi</span><span class="w"> </span><span class="kn">import</span> <span class="n">APIRouter</span>
+
+<span class="n">router</span> <span class="o">=</span> <span class="n">APIRouter</span><span class="p">()</span>
+
+<span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/board&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">board</span><span class="p">():</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;items&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;one&quot;</span><span class="p">,</span> <span class="s2">&quot;two&quot;</span><span class="p">,</span> <span class="s2">&quot;three&quot;</span><span class="p">]}</span>
+
+<span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/action&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">action</span><span class="p">(</span><span class="n">body</span><span class="p">:</span> <span class="nb">dict</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;ok&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;received&quot;</span><span class="p">:</span> <span class="n">body</span><span class="p">}</span>
+</code></pre></div>
+
+<p>Routes mount under <code>/api/plugins/&lt;id&gt;/</code> (<code>GET /api/plugins/&lt;id&gt;/board</code>, …).
+Backend code runs inside the gateway process, so it can import from the
+hermes-agent codebase directly (<code>hermes_state</code>, <code>hermes_cli.config</code>, …). See
+<a href="../user-guide/features/extending-the-dashboard.html#backend-api-routes">Extending the Dashboard → Backend API routes</a>
+for the full backend reference — the mount is identical.</p>
+<div class="admonition adm-caution"><p class="adm-title">The Python backend is gated separately</p>
+<p>Enabling a plugin in the desktop <strong>Capabilities → Plugins</strong> panel is a renderer-side
+choice; it does <strong>not</strong> import Python. A user plugin's <code>plugin_api.py</code> is
+imported only when the plugin is in the <code>plugins.enabled</code> allow-list in
+<code>config.yaml</code> (and not in <code>plugins.disabled</code>). Project plugins (<code>./.hermes/</code>)
+never auto-import Python. This is a security boundary, not an oversight
+(GHSA-mcfc-hp25-cjv7).</p>
+</div>
+<h3 id="calling-it-from-the-plugin">Calling it from the plugin</h3>
+<div class="highlight"><pre><span></span><code><span class="nx">register</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// REST — namespace-relative path.</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">load</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">rest</span><span class="p">(</span><span class="s1">&#39;/board&#39;</span><span class="p">)</span><span class="w">                 </span><span class="c1">// GET /api/plugins/&lt;id&gt;/board</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">act</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">rest</span><span class="p">(</span><span class="s1">&#39;/action&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">go</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">})</span>
+
+<span class="w">  </span><span class="c1">// Live twin — a WebSocket to your own namespace.</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">stop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">socket</span><span class="p">(</span><span class="s1">&#39;/events&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">frame</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">queryClient</span><span class="p">.</span><span class="nx">invalidateQueries</span><span class="p">({</span><span class="w"> </span><span class="nx">queryKey</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">ctx</span><span class="p">.</span><span class="nx">source</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;board&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">})</span>
+<span class="w">  </span><span class="p">})</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><code>ctx.rest</code> is profile-aware and rejects path traversal (<code>..</code>) so you can never
+address another plugin's API or a core route through it. <code>PluginRestOptions</code> is
+<code>{ method?, body?, upload?: { filename, contentType?, bytes }, timeoutMs? }</code>.</p>
+<p><code>ctx.socket</code> auto-reconnects with backoff until disposed. <strong>It resolves to a no-op
+on OAuth remotes</strong> (single-use WS tickets are core-managed) — treat the socket as
+an accelerator over polling, never a replacement. Every consumer needs a polling
+fallback anyway, since any socket can drop.</p>
+<p>For gateway-wide data (not your own namespace), use <code>host.request</code> (JSON-RPC) and
+<code>host.onEvent</code> (the gateway event stream) instead.</p>
+<h2 id="settings-enable-state-and-storage">Settings, enable state, and storage</h2>
+<p>Every plugin — enabled or not — inventories in <strong>Capabilities → Plugins</strong>, where the
+user toggles it live (no app restart), reveals its folder, or rescans. The user's
+choice is remembered:</p>
+<ul>
+<li>No choice yet → the plugin's own <code>defaultEnabled</code> (default <code>true</code>). Set
+  <code>defaultEnabled: false</code> to ship an opt-in plugin that stays dark until the user
+  flips it on.</li>
+<li>Explicit choice → persisted and honored across restarts. A disabled plugin
+  stays disabled — don't fight it; the user turned you off.</li>
+</ul>
+<p>Persist your own state with <code>ctx.storage</code>, namespaced to your plugin
+(<code>hermes.plugin.&lt;id&gt;.*</code>) so plugins can't read or clobber each other:</p>
+<div class="highlight"><pre><span></span><code><span class="nx">ctx</span><span class="p">.</span><span class="nx">storage</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="s1">&#39;lastTab&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;board&#39;</span><span class="p">)</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">tab</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">storage</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;lastTab&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;summary&#39;</span><span class="p">)</span>
+<span class="nx">ctx</span><span class="p">.</span><span class="nx">storage</span><span class="p">.</span><span class="nx">remove</span><span class="p">(</span><span class="s1">&#39;lastTab&#39;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="bundled-plugins">Bundled plugins</h2>
+<p>A plugin can ship in-tree at <code>apps/desktop/src/plugins/&lt;id&gt;/plugin.tsx</code> (default
+export a <code>HermesPlugin</code>). It's discovered by <code>discoverBundledPlugins()</code> at boot —
+no import, no registry edit — and shares the exact inventory + live
+enable/disable contract as a disk plugin. The two differences:</p>
+<ol>
+<li>It goes through the app's Vite build, so you can write <strong>real JSX</strong> and import
+   the SDK by its <code>@hermes/plugin-sdk</code> alias.</li>
+<li>It's still lint-fenced to <code>@hermes/plugin-sdk</code> + <code>react</code> only — no <code>@/…</code> app
+   internals.</li>
+</ol>
+<p>No desktop plugins ship in the core tree today; the shipped app stays uncluttered
+and demos live in the
+<a href="https://github.com/NousResearch/hermes-example-plugins" class="ext" target="_blank" rel="noopener"><code>hermes-example-plugins</code></a>
+companion repo.</p>
+<h2 id="security-model">Security model</h2>
+<p>A loaded plugin is evaluated as ESM in the renderer realm with <strong>full app
+authority</strong> — the React singleton, the whole SDK (<code>host.request</code> gateway RPC,
+<code>ctx.rest</code>, storage, <code>navigate</code>). The isolation the loader provides is <strong>error
+isolation only</strong>: a plugin can't crash the app (contributions are error-bounded,
+listeners isolated), but it can do anything the app can.</p>
+<p>This is acceptable for <strong>local</strong> sources — a disk file can already run code on
+your machine — which is why the disk door only loads local files you (or your
+agent) wrote. The optional <code>integrity</code> (<code>sha256-…</code>) check only proves the bytes
+match a hash; it does <strong>not</strong> sandbox. A future remote-source door will need a
+real boundary (iframe/worker + CSP + capability gating) before it can land; do
+not treat this pipeline as a trust boundary.</p>
+<h2 id="pitfalls">Pitfalls</h2>
+<ul>
+<li><strong>JSX won't parse in a disk plugin.</strong> The file loads uncompiled — use <code>jsx()</code> /
+  <code>jsxs()</code> (or <code>React.createElement</code>), not JSX syntax. (Bundled plugins are built,
+  so JSX is fine there.)</li>
+<li><strong>Only three specifiers resolve:</strong> <code>@hermes/plugin-sdk</code>, <code>react</code>,
+  <code>react/jsx-runtime</code>. Any other import surfaces an up-front load error.</li>
+<li><strong>Never hardcode colors</strong> (<code>#000</code>, <code>black</code>, <code>rgb(...)</code>). Leave the background
+  alone; use theme variables (<code>var(--ui-*)</code>) for everything.</li>
+<li><strong>Reference only what you imported.</strong> A component you forgot to import (e.g.
+  <code>StatusDot</code>) is a <code>ReferenceError</code> at render — double-check every identifier in
+  your <code>jsx()</code> calls appears in the import line.</li>
+<li><strong>Read state imperatively in handlers</strong> (<code>$atom.get()</code>), never from a render
+  closure — rapid events will otherwise see stale values. Subscribe (<code>useValue</code>)
+  only in the leaf that renders the value.</li>
+<li><strong>Canvas panes must track their container</strong> with a <code>ResizeObserver</code> and resize
+  the canvas (width/height attributes, not just CSS) — panes resize constantly.</li>
+<li><strong>Don't poll faster than a few seconds</strong> with <code>host.request</code>; prefer
+  <code>host.onEvent</code> / <code>ctx.socket</code> and let React Query dedupe.</li>
+<li><strong><code>ctx.socket</code> is a no-op on OAuth remotes.</strong> Always have a polling fallback.</li>
+</ul>
+<h2 id="reference">Reference</h2>
+<h3 id="sdk-exports-at-a-glance">SDK exports at a glance</h3>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Exports</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Host</td>
+<td><code>host</code> (<code>.state.*</code>, <code>.notify</code>, <code>.notifyError</code>, <code>.navigate</code>, <code>.onEvent</code>, <code>.logs</code>, <code>.status</code>, <code>.restartGateway</code>, <code>.request</code>)</td>
+</tr>
+<tr>
+<td>Plugin contract</td>
+<td><code>HermesPlugin</code>, <code>PluginContext</code>, <code>PluginContribution</code>, <code>PluginStorage</code>, <code>PluginOs</code>, <code>PluginRestOptions</code>, <code>PluginNativeNotificationInput</code>, <code>PluginNotificationAction</code>, <code>HermesOpenTarget</code>, <code>Contribution</code></td>
+</tr>
+<tr>
+<td>Area constants</td>
+<td><code>PANES_AREA</code>, <code>ROUTES_AREA</code>, <code>SIDEBAR_NAV_AREA</code>, <code>STATUSBAR_AREAS</code>, <code>TITLEBAR_AREAS</code>, <code>WORKSPACE_PAGE_HEADER_AREA</code>, <code>PALETTE_AREA</code>, <code>KEYBINDS_AREA</code>, <code>THEMES_AREA</code>, <code>COMPOSER_AREAS</code></td>
+</tr>
+<tr>
+<td>Area payloads</td>
+<td><code>RouteContribution</code>, <code>SidebarNavContribution</code>, <code>StatusbarItem</code>, <code>TitlebarTool</code>, <code>PaletteContribution</code>, <code>KeybindContribution</code>, <code>ComposerMiddleware</code>, <code>ComposerAttachmentProvider</code></td>
+</tr>
+<tr>
+<td>React / state</td>
+<td><code>useValue</code>, <code>atom</code>, <code>computed</code>, <code>useQuery</code>, <code>useMutation</code>, <code>useQueryClient</code>, <code>queryClient</code>, <code>Contribute</code></td>
+</tr>
+<tr>
+<td>Theming</td>
+<td><code>useTheme</code>, <code>requestTheme</code>, <code>setAccentOverride</code>, <code>$accentOverride</code>, <code>retintTheme</code>, <code>themeHue</code>, <code>DesktopTheme</code>, <code>DesktopThemeColors</code>, plus OKLCH math (<code>hexToOklch</code>, <code>oklchToHex</code>, <code>oklchToSrgb255</code>, <code>mixOklab</code>, <code>maxChroma</code>, <code>hueDelta</code>, <code>normalizeHex</code>) and sRGB measures (<code>contrastRatio</code> — <code>number | null</code>, null for unparseable input — <code>readableOn</code>)</td>
+</tr>
+<tr>
+<td>UI kit</td>
+<td><code>Button</code>, <code>Input</code>, <code>Textarea</code>, <code>Select*</code>, <code>Switch</code>, <code>Checkbox</code>, <code>SegmentedControl</code>, <code>Tabs*</code>, <code>Dialog*</code>, <code>ConfirmDialog</code>, <code>DropdownMenu*</code>, <code>ContextMenu*</code>, <code>Popover*</code>, <code>Tip</code>/<code>Tooltip*</code>, <code>Badge</code>, <code>Kbd</code>/<code>KbdGroup</code>, <code>SearchField</code>, <code>ScrollArea</code>, <code>Separator</code>, <code>Skeleton</code>, <code>GlyphSpinner</code>, <code>Loader</code>, <code>EmptyState</code>, <code>ErrorState</code>, <code>CopyButton</code>, <code>StatusDot</code>, <code>LogView</code>, <code>Codicon</code>, <code>DecodeText</code></td>
+</tr>
+<tr>
+<td>Helpers</td>
+<td><code>cn</code>, <code>icons</code>, <code>haptic</code>, <code>useI18n</code>, <code>profileColor</code>, <code>profileColorSoft</code>, <code>relativeTime</code>, <code>fmtDateTime</code>, <code>fmtDayTime</code>, <code>coarseElapsed</code>, <code>evaluateRuntimeReadiness</code></td>
+</tr>
+</tbody>
+</table>
+<p>The canonical, always-current export list is <code>apps/desktop/src/sdk/index.ts</code>.</p>
+<h3 id="agents-the-hermes-desktop-plugins-skill">Agents: the <code>hermes-desktop-plugins</code> skill</h3>
+<p>When an agent writes a desktop plugin, it should load the bundled
+<strong><code>hermes-desktop-plugins</code></strong> skill — it carries the same contract as this page in
+agent-facing form, with a ready-to-copy <code>templates/plugin.js</code>. This page is the
+human/developer reference; the skill is the working checklist.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p><strong>My plugin doesn't appear.</strong> Confirm the file is at
+<code>$HERMES_HOME/desktop-plugins/&lt;id&gt;/plugin.js</code> and the folder name matches the
+export <code>id</code>. Run ⌘K → <strong>Reload desktop plugins</strong>. Check the app for an error
+toast naming the failure, and tail <code>hermes logs gui -f</code>.</p>
+<p><strong>"unsupported import" on load.</strong> A disk plugin may only import
+<code>@hermes/plugin-sdk</code>, <code>react</code>, and <code>react/jsx-runtime</code>. Remove any other import.</p>
+<p><strong>A <code>jsx</code> element renders nothing / throws <code>ReferenceError</code>.</strong> An identifier used
+in a <code>jsx()</code> call isn't imported. Add it to the import line.</p>
+<p><strong><code>ctx.rest</code> returns 404.</strong> The backend isn't mounted: confirm
+<code>~/.hermes/plugins/&lt;id&gt;/dashboard/manifest.json</code> has <code>"api": "plugin_api.py"</code>,
+that the plugin is in <code>plugins.enabled</code> in <code>config.yaml</code>, and restart the gateway
+(backend routes mount at startup). Tail <code>~/.hermes/logs/errors.log</code> for
+<code>Failed to load plugin &lt;id&gt; API routes</code>.</p>
+<p><strong><code>ctx.socket</code> never fires.</strong> On an OAuth remote it's a no-op by design — use your
+polling fallback. Otherwise verify the backend exposes the matching
+<code>@router.websocket(...)</code> route under its namespace.</p>
+<p><strong>Colors look wrong after a theme switch.</strong> You hardcoded a color. Replace it with
+a <code>var(--ui-*)</code> theme variable.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/desktop-plugin-sdk</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#mental-model">Mental model</a></li>
+<li class="lvl2"><a href="#two-delivery-modes">Two delivery modes</a></li>
+<li class="lvl2"><a href="#quick-start--your-first-plugin">Quick start — your first plugin</a></li>
+<li class="lvl2"><a href="#the-plugin-contract">The plugin contract</a></li>
+<li class="lvl2"><a href="#contribution-areas--the-cookbook">Contribution areas — the cookbook</a></li>
+<li class="lvl3"><a href="#panes">Panes</a></li>
+<li class="lvl3"><a href="#pages-and-sidebar-nav">Pages and sidebar nav</a></li>
+<li class="lvl3"><a href="#status-bar-and-title-bar">Status bar and title bar</a></li>
+<li class="lvl3"><a href="#palette-commands-and-keybinds">Palette commands and keybinds</a></li>
+<li class="lvl3"><a href="#themes">Themes</a></li>
+<li class="lvl3"><a href="#composer-extensions">Composer extensions</a></li>
+<li class="lvl3"><a href="#transcript-directives--inline-components-the-model-addresses">Transcript directives — inline components the model addresses</a></li>
+<li class="lvl3"><a href="#mount-scoped-chrome-contribute">Mount-scoped chrome (Contribute)</a></li>
+<li class="lvl2"><a href="#host-api">Host API</a></li>
+<li class="lvl2"><a href="#data-layer--react-query--nanostores">Data layer — React Query + nanostores</a></li>
+<li class="lvl2"><a href="#the-ui-kit-and-theming">The UI kit and theming</a></li>
+<li class="lvl2"><a href="#a-backend-for-your-plugin">A backend for your plugin</a></li>
+<li class="lvl3"><a href="#one-package-both-sdks">One package, both SDKs</a></li>
+<li class="lvl3"><a href="#install-link">Distributing with an install link</a></li>
+<li class="lvl3"><a href="#the-python-side">The Python side</a></li>
+<li class="lvl3"><a href="#calling-it-from-the-plugin">Calling it from the plugin</a></li>
+<li class="lvl2"><a href="#settings-enable-state-and-storage">Settings, enable state, and storage</a></li>
+<li class="lvl2"><a href="#bundled-plugins">Bundled plugins</a></li>
+<li class="lvl2"><a href="#security-model">Security model</a></li>
+<li class="lvl2"><a href="#pitfalls">Pitfalls</a></li>
+<li class="lvl2"><a href="#reference">Reference</a></li>
+<li class="lvl3"><a href="#sdk-exports-at-a-glance">SDK exports at a glance</a></li>
+<li class="lvl3"><a href="#agents-the-hermes-desktop-plugins-skill">Agents: the hermes-desktop-plugins skill</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

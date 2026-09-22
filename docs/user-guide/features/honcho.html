@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Honcho Memory · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/honcho</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="honcho-memory">Honcho Memory</h1>
+<p><a href="https://github.com/plastic-labs/honcho" class="ext" target="_blank" rel="noopener">Honcho</a> is an AI-native memory backend that adds dialectic reasoning and deep user modeling on top of Hermes's built-in memory system. Instead of simple key-value storage, Honcho maintains a running model of who the user is — their preferences, communication style, goals, and patterns — by reasoning about conversations after they happen.</p>
+<div class="admonition adm-info"><p class="adm-title">Honcho is a Memory Provider Plugin</p>
+<p>Honcho is integrated into the <a href="memory-providers.html">Memory Providers</a> system. All features below are available through the unified memory provider interface.</p>
+</div>
+<h2 id="what-honcho-adds">What Honcho Adds</h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Built-in Memory</th>
+<th>Honcho</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cross-session persistence</td>
+<td>✔ File-based MEMORY.md/USER.md</td>
+<td>✔ Server-side with API</td>
+</tr>
+<tr>
+<td>User profile</td>
+<td>✔ Manual agent curation</td>
+<td>✔ Automatic dialectic reasoning</td>
+</tr>
+<tr>
+<td>Session summary</td>
+<td>—</td>
+<td>✔ Session-scoped context injection</td>
+</tr>
+<tr>
+<td>Multi-agent isolation</td>
+<td>—</td>
+<td>✔ Per-peer profile separation</td>
+</tr>
+<tr>
+<td>Observation modes</td>
+<td>—</td>
+<td>✔ Unified or directional observation</td>
+</tr>
+<tr>
+<td>Conclusions (derived insights)</td>
+<td>—</td>
+<td>✔ Server-side reasoning about patterns</td>
+</tr>
+<tr>
+<td>Search across history</td>
+<td>✔ FTS5 session search</td>
+<td>✔ Semantic search over conclusions</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Dialectic reasoning</strong>: After each conversation turn (gated by <code>dialecticCadence</code>), Honcho analyzes the exchange and derives insights about the user's preferences, habits, and goals. These accumulate over time, giving the agent a deepening understanding that goes beyond what the user explicitly stated. The dialectic supports multi-pass depth (1–3 passes) with automatic cold/warm prompt selection — cold start queries focus on general user facts while warm queries prioritize session-scoped context.</p>
+<p><strong>Session-scoped context</strong>: Base context now includes the session summary alongside the user representation and peer card. This gives the agent awareness of what has already been discussed in the current session, reducing repetition and enabling continuity.</p>
+<p><strong>Multi-agent profiles</strong>: When multiple Hermes instances talk to the same user (e.g., a coding assistant and a personal assistant), Honcho maintains separate "peer" profiles. Each peer sees only its own observations and conclusions, preventing cross-contamination of context.</p>
+<h2 id="setup">Setup</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">    </span><span class="c1"># select &quot;honcho&quot; from the provider list</span>
+</code></pre></div>
+
+<p>Or configure manually:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">memory</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">honcho</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;HONCHO_API_KEY=***&#39;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/.env
+</code></pre></div>
+
+<p>Get an API key at <a href="https://honcho.dev" class="ext" target="_blank" rel="noopener">honcho.dev</a>.</p>
+<h2 id="architecture">Architecture</h2>
+<h3 id="two-layer-context-injection">Two-Layer Context Injection</h3>
+<p>Every turn (in <code>hybrid</code> or <code>context</code> mode), Honcho assembles two layers of context injected into the system prompt:</p>
+<ol>
+<li><strong>Base context</strong> — session summary, user representation, user peer card, AI self-representation, and AI identity card. Refreshed on <code>contextCadence</code>. This is the "who is this user" layer.</li>
+<li><strong>Dialectic supplement</strong> — LLM-synthesized reasoning about the user's current state and needs. Refreshed on <code>dialecticCadence</code>. This is the "what matters right now" layer.</li>
+</ol>
+<p>Both layers are concatenated and truncated to the <code>contextTokens</code> budget (if set).</p>
+<h3 id="coldwarm-prompt-selection">Cold/Warm Prompt Selection</h3>
+<p>The dialectic automatically selects between two prompt strategies:</p>
+<ul>
+<li><strong>Cold start</strong> (no base context yet): General query — "Who is this person? What are their preferences, goals, and working style?"</li>
+<li><strong>Warm session</strong> (base context exists): Session-scoped query — "Given what's been discussed in this session so far, what context about this user is most relevant?"</li>
+</ul>
+<p>This happens automatically based on whether base context has been populated.</p>
+<h3 id="three-orthogonal-config-knobs">Three Orthogonal Config Knobs</h3>
+<p>Cost and depth are controlled by three independent knobs:</p>
+<table>
+<thead>
+<tr>
+<th>Knob</th>
+<th>Controls</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>contextCadence</code></td>
+<td>Turns between <code>context()</code> API calls (base layer refresh)</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>dialecticCadence</code></td>
+<td>Turns between <code>peer.chat()</code> LLM calls (dialectic layer refresh)</td>
+<td><code>2</code> (recommended 1–5)</td>
+</tr>
+<tr>
+<td><code>dialecticDepth</code></td>
+<td>Number of <code>.chat()</code> passes per dialectic invocation (1–3)</td>
+<td><code>1</code></td>
+</tr>
+</tbody>
+</table>
+<p>These are orthogonal — you can have frequent context refreshes with infrequent dialectic, or deep multi-pass dialectic at low frequency. Example: <code>contextCadence: 1, dialecticCadence: 5, dialecticDepth: 2</code> refreshes base context every turn, runs dialectic every 5 turns, and each dialectic run makes 2 passes.</p>
+<h3 id="dialectic-depth-multi-pass">Dialectic Depth (Multi-Pass)</h3>
+<p>When <code>dialecticDepth</code> &gt; 1, each dialectic invocation runs multiple <code>.chat()</code> passes:</p>
+<ul>
+<li><strong>Pass 0</strong>: Cold or warm prompt (see above)</li>
+<li><strong>Pass 1</strong>: Self-audit — identifies gaps in the initial assessment and synthesizes evidence from recent sessions</li>
+<li><strong>Pass 2</strong>: Reconciliation — checks for contradictions between prior passes and produces a final synthesis</li>
+</ul>
+<p>Each pass uses a proportional reasoning level (lighter early passes, base level for the main pass). Override per-pass levels with <code>dialecticDepthLevels</code> — e.g., <code>["minimal", "medium", "high"]</code> for a depth-3 run.</p>
+<p>Passes bail out early if the prior pass returned strong signal (long, structured output), so depth 3 doesn't always mean 3 LLM calls.</p>
+<h3 id="session-start-prewarm">Session-Start Prewarm</h3>
+<p>On session init, Honcho fires a dialectic call in the background at the full configured <code>dialecticDepth</code> and hands the result directly to turn 1's context assembly. A single-pass prewarm on a cold peer often returns thin output — multi-pass depth runs the audit/reconcile cycle before the user ever speaks. If prewarm hasn't landed by turn 1, turn 1 falls back to a synchronous call with a bounded timeout.</p>
+<h3 id="query-adaptive-reasoning-level">Query-Adaptive Reasoning Level</h3>
+<p>The auto-injected dialectic scales <code>dialecticReasoningLevel</code> by query length: +1 level at ≥120 chars, +2 at ≥400, clamped at <code>reasoningLevelCap</code> (default <code>"high"</code>). Disable with <code>reasoningHeuristic: false</code> to pin every auto call to <code>dialecticReasoningLevel</code>. Available levels: <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>max</code>.</p>
+<h2 id="configuration-options">Configuration Options</h2>
+<p>Honcho is configured in <code>~/.honcho/config.json</code> (global) or <code>$HERMES_HOME/honcho.json</code> (profile-local). The setup wizard handles this for you.</p>
+<h3 id="self-hosted-honcho-with-authentication">Self-Hosted Honcho with Authentication</h3>
+<p>When pointing Hermes at a self-hosted Honcho server, <code>hermes honcho setup</code> (and <code>hermes memory setup</code>) ask for a <strong>local JWT / bearer token</strong> after the base URL. Paste a JWT signed with the server's <code>AUTH_JWT_SECRET</code> (the Honcho compose env var) to enable authenticated access; leave it blank for servers running with <code>AUTH_USE_AUTH=false</code>. The local token is stored under the host block (<code>hosts.&lt;host&gt;.apiKey</code> in <code>honcho.json</code>), separate from any cloud <code>apiKey</code>, so you can flip the <code>Cloud or local?</code> prompt back to <code>cloud</code> later without losing either credential.</p>
+<h3 id="full-config-reference">Full Config Reference</h3>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>contextTokens</code></td>
+<td><code>null</code> (uncapped)</td>
+<td>Token budget for auto-injected context per turn. Set to an integer (e.g. 1200) to cap. Truncates at word boundaries</td>
+</tr>
+<tr>
+<td><code>contextCadence</code></td>
+<td><code>1</code></td>
+<td>Minimum turns between <code>context()</code> API calls (base layer refresh)</td>
+</tr>
+<tr>
+<td><code>dialecticCadence</code></td>
+<td><code>2</code></td>
+<td>Minimum turns between <code>peer.chat()</code> LLM calls (dialectic layer). Recommended 1–5. In <code>tools</code> mode, irrelevant — model calls explicitly</td>
+</tr>
+<tr>
+<td><code>dialecticDepth</code></td>
+<td><code>1</code></td>
+<td>Number of <code>.chat()</code> passes per dialectic invocation. Clamped to 1–3</td>
+</tr>
+<tr>
+<td><code>dialecticDepthLevels</code></td>
+<td><code>null</code></td>
+<td>Optional array of reasoning levels per pass, e.g. <code>["minimal", "low", "medium"]</code>. Overrides proportional defaults</td>
+</tr>
+<tr>
+<td><code>dialecticReasoningLevel</code></td>
+<td><code>'low'</code></td>
+<td>Base reasoning level: <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>max</code></td>
+</tr>
+<tr>
+<td><code>dialecticDynamic</code></td>
+<td><code>true</code></td>
+<td>When <code>true</code>, model can override reasoning level per-call via tool param</td>
+</tr>
+<tr>
+<td><code>dialecticMaxChars</code></td>
+<td><code>600</code></td>
+<td>Max chars of dialectic result injected into system prompt</td>
+</tr>
+<tr>
+<td><code>recallMode</code></td>
+<td><code>'hybrid'</code></td>
+<td><code>hybrid</code> (auto-inject + tools), <code>context</code> (inject only), <code>tools</code> (tools only)</td>
+</tr>
+<tr>
+<td><code>initOnSessionStart</code></td>
+<td><code>false</code></td>
+<td><code>tools</code> mode only. <code>true</code> creates the Honcho session <strong>synchronously at session start</strong> so it is ready before the first tool call; <code>false</code> (default) defers it to the first <code>honcho_*</code> call. See the startup note below</td>
+</tr>
+<tr>
+<td><code>timeout</code></td>
+<td><code>null</code> (SDK default)</td>
+<td>Seconds allowed for each Honcho SDK call (<code>requestTimeout</code> and the <code>HONCHO_TIMEOUT</code> env var are accepted too). Caps how long an unreachable server can hold a call, including the eager init above</td>
+</tr>
+<tr>
+<td><code>writeFrequency</code></td>
+<td><code>'async'</code></td>
+<td>When to flush messages: <code>async</code> (background thread), <code>turn</code> (sync), <code>session</code> (batch on end), or integer N</td>
+</tr>
+<tr>
+<td><code>saveMessages</code></td>
+<td><code>true</code></td>
+<td>Whether to persist messages to Honcho API</td>
+</tr>
+<tr>
+<td><code>observationMode</code></td>
+<td><code>'directional'</code></td>
+<td><code>directional</code> (all on) or <code>unified</code> (shared pool). Override with <code>observation</code> object for granular control</td>
+</tr>
+<tr>
+<td><code>messageMaxChars</code></td>
+<td><code>25000</code></td>
+<td>Max chars per message sent via <code>add_messages()</code>. Chunked if exceeded</td>
+</tr>
+<tr>
+<td><code>dialecticMaxInputChars</code></td>
+<td><code>10000</code></td>
+<td>Max chars for dialectic query input to <code>peer.chat()</code></td>
+</tr>
+<tr>
+<td><code>sessionStrategy</code></td>
+<td><code>'per-directory'</code></td>
+<td><code>per-directory</code>, <code>per-repo</code>, <code>per-session</code>, or <code>global</code></td>
+</tr>
+<tr>
+<td><code>pinUserPeer</code></td>
+<td><code>false</code></td>
+<td>Gateway only. When <code>true</code>, every platform user collapses to <code>peerName</code></td>
+</tr>
+<tr>
+<td><code>userPeerAliases</code></td>
+<td><code>{}</code></td>
+<td>Gateway only. Map of runtime IDs to peers (<code>{"7654321": "alice"}</code>). Many-to-one</td>
+</tr>
+<tr>
+<td><code>runtimePeerPrefix</code></td>
+<td><code>""</code></td>
+<td>Gateway only. Namespaces unknown runtime IDs (<code>telegram_7654321</code>) when no alias matches</td>
+</tr>
+<tr>
+<td><code>a2aSessions</code></td>
+<td><code>true</code></td>
+<td>Write DMs from other bots into their own Honcho session per sender bot, never the human's. <code>false</code> skips bot-authored turns entirely</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Session strategy</strong> controls how Honcho sessions map to your work:
+- <code>per-session</code> — each <code>hermes</code> run gets a fresh session. Clean starts, memory via tools. Recommended for new users.
+- <code>per-directory</code> — one Honcho session per working directory. Context accumulates across runs.
+- <code>per-repo</code> — one session per git repository.
+- <code>global</code> — single session across all directories.</p>
+<p>Directory-based strategies and manual <code>sessions</code> mappings use the logical session working directory, not the backend's launch directory. Desktop/TUI project workspaces and ACP session directories are passed during agent construction, including deferred builds. When no directory is supplied, Honcho uses the runtime cwd resolver: session context, then the scoped <code>terminal.cwd</code> setting, then the process launch directory.</p>
+<p>Messaging gateways keep their stable per-chat session key regardless of strategy or title. For other sessions, <code>per-session</code> identity takes priority, followed by a manual directory mapping, an explicit title, and the configured strategy.</p>
+<p>Automatically generated Hermes titles (<code>derived</code> or <code>llm</code>), including lineage titles for Desktop branches, are display metadata and do not override <code>sessionStrategy</code>. An explicit user title remains an intentional session-name override for non-gateway, non-<code>per-session</code> sessions without a manual mapping.</p>
+<p>Sessions created before title provenance was recorded retain legacy behavior: because an old automatic title cannot be distinguished from an old user title, a title with no source is treated as an explicit override.</p>
+<p><strong>Recall mode</strong> controls how memory flows into conversations:
+- <code>hybrid</code> — context auto-injected into system prompt AND tools available (model decides when to query).
+- <code>context</code> — auto-injection only, tools hidden.
+- <code>tools</code> — tools only, no auto-injection. Agent must explicitly call <code>honcho_reasoning</code>, <code>honcho_search</code>, etc.</p>
+<p><strong>Settings per recall mode:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th><code>hybrid</code></th>
+<th><code>context</code></th>
+<th><code>tools</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>writeFrequency</code></td>
+<td>flushes messages</td>
+<td>flushes messages</td>
+<td>flushes messages</td>
+</tr>
+<tr>
+<td><code>contextCadence</code></td>
+<td>gates base context refresh</td>
+<td>gates base context refresh</td>
+<td>irrelevant — no injection</td>
+</tr>
+<tr>
+<td><code>dialecticCadence</code></td>
+<td>gates auto LLM calls</td>
+<td>gates auto LLM calls</td>
+<td>irrelevant — model calls explicitly</td>
+</tr>
+<tr>
+<td><code>dialecticDepth</code></td>
+<td>multi-pass per invocation</td>
+<td>multi-pass per invocation</td>
+<td>irrelevant — model calls explicitly</td>
+</tr>
+<tr>
+<td><code>contextTokens</code></td>
+<td>caps injection</td>
+<td>caps injection</td>
+<td>irrelevant — no injection</td>
+</tr>
+<tr>
+<td><code>dialecticDynamic</code></td>
+<td>gates model override</td>
+<td>N/A (no tools)</td>
+<td>gates model override</td>
+</tr>
+</tbody>
+</table>
+<p>In <code>tools</code> mode, the model is fully in control — it calls <code>honcho_reasoning</code> when it wants, at whatever <code>reasoning_level</code> it picks. Cadence and budget settings only apply to modes with auto-injection (<code>hybrid</code> and <code>context</code>).</p>
+<p><strong>Startup behaviour and <code>initOnSessionStart</code>.</strong> In <code>hybrid</code> and <code>context</code> mode the session is created in a background thread and startup fails open if Honcho is slow or down. <code>tools</code> mode is different by design: with <code>initOnSessionStart: false</code> (the default) nothing touches Honcho until the first <code>honcho_*</code> tool call, and with <code>initOnSessionStart: true</code> the session is created <strong>synchronously during agent construction</strong> so a tool call on turn 1 never races a half-initialized session. That guarantee means startup waits for Honcho: if the server is unreachable, every SDK call in that eager path runs to its connection/<code>timeout</code> limit before the agent is ready, which on Desktop shows up as <code>request timed out: session.resume</code> / <code>prompt.submit</code> (the renderer gives up after 30 s). Keep <code>initOnSessionStart</code> at <code>false</code> on Desktop and whenever your Honcho is a local service that may not be running, and set <code>timeout</code> (seconds) in <code>honcho.json</code> to bound each call if you do enable it.</p>
+<h2 id="gateway-identity-mapping">Gateway Identity Mapping</h2>
+<p>These settings only matter when you run the <a href="../../developer-guide/gateway-internals.html">Hermes gateway</a> — the one entrypoint where users arrive with platform-native runtime IDs (Telegram UID, Discord snowflake, Slack user). CLI, TUI, and desktop sessions have no runtime ID and always resolve to <code>peerName</code>, so off-gateway these keys do nothing.</p>
+<p>The setup wizard detects whether a gateway platform is connected and skips this step entirely if not. When it runs, it asks one question — <em>who talks to this gateway?</em> — and derives the keys:</p>
+<table>
+<thead>
+<tr>
+<th>Answer</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>just me</strong></td>
+<td><code>pinUserPeer: true</code> — every non-agent gateway user collapses to your peer. Pin overrides all aliases, so pick this only when no user-side identity needs its own peer. If separate agents reach the gateway and each needs a distinct peer, do <strong>not</strong> pin — leave <code>pinUserPeer: false</code> and map them via <code>userPeerAliases</code> (the <code>[e]</code> editor) instead</td>
+</tr>
+<tr>
+<td><strong>me + other people</strong> (pooled)</td>
+<td><code>pinUserPeer: false</code> + <code>userPeerAliases</code> mapping your runtime IDs to <code>peerName</code> — you stay on your shared history, others get their own peers</td>
+</tr>
+<tr>
+<td><strong>only other people</strong></td>
+<td><code>pinUserPeer: false</code>, optional <code>runtimePeerPrefix</code> — each user gets their own peer</td>
+</tr>
+</tbody>
+</table>
+<p>Pick <code>[e]</code> at the prompt to set the three keys directly instead.</p>
+<p>The resolver tries the keys top-down, first match wins: <code>pinUserPeer</code> → <code>userPeerAliases[id]</code> → <code>runtimePeerPrefix + id</code> → raw runtime ID → <code>peerName</code> → session-key fallback.</p>
+<p>Each turn is written under the peer of whoever wrote it, so in a shared chat the first person to message no longer collects everyone else's facts. A turn from another bot (a Bot Mode DM tagged <code>bot:&lt;profile&gt;</code>, or a platform account the adapter flags as a bot) always gets its own peer: <code>pinUserPeer</code> unifies one person's accounts, never a bot. Its turn lands in a per-sender <code>a2a</code> session (see <code>a2aSessions</code>), and <code>honcho_conclude</code> / <code>honcho_profile</code> refuse writes while such a turn runs, since conclusions and cards describe the human.</p>
+<div class="admonition adm-warning"><p class="adm-title">Un-pinning orphans pooled memory</p>
+<p>Flipping <code>pinUserPeer</code> from <code>true</code> to <code>false</code> does not migrate data — memory accumulated under <code>peerName</code> stays there, and platform users resolve to fresh, empty peers. To keep your own continuity, choose the <strong>pooled</strong> path so your runtime IDs alias back to <code>peerName</code>. The wizard offers this steer automatically when it detects the transition.</p>
+</div>
+<div class="admonition adm-note"><p class="adm-title">Deprecated key</p>
+<p><code>pinPeerName</code> is a legacy alias for <code>pinUserPeer</code> — still read for back-compat (<code>pinUserPeer</code> wins where both are set), never written. Re-running setup migrates it onto the canonical key.</p>
+</div>
+<h2 id="observation-directional-vs-unified">Observation (Directional vs. Unified)</h2>
+<p>Honcho models a conversation as peers exchanging messages. Each peer has two observation toggles that map 1:1 to Honcho's <code>SessionPeerConfig</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Toggle</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>observeMe</code></td>
+<td>Honcho builds a representation of this peer from its own messages</td>
+</tr>
+<tr>
+<td><code>observeOthers</code></td>
+<td>This peer observes the other peer's messages (feeds cross-peer reasoning)</td>
+</tr>
+</tbody>
+</table>
+<p>Two peers × two toggles = four flags. <code>observationMode</code> is a shorthand preset:</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th>User flags</th>
+<th>AI flags</th>
+<th>Semantics</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"directional"</code> (default)</td>
+<td>me: on, others: on</td>
+<td>me: on, others: on</td>
+<td>Full mutual observation. Enables cross-peer dialectic — "what does the AI know about the user, based on what the user said and the AI replied."</td>
+</tr>
+<tr>
+<td><code>"unified"</code></td>
+<td>me: on, others: off</td>
+<td>me: off, others: on</td>
+<td>Shared-pool semantics — the AI observes the user's messages only, the user peer only self-models. Single-observer pool.</td>
+</tr>
+</tbody>
+</table>
+<p>Override the preset with an explicit <code>observation</code> block for per-peer control:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">&quot;observation&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;user&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;observeMe&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w">  </span><span class="nt">&quot;observeOthers&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;ai&quot;</span><span class="p">:</span><span class="w">   </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;observeMe&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w">  </span><span class="nt">&quot;observeOthers&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Common patterns:</p>
+<table>
+<thead>
+<tr>
+<th>Intent</th>
+<th>Config</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Full observation (most users)</td>
+<td><code>"observationMode": "directional"</code></td>
+</tr>
+<tr>
+<td>AI shouldn't re-model the user from its own replies</td>
+<td><code>"ai": {"observeMe": true, "observeOthers": false}</code></td>
+</tr>
+<tr>
+<td>Strong persona the AI peer shouldn't update from self-observation</td>
+<td><code>"ai": {"observeMe": false, "observeOthers": true}</code></td>
+</tr>
+</tbody>
+</table>
+<p>Server-side toggles set via the <a href="https://app.honcho.dev" class="ext" target="_blank" rel="noopener">Honcho dashboard</a> win over local defaults — Hermes syncs them back at session init.</p>
+<h2 id="tools">Tools</h2>
+<p>When Honcho is active as the memory provider, five tools become available:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>honcho_profile</code></td>
+<td>Read or update peer card — pass <code>card</code> (list of facts) to update, omit to read</td>
+</tr>
+<tr>
+<td><code>honcho_search</code></td>
+<td>Semantic search over context — raw excerpts, no LLM synthesis</td>
+</tr>
+<tr>
+<td><code>honcho_context</code></td>
+<td>Full session context — summary, representation, card, recent messages</td>
+</tr>
+<tr>
+<td><code>honcho_reasoning</code></td>
+<td>Synthesized answer from Honcho's LLM — pass <code>reasoning_level</code> (minimal/low/medium/high/max) to control depth</td>
+</tr>
+<tr>
+<td><code>honcho_conclude</code></td>
+<td>Create or delete conclusions — pass <code>conclusion</code> to create, <code>delete_id</code> to remove (PII only)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="cli-commands">CLI Commands</h2>
+<p>The <code>hermes honcho</code> subcommand is <strong>only registered when Honcho is the active memory provider</strong> (<code>memory.provider: honcho</code> in <code>config.yaml</code>). On a fresh install, configure Honcho directly with <code>hermes memory setup honcho</code> (or run <code>hermes memory setup</code> and pick it from the list); the <code>hermes honcho</code> subcommand then appears on the next invocation.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w"> </span>honcho<span class="w">    </span><span class="c1"># Configure Honcho directly (works before activation)</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>status<span class="w">          </span><span class="c1"># Connection status, config, and key settings</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>setup<span class="w">           </span><span class="c1"># Redirects to `hermes memory setup` (post-activation alias)</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>strategy<span class="w">        </span><span class="c1"># Show or set session strategy (per-session/per-directory/per-repo/global)</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>peer<span class="w">            </span><span class="c1"># Show or update peer names + dialectic reasoning level</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>mode<span class="w">            </span><span class="c1"># Show or set recall mode (hybrid/context/tools)</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>tokens<span class="w">          </span><span class="c1"># Show or set token budget for context and dialectic</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>identity<span class="w">        </span><span class="c1"># Seed or show the AI peer&#39;s Honcho identity</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>sync<span class="w">            </span><span class="c1"># Sync Honcho config to all existing profiles</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>peers<span class="w">           </span><span class="c1"># Show peer identities across all profiles</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>sessions<span class="w">        </span><span class="c1"># List known Honcho session mappings</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>map<span class="w">             </span><span class="c1"># Map current directory to a Honcho session name</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span><span class="nb">enable</span><span class="w">          </span><span class="c1"># Enable Honcho for the active profile</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>disable<span class="w">         </span><span class="c1"># Disable Honcho for the active profile</span>
+hermes<span class="w"> </span>honcho<span class="w"> </span>migrate<span class="w">         </span><span class="c1"># Step-by-step migration guide from openclaw-honcho</span>
+</code></pre></div>
+
+<h2 id="migrating-from-hermes-honcho">Migrating from <code>hermes honcho</code></h2>
+<p>If you previously used the standalone <code>hermes honcho setup</code>:</p>
+<ol>
+<li>Your existing configuration (<code>honcho.json</code> or <code>~/.honcho/config.json</code>) is preserved</li>
+<li>Your server-side data (memories, conclusions, user profiles) is intact</li>
+<li>Set <code>memory.provider: honcho</code> in config.yaml to reactivate</li>
+</ol>
+<p>No re-login or re-setup needed. Run <code>hermes memory setup</code> and select "honcho" — the wizard detects your existing config.</p>
+<h2 id="full-documentation">Full Documentation</h2>
+<p>See <a href="memory-providers.html#honcho">Memory Providers — Honcho</a> for the complete reference.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/honcho</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#what-honcho-adds">What Honcho Adds</a></li>
+<li class="lvl2"><a href="#setup">Setup</a></li>
+<li class="lvl2"><a href="#architecture">Architecture</a></li>
+<li class="lvl3"><a href="#two-layer-context-injection">Two-Layer Context Injection</a></li>
+<li class="lvl3"><a href="#coldwarm-prompt-selection">Cold/Warm Prompt Selection</a></li>
+<li class="lvl3"><a href="#three-orthogonal-config-knobs">Three Orthogonal Config Knobs</a></li>
+<li class="lvl3"><a href="#dialectic-depth-multi-pass">Dialectic Depth (Multi-Pass)</a></li>
+<li class="lvl3"><a href="#session-start-prewarm">Session-Start Prewarm</a></li>
+<li class="lvl3"><a href="#query-adaptive-reasoning-level">Query-Adaptive Reasoning Level</a></li>
+<li class="lvl2"><a href="#configuration-options">Configuration Options</a></li>
+<li class="lvl3"><a href="#self-hosted-honcho-with-authentication">Self-Hosted Honcho with Authentication</a></li>
+<li class="lvl3"><a href="#full-config-reference">Full Config Reference</a></li>
+<li class="lvl2"><a href="#gateway-identity-mapping">Gateway Identity Mapping</a></li>
+<li class="lvl2"><a href="#observation-directional-vs-unified">Observation (Directional vs. Unified)</a></li>
+<li class="lvl2"><a href="#tools">Tools</a></li>
+<li class="lvl2"><a href="#cli-commands">CLI Commands</a></li>
+<li class="lvl2"><a href="#migrating-from-hermes-honcho">Migrating from hermes honcho</a></li>
+<li class="lvl2"><a href="#full-documentation">Full Documentation</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

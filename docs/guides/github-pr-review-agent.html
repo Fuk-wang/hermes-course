@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tutorial: GitHub PR Review Agent · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/github-pr-review-agent</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="tutorial-build-a-github-pr-review-agent">Tutorial: Build a GitHub PR Review Agent</h1>
+<p><strong>The problem:</strong> Your team opens PRs faster than you can review them. PRs sit for days waiting for eyeballs. Junior devs merge bugs because nobody had time to check. You spend your mornings catching up on diffs instead of building.</p>
+<p><strong>The solution:</strong> An AI agent that watches your repos around the clock, reviews every new PR for bugs, security issues, and code quality, and sends you a summary — so you only spend time on PRs that actually need human judgment.</p>
+<p><strong>What you'll build:</strong></p>
+<div class="highlight"><pre><span></span><code>┌───────────────────────────────────────────────────────────────────┐
+│                                                                   │
+│   Cron Timer  ──▶  Hermes Agent  ──▶  GitHub API  ──▶  Review     │
+│   (every 2h)       + gh CLI           (PR diffs)       delivery   │
+│                    + skill                             (Telegram, │
+│                    + memory                            Discord,   │
+│                                                        local)     │
+│                                                                   │
+└───────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<p>This guide uses <strong>cron jobs</strong> to poll for PRs on a schedule — no server or public endpoint needed. Works behind NAT and firewalls.</p>
+<div class="admonition adm-tip"><p class="adm-title">Want real-time reviews instead?</p>
+<p>If you have a public endpoint available, check out <a href="webhook-github-pr-review.html">Automated GitHub PR Comments with Webhooks</a> — GitHub pushes events to Hermes instantly when PRs are opened or updated.</p>
+</div>
+<hr />
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li><strong>Hermes Agent installed</strong> — see the <a href="../getting-started/installation.html">Installation guide</a></li>
+<li><strong>Gateway running</strong> for cron jobs:
+  <code>bash
+  hermes gateway install   # Install as a service
+  # or
+  hermes gateway           # Run in foreground</code></li>
+<li><strong>GitHub CLI (<code>gh</code>) installed and authenticated</strong>:
+  ```bash
+  # Install
+  brew install gh        # macOS
+  sudo apt install gh    # Ubuntu/Debian</li>
+</ul>
+<p># Authenticate
+  gh auth login
+  ```
+- <strong>Messaging configured</strong> (optional) — <a href="../user-guide/messaging/telegram.html">Telegram</a> or <a href="../user-guide/messaging/discord.html">Discord</a></p>
+<div class="admonition adm-tip"><p class="adm-title">No messaging? No problem</p>
+<p>Use <code>deliver: "local"</code> to save reviews to <code>~/.hermes/cron/output/</code>. Great for testing before wiring up notifications.</p>
+</div>
+<hr />
+<h2 id="step-1-verify-the-setup">Step 1: Verify the Setup</h2>
+<p>Make sure Hermes can access GitHub. Start a chat:</p>
+<div class="highlight"><pre><span></span><code>hermes
+</code></pre></div>
+
+<p>Test with a simple command:</p>
+<div class="highlight"><pre><span></span><code>Run: gh pr list --repo NousResearch/hermes-agent --state open --limit 3
+</code></pre></div>
+
+<p>You should see a list of open PRs. If this works, you're ready.</p>
+<hr />
+<h2 id="step-2-try-a-manual-review">Step 2: Try a Manual Review</h2>
+<p>Still in the chat, ask Hermes to review a real PR:</p>
+<div class="highlight"><pre><span></span><code>Review this pull request. Read the diff, check for bugs, security issues,
+and code quality. Be specific about line numbers and quote problematic code.
+
+Run: gh pr diff 3888 --repo NousResearch/hermes-agent
+</code></pre></div>
+
+<p>Hermes will:
+1. Execute <code>gh pr diff</code> to fetch the code changes
+2. Read through the entire diff
+3. Produce a structured review with specific findings</p>
+<p>If you're happy with the quality, time to automate it.</p>
+<hr />
+<h2 id="step-3-create-a-review-skill">Step 3: Create a Review Skill</h2>
+<p>A skill gives Hermes consistent review guidelines that persist across sessions and cron runs. Without one, review quality varies.</p>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.hermes/skills/code-review
+</code></pre></div>
+
+<p>Create <code>~/.hermes/skills/code-review/SKILL.md</code>:</p>
+<div class="highlight"><pre><span></span><code>---
+name: code-review
+<span class="gu">description: Review pull requests for bugs, security issues, and code quality</span>
+<span class="gu">---</span>
+
+<span class="gh"># Code Review Guidelines</span>
+
+When reviewing a pull request:
+
+<span class="gu">## What to Check</span>
+<span class="k">1.</span> <span class="gs">**Bugs**</span> — Logic errors, off-by-one, null/undefined handling
+<span class="k">2.</span> <span class="gs">**Security**</span> — Injection, auth bypass, secrets in code, SSRF
+<span class="k">3.</span> <span class="gs">**Performance**</span> — N+1 queries, unbounded loops, memory leaks
+<span class="k">4.</span> <span class="gs">**Style**</span> — Naming conventions, dead code, missing error handling
+<span class="k">5.</span> <span class="gs">**Tests**</span> — Are changes tested? Do tests cover edge cases?
+
+<span class="gu">## Output Format</span>
+For each finding:
+<span class="k">-</span><span class="w"> </span><span class="gs">**File:Line**</span> — exact location
+<span class="k">-</span><span class="w"> </span><span class="gs">**Severity**</span> — Critical / Warning / Suggestion
+<span class="k">-</span><span class="w"> </span><span class="gs">**What&#39;s wrong**</span> — one sentence
+<span class="k">-</span><span class="w"> </span><span class="gs">**Fix**</span> — how to fix it
+
+<span class="gu">## Rules</span>
+<span class="k">-</span><span class="w"> </span>Be specific. Quote the problematic code.
+<span class="k">-</span><span class="w"> </span>Don&#39;t flag style nitpicks unless they affect readability.
+<span class="k">-</span><span class="w"> </span>If the PR looks good, say so. Don&#39;t invent problems.
+<span class="k">-</span><span class="w"> </span>End with: APPROVE / REQUEST_CHANGES / COMMENT
+</code></pre></div>
+
+<p>Verify it loaded — start <code>hermes</code> and you should see <code>code-review</code> in the skills list at startup.</p>
+<hr />
+<h2 id="step-4-teach-it-your-conventions">Step 4: Teach It Your Conventions</h2>
+<p>This is what makes the reviewer actually useful. Start a session and teach Hermes your team's standards:</p>
+<div class="highlight"><pre><span></span><code>Remember: In our backend repo, we use Python with FastAPI.
+All endpoints must have type annotations and Pydantic models.
+We don&#39;t allow raw SQL — only SQLAlchemy ORM.
+Test files go in tests/ and must use pytest fixtures.
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>Remember: In our frontend repo, we use TypeScript with React.
+No `any` types allowed. All components must have props interfaces.
+We use React Query for data fetching, never useEffect for API calls.
+</code></pre></div>
+
+<p>These memories persist forever — the reviewer will enforce your conventions without being told each time.</p>
+<hr />
+<h2 id="step-5-create-the-automated-cron-job">Step 5: Create the Automated Cron Job</h2>
+<p>Now wire it all together. Create a cron job that runs every 2 hours:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;0 */2 * * *&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;Check for new open PRs and review them.</span>
+
+<span class="s2">Repos to monitor:</span>
+<span class="s2">- myorg/backend-api</span>
+<span class="s2">- myorg/frontend-app</span>
+
+<span class="s2">Steps:</span>
+<span class="s2">1. Run: gh pr list --repo REPO --state open --limit 5 --json number,title,author,createdAt</span>
+<span class="s2">2. For each PR created or updated in the last 4 hours:</span>
+<span class="s2">   - Run: gh pr diff NUMBER --repo REPO</span>
+<span class="s2">   - Review the diff using the code-review guidelines</span>
+<span class="s2">3. Format output as:</span>
+
+<span class="s2">## PR Reviews — today</span>
+
+<span class="s2">### [repo] #[number]: [title]</span>
+<span class="s2">**Author:** [name] | **Verdict:** APPROVE/REQUEST_CHANGES/COMMENT</span>
+<span class="s2">[findings]</span>
+
+<span class="s2">If no new PRs found, say: No new PRs to review.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;pr-review&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>code-review
+</code></pre></div>
+
+<p>Verify it's scheduled:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>list
+</code></pre></div>
+
+<h3 id="other-useful-schedules">Other useful schedules</h3>
+<table>
+<thead>
+<tr>
+<th>Schedule</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0 */2 * * *</code></td>
+<td>Every 2 hours</td>
+</tr>
+<tr>
+<td><code>0 9,13,17 * * 1-5</code></td>
+<td>Three times a day, weekdays only</td>
+</tr>
+<tr>
+<td><code>0 9 * * 1</code></td>
+<td>Weekly Monday morning roundup</td>
+</tr>
+<tr>
+<td><code>30m</code></td>
+<td>Every 30 minutes (high-traffic repos)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="step-6-run-it-on-demand">Step 6: Run It On Demand</h2>
+<p>Don't want to wait for the schedule? Trigger it manually:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>run<span class="w"> </span>pr-review
+</code></pre></div>
+
+<p>Or from within a chat session:</p>
+<div class="highlight"><pre><span></span><code>/cron run pr-review
+</code></pre></div>
+
+<hr />
+<h2 id="going-further">Going Further</h2>
+<h3 id="post-reviews-directly-to-github">Post Reviews Directly to GitHub</h3>
+<p>Instead of delivering to Telegram, have the agent comment on the PR itself:</p>
+<p>Add this to your cron prompt:</p>
+<div class="highlight"><pre><span></span><code>After reviewing, post your review:
+- For issues: gh pr review NUMBER --repo REPO --comment --body &quot;YOUR_REVIEW&quot;
+- For critical issues: gh pr review NUMBER --repo REPO --request-changes --body &quot;YOUR_REVIEW&quot;
+- For clean PRs: gh pr review NUMBER --repo REPO --approve --body &quot;Looks good&quot;
+</code></pre></div>
+
+<div class="admonition adm-caution"><p class="adm-title">Caution</p>
+<p>Make sure <code>gh</code> has a token with <code>repo</code> scope. Reviews are posted as whoever <code>gh</code> is authenticated as.</p>
+</div>
+<h3 id="weekly-pr-dashboard">Weekly PR Dashboard</h3>
+<p>Create a Monday morning overview of all your repos:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;0 9 * * 1&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;Generate a weekly PR dashboard:</span>
+<span class="s2">- myorg/backend-api</span>
+<span class="s2">- myorg/frontend-app</span>
+<span class="s2">- myorg/infra</span>
+
+<span class="s2">For each repo show:</span>
+<span class="s2">1. Open PR count and oldest PR age</span>
+<span class="s2">2. PRs merged this week</span>
+<span class="s2">3. Stale PRs (older than 5 days)</span>
+<span class="s2">4. PRs with no reviewer assigned</span>
+
+<span class="s2">Format as a clean summary.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;weekly-dashboard&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram
+</code></pre></div>
+
+<h3 id="multi-repo-monitoring">Multi-Repo Monitoring</h3>
+<p>Scale up by adding more repos to the prompt. The agent processes them sequentially — no extra setup needed.</p>
+<hr />
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="gh-command-not-found">"gh: command not found"</h3>
+<p>The gateway runs in a minimal environment. Ensure <code>gh</code> is in the system PATH and restart the gateway.</p>
+<h3 id="reviews-are-too-generic">Reviews are too generic</h3>
+<ol>
+<li>Add the <code>code-review</code> skill (Step 3)</li>
+<li>Teach Hermes your conventions via memory (Step 4)</li>
+<li>The more context it has about your stack, the better the reviews</li>
+</ol>
+<h3 id="cron-job-doesnt-run">Cron job doesn't run</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>status<span class="w">    </span><span class="c1"># Is the gateway running?</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>list<span class="w">         </span><span class="c1"># Is the job enabled?</span>
+</code></pre></div>
+
+<h3 id="rate-limits">Rate limits</h3>
+<p>GitHub allows 5,000 API requests/hour for authenticated users. Each PR review uses ~3-5 requests (list + diff + optional comments). Even reviewing 100 PRs/day stays well within limits.</p>
+<hr />
+<h2 id="whats-next">What's Next?</h2>
+<ul>
+<li><strong><a href="webhook-github-pr-review.html">Webhook-Based PR Reviews</a></strong> — get instant reviews when PRs are opened (requires a public endpoint)</li>
+<li><strong><a href="daily-briefing-bot.html">Daily Briefing Bot</a></strong> — combine PR reviews with your morning news digest</li>
+<li><strong><a href="../developer-guide/plugins.html">Build a Plugin</a></strong> — wrap the review logic into a shareable plugin</li>
+<li><strong><a href="../user-guide/profiles.html">Profiles</a></strong> — run a dedicated reviewer profile with its own memory and config</li>
+<li><strong><a href="../user-guide/features/fallback-providers.html">Fallback Providers</a></strong> — ensure reviews run even when one provider is down</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/github-pr-review-agent</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#step-1-verify-the-setup">Step 1: Verify the Setup</a></li>
+<li class="lvl2"><a href="#step-2-try-a-manual-review">Step 2: Try a Manual Review</a></li>
+<li class="lvl2"><a href="#step-3-create-a-review-skill">Step 3: Create a Review Skill</a></li>
+<li class="lvl2"><a href="#step-4-teach-it-your-conventions">Step 4: Teach It Your Conventions</a></li>
+<li class="lvl2"><a href="#step-5-create-the-automated-cron-job">Step 5: Create the Automated Cron Job</a></li>
+<li class="lvl3"><a href="#other-useful-schedules">Other useful schedules</a></li>
+<li class="lvl2"><a href="#step-6-run-it-on-demand">Step 6: Run It On Demand</a></li>
+<li class="lvl2"><a href="#going-further">Going Further</a></li>
+<li class="lvl3"><a href="#post-reviews-directly-to-github">Post Reviews Directly to GitHub</a></li>
+<li class="lvl3"><a href="#weekly-pr-dashboard">Weekly PR Dashboard</a></li>
+<li class="lvl3"><a href="#multi-repo-monitoring">Multi-Repo Monitoring</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl3"><a href="#gh-command-not-found">&quot;gh: command not found&quot;</a></li>
+<li class="lvl3"><a href="#reviews-are-too-generic">Reviews are too generic</a></li>
+<li class="lvl3"><a href="#cron-job-doesnt-run">Cron job doesn&#x27;t run</a></li>
+<li class="lvl3"><a href="#rate-limits">Rate limits</a></li>
+<li class="lvl2"><a href="#whats-next">What&#x27;s Next?</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

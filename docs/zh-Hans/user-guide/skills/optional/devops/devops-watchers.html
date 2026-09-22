@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watchers — 使用水印去重轮询 RSS、JSON API 和 GitHub · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/optional/devops/devops-watchers</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="watchers">Watchers</h1>
+<p>使用水印去重轮询 RSS、JSON API 和 GitHub。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>可选 — 通过 <code>hermes skills install official/devops/watchers</code> 安装</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>optional-skills/devops/watchers</code></td>
+</tr>
+<tr>
+<td>版本</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>作者</td>
+<td>Hermes Agent</td>
+</tr>
+<tr>
+<td>许可证</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos</td>
+</tr>
+<tr>
+<td>标签</td>
+<td><code>cron</code>, <code>polling</code>, <code>rss</code>, <code>github</code>, <code>http</code>, <code>automation</code>, <code>monitoring</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。</p>
+</div>
+<h1 id="watchers_1">Watchers</h1>
+<p>按固定间隔轮询（polling）外部数据源，仅对新条目作出响应。提供三个现成脚本及一个共享水印（watermark）辅助模块；可将其接入 cron 任务，也可从终端临时运行。</p>
+<h2 id="使用场景">使用场景</h2>
+<ul>
+<li>用户希望监控 RSS/Atom feed 并在有新条目时收到通知</li>
+<li>用户希望监控 GitHub 仓库的 issues / pulls / releases / commits</li>
+<li>用户希望轮询任意 JSON 端点并在有新条目时收到通知</li>
+<li>用户请求"为 X 创建一个 watcher"或"当 X 变化时通知我"</li>
+</ul>
+<h2 id="工作原理">工作原理</h2>
+<p>一个 watcher 本质上是一个脚本，执行以下操作：</p>
+<ol>
+<li>从外部数据源获取数据</li>
+<li>与记录已处理 ID 的水印文件进行比对</li>
+<li>将新水印写回文件</li>
+<li>将新条目打印到 stdout（无变化则不输出）</li>
+</ol>
+<p>以下三个脚本均实现了上述逻辑。agent 通过终端工具运行它们——来自 cron 任务、webhook 或交互式对话——并报告新内容。</p>
+<h2 id="现成脚本">现成脚本</h2>
+<p>安装 skill 后，三个脚本均位于 <code>$HERMES_HOME/skills/devops/watchers/scripts/</code>。每个脚本读取 <code>WATCHER_STATE_DIR</code>（默认为 <code>$HERMES_HOME/watcher-state/</code>）作为状态文件目录，以 <code>--name</code> 参数作为键名。</p>
+<table>
+<thead>
+<tr>
+<th>脚本</th>
+<th>监控对象</th>
+<th>去重键</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>watch_rss.py</code></td>
+<td>RSS 2.0 或 Atom feed URL</td>
+<td><code>&lt;guid&gt;</code> / <code>&lt;id&gt;</code></td>
+</tr>
+<tr>
+<td><code>watch_http_json.py</code></td>
+<td>任意返回对象列表的 JSON 端点</td>
+<td>可配置的 id 字段</td>
+</tr>
+<tr>
+<td><code>watch_github.py</code></td>
+<td>GitHub 仓库的 issues / pulls / releases / commits</td>
+<td><code>id</code> / <code>sha</code></td>
+</tr>
+</tbody>
+</table>
+<p>三个脚本的共同特性：</p>
+<ul>
+<li>首次运行记录基线——不会重放已有 feed 内容</li>
+<li>水印为有界 ID 集合（最多 500 条），以限制内存占用</li>
+<li>输出格式：每条条目为 <code>## &lt;title&gt;\n&lt;url&gt;\n\n&lt;optional body&gt;</code></li>
+<li>无新内容时 stdout 为空——调用方将此视为静默</li>
+<li>获取出错时返回非零退出码</li>
+</ul>
+<h2 id="用法">用法</h2>
+<p>直接从终端工具运行 watcher：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span><span class="nv">$HERMES_HOME</span>/skills/devops/watchers/scripts/watch_rss.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hn<span class="w"> </span>--url<span class="w"> </span>https://news.ycombinator.com/rss<span class="w"> </span>--max<span class="w"> </span><span class="m">5</span>
+</code></pre></div>
+
+<p>监控 GitHub 仓库（在 <code>~/.hermes/.env</code> 中设置 <code>GITHUB_TOKEN</code> 以避免匿名请求限制 60 次/小时）：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span><span class="nv">$HERMES_HOME</span>/skills/devops/watchers/scripts/watch_github.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hermes-issues<span class="w"> </span>--repo<span class="w"> </span>NousResearch/hermes-agent<span class="w"> </span>--scope<span class="w"> </span>issues
+</code></pre></div>
+
+<p>轮询任意 JSON API：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span><span class="nv">$HERMES_HOME</span>/skills/devops/watchers/scripts/watch_http_json.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>api<span class="w"> </span>--url<span class="w"> </span>https://api.example.com/events<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--id-field<span class="w"> </span>event_id<span class="w"> </span>--items-path<span class="w"> </span>data.events
+</code></pre></div>
+
+<h2 id="接入-cron">接入 cron</h2>
+<p>向 agent 发送如下 prompt（提示词）以调度 cron 任务：</p>
+<blockquote>
+<p>每 15 分钟运行一次 <code>watch_rss.py --name hn --url https://news.ycombinator.com/rss</code>。如果有输出，则汇总标题并推送；如果没有输出，则保持静默。</p>
+</blockquote>
+<p>agent 在 cron 任务的 agent 循环中通过终端工具调用脚本，无需修改 cron 内置的 <code>--script</code> 标志。</p>
+<h2 id="状态文件">状态文件</h2>
+<p>每个 watcher 将状态写入 <code>$HERMES_HOME/watcher-state/&lt;name&gt;.json</code>。查看状态：</p>
+<div class="highlight"><pre><span></span><code>cat<span class="w"> </span><span class="nv">$HERMES_HOME</span>/watcher-state/hn.json
+</code></pre></div>
+
+<p>强制重放（下次运行视为首次轮询）：</p>
+<div class="highlight"><pre><span></span><code>rm<span class="w"> </span><span class="nv">$HERMES_HOME</span>/watcher-state/hn.json
+</code></pre></div>
+
+<h2 id="自定义-watcher">自定义 watcher</h2>
+<p>三个脚本使用相同的模板：加载水印、获取数据、差异比对、保存、输出。<code>scripts/_watermark.py</code> 是共享辅助模块；导入它即可免费获得原子写入、有界 ID 集合及首次运行基线功能。参考任意一个脚本，即可了解所需的样板代码有多少。</p>
+<h2 id="常见问题">常见问题</h2>
+<ol>
+<li><strong>每次 tick 都打印"无新条目"的标题。</strong> 调用方依赖 stdout 为空来判断静默。若在空 delta 时打印任何内容，将导致频道被刷屏。已提供的脚本已处理此问题；自定义脚本也必须如此。</li>
+<li><strong>期望首次运行就输出条目。</strong> 首次运行只记录基线，不会输出内容。如需初始摘要，可在首次运行后删除状态文件，或在自定义脚本中添加 <code>--prime-with-latest N</code> 标志。</li>
+<li><strong>水印无限增长。</strong> 共享辅助模块上限为 500 个 ID。对于高频更新的 feed 可适当提高；在存储受限的文件系统上可适当降低。</li>
+<li><strong>状态目录位于 agent 沙箱无法写入的位置。</strong> <code>$HERMES_HOME/watcher-state/</code> 始终可写。Docker/Modal 后端可能无法访问任意宿主机路径。</li>
+</ol>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/optional/devops/devops-watchers</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#使用场景">使用场景</a></li>
+<li class="lvl2"><a href="#工作原理">工作原理</a></li>
+<li class="lvl2"><a href="#现成脚本">现成脚本</a></li>
+<li class="lvl2"><a href="#用法">用法</a></li>
+<li class="lvl2"><a href="#接入-cron">接入 cron</a></li>
+<li class="lvl2"><a href="#状态文件">状态文件</a></li>
+<li class="lvl2"><a href="#自定义-watcher">自定义 watcher</a></li>
+<li class="lvl2"><a href="#常见问题">常见问题</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Context Engine 插件 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/context-engine-plugin</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="构建-context-engine-插件">构建 Context Engine 插件</h1>
+<p>Context engine 插件用于替换内置的 <code>ContextCompressor</code>，以实现管理对话上下文的替代策略。例如，无损上下文管理（LCM）引擎通过构建知识 DAG 来替代有损摘要。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>Agent 的上下文管理基于 <code>ContextEngine</code> ABC（<code>agent/context_engine.py</code>）构建。内置的 <code>ContextCompressor</code> 是默认实现。插件引擎必须实现相同的接口。</p>
+<p>同一时间只能有<strong>一个</strong> context engine 处于激活状态。选择由配置驱动：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">context</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">engine</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;compressor&quot;</span><span class="w">    </span><span class="c1"># 默认内置</span>
+<span class="w">  </span><span class="nt">engine</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;lcm&quot;</span><span class="w">           </span><span class="c1"># 激活名为 &quot;lcm&quot; 的插件引擎</span>
+</code></pre></div>
+
+<p>插件引擎<strong>永远不会自动激活</strong> — 用户必须显式将 <code>context.engine</code> 设置为插件名称。</p>
+<h2 id="目录结构">目录结构</h2>
+<p>每个 context engine 位于 <code>plugins/context_engine/&lt;name&gt;/</code>：</p>
+<div class="highlight"><pre><span></span><code>plugins/context_engine/lcm/
+├── __init__.py      # 导出 ContextEngine 子类
+├── plugin.yaml      # 元数据（name、description、version）
+└── ...              # 引擎所需的其他模块
+</code></pre></div>
+
+<h2 id="contextengine-abc">ContextEngine ABC</h2>
+<p>你的引擎必须实现以下<strong>必需</strong>方法：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.context_engine</span><span class="w"> </span><span class="kn">import</span> <span class="n">ContextEngine</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">LCMEngine</span><span class="p">(</span><span class="n">ContextEngine</span><span class="p">):</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;短标识符，例如 &#39;lcm&#39;。必须与 config.yaml 中的值匹配。&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="s2">&quot;lcm&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">update_from_response</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">usage</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;每次 LLM 调用后，以 usage dict 为参数调用。</span>
+
+<span class="sd">        从响应中更新 self.last_prompt_tokens、self.last_completion_tokens、</span>
+<span class="sd">        self.last_total_tokens。</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">should_compress</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">prompt_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;若本轮应触发压缩则返回 True。&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">compress</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">messages</span><span class="p">:</span> <span class="nb">list</span><span class="p">,</span> <span class="n">current_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+                 <span class="n">focus_topic</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;压缩消息列表并返回新的（可能更短的）列表。</span>
+
+<span class="sd">        返回的列表必须是有效的 OpenAI 格式消息序列。</span>
+
+<span class="sd">        ``focus_topic`` 是来自手动 ``/compress &lt;focus&gt;`` 的可选主题字符串；</span>
+<span class="sd">        支持引导式压缩的引擎应优先保留与其相关的信息，其他引擎可忽略。</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+</code></pre></div>
+
+<h3 id="引擎必须维护的类属性">引擎必须维护的类属性</h3>
+<p>Agent 直接读取这些属性用于显示和日志记录：</p>
+<div class="highlight"><pre><span></span><code><span class="n">last_prompt_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">last_completion_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">last_total_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">threshold_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>        <span class="c1"># 触发压缩的阈值</span>
+<span class="n">context_length</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>          <span class="c1"># 模型的完整上下文窗口</span>
+<span class="n">compression_count</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>       <span class="c1"># compress() 已运行的次数</span>
+</code></pre></div>
+
+<h3 id="可选方法">可选方法</h3>
+<p>这些方法在 ABC 中有合理的默认实现，按需覆盖：</p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>默认行为</th>
+<th>何时覆盖</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>on_session_start(session_id, **kwargs)</code></td>
+<td>空操作</td>
+<td>需要加载持久化状态（DAG、DB）时</td>
+</tr>
+<tr>
+<td><code>on_session_end(session_id, messages)</code></td>
+<td>空操作</td>
+<td>需要刷新状态、关闭连接时</td>
+</tr>
+<tr>
+<td><code>on_session_reset()</code></td>
+<td>重置 token 计数器</td>
+<td>有需要清除的会话级状态时</td>
+</tr>
+<tr>
+<td><code>update_model(model, context_length, ...)</code></td>
+<td>更新 context_length 和阈值</td>
+<td>需要在切换模型时重新计算预算时</td>
+</tr>
+<tr>
+<td><code>get_tool_schemas()</code></td>
+<td>返回 <code>[]</code></td>
+<td>引擎提供 agent 可调用的工具时（例如 <code>lcm_grep</code>）</td>
+</tr>
+<tr>
+<td><code>handle_tool_call(name, args, **kwargs)</code></td>
+<td>返回错误 JSON</td>
+<td>实现工具处理器时</td>
+</tr>
+<tr>
+<td><code>should_compress_preflight(messages)</code></td>
+<td>返回 <code>False</code></td>
+<td>可在 API 调用前进行低成本预估时</td>
+</tr>
+<tr>
+<td><code>get_status()</code></td>
+<td>标准 token/阈值字典</td>
+<td>有自定义指标需要暴露时</td>
+</tr>
+</tbody>
+</table>
+<h2 id="引擎工具">引擎工具</h2>
+<p>Context engine 可以暴露 agent 直接调用的工具。从 <code>get_tool_schemas()</code> 返回 schema，并在 <code>handle_tool_call()</code> 中处理调用：</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">get_tool_schemas</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">[{</span>
+        <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;lcm_grep&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Search the context knowledge graph&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;parameters&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;object&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;properties&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;query&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;string&quot;</span><span class="p">,</span> <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Search query&quot;</span><span class="p">}</span>
+            <span class="p">},</span>
+            <span class="s2">&quot;required&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;query&quot;</span><span class="p">],</span>
+        <span class="p">},</span>
+    <span class="p">}]</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">handle_tool_call</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;lcm_grep&quot;</span><span class="p">:</span>
+        <span class="n">results</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_search_dag</span><span class="p">(</span><span class="n">args</span><span class="p">[</span><span class="s2">&quot;query&quot;</span><span class="p">])</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;results&quot;</span><span class="p">:</span> <span class="n">results</span><span class="p">})</span>
+    <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Unknown tool: </span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">})</span>
+</code></pre></div>
+
+<p>引擎工具在启动时注入到 agent 的工具列表中并自动分发 — 无需注册到注册表。</p>
+<h2 id="注册">注册</h2>
+<h3 id="通过目录推荐">通过目录（推荐）</h3>
+<p>将引擎放置于 <code>plugins/context_engine/&lt;name&gt;/</code>。<code>__init__.py</code> 必须导出一个 <code>ContextEngine</code> 子类。发现系统会自动找到并实例化它。</p>
+<h3 id="通过通用插件系统">通过通用插件系统</h3>
+<p>通用插件也可以注册 context engine：</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">engine</span> <span class="o">=</span> <span class="n">LCMEngine</span><span class="p">(</span><span class="n">context_length</span><span class="o">=</span><span class="mi">200000</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_context_engine</span><span class="p">(</span><span class="n">engine</span><span class="p">)</span>
+</code></pre></div>
+
+<p>只能注册一个引擎。第二个尝试注册的插件将被拒绝并发出警告。</p>
+<h2 id="生命周期">生命周期</h2>
+<div class="highlight"><pre><span></span><code>1. 引擎实例化（插件加载或目录发现）
+2. on_session_start() — 对话开始
+3. update_from_response() — 每次 API 调用后
+4. should_compress() — 每轮检查
+5. compress() — 当 should_compress() 返回 True 时调用
+6. on_session_end() — 会话边界（CLI 退出、/reset、gateway 过期）
+</code></pre></div>
+
+<p><code>on_session_reset()</code> 在 <code>/new</code> 或 <code>/reset</code> 时调用，用于清除会话级状态而不完全关闭。</p>
+<h2 id="配置">配置</h2>
+<p>用户通过 <code>hermes plugins</code> → Provider Plugins → Context Engine 选择引擎，或直接编辑 <code>config.yaml</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">context</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">engine</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;lcm&quot;</span><span class="w">   </span><span class="c1"># 必须与引擎的 name 属性匹配</span>
+</code></pre></div>
+
+<p><code>compression</code> 配置块（<code>compression.threshold</code>、<code>compression.protect_last_n</code> 等）专属于内置的 <code>ContextCompressor</code>。如有需要，你的引擎应定义自己的配置格式，并在初始化期间从 <code>config.yaml</code> 读取。</p>
+<h2 id="测试">测试</h2>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.context_engine</span><span class="w"> </span><span class="kn">import</span> <span class="n">ContextEngine</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_engine_satisfies_abc</span><span class="p">():</span>
+    <span class="n">engine</span> <span class="o">=</span> <span class="n">YourEngine</span><span class="p">(</span><span class="n">context_length</span><span class="o">=</span><span class="mi">200000</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">ContextEngine</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="n">engine</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;your-name&quot;</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_compress_returns_valid_messages</span><span class="p">():</span>
+    <span class="n">engine</span> <span class="o">=</span> <span class="n">YourEngine</span><span class="p">(</span><span class="n">context_length</span><span class="o">=</span><span class="mi">200000</span><span class="p">)</span>
+    <span class="n">msgs</span> <span class="o">=</span> <span class="p">[{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;hello&quot;</span><span class="p">}]</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">engine</span><span class="o">.</span><span class="n">compress</span><span class="p">(</span><span class="n">msgs</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="nb">list</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="nb">all</span><span class="p">(</span><span class="s2">&quot;role&quot;</span> <span class="ow">in</span> <span class="n">m</span> <span class="k">for</span> <span class="n">m</span> <span class="ow">in</span> <span class="n">result</span><span class="p">)</span>
+</code></pre></div>
+
+<p>完整的 ABC 契约测试套件请参见 <code>tests/agent/test_context_engine.py</code>。</p>
+<h2 id="另请参阅">另请参阅</h2>
+<ul>
+<li><a href="context-compression-and-caching.html">上下文压缩与缓存</a> — 内置压缩器的工作原理</li>
+<li><a href="memory-provider-plugin.html">Memory Provider 插件</a> — 类似的单选插件系统（用于内存）</li>
+<li><a href="../user-guide/features/plugins.html">插件</a> — 通用插件系统概述</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/context-engine-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#工作原理">工作原理</a></li>
+<li class="lvl2"><a href="#目录结构">目录结构</a></li>
+<li class="lvl2"><a href="#contextengine-abc">ContextEngine ABC</a></li>
+<li class="lvl3"><a href="#引擎必须维护的类属性">引擎必须维护的类属性</a></li>
+<li class="lvl3"><a href="#可选方法">可选方法</a></li>
+<li class="lvl2"><a href="#引擎工具">引擎工具</a></li>
+<li class="lvl2"><a href="#注册">注册</a></li>
+<li class="lvl3"><a href="#通过目录推荐">通过目录（推荐）</a></li>
+<li class="lvl3"><a href="#通过通用插件系统">通过通用插件系统</a></li>
+<li class="lvl2"><a href="#生命周期">生命周期</a></li>
+<li class="lvl2"><a href="#配置">配置</a></li>
+<li class="lvl2"><a href="#测试">测试</a></li>
+<li class="lvl2"><a href="#另请参阅">另请参阅</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

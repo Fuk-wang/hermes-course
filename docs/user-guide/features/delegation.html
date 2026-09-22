@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subagent Delegation · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/delegation</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="subagent-delegation">Subagent Delegation</h1>
+<p>The <code>delegate_task</code> tool spawns child AIAgent instances with isolated context, inherited tool access, and their own terminal sessions. Each child gets a fresh conversation and works independently — only its final summary enters the parent's context.</p>
+<p>Top-level model calls run in the background automatically. Hermes returns a handle immediately so the conversation can continue, then posts the result back as a new message. An orchestrator subagent waits for its own workers so it can synthesize their results before returning.</p>
+<h2 id="completion-delivery">Completion delivery</h2>
+<p>Messaging gateways acknowledge background completions only after their adapter actually
+schedules the event or inserts it into the session's queue. Missing handlers, mismatched
+session routes, and full queues leave the completion pending for retry; these admission
+refusals do not consume the durable delivery-attempt budget. A successful admission suppresses
+repeat delivery within the running gateway, but is not proof that a model turn or outbound
+reply completed. Crash/restart delivery remains at least once, subject to the existing replay
+age limit; actual transport failures retain their bounded retry policy.</p>
+<p>An unavailable API-server route stays pending without repeated missing-route warnings.
+Malformed messaging routes still produce diagnostics. On the API server, an async delegation
+completion adds a durable timeline delivery row only: the client owns the next model turn.
+Setting background process notifications to <code>off</code> still drains pattern-watch events silently.</p>
+<h2 id="background-process-lifetime">Background process lifetime</h2>
+<p>Background terminal processes belong to the agent that starts them. Closing a child during delegation teardown terminates its remaining processes, including work started in earlier turns, without stopping processes owned by the parent or sibling agents. Sharing a terminal environment does not transfer process ownership.</p>
+<p>A child should wait for its builds, tests, and other bounded background commands before returning its final summary. Start a CI watcher or server in the parent session if it must continue after the child finishes; returning a process ID does not transfer ownership to the parent.</p>
+<h2 id="single-task">Single Task</h2>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Debug why tests fail&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;Error: assertion in test_foo.py line 42&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h2 id="parallel-batch">Parallel Batch</h2>
+<p>Up to 10 concurrent subagents by default (configurable, no hard ceiling):</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span><span class="n">tasks</span><span class="o">=</span><span class="p">[</span>
+    <span class="p">{</span><span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Research topic A&quot;</span><span class="p">,</span> <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Focus on recent primary sources&quot;</span><span class="p">},</span>
+    <span class="p">{</span><span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Research topic B&quot;</span><span class="p">,</span> <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Compare the leading explanations&quot;</span><span class="p">},</span>
+    <span class="p">{</span><span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Fix the build&quot;</span><span class="p">,</span> <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Project root: /home/user/project&quot;</span><span class="p">}</span>
+<span class="p">])</span>
+</code></pre></div>
+
+<h2 id="structured-output-output_schema">Structured Output (<code>output_schema</code>)</h2>
+<p>Each task can carry an optional <code>output_schema</code>, a JSON Schema object the child's final answer must validate against. The child sees the schema up front as an output contract ("return ONLY the JSON value — no prose, no code fence"); when the answer comes back the parent validates it, and on failure sends the child exactly one bounded correction turn carrying the validation errors verbatim (the schema is not re-pasted). The task's result then gains <code>schema_valid</code> (true/false) and, on failure, <code>schema_errors</code>.</p>
+<p>A contract miss after the retry does <strong>not</strong> discard the child's work: the result keeps <code>status: completed</code> with the child's raw final text in <code>summary</code>, <code>schema_valid: false</code>, the <code>schema_errors</code>, and a <code>schema_note</code> saying the text is unvalidated. The parent extracts what it needs from the raw text instead of re-running a task that may have taken an hour. Prose or a code fence around otherwise-valid JSON (object or array) is tolerated by the validator.</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">tasks</span><span class="o">=</span><span class="p">[{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Check which of these three endpoints return 200&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;https://a.example, https://b.example, https://c.example&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;output_schema&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;object&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;properties&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;healthy&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;array&quot;</span><span class="p">,</span> <span class="s2">&quot;items&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;string&quot;</span><span class="p">}},</span>
+                <span class="s2">&quot;failing&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;array&quot;</span><span class="p">,</span> <span class="s2">&quot;items&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;string&quot;</span><span class="p">}}</span>
+            <span class="p">},</span>
+            <span class="s2">&quot;required&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;healthy&quot;</span><span class="p">,</span> <span class="s2">&quot;failing&quot;</span><span class="p">]</span>
+        <span class="p">}</span>
+    <span class="p">}]</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>Keep schemas forgiving: require only the fields you will actually read. Tasks without an <code>output_schema</code> are unaffected.</p>
+<h2 id="how-subagent-context-works">How Subagent Context Works</h2>
+<div class="admonition adm-warning"><p class="adm-title">Critical: Subagents Know Nothing</p>
+<p>Subagents start with a <strong>completely fresh conversation</strong>. They have zero knowledge of the parent's conversation history, prior tool calls, or anything discussed before delegation. The subagent's only context comes from the <code>goal</code> and <code>context</code> fields the parent agent populates when it calls <code>delegate_task</code>.</p>
+</div>
+<p>One exception: when the parent has a resolved workspace directory, every subagent's system prompt embeds that workspace's <strong>project context files</strong> (<code>.hermes.md</code> &gt; AGENTS.md chain &gt; CLAUDE.md &gt; <code>.cursorrules</code> — the same discovery, priority, and size caps as the main agent's system prompt; SOUL.md is excluded). Subagents working in a repo operate under the repo's own conventions without having to rediscover them.</p>
+<p>This means the parent agent must pass <strong>everything</strong> the subagent needs in the call:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># BAD - subagent has no idea what &quot;the error&quot; is</span>
+<span class="n">delegate_task</span><span class="p">(</span><span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Fix the error&quot;</span><span class="p">)</span>
+
+<span class="c1"># GOOD - subagent has all context it needs</span>
+<span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Fix the TypeError in api/handlers.py&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;The file api/handlers.py has a TypeError on line 47:</span>
+<span class="s2">    &#39;NoneType&#39; object has no attribute &#39;get&#39;.</span>
+<span class="s2">    The function process_request() receives a dict from parse_body(),</span>
+<span class="s2">    but parse_body() returns None when Content-Type is missing.</span>
+<span class="s2">    The project is at /home/user/myproject and uses Python 3.11.&quot;&quot;&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>The subagent receives a focused system prompt built from your goal and context, instructing it to complete the task and provide a structured summary of what it did, what it found, any files modified, and any issues encountered.</p>
+<h3 id="forwarding-images-to-a-subagent">Forwarding Images to a Subagent</h3>
+<p>Text context is not enough when the task is inherently visual — a screenshot the user sent, a design mock, a rendered chart. Each task accepts an optional <code>images</code> list (up to 8 entries; local file paths, <code>http(s)</code> URLs or <code>data:image/...</code> URLs):</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span><span class="n">tasks</span><span class="o">=</span><span class="p">[{</span>
+    <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Compare the rendered dashboard against the design mock and list layout deviations&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;The app runs at http://localhost:3000; the repo is at /home/user/dash.&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;images&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;/home/user/mocks/dashboard-v2.png&quot;</span><span class="p">,</span>
+               <span class="s2">&quot;https://cdn.example.com/current-render.png&quot;</span><span class="p">],</span>
+<span class="p">}])</span>
+</code></pre></div>
+
+<p>Delivery follows the same routing as user-attached images (<code>agent.image_input_mode</code>):</p>
+<ul>
+<li><strong>Vision-capable child model</strong> — the images arrive as native multimodal content on the child's first turn: local files are embedded as data URLs (subject to the same read guard as every other file read), remote and <code>data:</code> URLs pass through verbatim. The child sees the actual pixels.</li>
+<li><strong>Non-vision child model</strong> — the goal gains <code>[Image attached at: &lt;path&gt;]</code> hint lines and the child is told to inspect them with <code>vision_analyze</code>.</li>
+</ul>
+<p>Forwarding is best-effort: unreadable paths are skipped with a log line, and any failure in the image plumbing falls back to the plain text goal — it can never break a spawn. Images are for things the child must <em>see</em>; put text file paths in <code>context</code> as usual.</p>
+<h2 id="practical-examples">Practical Examples</h2>
+<h3 id="parallel-research">Parallel Research</h3>
+<p>Research multiple topics simultaneously and collect summaries:</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span><span class="n">tasks</span><span class="o">=</span><span class="p">[</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Research the current state of WebAssembly in 2025&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Focus on: browser support, non-browser runtimes, language support&quot;</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Research the current state of RISC-V adoption in 2025&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Focus on: server chips, embedded systems, software ecosystem&quot;</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Research quantum computing progress in 2025&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Focus on: error correction breakthroughs, practical applications, key players&quot;</span>
+    <span class="p">}</span>
+<span class="p">])</span>
+</code></pre></div>
+
+<h3 id="code-review--fix">Code Review + Fix</h3>
+<p>Delegate a review-and-fix workflow to a fresh context:</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Review the authentication module for security issues and fix any found&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;Project at /home/user/webapp.</span>
+<span class="s2">    Auth module files: src/auth/login.py, src/auth/jwt.py, src/auth/middleware.py.</span>
+<span class="s2">    The project uses Flask, PyJWT, and bcrypt.</span>
+<span class="s2">    Focus on: SQL injection, JWT validation, password handling, session management.</span>
+<span class="s2">    Fix any issues found and run the test suite (pytest tests/auth/).&quot;&quot;&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="multi-file-refactoring">Multi-File Refactoring</h3>
+<p>Delegate a large refactoring task that would flood the parent's context:</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Refactor all Python files in src/ to replace print() with proper logging&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;Project at /home/user/myproject.</span>
+<span class="s2">    Use the &#39;logging&#39; module with logger = logging.getLogger(__name__).</span>
+<span class="s2">    Replace print() calls with appropriate log levels:</span>
+<span class="s2">    - print(f&quot;Error: ...&quot;) -&gt; logger.error(...)</span>
+<span class="s2">    - print(f&quot;Warning: ...&quot;) -&gt; logger.warning(...)</span>
+<span class="s2">    - print(f&quot;Debug: ...&quot;) -&gt; logger.debug(...)</span>
+<span class="s2">    - Other prints -&gt; logger.info(...)</span>
+<span class="s2">    Don&#39;t change print() in test files or CLI output.</span>
+<span class="s2">    Run pytest after to verify nothing broke.&quot;&quot;&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h2 id="batch-mode-details">Batch Mode Details</h2>
+<p>When a top-level agent provides a <code>tasks</code> array, Hermes returns one background handle and runs the subagents in parallel. By default the call returns <strong>one</strong> consolidated message once every task has finished. Results are delivered only between the parent's turns: the parent should finish anything that does not depend on the children, then end its turn rather than polling transcripts, artifacts, or CI while it waits.</p>
+<h3 id="independent-completions-opt-in">Independent completions (opt-in)</h3>
+<p>Set <code>delegation.independent_completions: true</code> to have results land <strong>per completion unit</strong> as each finishes instead. The model-facing <code>group</code> field and grouping guidance are only advertised when this option is enabled. Start a new session after changing it so the tool schema can reflect the setting without changing an existing conversation's cached prefix. Old calls containing <code>group</code> remain accepted; with the option off, the whole call still returns together.</p>
+<p>When independent completions are enabled:</p>
+<ul>
+<li>Omit <code>group</code> when each result is useful to act on separately. Each task reports as soon as it finishes.</li>
+<li>Use the same <code>group</code> string when you want to review outputs together: comparison, synthesis, or one coordinated decision. The group returns <strong>one</strong> consolidated message after all its tasks finish. Even independently executable tasks can belong in one group when their results inform the same decision.</li>
+<li>Different groups report independently; grouped and ungrouped tasks can share one call.</li>
+</ul>
+<p>This is off by default because every unit is a new turn for the orchestrator: a 15-task call becomes up to 15 wake-ups, which fragmented long campaigns. Grouping controls <strong>result delivery, not execution order</strong>: all tasks still run in parallel. If task B needs task A's output to do its work, dispatch A first, then dispatch B with that output after A returns.</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;tasks&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span><span class="nt">&quot;goal&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Review PR #101 ...&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="nt">&quot;goal&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Review PR #102 ...&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="nt">&quot;goal&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Benchmark approach A ...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;group&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bench&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="nt">&quot;goal&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Benchmark approach B ...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;group&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bench&quot;</span><span class="p">}</span>
+<span class="p">]}</span>
+</code></pre></div>
+
+<p>The dispatch handle lists each unit (<code>units[].delegation_id</code>, <code>group</code>, <code>task_indexes</code>); unit ids are the call's id suffixed <code>-1</code>, <code>-2</code>, …, and every unit of one call shares a single slot of <code>delegation.max_concurrent_children</code>, so grouping never changes capacity accounting (the worker pool grows to the number of live units so no unit waits behind a full pool). An orchestrator subagent waits for its whole batch in the current turn so it can synthesize the results.</p>
+<ul>
+<li><strong>Maximum concurrency:</strong> 10 tasks by default (configurable via <code>delegation.max_concurrent_children</code> or the <code>DELEGATION_MAX_CONCURRENT_CHILDREN</code> env var; floor of 1, no hard ceiling). Batches larger than the limit return a tool error rather than being silently truncated.</li>
+<li><strong>Thread pool:</strong> Uses <code>ThreadPoolExecutor</code> with the configured concurrency limit as max workers</li>
+<li><strong>Progress display:</strong> In CLI mode, a tree-view shows tool calls from each subagent in real-time with per-task completion lines. In gateway mode, progress is batched and relayed to the parent's progress callback. CLI and TUI completion notices use task-first titles such as <code>Subagent Task Completed: Review changes</code>; multi-task groups use the group name and task count. Unsuccessful or incomplete work gets a corresponding status label. These compact notices do not replace the full results delivered to the parent agent.</li>
+<li><strong>Result ordering:</strong> Within a unit, results are sorted by task index to match input order regardless of completion order; <code>TASK i/N</code> labels index the whole call</li>
+<li><strong>Cancellation:</strong> Follow-up messages do not cancel a top-level background batch. <code>/stop</code> (gateway <code>/stop</code>, CLI <code>/stop</code>, the Desktop/TUI Stop button, an ACP cancel) or closing/resetting the owning session ends its background children and every synchronous descendant beneath them; each stopped child still returns as a completion with <code>status="interrupted"</code> and its partial output</li>
+</ul>
+<p>Synchronous single-task delegation from an orchestrator runs directly without thread pool overhead.</p>
+<h3 id="durable-background-completions">Durable background completions</h3>
+<p>When a background delegation finishes, Hermes stores its completion event in
+the active profile's <code>state.db</code> before publishing it to the normal fresh-turn
+queue. If Hermes restarts after completion but before delivery, the pending
+event is restored and routed through the same ownership checks. Competing
+consumers use a durable claim, so only the consumer that successfully accepts
+the synthetic turn acknowledges delivery; failed attempts release the claim for
+retry.</p>
+<p>This does not resume child execution after a crash. A delegation whose owner
+process disappears while it is still running is recorded as <code>unknown</code>, because
+Hermes cannot prove whether its external side effects happened. Pending and
+delivered records are bounded and profile-local.</p>
+<h3 id="child-background-process-notifications">Child background-process notifications</h3>
+<p>Background processes a subagent starts (e.g. <code>npm ci</code> with
+<code>notify_on_complete</code>) technically route their completion and watch-pattern
+notifications to the <strong>parent</strong> conversation, because anything that outlives
+the child needs a durable consumer. By default those notifications are
+<strong>suppressed</strong> in the parent chat — the child's consolidated delegation result
+is the deliverable, and mid-conversation "process finished" walls from a
+child's internal builds are noise. Suppressed events are logged at debug level
+with the process session ID and subagent task ID, so they remain diagnosable.</p>
+<p>The delegation result itself is never suppressed. To restore delivery of the
+child process notifications (each carries a "Started by subagent …"
+attribution line):</p>
+<div class="highlight"><pre><span></span><code><span class="nt">delegation</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">surface_child_process_notifications</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># default: false</span>
+</code></pre></div>
+
+<h3 id="handing-a-process-to-the-parent">Handing a process to the parent</h3>
+<p>A subagent's background processes are also <strong>killed when the subagent finishes</strong>, so a CI watcher or build a child starts with <code>notify=true</code> never reports to anyone. The child's <code>terminal</code> result says so (<code>notify_on_complete: false</code> plus a <code>subagent_note</code>), and the child has three honest options before it finishes:</p>
+<ul>
+<li><strong>wait</strong> — <code>process_manage(action="wait", session_id=...)</code> and report the result itself;</li>
+<li><strong>kill</strong> — <code>process_manage(action="kill", ...)</code>;</li>
+<li><strong>hand off</strong> — <code>process_manage(action="handoff", session_id=..., data="&lt;one sentence: what it is for&gt;")</code>. The runtime transfers ownership to the parent under the registry lock (up to 3 per child; only a running process the child owns is accepted, anything else is a tool error). The parent's completion notice then arrives in the parent chat with <code>Handed off to you by a subagent… Purpose: …</code>, and the parent can poll/log/kill it like its own.</li>
+</ul>
+<p>A process that finishes while the child is still running needs no handoff: the child reads it (<code>poll</code>/<code>wait</code>/<code>log</code>) and reports it. If the child never reads it, the exit code and output tail are attached to its result as <code>unread_completions</code> and shown to the parent. Whatever is still running and was neither killed nor handed off is named on its result (<code>orphaned_processes</code>) and in the parent's delegation notice as terminated, so the parent hears from the runtime, never from the child's prose, that "the watcher is running" is no longer true. For CI watchers the better pattern is still: the child returns the fact (PR number, SHA) and the parent launches its own watcher.</p>
+<h2 id="model-override">Model Override</h2>
+<p>You can configure a different model for subagents via <code>config.yaml</code> — useful for delegating simple tasks to cheaper/faster models:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># In ~/.hermes/config.yaml</span>
+<span class="nt">delegation</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;google/gemini-flash-2.0&quot;</span><span class="w">    </span><span class="c1"># Cheaper model for subagents</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;openrouter&quot;</span><span class="w">              </span><span class="c1"># Optional: route subagents to a different provider</span>
+</code></pre></div>
+
+<p>If omitted, subagents use the same model as the parent.</p>
+<h3 id="cost-strategy-frontier-planner-inexpensive-workers">Cost strategy: frontier planner, inexpensive workers</h3>
+<p>Decomposing a problem into well-specified subtasks takes frontier-level judgment; executing a subtask that already comes with a clear goal, full context, and an output contract usually doesn't. Meanwhile the children are where the tokens go — a parallel batch of subagents typically burns the large majority of a run's total tokens, so the worker model is where the cost actually lives. Pinning <code>delegation.model</code> to an inexpensive model while your main session stays on a frontier model keeps the planning quality where it matters and cuts spend where the volume is:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-frontier-model&quot;</span><span class="w">     </span><span class="c1"># parent (planner) stays on the frontier model</span>
+<span class="nt">delegation</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-inexpensive-model&quot;</span><span class="w">    </span><span class="c1"># all delegate_task children run on this</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;openrouter&quot;</span><span class="w">             </span><span class="c1"># optional: route children to a different provider</span>
+</code></pre></div>
+
+<p>Resolution order: <code>delegation.base_url</code> (direct endpoint) takes precedence, then <code>delegation.provider</code> (full credential bundle resolved via the runtime provider system), and when neither is set children inherit the parent's provider and credentials; <code>delegation.model</code> applies in all cases, and when it is empty children inherit the parent's model. Setting <code>delegation.provider</code> alongside <code>delegation.base_url</code> keeps the explicit endpoint but carries that provider's request overrides and max output tokens into the child. An explicit <code>delegation.request_overrides</code> dict is honored on every branch and merges over those runtime-derived values (see <a href="#configuration">Configuration</a> below).</p>
+<p>Note that the pin is global: <code>delegate_task</code> has no per-task model parameter, so every child in a batch runs on the configured delegation model. For quality-sensitive subtasks that need a stronger model, either leave <code>delegation.model</code> unset for that session or hand the task to the <a href="kanban.html#per-task-model-override">kanban board</a>, which does support a per-task model override.</p>
+<h2 id="the-review-command">The <code>/review</code> Command</h2>
+<p><code>/review</code> spawns an independent, full-privilege background subagent whose only job is to review the work your conversation just produced — a PR, a diff, code, documentation, a design. It works on every surface: CLI, TUI, the Desktop app, and every gateway messaging platform.</p>
+<div class="highlight"><pre><span></span><code>/review                       # review whatever the last 10 messages presented
+/review focus on security     # add extra instructions for the reviewer
+</code></pre></div>
+
+<p>What happens:</p>
+<ol>
+<li>The last 10 user/assistant messages are snapshotted as the reviewer's starting evidence (tool output and system messages are excluded).</li>
+<li>A reviewer subagent is dispatched on the same background delegation rail as <code>delegate_task</code> — it gets the full normal subagent toolset (terminal, web, files, browser...), so it actually opens the PR, reads the diff, and runs code rather than judging from the excerpt.</li>
+<li>The reviewer inherits the primary agent's working context: any skills the primary agent had loaded (launch-preloaded or via <code>skill_view</code> during the session) are named in its briefing with an instruction to load them and judge the work against their conventions. Like every subagent, its system prompt also embeds the workspace's project context files (AGENTS.md / CLAUDE.md / .cursorrules) as binding conventions.</li>
+<li>When it finishes, its full review re-enters the same session as a normal background-subagent completion — your primary agent sees it and can act on it (fix the findings, push follow-ups, reply to you).</li>
+</ol>
+<p>The canonical flow: your main agent opens a PR, you type <code>/review</code>, and a second pair of eyes investigates it while you keep working; the review lands back in the chat addressed to the agent that created the PR.</p>
+<p>Dispatch prints only “Review started. Results will return here.” The live subagent viewer identifies the worker as <strong>Review: your focus</strong> (or <strong>Review recent work</strong> for bare <code>/review</code>), with a shortened single-line label; the reviewer still receives your full instructions. In the classic CLI, the dock above the composer shows elapsed time and latest activity; <strong>Ctrl+T</strong> (or <strong>F6</strong>) opens the roster with its model, transcript, steering, and stop controls. The same review label appears in the TUI and Desktop subagent viewers.</p>
+<h3 id="review-model">Review model</h3>
+<p>By default the reviewer runs on your main model. To pin a dedicated review model, set <code>auxiliary.review</code> in <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">review</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span><span class="w">               </span><span class="c1"># or nous, anthropic, a direct base_url, ...</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">anthropic/claude-opus-4.6</span><span class="w">   </span><span class="c1"># a strong reviewer model</span>
+</code></pre></div>
+
+<p>Credentials resolve exactly like a <code>delegation.provider</code> pin (full runtime-provider bundle: base_url, api key, api_mode). <code>provider: auto</code> with an empty <code>model</code> means "inherit the main agent's model" — the default.</p>
+<p><code>/review</code> is deliberately separate from <code>/refine</code>: <code>/refine</code> reviews the conversation to update memory and skills, <code>/review</code> reviews the <em>work product</em> the conversation created.</p>
+<h2 id="inherited-tool-access">Inherited Tool Access</h2>
+<p><code>delegate_task</code> does not accept a model-facing <code>toolsets</code> parameter. Each subagent inherits the parent's enabled toolsets so the model cannot grant a child capabilities that the parent does not have. Configure the parent's tools before starting the conversation if delegated work needs additional capabilities.</p>
+<p>Certain tools are blocked for subagents even when the parent has them:
+- <code>delegate_task</code> — blocked for leaf subagents (the default). Retained for <code>role="orchestrator"</code> children, bounded by <code>max_spawn_depth</code> — see <a href="#depth-limit-and-nested-orchestration">Depth Limit and Nested Orchestration</a> below.
+- <code>clarify</code> — subagents cannot interact with the user
+- <code>memory</code> — no writes to shared persistent memory
+- <code>send_message</code> — no cross-platform side effects
+- <code>cronjob</code> — no scheduling more work in the parent's name</p>
+<p>Both roles retain <code>execute_code</code> (programmatic tool calling) so children can batch mechanical work.</p>
+<h2 id="max-iterations">Max Iterations</h2>
+<p>Each subagent has an iteration limit (default: 250) that controls how many tool-calling turns it can take. The limit is set globally in <code>config.yaml</code> and applies to every child; it is not a per-call parameter of <code>delegate_task</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># In ~/.hermes/config.yaml</span>
+<span class="nt">delegation</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">max_iterations</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60</span><span class="w">   </span><span class="c1"># lower it for fleets of simple tasks, raise it for long investigations</span>
+</code></pre></div>
+
+<p>A child that exhausts its budget returns with <code>exit_reason: max_iterations</code> and <code>truncated: true</code>, so the parent can tell a budget stop from a completed task.</p>
+<h2 id="child-timeout">Child Timeout</h2>
+<p>By default there is <strong>no wall-clock timeout</strong> on subagents. Children fail only from what they're actually doing — API errors, tool errors, or hitting their iteration budget — never from a delegation-level stopwatch. Earlier releases shipped a hard cap (300s, later 600s), which kept killing legitimately busy children mid-task: deep code reviews, large research fan-outs, and slow reasoning models routinely need more than 10 minutes while making steady progress the whole time.</p>
+<p>Genuinely stuck children are still detected on every runtime, with or without a configured cap: the heartbeat staleness monitor watches each child's progress signals (API calls, tool starts, activity-timestamp ticks). A child whose progress is completely frozen past the stale threshold — 450s idle between turns, 1200s while inside a tool — is interrupted and its wait is <strong>abandoned</strong>: the parent gets a <code>status: "timeout"</code> entry whose error reads <code>Subagent stopped making progress after N API call(s) — no activity for 450s (heartbeat stale threshold); the pending worker was abandoned.</code> The wait ends even in one-shot runs (<code>hermes chat -Q</code>, Bot Chat one-shot, cron) that have no gateway inactivity watchdog behind them, so a wedged child can no longer hold the turn or its session lease forever. An in-flight model wait still counts as progress — subagents refresh the activity clock while waiting on the provider, so a slow local / long-prefill completion is not treated as stalled.</p>
+<p>If you want a hard cap anyway (e.g. cost control on unattended cron-driven delegation), opt in per-install:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">delegation</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">child_timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span><span class="w">     </span><span class="c1"># default: 0 = no timeout</span>
+<span class="w">  </span><span class="c1"># child_timeout_seconds: 1800  # opt-in hard cap (floor 30s)</span>
+</code></pre></div>
+
+<p>A positive value enforces a hard wall-clock limit on each child; <code>0</code> or a negative value disables it.</p>
+<p>When a configured cap or the stale threshold fires, the child's result carries
+structured timeout metadata alongside the error message so parents and hooks
+can distinguish a stopwatch kill from other failures without parsing text:
+<code>timeout_seconds</code> (whichever limit actually ended the wait — the stale
+threshold when it pre-empts a longer configured cap, otherwise the cap),
+<code>timed_out_after_seconds</code> (actual wall clock), and <code>timeout_phase</code>
+(<code>before_first_llm_call</code> when the child never reached its first request,
+<code>after_llm_calls</code> otherwise). All three are <code>null</code> on non-timeout errors.</p>
+<h2 id="failure-visibility">Failure Visibility</h2>
+<p>A subagent that fails — non-retryable provider error (404/400), timeout, crash, or no usable output — is never silent:</p>
+<ul>
+<li><strong>CLI</strong>: the delegation tree prints a one-line reason: <code>⚠️ Subagent failed — "your goal": HTTP 404: model not found (after 12s)</code>. Batch runs append the reason to the per-task <code>✗</code> completion line.</li>
+<li><strong>Gateway platforms</strong> (Telegram, Discord, Slack, ...): the same clean line is delivered as a standalone chat notice, <strong>even when <code>tool_progress</code> is off</strong> for that platform.</li>
+<li><strong>Parent agent</strong>: the tool result entry carries <code>status: "failed"</code> plus the full <code>error</code> text, so the model can react (retry, re-route, report).</li>
+</ul>
+<p>Error text is reduced to the single most informative line (the exception message, not a traceback wall) and capped in length.</p>
+<div class="admonition adm-tip"><p class="adm-title">Diagnostic dump on zero-call timeout</p>
+<p>With a hard cap configured, if a subagent times out having made <strong>zero</strong> API calls (usually: provider unreachable, auth failure, or tool-schema rejection), <code>delegate_task</code> writes a structured diagnostic to <code>~/.hermes/logs/subagent-timeout-&lt;session&gt;-&lt;timestamp&gt;.log</code> containing the subagent's config snapshot, credential-resolution trace, any early error messages, and stack traces for <strong>all</strong> live threads (not just the child's own) — a child parked waiting on a nested helper thread is indistinguishable from a slow provider without the full picture.</p>
+</div>
+<h2 id="stall-detection-for-background-subagents">Stall Detection for Background Subagents</h2>
+<p>Background delegations (<code>delegate_task(background=true)</code>) are watched by a
+<strong>progress-based stall monitor</strong> — on by default, zero config. Unlike a
+wall-clock timeout, it never touches a child that is making progress, no
+matter how long it runs.</p>
+<p>The monitor samples each detached child's progress signals — API-call count,
+current tool, and last-activity timestamp (which ticks on <strong>every streamed
+token</strong>, tool transition, and API-call boundary, so a child mid-stream on a
+long response always counts as alive):</p>
+<ol>
+<li><strong>Progressing children are never touched.</strong> Any advancing signal resets
+   the clock.</li>
+<li>A child whose progress is completely frozen past the stale threshold
+   (450s idle, 1200s while inside a tool — legitimately slow terminal
+   commands and web fetches get the higher ceiling) is <strong>interrupted</strong> and
+   given a 120s grace window. A child that unwinds in time delivers its
+   partial results through the normal completion path.</li>
+<li>A child that never returns is force-finalized with a terminal <code>stalled</code>
+   completion event, so the owning session hears an outcome instead of
+   going silent, and the async slot frees for new work.</li>
+</ol>
+<p>The <code>stalled</code> event carries structured metadata mirroring the sync-path
+timeout fields: <code>stalled_after_quiet_seconds</code>, <code>stall_threshold_seconds</code>,
+<code>stall_phase</code> (<code>idle</code> / <code>in_tool</code>), and <code>stall_grace_seconds</code>.</p>
+<p>This closed a long-standing failure mode where a wedged background child
+left its session looking dead until a process restart. The underlying wedge
+(children hanging at their first API call after multi-day gateway uptime)
+was also fixed at the root: delegated children now run their OpenAI-wire
+API requests inline on their own conversation thread instead of a nested
+worker thread — the layer where the wedge lived. The stall monitor remains
+as the safety net for anything else.</p>
+<h2 id="monitoring-running-subagents-agents">Monitoring Running Subagents (<code>/agents</code>)</h2>
+<p>The TUI ships a <code>/agents</code> overlay (alias <code>/tasks</code>) that turns recursive <code>delegate_task</code> fan-out into a first-class audit surface:</p>
+<ul>
+<li>Live tree view of running and recently-finished subagents, grouped by parent</li>
+<li>Per-branch cost, token, and file-touched rollups</li>
+<li>Kill and pause controls — cancel a specific subagent mid-flight without interrupting its siblings</li>
+<li>Post-hoc review: step through each subagent's turn-by-turn history even after they've returned to the parent</li>
+</ul>
+<h3 id="live-activity-above-the-composer">Live activity above the composer</h3>
+<p>The classic CLI, TUI, and Desktop automatically show live subagents above the composer. You can keep writing while watching the live count, task names, elapsed time, and latest activity. The terminal dock limits visible rows according to screen height and shows how many additional workers are hidden; Desktop previews up to three workers.</p>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>Expand and inspect</th>
+<th>Control a selected worker</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Classic CLI</td>
+<td><strong>Ctrl+T</strong> (or <strong>F6</strong>) opens the full-screen live roster; arrows select, <strong>Enter</strong> opens the transcript tail, <strong>PgUp/PgDn</strong> scroll</td>
+<td><strong>s</strong> opens a separate steering input; <strong>x</strong>, then <strong>y</strong> requests stop</td>
+</tr>
+<tr>
+<td>TUI</td>
+<td><strong>Ctrl+T</strong> or <code>/agents</code> opens the full-height tree; <strong>Enter/t</strong> opens the live transcript tail; <strong>d</strong> opens rich detail (archived/replay Enter still opens detail)</td>
+<td><strong>e</strong> opens steering; <strong>x</strong> stops the selected worker; <strong>X</strong> stops its subtree</td>
+</tr>
+<tr>
+<td>Desktop</td>
+<td>Expand <strong>Subagents</strong> above the composer, then select a worker to inspect its activity and details</td>
+<td><strong>Steer</strong> queues guidance; <strong>Stop</strong> requests interruption for that worker</td>
+</tr>
+</tbody>
+</table>
+<p>Closing the terminal monitor returns to your existing composer draft. Steering uses its own input and acknowledges <strong>queued</strong>, not delivery: the child consumes guidance at a checkpoint. Stop does not interrupt unrelated siblings.</p>
+<p>Press <strong>F7</strong> in the Classic CLI or TUI composer to toggle the dock between its multi-row preview and a single shaded summary line. The summary retains the live count and expand/restore hints, adding activity when space permits. Typing and sending remain available; opening and closing the monitor preserves your draft and insertion point. This is a local presentation choice, not a saved config change.</p>
+<p>The live transcript tail is a bounded recent excerpt, not an unlimited conversation browser. A child leaving the live registry leaves the dock; completion messages and the TUI/Desktop history views remain the place to review finished work. Latest activity is an observation, not a percentage-complete estimate.</p>
+<p>The classic CLI's <code>/agents</code> and <code>/tasks</code> commands still print a text summary; <strong>Ctrl+T</strong> (or <strong>F6</strong>) is the immediate interactive monitor, including while the parent is busy. See <a href="../tui.html#slash-commands">TUI — Slash commands</a>.</p>
+<p>On the classic CLI and every gateway platform (Telegram, Discord, Slack, ...),
+<code>/agents</code> also lists <strong>background delegations with live per-child activity</strong>,
+sampled directly from each running child:</p>
+<div class="highlight"><pre><span></span><code>Background delegations: 1 running
+- deleg_ab12cd34 · running · research the delegation stall monitor
+  - child 1: 4 api calls · in web_search · active 12s ago
+  - child 2: 7 api calls · between turns · active 3s ago
+</code></pre></div>
+
+<p>A delegation the stall monitor has flagged shows as
+<code>stalling · no progress 450s — interrupting</code>, and long-quiet-but-healthy
+children show their quiet time so you can tell "slow" from "stuck" at a
+glance.</p>
+<h2 id="steering-a-running-subagent">Steering a Running Subagent</h2>
+<p>Interrupting a child throws away its in-flight work; often you just want to redirect it.</p>
+<h3 id="from-the-parent-agent-model-facing">From the parent agent (model-facing)</h3>
+<p>The parent agent orchestrates its own running children with the same <code>delegate_task</code> tool it spawned them with — no separate control tool:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;list&quot;</span><span class="p">}</span>
+<span class="p">{</span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;steer&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;subagent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sa-0-1a2b3c4d&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;focus on pricing instead&quot;</span><span class="p">}</span>
+<span class="p">{</span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;stop&quot;</span><span class="p">,</span><span class="w">  </span><span class="nt">&quot;subagent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sa-0-1a2b3c4d&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li><strong><code>list</code></strong> returns the conversation's live children: <code>subagent_id</code>, goal, status, <code>running_seconds</code>, <code>accepting_steer</code>, and the live transcript path. Ids also come back in the spawn dispatch response as <code>subagent_ids</code>.</li>
+<li><strong><code>steer</code></strong> queues a course correction into a running child without stopping it (delivery semantics below).</li>
+<li><strong><code>stop</code></strong> ends a child early at its next iteration boundary; the partial result still re-enters the conversation as a normal completion message.</li>
+</ul>
+<p>Control actions run synchronously in-turn (never backgrounded), are scoped to the caller's own spawn tree — a conversation can never see or control another session's children — and never consume the per-turn subagent spawn cap, so <code>stop</code> keeps working even after the cap is hit.</p>
+<h3 id="from-the-tui--gateway-session-facing">From the TUI / gateway (session-facing)</h3>
+<p><code>steer_subagent(subagent_id, text)</code> in <code>tools/delegate_tool_registry.py</code> is the redirection-side mirror of <code>interrupt_subagent()</code>: it queues text into a live child through the same mechanism as <a href="../../reference/slash-commands.html"><code>/steer</code></a> — the text is appended to the child's last tool result at its next iteration boundary, the in-flight tool call is never cut, and the child sees it as an out-of-band user message. Programmatic hosts reach it through the session-scoped <code>subagent.steer</code> gateway RPC, which sits beside <code>subagent.interrupt</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;method&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;subagent.steer&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;params&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;owning-ui-session&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;subagent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sa-0-1a2b3c4d&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;text&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;focus on pricing instead&quot;</span><span class="p">}}</span>
+</code></pre></div>
+
+<p>Subagent ids come from <code>delegation.status</code> (or <code>list_active_subagents()</code>) — the same place <code>subagent.interrupt</code> gets them. The gateway accepts steering only from the exact live UI/gateway session that spawned the child. A missing, foreign, ambiguous, or stale/recycled session identity is rejected; knowing a global subagent id is not authority. Direct in-process callers retain the unscoped helper contract deliberately.</p>
+<p><strong>Queued is not delivered, but it is never synthetic success.</strong> A <code>"queued"</code> response means the text was accepted before the child's completion boundary, not necessarily that the child has seen it. Acceptance and completion are synchronized: either the child can still consume the text, or its exact text is drained into the result as <code>pending_steer</code>. Calls after closure return <code>"rejected"</code>. If a child accepted the steer but had already produced its final answer, the completion entry the parent receives retains it as <code>missed_steer</code>, with a note appended to the summary:</p>
+<div class="highlight"><pre><span></span><code>[steer did not land — the subagent finished before it could be delivered: focus on pricing instead]
+</code></pre></div>
+
+<p>So the parent (or the operator driving it) can tell a steered child from one that finished on the old instructions, and re-issue the guidance as a follow-up instead of trusting that it landed.</p>
+<h2 id="live-transcripts">Live Transcripts</h2>
+<p>Every <code>delegate_task</code> dispatch also creates one <strong>append-only, human-readable log per task</strong> so you (or the parent agent) can watch a subagent work in real time instead of waiting for the consolidated summary:</p>
+<div class="highlight"><pre><span></span><code>&lt;hermes_home&gt;/cache/delegation/live/&lt;delegation_id&gt;/task-&lt;n&gt;.log
+</code></pre></div>
+
+<p>The dispatch response includes the paths as <code>live_transcripts</code>, and the files are pre-created at dispatch time, so this works immediately:</p>
+<div class="highlight"><pre><span></span><code>tail<span class="w"> </span>-f<span class="w"> </span>~/.hermes/cache/delegation/live/deleg_ab12cd34/task-0.log
+</code></pre></div>
+
+<p>Each line is timestamped and shows the child's assistant text, thinking snippets, tool calls (<code>-&gt; tool_name({args})</code>), tool results, and a final status marker. A <code>manifest.json</code> in the same directory describes the batch (goals, task count, per-task status). The logs persist after completion — they double as the full-fidelity operational record alongside the summary — and directories older than 7 days are pruned automatically on new dispatches. Because they live under <code>cache/delegation</code>, they are also readable from remote terminal backends (Docker/Modal/SSH).</p>
+<h2 id="depth-limit-and-nested-orchestration">Depth Limit and Nested Orchestration</h2>
+<p>By default, delegation is <strong>flat</strong>: a parent (depth 0) spawns children (depth 1), and those children cannot delegate further. This prevents runaway recursive delegation.</p>
+<p>For multi-stage workflows (research → synthesis, or parallel orchestration over sub-problems), a parent can spawn <strong>orchestrator</strong> children that <em>can</em> delegate their own workers:</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Survey three code review approaches and recommend one&quot;</span><span class="p">,</span>
+    <span class="n">role</span><span class="o">=</span><span class="s2">&quot;orchestrator&quot;</span><span class="p">,</span>  <span class="c1"># Allows this child to spawn its own workers</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<ul>
+<li><code>role="leaf"</code> (default): child cannot delegate further — identical to the flat-delegation behavior.</li>
+<li><code>role="orchestrator"</code>: child retains the <code>delegation</code> toolset. Gated by <code>delegation.max_spawn_depth</code> (default <strong>1</strong> = flat, so <code>role="orchestrator"</code> is a no-op at defaults). Raise <code>max_spawn_depth</code> to 2 to allow orchestrator children to spawn leaf grandchildren; 3+ for deeper trees. There is no upper ceiling — cost is the practical limit.</li>
+<li><code>delegation.orchestrator_enabled: false</code>: global kill switch that forces every child to <code>leaf</code> regardless of the <code>role</code> parameter.</li>
+</ul>
+<p><strong>Cost warning:</strong> With <code>max_spawn_depth: 3</code> and <code>max_concurrent_children: 3</code>, the tree can reach 3×3×3 = 27 concurrent leaf agents. Each extra level multiplies spend — raise <code>max_spawn_depth</code> intentionally.</p>
+<p><strong>One-shot runs are capped separately.</strong> <code>hermes chat -q</code> / <code>--oneshot</code> sessions may spawn at most <code>delegation.oneshot_max_children</code> subagents in total (default <code>2</code>, <code>0</code> = unlimited). A one-shot run has no later turn to receive results, and in benchmark trajectories most of its spawns were "independently review my own work" rather than parallel work — each such child re-pays a cold system prompt and re-reads the repo. Interactive and gateway sessions are unaffected.</p>
+<h2 id="lifetime-and-durability">Lifetime and Durability</h2>
+<div class="admonition adm-warning"><p class="adm-title">Background completion durability is not durable execution</p>
+<p>Top-level model-facing <code>delegate_task</code> calls run in the background automatically where the session supports later delivery. Hermes returns a handle immediately, and the result re-enters the conversation after the child or batch finishes. Orchestrator subagents wait for their workers in the current turn because they must synthesize those results before returning. Stateless request/response endpoints fall back to synchronous execution when they cannot deliver a detached result later.</p>
+<ul>
+<li>Normal follow-up messages do not cancel background children. <code>/stop</code> on any surface (gateway <code>/stop</code> — also when the session is idle after the dispatching turn ended — CLI <code>/stop</code>, the Desktop/TUI Stop button, an ACP cancel) ends the session's running background delegations, and closing or resetting the owning session does the same.</li>
+<li>Explicit session close/reset interrupts that session's background children. Closing a TUI viewer of a gateway-owned session does not kill the gateway's work.</li>
+<li>A Hermes process restart does <strong>not</strong> resume a running child. Its attempt becomes <code>unknown</code> because Hermes cannot prove which side effects happened.</li>
+<li>A child that completed before restart but whose result was not delivered is restored and routed back through the owning session's normal checks.</li>
+<li>Stopped children return a structured result (<code>status="interrupted"</code>, <code>exit_reason="interrupted"</code>) whose <code>summary</code> is the last text the child produced before the stop (the interrupt placeholder moves to <code>error</code>). The stop recurses down the spawn tree — an orchestrator child's synchronous workers are interrupted first and their partial results roll up into the child's own interrupted result — and each background unit's result re-enters the conversation right away as its normal completion notice (<code>Subagent Task Interrupted: …</code>), so nothing waits for the child to exhaust its budget.</li>
+</ul>
+<p>For <strong>durable execution</strong> that must survive session closure or process restart, use:</p>
+<ul>
+<li><code>cronjob</code> (action=<code>create</code>) — schedules a separate agent run; immune to parent-turn interrupts.</li>
+<li><code>terminal(background=True, notify_on_complete=True)</code> — long-running shell commands that keep running while the agent does other things.</li>
+</ul>
+</div>
+<h2 id="key-properties">Key Properties</h2>
+<ul>
+<li>Each subagent gets its <strong>own terminal session</strong> (separate from the parent)</li>
+<li>Subagents inherit the parent's enabled toolsets; the model cannot select or widen them per call</li>
+<li><strong>Nested delegation is opt-in</strong> — only <code>role="orchestrator"</code> children can delegate further, and only when <code>max_spawn_depth</code> is raised from its default of 1 (flat). Disable globally with <code>orchestrator_enabled: false</code>.</li>
+<li>Leaf subagents <strong>cannot</strong> call: <code>delegate_task</code>, <code>clarify</code>, <code>memory</code>, <code>send_message</code>, <code>cronjob</code>. Orchestrator subagents retain <code>delegate_task</code> but keep the other blocks. Both roles retain <code>execute_code</code> (programmatic tool calling) so children can batch mechanical work instead of burning reasoning iterations.</li>
+<li><strong>Cancellation follows ownership</strong> — <code>/stop</code> or closing/resetting the owning session ends its background children and the synchronous descendants beneath them; each returns an interrupted completion carrying its partial output</li>
+<li>Only the final summary enters the parent's context, keeping token usage efficient</li>
+<li>Subagents inherit the parent's <strong>API key, provider configuration, and credential pool</strong> (enabling key rotation on rate limits)</li>
+</ul>
+<h2 id="worktree-isolation">Worktree Isolation</h2>
+<p>By default, subagents share the parent's working directory — fine for research
+and read-heavy work, but parallel children editing the same repo can collide.
+Set <code>delegation.worktree_isolation: true</code> to give each child its own git
+worktree, branched from the repo's current <code>HEAD</code> (inspired by Muse Code's
+<code>--subagent-worktree-isolation</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="nt">delegation</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">worktree_isolation</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># default: false</span>
+</code></pre></div>
+
+<p>With isolation on:</p>
+<ul>
+<li>Each child starts its terminal in <code>&lt;repo&gt;/.worktrees/subagent-&lt;id&gt;</code> on its
+  own branch <code>hermes-subagent/subagent-&lt;id&gt;</code>, and its goal message tells it to
+  work and commit there.</li>
+<li>The parent's checkout stays untouched; children can't clobber each other's
+  edits.</li>
+<li>When a child finishes, its result entry gains a <code>worktree</code> field reporting
+  <code>path</code>, <code>branch</code>, <code>commits</code> (ahead of the base), and <code>dirty</code>. The parent
+  reviews or merges each branch (<code>git log &lt;branch&gt;</code>, <code>git merge &lt;branch&gt;</code>).</li>
+<li>A worktree left with <strong>no commits and a clean tree is pruned automatically</strong>
+  (<code>pruned: true</code>); anything holding work is kept.</li>
+<li>Pruning requires proof. If a git inspection probe fails — or finalization
+  itself errors — the worktree and branch are kept and the entry carries
+  <code>inspection_failed: true</code> plus a <code>note</code> — <code>commits</code>/<code>dirty</code> are then
+  defaults, not measurements, so inspect the worktree rather than assuming
+  the child produced nothing.</li>
+</ul>
+<p>Scope: opt-in, git-only, and local-terminal-backend-only. In a non-git
+directory, on docker/ssh/modal backends, or if worktree creation fails, the
+setting degrades silently to today's shared-workspace behavior — never an
+error.</p>
+<h2 id="delegation-vs-execute_code">Delegation vs execute_code</h2>
+<table>
+<thead>
+<tr>
+<th>Factor</th>
+<th>delegate_task</th>
+<th>execute_code</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Reasoning</strong></td>
+<td>Full LLM reasoning loop</td>
+<td>Just Python code execution</td>
+</tr>
+<tr>
+<td><strong>Context</strong></td>
+<td>Fresh isolated conversation</td>
+<td>No conversation, just script</td>
+</tr>
+<tr>
+<td><strong>Tool access</strong></td>
+<td>All non-blocked tools with reasoning</td>
+<td>7 tools via RPC, no reasoning</td>
+</tr>
+<tr>
+<td><strong>Parallelism</strong></td>
+<td>10 concurrent subagents by default (configurable)</td>
+<td>Single script</td>
+</tr>
+<tr>
+<td><strong>Best for</strong></td>
+<td>Complex tasks needing judgment</td>
+<td>Mechanical multi-step pipelines</td>
+</tr>
+<tr>
+<td><strong>Token cost</strong></td>
+<td>Higher (full LLM loop)</td>
+<td>Lower (only stdout returned)</td>
+</tr>
+<tr>
+<td><strong>User interaction</strong></td>
+<td>None (subagents can't clarify)</td>
+<td>None</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Rule of thumb:</strong> Use <code>delegate_task</code> when the subtask requires reasoning, judgment, or multi-step problem solving. Use <code>execute_code</code> when you need mechanical data processing or scripted workflows.</p>
+<h2 id="configuration">Configuration</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># In ~/.hermes/config.yaml</span>
+<span class="nt">delegation</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">max_iterations</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">250</span><span class="w">                       </span><span class="c1"># Max turns per child (default: 250)</span>
+<span class="w">  </span><span class="c1"># max_concurrent_children: 10             # Parallel children per batch (default: 10)</span>
+<span class="w">  </span><span class="c1"># independent_completions: false          # true = each task/group returns as it finishes (default: one message per call)</span>
+<span class="w">  </span><span class="c1"># worktree_isolation: false               # Give each child its own git worktree (see Worktree Isolation above)</span>
+<span class="w">  </span><span class="c1"># max_spawn_depth: 1                      # Tree depth (floor 1, no ceiling, default 1 = flat). Raise to 2 to allow orchestrator children to spawn leaves; 3+ for deeper trees.</span>
+<span class="w">  </span><span class="c1"># orchestrator_enabled: true              # Disable to force all children to leaf role.</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;google/gemini-3-flash-preview&quot;</span><span class="w">             </span><span class="c1"># Optional provider/model override</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;openrouter&quot;</span><span class="w">                             </span><span class="c1"># Optional built-in provider</span>
+<span class="w">  </span><span class="nt">api_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">anthropic_messages</span><span class="w">                       </span><span class="c1"># optional; auto-detected from base_url for anthropic_messages endpoints</span>
+
+<span class="c1"># Or use a direct custom endpoint instead of provider:</span>
+<span class="nt">delegation</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;qwen2.5-coder&quot;</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;http://localhost:1234/v1&quot;</span>
+<span class="w">  </span><span class="nt">api_key</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;local-key&quot;</span>
+<span class="w">  </span><span class="c1"># api_mode: &quot;anthropic_messages&quot;  # Optional. Wire protocol override for base_url (&quot;chat_completions&quot;, &quot;codex_responses&quot;, or &quot;anthropic_messages&quot;). Empty = auto-detect from URL (e.g. /anthropic suffix). Set explicitly for endpoints the heuristic can&#39;t classify (Azure AI Foundry, MiniMax, Zhipu GLM, LiteLLM proxies, …).</span>
+
+<span class="c1"># Send per-child request settings on every subagent API call — e.g. OpenRouter</span>
+<span class="c1"># routing hints when delegating straight to openrouter.ai via base_url:</span>
+<span class="nt">delegation</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;deepseek/deepseek-v4-flash-0731&quot;</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://openrouter.ai/api/v1&quot;</span>
+<span class="w">  </span><span class="nt">api_key</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;sk-or-...&quot;</span>
+<span class="w">  </span><span class="nt">request_overrides</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">extra_body</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">provider</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">sort</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">throughput</span><span class="w">   </span><span class="c1"># children route to the fastest OpenRouter provider</span>
+</code></pre></div>
+
+<p>When <code>base_url</code> points at an Anthropic-compatible endpoint — for example a path ending in <code>/anthropic</code>, an Azure Foundry Claude route, or a MiniMax <code>/anthropic</code> proxy — <code>api_mode</code> is auto-detected as <code>anthropic_messages</code> so the subagent uses the right wire format without you setting anything. Set <code>api_mode</code> explicitly when the auto-detection guess is wrong (rare).</p>
+<p>Subagents compact where their parent does — the lower of <code>compression.threshold</code> × window and the global <code>compression.threshold_tokens</code> cap (256K on a 1M model by default). <code>delegation.compression_threshold_tokens</code> (default <code>0</code>, off) adds an optional absolute cap on a child's compaction <em>trigger</em>, applied as the lower of it and the ratio threshold; it never touches the request payload or the parent. A token count of at least 16000 enables it; <code>true</code> or <code>"200k"</code> are config errors that are warned and ignored. It stays off by default because a replay of a 1,393-agent run put 200K–400K caps within 5% of each other in cost once cache prefixes are intact, and every compaction is a chance to lose detail.</p>
+<p><code>delegation.request_overrides</code> works on <strong>all three</strong> resolution branches — direct <code>base_url</code>, named <code>provider</code>, and pure inherit — so it always takes effect. Top-level keys are API kwargs (e.g. <code>service_tier</code>); an <code>extra_body</code> sub-dict is merged into the request's <code>extra_body</code>. Explicit values merge <strong>over</strong> runtime- or parent-derived overrides: explicit top-level keys win, and <code>extra_body</code> is deep-merged one level, so a provider's own request personality (e.g. <code>thinking: {type: disabled}</code>) survives unless your key redefines it. See <a href="../configuration.html#delegation">Configuration → Delegation</a> for details.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>The agent handles delegation automatically based on the task complexity. You don't need to explicitly ask it to delegate — it will do so when it makes sense.</p>
+</div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/delegation</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#completion-delivery">Completion delivery</a></li>
+<li class="lvl2"><a href="#background-process-lifetime">Background process lifetime</a></li>
+<li class="lvl2"><a href="#single-task">Single Task</a></li>
+<li class="lvl2"><a href="#parallel-batch">Parallel Batch</a></li>
+<li class="lvl2"><a href="#structured-output-output_schema">Structured Output (output_schema)</a></li>
+<li class="lvl2"><a href="#how-subagent-context-works">How Subagent Context Works</a></li>
+<li class="lvl3"><a href="#forwarding-images-to-a-subagent">Forwarding Images to a Subagent</a></li>
+<li class="lvl2"><a href="#practical-examples">Practical Examples</a></li>
+<li class="lvl3"><a href="#parallel-research">Parallel Research</a></li>
+<li class="lvl3"><a href="#code-review--fix">Code Review + Fix</a></li>
+<li class="lvl3"><a href="#multi-file-refactoring">Multi-File Refactoring</a></li>
+<li class="lvl2"><a href="#batch-mode-details">Batch Mode Details</a></li>
+<li class="lvl3"><a href="#independent-completions-opt-in">Independent completions (opt-in)</a></li>
+<li class="lvl3"><a href="#durable-background-completions">Durable background completions</a></li>
+<li class="lvl3"><a href="#child-background-process-notifications">Child background-process notifications</a></li>
+<li class="lvl3"><a href="#handing-a-process-to-the-parent">Handing a process to the parent</a></li>
+<li class="lvl2"><a href="#model-override">Model Override</a></li>
+<li class="lvl3"><a href="#cost-strategy-frontier-planner-inexpensive-workers">Cost strategy: frontier planner, inexpensive workers</a></li>
+<li class="lvl2"><a href="#the-review-command">The /review Command</a></li>
+<li class="lvl3"><a href="#review-model">Review model</a></li>
+<li class="lvl2"><a href="#inherited-tool-access">Inherited Tool Access</a></li>
+<li class="lvl2"><a href="#max-iterations">Max Iterations</a></li>
+<li class="lvl2"><a href="#child-timeout">Child Timeout</a></li>
+<li class="lvl2"><a href="#failure-visibility">Failure Visibility</a></li>
+<li class="lvl2"><a href="#stall-detection-for-background-subagents">Stall Detection for Background Subagents</a></li>
+<li class="lvl2"><a href="#monitoring-running-subagents-agents">Monitoring Running Subagents (/agents)</a></li>
+<li class="lvl3"><a href="#live-activity-above-the-composer">Live activity above the composer</a></li>
+<li class="lvl2"><a href="#steering-a-running-subagent">Steering a Running Subagent</a></li>
+<li class="lvl3"><a href="#from-the-parent-agent-model-facing">From the parent agent (model-facing)</a></li>
+<li class="lvl3"><a href="#from-the-tui--gateway-session-facing">From the TUI / gateway (session-facing)</a></li>
+<li class="lvl2"><a href="#live-transcripts">Live Transcripts</a></li>
+<li class="lvl2"><a href="#depth-limit-and-nested-orchestration">Depth Limit and Nested Orchestration</a></li>
+<li class="lvl2"><a href="#lifetime-and-durability">Lifetime and Durability</a></li>
+<li class="lvl2"><a href="#key-properties">Key Properties</a></li>
+<li class="lvl2"><a href="#worktree-isolation">Worktree Isolation</a></li>
+<li class="lvl2"><a href="#delegation-vs-execute_code">Delegation vs execute_code</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

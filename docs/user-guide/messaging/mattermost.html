@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mattermost · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/messaging/mattermost</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="mattermost-setup">Mattermost Setup</h1>
+<p>Hermes Agent integrates with Mattermost as a bot, letting you chat with your AI assistant through direct messages or team channels. Mattermost is a self-hosted, open-source Slack alternative — you run it on your own infrastructure, keeping full control of your data. The bot connects via Mattermost's REST API (v4) and WebSocket for real-time events, processes messages through the Hermes Agent pipeline (including tool use, memory, and reasoning), and responds in real time. It supports text, file attachments, images, and slash commands.</p>
+<p>No external Mattermost library is required — the adapter uses <code>aiohttp</code>, which is already a Hermes dependency.</p>
+<p>Before setup, here's the part most people want to know: how Hermes behaves once it's in your Mattermost instance.</p>
+<h2 id="how-hermes-behaves">How Hermes Behaves</h2>
+<table>
+<thead>
+<tr>
+<th>Context</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>DMs</strong></td>
+<td>Hermes responds to every message. No <code>@mention</code> needed. Each DM has its own session.</td>
+</tr>
+<tr>
+<td><strong>Public/private channels</strong></td>
+<td>Hermes responds when you <code>@mention</code> it. Without a mention, Hermes ignores the message.</td>
+</tr>
+<tr>
+<td><strong>Threads</strong></td>
+<td>If <code>MATTERMOST_REPLY_MODE=thread</code>, Hermes replies in a thread under your message. Thread context stays isolated from the parent channel.</td>
+</tr>
+<tr>
+<td><strong>Shared channels with multiple users</strong></td>
+<td>By default, Hermes isolates session history per user inside the channel. Two people talking in the same channel do not share one transcript unless you explicitly disable that.</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>If you want Hermes to reply as threaded conversations (nested under your original message), set <code>MATTERMOST_REPLY_MODE=thread</code>. The default is <code>off</code>, which sends flat messages in the channel.</p>
+</div>
+<h3 id="session-model-in-mattermost">Session Model in Mattermost</h3>
+<p>By default:</p>
+<ul>
+<li>each DM gets its own session</li>
+<li>each thread gets its own session namespace</li>
+<li>each user in a shared channel gets their own session inside that channel</li>
+</ul>
+<p>This is controlled by <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>Set it to <code>false</code> only if you explicitly want one shared conversation for the entire channel:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>Shared sessions can be useful for a collaborative channel, but they also mean:</p>
+<ul>
+<li>users share context growth and token costs</li>
+<li>one person's long tool-heavy task can bloat everyone else's context</li>
+<li>one person's in-flight run can interrupt another person's follow-up in the same channel</li>
+</ul>
+<p>This guide walks you through the full setup process — from creating your bot on Mattermost to sending your first message.</p>
+<h2 id="step-1-enable-bot-accounts">Step 1: Enable Bot Accounts</h2>
+<p>Bot accounts must be enabled on your Mattermost server before you can create one.</p>
+<ol>
+<li>Log in to Mattermost as a <strong>System Admin</strong>.</li>
+<li>Go to <strong>System Console</strong> → <strong>Integrations</strong> → <strong>Bot Accounts</strong>.</li>
+<li>Set <strong>Enable Bot Account Creation</strong> to <strong>true</strong>.</li>
+<li>Click <strong>Save</strong>.</li>
+</ol>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>If you don't have System Admin access, ask your Mattermost administrator to enable bot accounts and create one for you.</p>
+</div>
+<h2 id="step-2-create-a-bot-account">Step 2: Create a Bot Account</h2>
+<ol>
+<li>In Mattermost, click the <strong>☰</strong> menu (top-left) → <strong>Integrations</strong> → <strong>Bot Accounts</strong>.</li>
+<li>Click <strong>Add Bot Account</strong>.</li>
+<li>Fill in the details:</li>
+<li><strong>Username</strong>: e.g., <code>hermes</code></li>
+<li><strong>Display Name</strong>: e.g., <code>Hermes Agent</code></li>
+<li><strong>Description</strong>: optional</li>
+<li><strong>Role</strong>: <code>Member</code> is sufficient</li>
+<li>Click <strong>Create Bot Account</strong>.</li>
+<li>Mattermost will display the <strong>bot token</strong>. <strong>Copy it immediately.</strong></li>
+</ol>
+<div class="admonition adm-warning"><p class="adm-title">Token shown only once</p>
+<p>The bot token is only displayed once when you create the bot account. If you lose it, you'll need to regenerate it from the bot account settings. Never share your token publicly or commit it to Git — anyone with this token has full control of the bot.</p>
+</div>
+<p>Store the token somewhere safe (a password manager, for example). You'll need it in Step 5.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>You can also use a <strong>personal access token</strong> instead of a bot account. Go to <strong>Profile</strong> → <strong>Security</strong> → <strong>Personal Access Tokens</strong> → <strong>Create Token</strong>. This is useful if you want Hermes to post as your own user rather than a separate bot user.</p>
+</div>
+<h2 id="step-3-add-the-bot-to-channels">Step 3: Add the Bot to Channels</h2>
+<p>The bot needs to be a member of any channel where you want it to respond:</p>
+<ol>
+<li>Open the channel where you want the bot.</li>
+<li>Click the channel name → <strong>Add Members</strong>.</li>
+<li>Search for your bot username (e.g., <code>hermes</code>) and add it.</li>
+</ol>
+<p>For DMs, simply open a direct message with the bot — it will be able to respond immediately.</p>
+<h2 id="step-4-find-your-mattermost-user-id">Step 4: Find Your Mattermost User ID</h2>
+<p>Hermes Agent uses your Mattermost User ID to control who can interact with the bot. To find it:</p>
+<ol>
+<li>Click your <strong>avatar</strong> (top-left corner) → <strong>Profile</strong>.</li>
+<li>Your User ID is displayed in the profile dialog — click it to copy.</li>
+</ol>
+<p>Your User ID is a 26-character alphanumeric string like <code>3uo8dkh1p7g1mfk49ear5fzs5c</code>.</p>
+<div class="admonition adm-warning"><p class="adm-title">Warning</p>
+<p>Your User ID is <strong>not</strong> your username. The username is what appears after <code>@</code> (e.g., <code>@alice</code>). The User ID is a long alphanumeric identifier that Mattermost uses internally.</p>
+</div>
+<p><strong>Alternative</strong>: You can also get your User ID via the API:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer YOUR_TOKEN&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://your-mattermost-server/api/v4/users/me<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.id
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>To get a <strong>Channel ID</strong>: click the channel name → <strong>View Info</strong>. The Channel ID is shown in the info panel. You'll need this if you want to set a home channel manually.</p>
+</div>
+<h2 id="step-5-configure-hermes-agent">Step 5: Configure Hermes Agent</h2>
+<h3 id="option-a-interactive-setup-recommended">Option A: Interactive Setup (Recommended)</h3>
+<p>Run the guided setup command:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>setup
+</code></pre></div>
+
+<p>Select <strong>Mattermost</strong> when prompted, then paste your server URL, bot token, and user ID when asked.</p>
+<h3 id="option-b-manual-configuration">Option B: Manual Configuration</h3>
+<p>Add the following to your <code>~/.hermes/.env</code> file:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Required</span>
+<span class="nv">MATTERMOST_URL</span><span class="o">=</span>https://mm.example.com
+<span class="nv">MATTERMOST_TOKEN</span><span class="o">=</span>***
+<span class="nv">MATTERMOST_ALLOWED_USERS</span><span class="o">=</span>3uo8dkh1p7g1mfk49ear5fzs5c
+
+<span class="c1"># Multiple allowed users (comma-separated)</span>
+<span class="c1"># MATTERMOST_ALLOWED_USERS=3uo8dkh1p7g1mfk49ear5fzs5c,8fk2jd9s0a7bncm1xqw4tp6r3e</span>
+
+<span class="c1"># Optional: reply mode (thread or off, default: off)</span>
+<span class="c1"># MATTERMOST_REPLY_MODE=thread</span>
+
+<span class="c1"># Optional: respond without @mention (default: true = require mention)</span>
+<span class="c1"># MATTERMOST_REQUIRE_MENTION=false</span>
+
+<span class="c1"># Optional: channels where bot responds without @mention (comma-separated channel IDs)</span>
+<span class="c1"># MATTERMOST_FREE_RESPONSE_CHANNELS=channel_id_1,channel_id_2</span>
+</code></pre></div>
+
+<p>Optional behavior settings in <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<ul>
+<li><code>group_sessions_per_user: true</code> keeps each participant's context isolated inside shared channels and threads</li>
+</ul>
+<h3 id="start-the-gateway">Start the Gateway</h3>
+<p>Once configured, start the Mattermost gateway:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>The bot should connect to your Mattermost server within a few seconds. Send it a message — either a DM or in a channel where it's been added — to test.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>You can run <code>hermes gateway</code> in the background or as a systemd service for persistent operation. See the deployment docs for details.</p>
+</div>
+<h2 id="home-channel">Home Channel</h2>
+<p>You can designate a "home channel" where the bot sends proactive messages (such as cron job output, reminders, and notifications). There are two ways to set it:</p>
+<h3 id="using-the-slash-command">Using the Slash Command</h3>
+<p>Type <code>/sethome</code> in any Mattermost channel where the bot is present. That channel becomes the home channel.</p>
+<h3 id="manual-configuration">Manual Configuration</h3>
+<p>Add this to your <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MATTERMOST_HOME_CHANNEL</span><span class="o">=</span>abc123def456ghi789jkl012mn
+</code></pre></div>
+
+<p>Replace the ID with the actual channel ID (click the channel name → View Info → copy the ID).</p>
+<h2 id="reply-mode">Reply Mode</h2>
+<p>The <code>MATTERMOST_REPLY_MODE</code> setting controls how Hermes posts responses:</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>off</code> (default)</td>
+<td>Hermes posts flat messages in the channel, like a normal user.</td>
+</tr>
+<tr>
+<td><code>thread</code></td>
+<td>Hermes replies in a thread under your original message. Keeps channels clean when there's lots of back-and-forth.</td>
+</tr>
+</tbody>
+</table>
+<p>Set it in your <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MATTERMOST_REPLY_MODE</span><span class="o">=</span>thread
+</code></pre></div>
+
+<h2 id="mention-behavior">Mention Behavior</h2>
+<p>By default, the bot only responds in channels when <code>@mentioned</code>. You can change this:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MATTERMOST_REQUIRE_MENTION</code></td>
+<td><code>true</code></td>
+<td>Set to <code>false</code> to respond to all messages in channels (DMs always work).</td>
+</tr>
+<tr>
+<td><code>MATTERMOST_FREE_RESPONSE_CHANNELS</code></td>
+<td><em>(none)</em></td>
+<td>Comma-separated channel IDs where the bot responds without <code>@mention</code>, even when require_mention is true.</td>
+</tr>
+</tbody>
+</table>
+<p>To find a channel ID in Mattermost: open the channel, click the channel name header, and look for the ID in the URL or channel details.</p>
+<p>When the bot is <code>@mentioned</code>, the mention is automatically stripped from the message before processing.</p>
+<h2 id="channel-allowlist-allowed_channels">Channel allowlist (<code>allowed_channels</code>)</h2>
+<p>Restrict the bot to a fixed set of Mattermost channels. When set, the bot <strong>only</strong> responds in channels whose ID appears in the list — messages from any other channel are silently ignored, even if the bot is <code>@mentioned</code>.</p>
+<p><strong>DMs are exempt</strong> from this filter, so authorized users can always reach the bot in a direct message.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">mattermost</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">allowed_channels</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;abc123def456ghi789jkl012mno&quot;</span><span class="w">   </span><span class="c1"># #ops</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;xyz987uvw654rst321opq098nml&quot;</span><span class="w">   </span><span class="c1"># #incident-response</span>
+</code></pre></div>
+
+<p>Or via env var (comma-separated):</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MATTERMOST_ALLOWED_CHANNELS</span><span class="o">=</span><span class="s2">&quot;abc123def456ghi789jkl012mno,xyz987uvw654rst321opq098nml&quot;</span>
+</code></pre></div>
+
+<p>Behavior:</p>
+<ul>
+<li>Empty / unset → no restriction (fully backward compatible).</li>
+<li>Non-empty → channel ID must be on the list, or the message is dropped before any other gating (mention requirement, <code>MATTERMOST_FREE_RESPONSE_CHANNELS</code>, etc.) runs.</li>
+<li>Find a channel ID via the Mattermost UI → channel header → "View Info", or read it from the channel URL.</li>
+</ul>
+<p>See also: <a href="../../reference/slash-commands.html#permissions-and-adminuser-split">admin/user slash command split</a>.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="bot-is-not-responding-to-messages">Bot is not responding to messages</h3>
+<p><strong>Cause</strong>: The bot is not a member of the channel, or <code>MATTERMOST_ALLOWED_USERS</code> doesn't include your User ID.</p>
+<p><strong>Fix</strong>: Add the bot to the channel (channel name → Add Members → search for the bot). Verify your User ID is in <code>MATTERMOST_ALLOWED_USERS</code>. Restart the gateway.</p>
+<h3 id="403-forbidden-errors">403 Forbidden errors</h3>
+<p><strong>Cause</strong>: The bot token is invalid, or the bot doesn't have permission to post in the channel.</p>
+<p><strong>Fix</strong>: Check that <code>MATTERMOST_TOKEN</code> in your <code>.env</code> file is correct. Make sure the bot account hasn't been deactivated. Verify the bot has been added to the channel. If using a personal access token, ensure your account has the required permissions.</p>
+<h3 id="websocket-disconnects--reconnection-loops">WebSocket disconnects / reconnection loops</h3>
+<p><strong>Cause</strong>: Network instability, Mattermost server restarts, or firewall/proxy issues with WebSocket connections.</p>
+<p><strong>Fix</strong>: The adapter automatically reconnects with exponential backoff (2s → 60s). Check your server's WebSocket configuration — reverse proxies (nginx, Apache) need WebSocket upgrade headers configured. Verify no firewall is blocking WebSocket connections on your Mattermost server.</p>
+<p>For nginx, ensure your config includes:</p>
+<div class="highlight"><pre><span></span><code><span class="k">location</span><span class="w"> </span><span class="s">/api/v4/websocket</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kn">proxy_pass</span><span class="w"> </span><span class="s">http://mattermost-backend</span><span class="p">;</span>
+<span class="w">    </span><span class="kn">proxy_set_header</span><span class="w"> </span><span class="s">Upgrade</span><span class="w"> </span><span class="nv">$http_upgrade</span><span class="p">;</span>
+<span class="w">    </span><span class="kn">proxy_set_header</span><span class="w"> </span><span class="s">Connection</span><span class="w"> </span><span class="s">&quot;upgrade&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="kn">proxy_read_timeout</span><span class="w"> </span><span class="s">600s</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="failed-to-authenticate-on-startup">"Failed to authenticate" on startup</h3>
+<p><strong>Cause</strong>: The token or server URL is incorrect.</p>
+<p><strong>Fix</strong>: Verify <code>MATTERMOST_URL</code> points to your Mattermost server (include <code>https://</code>, no trailing slash). Check that <code>MATTERMOST_TOKEN</code> is valid — try it with curl:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer YOUR_TOKEN&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://your-server/api/v4/users/me
+</code></pre></div>
+
+<p>If this returns your bot's user info, the token is valid. If it returns an error, regenerate the token.</p>
+<h3 id="bot-is-offline">Bot is offline</h3>
+<p><strong>Cause</strong>: The Hermes gateway isn't running, or it failed to connect.</p>
+<p><strong>Fix</strong>: Check that <code>hermes gateway</code> is running. Look at the terminal output for error messages. Common issues: wrong URL, expired token, Mattermost server unreachable.</p>
+<h3 id="user-not-allowed--bot-ignores-you">"User not allowed" / Bot ignores you</h3>
+<p><strong>Cause</strong>: Your User ID isn't in <code>MATTERMOST_ALLOWED_USERS</code>.</p>
+<p><strong>Fix</strong>: Add your User ID to <code>MATTERMOST_ALLOWED_USERS</code> in <code>~/.hermes/.env</code> and restart the gateway. Remember: the User ID is a 26-character alphanumeric string, not your <code>@username</code>.</p>
+<h2 id="per-channel-prompts">Per-Channel Prompts</h2>
+<p>Assign ephemeral system prompts to specific Mattermost channels. The prompt is injected at runtime on every turn — never persisted to transcript history — so changes take effect immediately.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">mattermost</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">channel_prompts</span><span class="p">:</span>
+<span class="w">    </span><span class="s">&quot;channel_id_abc123&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">      </span><span class="no">You are a research assistant. Focus on academic sources,</span>
+<span class="w">      </span><span class="no">citations, and concise synthesis.</span>
+<span class="w">    </span><span class="s">&quot;channel_id_def456&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">      </span><span class="no">Code review mode. Be precise about edge cases and</span>
+<span class="w">      </span><span class="no">performance implications.</span>
+</code></pre></div>
+
+<p>Keys are Mattermost channel IDs (find them in the channel URL or via the API). All messages in the matching channel get the prompt injected as an ephemeral system instruction.</p>
+<h2 id="security">Security</h2>
+<div class="admonition adm-warning"><p class="adm-title">Warning</p>
+<p>Always set <code>MATTERMOST_ALLOWED_USERS</code> to restrict who can interact with the bot. Without it, the gateway denies all users by default as a safety measure. Only add User IDs of people you trust — authorized users have full access to the agent's capabilities, including tool use and system access.</p>
+</div>
+<p>For more information on securing your Hermes Agent deployment, see the <a href="../security.html">Security Guide</a>.</p>
+<h2 id="notes">Notes</h2>
+<ul>
+<li><strong>Self-hosted friendly</strong>: Works with any self-hosted Mattermost instance. No Mattermost Cloud account or subscription required.</li>
+<li><strong>No extra dependencies</strong>: The adapter uses <code>aiohttp</code> for HTTP and WebSocket, which is already included with Hermes Agent.</li>
+<li><strong>Team Edition compatible</strong>: Works with both Mattermost Team Edition (free) and Enterprise Edition.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/messaging/mattermost</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-hermes-behaves">How Hermes Behaves</a></li>
+<li class="lvl3"><a href="#session-model-in-mattermost">Session Model in Mattermost</a></li>
+<li class="lvl2"><a href="#step-1-enable-bot-accounts">Step 1: Enable Bot Accounts</a></li>
+<li class="lvl2"><a href="#step-2-create-a-bot-account">Step 2: Create a Bot Account</a></li>
+<li class="lvl2"><a href="#step-3-add-the-bot-to-channels">Step 3: Add the Bot to Channels</a></li>
+<li class="lvl2"><a href="#step-4-find-your-mattermost-user-id">Step 4: Find Your Mattermost User ID</a></li>
+<li class="lvl2"><a href="#step-5-configure-hermes-agent">Step 5: Configure Hermes Agent</a></li>
+<li class="lvl3"><a href="#option-a-interactive-setup-recommended">Option A: Interactive Setup (Recommended)</a></li>
+<li class="lvl3"><a href="#option-b-manual-configuration">Option B: Manual Configuration</a></li>
+<li class="lvl3"><a href="#start-the-gateway">Start the Gateway</a></li>
+<li class="lvl2"><a href="#home-channel">Home Channel</a></li>
+<li class="lvl3"><a href="#using-the-slash-command">Using the Slash Command</a></li>
+<li class="lvl3"><a href="#manual-configuration">Manual Configuration</a></li>
+<li class="lvl2"><a href="#reply-mode">Reply Mode</a></li>
+<li class="lvl2"><a href="#mention-behavior">Mention Behavior</a></li>
+<li class="lvl2"><a href="#channel-allowlist-allowed_channels">Channel allowlist (allowed_channels)</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl3"><a href="#bot-is-not-responding-to-messages">Bot is not responding to messages</a></li>
+<li class="lvl3"><a href="#403-forbidden-errors">403 Forbidden errors</a></li>
+<li class="lvl3"><a href="#websocket-disconnects--reconnection-loops">WebSocket disconnects / reconnection loops</a></li>
+<li class="lvl3"><a href="#failed-to-authenticate-on-startup">&quot;Failed to authenticate&quot; on startup</a></li>
+<li class="lvl3"><a href="#bot-is-offline">Bot is offline</a></li>
+<li class="lvl3"><a href="#user-not-allowed--bot-ignores-you">&quot;User not allowed&quot; / Bot ignores you</a></li>
+<li class="lvl2"><a href="#per-channel-prompts">Per-Channel Prompts</a></li>
+<li class="lvl2"><a href="#security">Security</a></li>
+<li class="lvl2"><a href="#notes">Notes</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

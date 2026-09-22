@@ -1,0 +1,1185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory Providers · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/memory-providers</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="memory-providers">Memory Providers</h1>
+<p>Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only <strong>one</strong> external provider can be active at a time — the built-in memory is always active alongside it.</p>
+<h2 id="quick-start">Quick Start</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">      </span><span class="c1"># interactive picker + configuration</span>
+hermes<span class="w"> </span>memory<span class="w"> </span>status<span class="w">     </span><span class="c1"># check what&#39;s active</span>
+hermes<span class="w"> </span>memory<span class="w"> </span>off<span class="w">        </span><span class="c1"># disable external provider</span>
+</code></pre></div>
+
+<p>You can also select the active memory provider via <code>hermes plugins</code> → Provider Plugins → Memory Provider.</p>
+<p>Or set manually in <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">memory</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openviking</span><span class="w">   </span><span class="c1"># or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory</span>
+</code></pre></div>
+
+<h2 id="how-it-works">How It Works</h2>
+<p>When a memory provider is active, Hermes automatically:</p>
+<ol>
+<li><strong>Injects provider context</strong> into the system prompt (what the provider knows)</li>
+<li><strong>Prefetches relevant memories</strong> before each turn (background, non-blocking)</li>
+<li><strong>Syncs conversation turns</strong> to the provider after each response</li>
+<li><strong>Extracts memories on session end</strong> (for providers that support it)</li>
+<li><strong>Mirrors built-in memory writes</strong> to the external provider</li>
+<li><strong>Adds provider-specific tools</strong> so the agent can search, store, and manage memories</li>
+</ol>
+<p>The built-in memory (MEMORY.md / USER.md) continues to work exactly as before. The external provider is additive.</p>
+<h2 id="available-providers">Available Providers</h2>
+<h3 id="honcho">Honcho</h3>
+<p>AI-native cross-session user modeling with dialectic reasoning, session-scoped context injection, semantic search, and persistent conclusions. Base context now includes the session summary alongside user representation and peer cards, giving the agent awareness of what has already been discussed.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Best for</strong></td>
+<td>Multi-agent systems with cross-session context, user-agent alignment</td>
+</tr>
+<tr>
+<td><strong>Requires</strong></td>
+<td><code>pip install honcho-ai</code> + <a href="https://app.honcho.dev" class="ext" target="_blank" rel="noopener">API key</a> or self-hosted instance</td>
+</tr>
+<tr>
+<td><strong>Data storage</strong></td>
+<td>Honcho Cloud or self-hosted</td>
+</tr>
+<tr>
+<td><strong>Cost</strong></td>
+<td>Honcho pricing (cloud) / free (self-hosted)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tools (5):</strong> <code>honcho_profile</code> (read/update peer card), <code>honcho_search</code> (semantic search), <code>honcho_context</code> (session context — summary, representation, card, messages), <code>honcho_reasoning</code> (LLM-synthesized), <code>honcho_conclude</code> (create/delete conclusions)</p>
+<p><strong>Architecture:</strong> Two-layer context injection — a base layer (session summary + representation + peer card, refreshed on <code>contextCadence</code>) plus a dialectic supplement (LLM reasoning, refreshed on <code>dialecticCadence</code>). The dialectic automatically selects cold-start prompts (general user facts) vs. warm prompts (session-scoped context) based on whether base context exists.</p>
+<p><strong>Three orthogonal config knobs</strong> control cost and depth independently:</p>
+<ul>
+<li><code>contextCadence</code> — how often the base layer refreshes (API call frequency)</li>
+<li><code>dialecticCadence</code> — how often the dialectic LLM fires (LLM call frequency)</li>
+<li><code>dialecticDepth</code> — how many <code>.chat()</code> passes per dialectic invocation (1–3, depth of reasoning)</li>
+</ul>
+<p>The auto-injected dialectic also scales its reasoning level by query length (longer query → deeper reasoning, capped at <code>reasoningLevelCap</code>); see <a href="honcho.html#query-adaptive-reasoning-level">Query-Adaptive Reasoning Level</a>.</p>
+<p><strong>Setup Wizard:</strong></p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">        </span><span class="c1"># select &quot;honcho&quot; — runs the Honcho-specific post-setup</span>
+</code></pre></div>
+
+<p>The legacy <code>hermes honcho setup</code> command still works (it now redirects to <code>hermes memory setup</code>), but is only registered after Honcho is selected as the active memory provider.</p>
+<p><strong>Headless / remote machines:</strong> for cloud auth on a box without a browser (SSH, remote VM), pick <strong>device</strong> at the wizard's auth-method prompt. The CLI prints a short code and a verification link; open the link in a browser on any other machine, approve, and setup completes — no API key copy-paste. The wizard defaults to this option automatically when it detects no usable local browser.</p>
+<p><strong>Config:</strong> <code>$HERMES_HOME/honcho.json</code> (profile-local) or <code>~/.honcho/config.json</code> (global). Resolution order: <code>$HERMES_HOME/honcho.json</code> &gt; <code>~/.hermes/honcho.json</code> &gt; <code>~/.honcho/config.json</code>. See the <a href="https://github.com/NousResearch/hermes-agent/blob/main/plugins/memory/honcho/README.md" class="ext" target="_blank" rel="noopener">config reference</a> and the <a href="https://docs.honcho.dev/v3/guides/integrations/hermes" class="ext" target="_blank" rel="noopener">Honcho integration guide</a>.</p>
+<details class="details">
+<summary>Full config reference</summary>
+
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>apiKey</code></td>
+<td>--</td>
+<td>API key from <a href="https://app.honcho.dev" class="ext" target="_blank" rel="noopener">app.honcho.dev</a></td>
+</tr>
+<tr>
+<td><code>baseUrl</code></td>
+<td>--</td>
+<td>Base URL for self-hosted Honcho</td>
+</tr>
+<tr>
+<td><code>peerName</code></td>
+<td>--</td>
+<td>User peer identity</td>
+</tr>
+<tr>
+<td><code>aiPeer</code></td>
+<td>host key</td>
+<td>AI peer identity (one per profile)</td>
+</tr>
+<tr>
+<td><code>workspace</code></td>
+<td>host key</td>
+<td>Shared workspace ID</td>
+</tr>
+<tr>
+<td><code>contextTokens</code></td>
+<td><code>null</code> (uncapped)</td>
+<td>Token budget for auto-injected context per turn. Truncates at word boundaries</td>
+</tr>
+<tr>
+<td><code>contextCadence</code></td>
+<td><code>1</code></td>
+<td>Minimum turns between <code>context()</code> API calls (base layer refresh)</td>
+</tr>
+<tr>
+<td><code>dialecticCadence</code></td>
+<td><code>2</code></td>
+<td>Minimum turns between <code>peer.chat()</code> LLM calls. Recommended 1–5. Only applies to <code>hybrid</code>/<code>context</code> modes</td>
+</tr>
+<tr>
+<td><code>dialecticDepth</code></td>
+<td><code>1</code></td>
+<td>Number of <code>.chat()</code> passes per dialectic invocation. Clamped 1–3. Pass 0: cold/warm prompt, pass 1: self-audit, pass 2: reconciliation</td>
+</tr>
+<tr>
+<td><code>dialecticDepthLevels</code></td>
+<td><code>null</code></td>
+<td>Optional array of reasoning levels per pass, e.g. <code>["minimal", "low", "medium"]</code>. Overrides proportional defaults</td>
+</tr>
+<tr>
+<td><code>dialecticReasoningLevel</code></td>
+<td><code>'low'</code></td>
+<td>Base reasoning level: <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>max</code></td>
+</tr>
+<tr>
+<td><code>dialecticDynamic</code></td>
+<td><code>true</code></td>
+<td>When <code>true</code>, model can override reasoning level per-call via tool param</td>
+</tr>
+<tr>
+<td><code>dialecticMaxChars</code></td>
+<td><code>600</code></td>
+<td>Max chars of dialectic result injected into system prompt</td>
+</tr>
+<tr>
+<td><code>recallMode</code></td>
+<td><code>'hybrid'</code></td>
+<td><code>hybrid</code> (auto-inject + tools), <code>context</code> (inject only), <code>tools</code> (tools only)</td>
+</tr>
+<tr>
+<td><code>writeFrequency</code></td>
+<td><code>'async'</code></td>
+<td>When to flush messages: <code>async</code> (background thread), <code>turn</code> (sync), <code>session</code> (batch on end), or integer N</td>
+</tr>
+<tr>
+<td><code>saveMessages</code></td>
+<td><code>true</code></td>
+<td>Whether to persist messages to Honcho API</td>
+</tr>
+<tr>
+<td><code>observationMode</code></td>
+<td><code>'directional'</code></td>
+<td><code>directional</code> (all on) or <code>unified</code> (shared pool). Override with <code>observation</code> object</td>
+</tr>
+<tr>
+<td><code>messageMaxChars</code></td>
+<td><code>25000</code></td>
+<td>Max chars per message (chunked if exceeded)</td>
+</tr>
+<tr>
+<td><code>dialecticMaxInputChars</code></td>
+<td><code>10000</code></td>
+<td>Max chars for dialectic query input to <code>peer.chat()</code></td>
+</tr>
+<tr>
+<td><code>sessionStrategy</code></td>
+<td><code>'per-directory'</code></td>
+<td><code>per-directory</code>, <code>per-repo</code>, <code>per-session</code>, <code>global</code></td>
+</tr>
+<tr>
+<td><code>pinUserPeer</code></td>
+<td><code>false</code></td>
+<td>Gateway only. When <code>true</code>, every non-agent gateway user collapses to <code>peerName</code>; the pin overrides all aliases</td>
+</tr>
+<tr>
+<td><code>userPeerAliases</code></td>
+<td><code>{}</code></td>
+<td>Gateway only. Maps runtime IDs to peers (<code>{"7654321": "alice"}</code>). Many-to-one</td>
+</tr>
+<tr>
+<td><code>runtimePeerPrefix</code></td>
+<td><code>""</code></td>
+<td>Gateway only. Namespaces unknown runtime IDs (<code>telegram_7654321</code>) when no alias matches</td>
+</tr>
+</tbody>
+</table>
+</details>
+<details class="details">
+<summary>Minimal honcho.json (cloud)</summary>
+
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;apiKey&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;your-key-from-app.honcho.dev&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;hosts&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;hermes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;aiPeer&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;peerName&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;your-name&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;workspace&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+</details>
+<details class="details">
+<summary>Minimal honcho.json (self-hosted)</summary>
+
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;baseUrl&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;http://localhost:8000&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;hosts&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;hermes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;aiPeer&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;peerName&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;your-name&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;workspace&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+</details>
+<div class="admonition adm-tip"><p class="adm-title">Migrating from `hermes honcho`</p>
+<p>If you previously used <code>hermes honcho setup</code>, your config and all server-side data are intact. Just re-enable through the setup wizard again or manually set <code>memory.provider: honcho</code> to reactivate via the new system.</p>
+</div>
+<p><strong>Multi-peer setup:</strong></p>
+<p>Honcho models conversations as peers exchanging messages — one user peer plus one AI peer per Hermes profile, all sharing a workspace. The workspace is the shared environment: the user peer is global across profiles, each AI peer is its own identity. Every AI peer builds an independent representation / card from its own observations, so a <code>coder</code> profile stays code-oriented while a <code>writer</code> profile stays editorial against the same user.</p>
+<p>The mapping:</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Workspace</strong></td>
+<td>Shared environment. All Hermes profiles under one workspace see the same user identity.</td>
+</tr>
+<tr>
+<td><strong>User peer</strong> (<code>peerName</code>)</td>
+<td>The human. Shared across profiles in the workspace.</td>
+</tr>
+<tr>
+<td><strong>AI peer</strong> (<code>aiPeer</code>)</td>
+<td>One per Hermes profile. Host key <code>hermes</code> → default; <code>hermes.&lt;profile&gt;</code> for others.</td>
+</tr>
+<tr>
+<td><strong>Observation</strong></td>
+<td>Per-peer toggles controlling what Honcho models from whose messages. <code>directional</code> (default, all four on) or <code>unified</code> (single-observer pool).</td>
+</tr>
+</tbody>
+</table>
+<h3 id="new-profile-fresh-honcho-peer">New profile, fresh Honcho peer</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>coder<span class="w"> </span>--clone
+</code></pre></div>
+
+<p><code>--clone</code> creates a <code>hermes.coder</code> host block in <code>honcho.json</code> with <code>aiPeer: "coder"</code>, shared <code>workspace</code>, inherited <code>peerName</code>, <code>recallMode</code>, <code>writeFrequency</code>, <code>observation</code>, etc. The AI peer is eagerly created in Honcho so it exists before the first message.</p>
+<h3 id="existing-profiles-backfill-honcho-peers">Existing profiles, backfill Honcho peers</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>honcho<span class="w"> </span>sync
+</code></pre></div>
+
+<p>Scans every Hermes profile, creates host blocks for any profile without one, inherits settings from the default <code>hermes</code> block, and creates the new AI peers eagerly. Idempotent — skips profiles that already have a host block.</p>
+<h3 id="per-profile-observation">Per-profile observation</h3>
+<p>Each host block can override the observation config independently. Example: a code-focused profile where the AI peer observes the user but doesn't self-model:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">&quot;hermes.coder&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;aiPeer&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;coder&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;observation&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;user&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;observeMe&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;observeOthers&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;ai&quot;</span><span class="p">:</span><span class="w">   </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;observeMe&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;observeOthers&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Observation toggles (one set per peer):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Toggle</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>observeMe</code></td>
+<td>Honcho builds a representation of this peer from its own messages</td>
+</tr>
+<tr>
+<td><code>observeOthers</code></td>
+<td>This peer observes the other peer's messages (feeds cross-peer reasoning)</td>
+</tr>
+</tbody>
+</table>
+<p>Presets via <code>observationMode</code>:</p>
+<ul>
+<li><strong><code>"directional"</code></strong> (default) — all four flags on. Full mutual observation; enables cross-peer dialectic.</li>
+<li><strong><code>"unified"</code></strong> — user <code>observeMe: true</code>, AI <code>observeOthers: true</code>, rest false. Single-observer pool; AI models the user but not itself, user peer only self-models.</li>
+</ul>
+<p>Server-side toggles set via the <a href="https://app.honcho.dev" class="ext" target="_blank" rel="noopener">Honcho dashboard</a> win over local defaults — synced back at session init.</p>
+<p>See the <a href="honcho.html#observation-directional-vs-unified">Honcho page</a> for the full observation reference.</p>
+<h3 id="gateway-identity-mapping">Gateway identity mapping</h3>
+<p>The peer model above covers CLI, TUI, and desktop sessions, where every conversation resolves to <code>peerName</code>. The <a href="../../developer-guide/gateway-internals.html">gateway</a> adds a second axis: users arrive with platform-native runtime IDs (Telegram UID, Discord snowflake, Slack user), and three keys decide which peer each ID resolves to.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pinUserPeer: true</code></td>
+<td>Every non-agent gateway user collapses to <code>peerName</code>. The pin is checked first, so it overrides all aliases — pick it only when no user-side identity needs its own peer</td>
+</tr>
+<tr>
+<td><code>userPeerAliases</code></td>
+<td>Maps specific runtime IDs to peers (<code>{"7654321": "alice"}</code>). The home for routing distinct identities — including agents that each carry their own peer</td>
+</tr>
+<tr>
+<td><code>runtimePeerPrefix</code></td>
+<td>Namespaces any unmapped runtime ID (<code>telegram_7654321</code>) so platforms with same-shaped IDs don't collide</td>
+</tr>
+</tbody>
+</table>
+<p>Off-gateway these keys do nothing. <code>hermes memory setup</code> only prompts for them when it detects a connected gateway platform. See the <a href="honcho.html#gateway-identity-mapping">Honcho page</a> for the resolver ladder and the setup flow.</p>
+<details class="details">
+<summary>Full honcho.json example (multi-profile)</summary>
+
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;apiKey&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;your-key&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;workspace&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;peerName&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;eri&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;hosts&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;hermes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;aiPeer&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;workspace&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;peerName&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;eri&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;recallMode&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hybrid&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;writeFrequency&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;async&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;sessionStrategy&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;per-directory&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;observation&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;user&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;observeMe&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;observeOthers&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;ai&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;observeMe&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;observeOthers&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;dialecticReasoningLevel&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;low&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;dialecticDynamic&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;dialecticCadence&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;dialecticDepth&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;dialecticMaxChars&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">600</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;contextCadence&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;messageMaxChars&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">25000</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;saveMessages&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;hermes.coder&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;aiPeer&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;coder&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;workspace&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;peerName&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;eri&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;recallMode&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tools&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;observation&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;user&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;observeMe&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;observeOthers&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;ai&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;observeMe&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;observeOthers&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;hermes.writer&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;aiPeer&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;writer&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;workspace&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;peerName&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;eri&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;sessions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;/home/user/myproject&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;myproject-main&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+</details>
+<p>See the <a href="https://github.com/NousResearch/hermes-agent/blob/main/plugins/memory/honcho/README.md" class="ext" target="_blank" rel="noopener">config reference</a> and <a href="https://docs.honcho.dev/v3/guides/integrations/hermes" class="ext" target="_blank" rel="noopener">Honcho integration guide</a>.</p>
+<hr />
+<h3 id="openviking">OpenViking</h3>
+<p>Context database by Volcengine (ByteDance) with filesystem-style knowledge hierarchy, tiered retrieval, and automatic memory extraction into 6 categories.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Best for</strong></td>
+<td>Self-hosted knowledge management with structured browsing</td>
+</tr>
+<tr>
+<td><strong>Requires</strong></td>
+<td>OpenViking initialized, validated, and running</td>
+</tr>
+<tr>
+<td><strong>Data storage</strong></td>
+<td>Self-hosted (local or cloud)</td>
+</tr>
+<tr>
+<td><strong>Cost</strong></td>
+<td>Free (open-source, AGPL-3.0)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tools (6):</strong> <code>viking_search</code> (semantic search), <code>viking_read</code> (tiered: abstract/overview/full), <code>viking_browse</code> (filesystem navigation), <code>viking_remember</code> (store facts), <code>viking_forget</code> (delete a memory file by exact <code>viking://</code> URI), <code>viking_add_resource</code> (ingest URLs/docs)</p>
+<p><strong>Setup:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Prepare OpenViking first</span>
+openviking-server<span class="w"> </span>init
+openviking-server<span class="w"> </span>doctor
+openviking-server
+
+<span class="c1"># Then configure Hermes</span>
+hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">    </span><span class="c1"># select &quot;openviking&quot;</span>
+<span class="c1"># Or manually:</span>
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>memory.provider<span class="w"> </span>openviking
+</code></pre></div>
+
+<p><code>hermes memory setup</code> can reuse or copy connection values from
+<code>~/.openviking/ovcli.conf</code>. Manual setup uses the active profile's <code>.env</code> file;
+for the default profile that is <code>~/.hermes/.env</code>, and for named profiles use
+<code>~/.hermes/profiles/&lt;profile&gt;/.env</code>.</p>
+<div class="highlight"><pre><span></span><code>OPENVIKING_ENDPOINT=http://127.0.0.1:1933
+# OPENVIKING_API_KEY=...
+# OPENVIKING_ACCOUNT=default
+# OPENVIKING_USER=default
+</code></pre></div>
+
+<p>OpenViking server settings live in <code>ov.conf</code> (<code>--config</code>,
+<code>OPENVIKING_CONFIG_FILE</code>, or <code>~/.openviking/ov.conf</code>). Client connection values
+live in <code>ovcli.conf</code> (<code>OPENVIKING_CLI_CONFIG_FILE</code> or
+<code>~/.openviking/ovcli.conf</code>).</p>
+<p><strong>Key features:</strong>
+- Tiered context loading: L0 (~100 tokens) → L1 (~2k) → L2 (full)
+- Automatic memory extraction on session commit (profile, preferences, entities, events, cases, patterns)
+- <code>viking://</code> URI scheme for hierarchical knowledge browsing</p>
+<p><code>OPENVIKING_ACCOUNT</code> and <code>OPENVIKING_USER</code> are used for local/trusted mode.
+Peer identity is optional. By default, Hermes sends no peer ID and writes
+explicit memories to <code>viking://user/&lt;user&gt;/memories/...</code>. Setup does not ask
+for a peer ID. For separate assistant context, set
+<code>memory.openviking.agent: work-assistant</code> in <code>config.yaml</code>.</p>
+<p>Existing non-empty peer settings keep their peer-scoped writes and recall.
+This includes <code>OPENVIKING_AGENT</code> and <code>actor_peer_id</code> or legacy <code>agent_id</code> in a
+linked OpenViking config. Existing memories are not moved or deleted.
+With no peer ID, default search covers user memory and existing peer memories
+under the same OpenViking user. Old peer memories remain searchable at their
+existing paths. Ranking and result limits determine which memories are returned.
+Set <code>memory.openviking.agent: hermes</code> to restore the old peer-scoped writes.
+Memories written at user scope before this change stay there and remain
+searchable. The setting changes future writes, not existing memory locations.</p>
+<p>Hermes sends <code>User-Agent: openviking-memory-hermes/&lt;version&gt;</code> on OpenViking
+requests. This standard harness identifier contains no per-user identifier and
+does not add a separate request.</p>
+<hr />
+<h3 id="mem0">Mem0</h3>
+<p>Server-side LLM fact extraction with semantic search, reranking, and automatic deduplication. Three connection modes: <strong>Platform</strong> (Mem0 Cloud), <strong>self-hosted dashboard</strong> (a Mem0 server you run via Docker), and <strong>OSS</strong> (Mem0 in-process with your own LLM + vector store).</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Best for</strong></td>
+<td>Hands-off memory management — Mem0 handles extraction automatically</td>
+</tr>
+<tr>
+<td><strong>Requires</strong></td>
+<td><code>pip install mem0ai</code> + API key (platform), a running Mem0 server (self-hosted dashboard), or an LLM + vector store (OSS)</td>
+</tr>
+<tr>
+<td><strong>Data storage</strong></td>
+<td>Mem0 Cloud (platform), your own Mem0 server (self-hosted dashboard), or in-process (OSS)</td>
+</tr>
+<tr>
+<td><strong>Cost</strong></td>
+<td>Mem0 pricing (platform) / free (self-hosted or OSS)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tools (4):</strong> <code>mem0_search</code> (semantic search; optional reranking in platform mode, off by default), <code>mem0_add</code> (store verbatim facts), <code>mem0_update</code> (update by ID), <code>mem0_delete</code> (delete by ID)</p>
+<p><strong>Setup (Platform):</strong></p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">    </span><span class="c1"># select &quot;mem0&quot; → &quot;Platform&quot;</span>
+<span class="c1"># Or manually:</span>
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>memory.provider<span class="w"> </span>mem0
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;MEM0_API_KEY=your-key&quot;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/.env
+</code></pre></div>
+
+<p><strong>Setup (OSS):</strong></p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">    </span><span class="c1"># select &quot;mem0&quot; → &quot;Open Source (self-hosted)&quot;</span>
+<span class="c1"># Or via flags:</span>
+hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w"> </span>mem0<span class="w"> </span>--mode<span class="w"> </span>oss<span class="w"> </span>--oss-llm<span class="w"> </span>openai<span class="w"> </span>--oss-llm-key<span class="w"> </span>sk-...<span class="w"> </span>--oss-vector<span class="w"> </span>qdrant
+</code></pre></div>
+
+<p>Preview without writing files:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w"> </span>mem0<span class="w"> </span>--mode<span class="w"> </span>oss<span class="w"> </span>--oss-llm-key<span class="w"> </span>sk-...<span class="w"> </span>--dry-run
+</code></pre></div>
+
+<p><strong>Setup (Self-Hosted Dashboard):</strong> connect to a Mem0 server you run via Docker (the dashboard's REST API):</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">    </span><span class="c1"># select &quot;mem0&quot; → &quot;Self-hosted server&quot;</span>
+<span class="c1"># Or via flags:</span>
+hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w"> </span>mem0<span class="w"> </span>--mode<span class="w"> </span>selfhosted<span class="w"> </span>--host<span class="w"> </span>http://localhost:8888<span class="w"> </span>--api-key<span class="w"> </span>your-admin-api-key
+</code></pre></div>
+
+<p>Or configure manually — either as env vars:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;MEM0_HOST=http://localhost:8888&quot;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/.env
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;MEM0_API_KEY=your-admin-api-key&quot;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/.env
+</code></pre></div>
+
+<p>or in <code>mem0.json</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="w"> </span><span class="nt">&quot;host&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;http://localhost:8888&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;api_key&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;your-admin-api-key&quot;</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+
+<p>The plugin authenticates with <code>X-API-Key</code> and uses the server's <code>/search</code> / <code>/memories</code> routes. <code>api_key</code> is optional (omit only for <code>AUTH_DISABLED</code> servers). Don't set <code>mode: oss</code> — it takes precedence over <code>host</code>.</p>
+<p><strong>Config:</strong> <code>$HERMES_HOME/mem0.json</code> (behavioral settings). Only the secret <code>MEM0_API_KEY</code> belongs in <code>~/.hermes/.env</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mode</code></td>
+<td><code>platform</code></td>
+<td><code>platform</code> (Mem0 Cloud) or <code>oss</code> (self-managed, in-process)</td>
+</tr>
+<tr>
+<td><code>host</code></td>
+<td>—</td>
+<td>Self-hosted Mem0 server URL (Docker dashboard). Routes over HTTP with <code>X-API-Key</code>; don't combine with <code>mode: oss</code></td>
+</tr>
+<tr>
+<td><code>user_id</code></td>
+<td><code>hermes-user</code></td>
+<td>User identifier</td>
+</tr>
+<tr>
+<td><code>agent_id</code></td>
+<td><code>hermes</code></td>
+<td>Agent identifier</td>
+</tr>
+<tr>
+<td><code>rerank</code></td>
+<td><code>false</code></td>
+<td>Rerank search results for relevance (platform mode only)</td>
+</tr>
+<tr>
+<td><code>sync_max_chars</code></td>
+<td><code>450</code></td>
+<td>Per-message character cap applied before each turn is sent for fact extraction, cut at the last sentence boundary. The default fits 512-token embedders (Ollama <code>bge-small-zh-v1.5</code>, <code>all-minilm</code>); raise it (e.g. <code>6000</code>) for 8k-token embedders such as <code>text-embedding-3-small</code>, <code>jina-embeddings-v3</code> or <code>bge-m3</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>OSS supported providers:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Providers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LLM</td>
+<td>openai, ollama</td>
+</tr>
+<tr>
+<td>Embedder</td>
+<td>openai, ollama</td>
+</tr>
+<tr>
+<td>Vector Store</td>
+<td>qdrant (local/server), pgvector</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Switching modes:</strong> Re-run <code>hermes memory setup mem0 --mode &lt;platform|selfhosted|oss&gt;</code> or edit <code>mem0.json</code> directly.</p>
+<hr />
+<h3 id="hindsight">Hindsight</h3>
+<p>Long-term memory with knowledge graph, entity resolution, and multi-strategy retrieval. The <code>hindsight_reflect</code> tool provides cross-memory synthesis that no other provider offers. Automatically retains full conversation turns (including tool calls) with session-level document tracking.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Best for</strong></td>
+<td>Knowledge graph-based recall with entity relationships</td>
+</tr>
+<tr>
+<td><strong>Requires</strong></td>
+<td>Cloud: API key from <a href="https://ui.hindsight.vectorize.io" class="ext" target="_blank" rel="noopener">ui.hindsight.vectorize.io</a>. Local: LLM API key (OpenAI, Groq, OpenRouter, etc.)</td>
+</tr>
+<tr>
+<td><strong>Data storage</strong></td>
+<td>Hindsight Cloud or local embedded PostgreSQL</td>
+</tr>
+<tr>
+<td><strong>Cost</strong></td>
+<td>Hindsight pricing (cloud) or free (local)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tools:</strong> <code>hindsight_retain</code> (store with entity extraction), <code>hindsight_recall</code> (multi-strategy search), <code>hindsight_reflect</code> (cross-memory synthesis)</p>
+<p><strong>Setup:</strong></p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">    </span><span class="c1"># select &quot;hindsight&quot;</span>
+<span class="c1"># Or manually:</span>
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>memory.provider<span class="w"> </span>hindsight
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;HINDSIGHT_API_KEY=your-key&quot;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/.env
+</code></pre></div>
+
+<p>The setup wizard installs dependencies automatically and only installs what's needed for the selected mode (<code>hindsight-client</code> for cloud, <code>hindsight-all</code> for local). Requires <code>hindsight-client &gt;= 0.4.22</code> (auto-upgraded on session start if outdated).</p>
+<p><strong>Local mode UI:</strong> <code>hindsight-embed -p hermes ui start</code></p>
+<p><strong>Config:</strong> <code>$HERMES_HOME/hindsight/config.json</code></p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mode</code></td>
+<td><code>cloud</code></td>
+<td><code>cloud</code> or <code>local</code></td>
+</tr>
+<tr>
+<td><code>bank_id</code></td>
+<td><code>hermes</code></td>
+<td>Memory bank identifier</td>
+</tr>
+<tr>
+<td><code>recall_budget</code></td>
+<td><code>mid</code></td>
+<td>Recall thoroughness: <code>low</code> / <code>mid</code> / <code>high</code></td>
+</tr>
+<tr>
+<td><code>memory_mode</code></td>
+<td><code>hybrid</code></td>
+<td><code>hybrid</code> (context + tools), <code>context</code> (auto-inject only), <code>tools</code> (tools only)</td>
+</tr>
+<tr>
+<td><code>auto_retain</code></td>
+<td><code>true</code></td>
+<td>Automatically retain conversation turns</td>
+</tr>
+<tr>
+<td><code>auto_recall</code></td>
+<td><code>true</code></td>
+<td>Automatically recall memories before each turn</td>
+</tr>
+<tr>
+<td><code>retain_async</code></td>
+<td><code>true</code></td>
+<td>Process retain asynchronously on the server</td>
+</tr>
+<tr>
+<td><code>retain_context</code></td>
+<td><code>conversation between Hermes Agent and the User</code></td>
+<td>Context label for retained memories</td>
+</tr>
+<tr>
+<td><code>retain_tags</code></td>
+<td>—</td>
+<td>Default tags applied to retained memories; merged with per-call tool tags</td>
+</tr>
+<tr>
+<td><code>retain_source</code></td>
+<td>—</td>
+<td>Optional <code>metadata.source</code> attached to retained memories</td>
+</tr>
+<tr>
+<td><code>retain_user_prefix</code></td>
+<td><code>User</code></td>
+<td>Label used before user turns in auto-retained transcripts</td>
+</tr>
+<tr>
+<td><code>retain_assistant_prefix</code></td>
+<td><code>Assistant</code></td>
+<td>Label used before assistant turns in auto-retained transcripts</td>
+</tr>
+<tr>
+<td><code>recall_tags</code></td>
+<td>—</td>
+<td>Tags to filter on recall</td>
+</tr>
+</tbody>
+</table>
+<p>See <a href="https://github.com/NousResearch/hermes-agent/blob/main/plugins/memory/hindsight/README.md" class="ext" target="_blank" rel="noopener">plugin README</a> for the full configuration reference.</p>
+<hr />
+<h3 id="holographic">Holographic</h3>
+<p>Local SQLite fact store with FTS5 full-text search, trust scoring, and HRR (Holographic Reduced Representations) for compositional algebraic queries.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Best for</strong></td>
+<td>Local-only memory with advanced retrieval, no external dependencies</td>
+</tr>
+<tr>
+<td><strong>Requires</strong></td>
+<td>Nothing (SQLite is always available). NumPy optional for HRR algebra.</td>
+</tr>
+<tr>
+<td><strong>Data storage</strong></td>
+<td>Local SQLite</td>
+</tr>
+<tr>
+<td><strong>Cost</strong></td>
+<td>Free</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tools:</strong> <code>fact_store</code> (9 actions: add, search, probe, related, reason, contradict, update, remove, list), <code>fact_feedback</code> (helpful/unhelpful rating that trains trust scores)</p>
+<p><strong>Setup:</strong></p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">    </span><span class="c1"># select &quot;holographic&quot;</span>
+<span class="c1"># Or manually:</span>
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>memory.provider<span class="w"> </span>holographic
+</code></pre></div>
+
+<p><strong>Config:</strong> <code>config.yaml</code> under <code>plugins.hermes-memory-store</code></p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>db_path</code></td>
+<td><code>$HERMES_HOME/memory_store.db</code></td>
+<td>SQLite database path</td>
+</tr>
+<tr>
+<td><code>auto_extract</code></td>
+<td><code>false</code></td>
+<td>Auto-extract facts at session end</td>
+</tr>
+<tr>
+<td><code>default_trust</code></td>
+<td><code>0.5</code></td>
+<td>Default trust score (0.0–1.0)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Unique capabilities:</strong>
+- <code>probe</code> — entity-specific algebraic recall (all facts about a person/thing)
+- <code>reason</code> — compositional AND queries across multiple entities
+- <code>contradict</code> — automated detection of conflicting facts
+- Trust scoring with asymmetric feedback (+0.05 helpful / -0.10 unhelpful)</p>
+<hr />
+<h3 id="retaindb">RetainDB</h3>
+<p>Cloud memory API with hybrid search (Vector + BM25 + Reranking), 7 memory types, and delta compression.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Best for</strong></td>
+<td>Teams already using RetainDB's infrastructure</td>
+</tr>
+<tr>
+<td><strong>Requires</strong></td>
+<td>RetainDB account + API key</td>
+</tr>
+<tr>
+<td><strong>Data storage</strong></td>
+<td>RetainDB Cloud</td>
+</tr>
+<tr>
+<td><strong>Cost</strong></td>
+<td>$20/month</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tools (10):</strong> <code>retaindb_profile</code> (user profile), <code>retaindb_search</code> (semantic search), <code>retaindb_context</code> (task-relevant context), <code>retaindb_remember</code> (store with type + importance), <code>retaindb_forget</code> (delete memories), plus file tools: <code>retaindb_upload_file</code>, <code>retaindb_list_files</code>, <code>retaindb_read_file</code>, <code>retaindb_ingest_file</code>, <code>retaindb_delete_file</code></p>
+<p><strong>Setup:</strong></p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">    </span><span class="c1"># select &quot;retaindb&quot;</span>
+<span class="c1"># Or manually:</span>
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>memory.provider<span class="w"> </span>retaindb
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;RETAINDB_API_KEY=your-key&quot;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/.env
+</code></pre></div>
+
+<hr />
+<h3 id="byterover">ByteRover</h3>
+<p>Persistent memory via the <code>brv</code> CLI — hierarchical knowledge tree with tiered retrieval (fuzzy text → LLM-driven search). Local-first with optional cloud sync.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Best for</strong></td>
+<td>Developers who want portable, local-first memory with a CLI</td>
+</tr>
+<tr>
+<td><strong>Requires</strong></td>
+<td>ByteRover CLI (<code>npm install -g byterover-cli</code> or <a href="https://byterover.dev" class="ext" target="_blank" rel="noopener">install script</a>)</td>
+</tr>
+<tr>
+<td><strong>Data storage</strong></td>
+<td>Local (default) or ByteRover Cloud (optional sync)</td>
+</tr>
+<tr>
+<td><strong>Cost</strong></td>
+<td>Free (local) or ByteRover pricing (cloud)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tools:</strong> <code>brv_query</code> (search knowledge tree), <code>brv_curate</code> (store facts/decisions/patterns), <code>brv_status</code> (CLI version + tree stats)</p>
+<p><strong>Setup:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Install the CLI first</span>
+curl<span class="w"> </span>-fsSL<span class="w"> </span>https://byterover.dev/install.sh<span class="w"> </span><span class="p">|</span><span class="w"> </span>sh
+
+<span class="c1"># Then configure Hermes</span>
+hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">    </span><span class="c1"># select &quot;byterover&quot;</span>
+<span class="c1"># Or manually:</span>
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>memory.provider<span class="w"> </span>byterover
+</code></pre></div>
+
+<p><strong>Key features:</strong>
+- Automatic pre-compression extraction (saves insights before context compression discards them)
+- Knowledge tree stored at <code>$HERMES_HOME/byterover/</code> (profile-scoped)
+- SOC2 Type II certified cloud sync (optional)</p>
+<hr />
+<h3 id="supermemory">Supermemory</h3>
+<p>Semantic long-term memory with profile recall, semantic search, explicit memory tools, and per-turn conversation capture (one document per session per 4-hour window).</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Best for</strong></td>
+<td>Semantic recall with user profiling and session-level graph building</td>
+</tr>
+<tr>
+<td><strong>Requires</strong></td>
+<td><code>pip install supermemory</code> + <a href="http://app.supermemory.ai/integrations?connect=hermes" class="ext" target="_blank" rel="noopener">cloud API key</a>, or a <a href="https://supermemory.ai/docs/self-hosting/overview" class="ext" target="_blank" rel="noopener">self-hosted server</a></td>
+</tr>
+<tr>
+<td><strong>Data storage</strong></td>
+<td>Supermemory Cloud or self-hosted</td>
+</tr>
+<tr>
+<td><strong>Cost</strong></td>
+<td>Supermemory pricing (cloud) / free (self-hosted)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tools:</strong> <code>supermemory_store</code> (save explicit memories), <code>supermemory_search</code> (semantic similarity search), <code>supermemory_forget</code> (forget by ID or best-match query), <code>supermemory_profile</code> (persistent profile + recent context)</p>
+<p><strong>Setup:</strong></p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">    </span><span class="c1"># select &quot;supermemory&quot;</span>
+<span class="c1"># Or manually:</span>
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>memory.provider<span class="w"> </span>supermemory
+<span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;SUPERMEMORY_API_KEY=***&#39;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/.env
+</code></pre></div>
+
+<p>Self-hosted setup:</p>
+<div class="highlight"><pre><span></span><code>npx<span class="w"> </span>supermemory<span class="w"> </span><span class="nb">local</span>
+</code></pre></div>
+
+<p>Before running <code>hermes memory setup</code>, set <code>base_url</code> in
+<code>$HERMES_HOME/supermemory.json</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;base_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;http://localhost:6767&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Then run <code>hermes memory setup</code> and enter the API key printed by the local
+server. Configuring the endpoint first ensures the setup connection probe also
+stays local.</p>
+<p><strong>Config:</strong> <code>$HERMES_HOME/supermemory.json</code></p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>base_url</code></td>
+<td><code>https://api.supermemory.ai</code></td>
+<td>API endpoint for hosted or self-hosted Supermemory. Takes priority over <code>SUPERMEMORY_BASE_URL</code>.</td>
+</tr>
+<tr>
+<td><code>container_tag</code></td>
+<td><code>hermes</code></td>
+<td>Container tag used for search and writes. Supports <code>{identity}</code> template for profile-scoped tags.</td>
+</tr>
+<tr>
+<td><code>auto_recall</code></td>
+<td><code>true</code></td>
+<td>Inject relevant memory context before turns</td>
+</tr>
+<tr>
+<td><code>auto_capture</code></td>
+<td><code>true</code></td>
+<td>Store cleaned user-assistant turns after each response</td>
+</tr>
+<tr>
+<td><code>max_recall_results</code></td>
+<td><code>10</code></td>
+<td>Max recalled items to format into context</td>
+</tr>
+<tr>
+<td><code>profile_frequency</code></td>
+<td><code>50</code></td>
+<td>Include profile facts on first turn and every N turns</td>
+</tr>
+<tr>
+<td><code>capture_mode</code></td>
+<td><code>all</code></td>
+<td>Skip tiny or trivial turns by default</td>
+</tr>
+<tr>
+<td><code>search_mode</code></td>
+<td><code>hybrid</code></td>
+<td>Search mode: <code>hybrid</code>, <code>memories</code>, or <code>documents</code></td>
+</tr>
+<tr>
+<td><code>api_timeout</code></td>
+<td><code>5.0</code></td>
+<td>Timeout for SDK requests</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Environment variables:</strong> <code>SUPERMEMORY_API_KEY</code> (required), <code>SUPERMEMORY_BASE_URL</code> (compatibility fallback when <code>base_url</code> is not configured), <code>SUPERMEMORY_CONTAINER_TAG</code> (overrides config).</p>
+<p>Base URL precedence is <code>supermemory.json</code> → <code>SUPERMEMORY_BASE_URL</code> → <code>https://api.supermemory.ai</code>. SDK operations and setup/status probes all use the resolved endpoint.</p>
+<p><strong>Key features:</strong>
+- Automatic context fencing — strips recalled memories from captured turns to prevent recursive memory pollution
+- Per-turn capture — each completed turn is written as it happens, one document per session per 4-hour window
+- Failed turn writes are retried (at-least-once) on the next turn, session end, <code>/reset</code>, or shutdown
+- End-to-end self-hosted routing — SDK and probe requests use the same configured endpoint
+- Profile facts injected on first turn and at configurable intervals
+- <strong>Profile-scoped containers</strong> — use <code>{identity}</code> in <code>container_tag</code> (e.g. <code>hermes-{identity}</code> → <code>hermes-coder</code>) to isolate memories per Hermes profile
+- <strong>Multi-container mode</strong> — enable <code>enable_custom_container_tags</code> with a <code>custom_containers</code> list to let the agent read/write across named containers. Automatic operations stay on the primary container.</p>
+<details class="details">
+<summary>Multi-container example</summary>
+
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;container_tag&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;enable_custom_container_tags&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;custom_containers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;project-alpha&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;shared-knowledge&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;custom_container_instructions&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Use project-alpha for coding context.&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+</details>
+<p><strong>Support:</strong> <a href="https://supermemory.link/discord" class="ext" target="_blank" rel="noopener">Discord</a> · <a href="mailto:support@supermemory.com">support@supermemory.com</a></p>
+<h3 id="memori">Memori</h3>
+<p>Structured long-term memory using Memori Cloud, with background completed-turn capture, tool-aware turn context, and explicit recall tools for facts, summaries, quota, signup, and feedback.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Best for</strong></td>
+<td>Agent-controlled recall with structured project and session attribution</td>
+</tr>
+<tr>
+<td><strong>Requires</strong></td>
+<td><code>pip install hermes-memori</code> + <code>hermes-memori install</code> + <a href="https://app.memorilabs.ai/signup" class="ext" target="_blank" rel="noopener">Memori API key</a></td>
+</tr>
+<tr>
+<td><strong>Data storage</strong></td>
+<td>Memori Cloud</td>
+</tr>
+<tr>
+<td><strong>Cost</strong></td>
+<td>Memori pricing</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tools:</strong> <code>memori_recall</code> (search long-term memory), <code>memori_recall_summary</code> (summarized context), <code>memori_quota</code> (usage/quota), <code>memori_signup</code> (request signup email), <code>memori_feedback</code> (send integration feedback)</p>
+<p><strong>Setup:</strong></p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>hermes-memori
+hermes-memori<span class="w"> </span>install
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>memory.provider<span class="w"> </span>memori
+hermes<span class="w"> </span>memory<span class="w"> </span>setup
+</code></pre></div>
+
+<hr />
+<h2 id="provider-comparison">Provider Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Storage</th>
+<th>Cost</th>
+<th>Tools</th>
+<th>Dependencies</th>
+<th>Unique Feature</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Honcho</strong></td>
+<td>Cloud</td>
+<td>Paid</td>
+<td>5</td>
+<td><code>honcho-ai</code></td>
+<td>Dialectic user modeling + session-scoped context</td>
+</tr>
+<tr>
+<td><strong>OpenViking</strong></td>
+<td>Self-hosted</td>
+<td>Free</td>
+<td>6</td>
+<td><code>openviking</code> + server</td>
+<td>Filesystem hierarchy + tiered loading</td>
+</tr>
+<tr>
+<td><strong>Mem0</strong></td>
+<td>Cloud/Self-hosted</td>
+<td>Free/Paid</td>
+<td>4</td>
+<td><code>mem0ai</code></td>
+<td>Server-side LLM extraction + self-hosted/OSS modes</td>
+</tr>
+<tr>
+<td><strong>Hindsight</strong></td>
+<td>Cloud/Local</td>
+<td>Free/Paid</td>
+<td>3</td>
+<td><code>hindsight-client</code></td>
+<td>Knowledge graph + reflect synthesis</td>
+</tr>
+<tr>
+<td><strong>Holographic</strong></td>
+<td>Local</td>
+<td>Free</td>
+<td>2</td>
+<td>None</td>
+<td>HRR algebra + trust scoring</td>
+</tr>
+<tr>
+<td><strong>RetainDB</strong></td>
+<td>Cloud</td>
+<td>$20/mo</td>
+<td>10</td>
+<td><code>requests</code></td>
+<td>Delta compression</td>
+</tr>
+<tr>
+<td><strong>ByteRover</strong></td>
+<td>Local/Cloud</td>
+<td>Free/Paid</td>
+<td>3</td>
+<td><code>brv</code> CLI</td>
+<td>Pre-compression extraction</td>
+</tr>
+<tr>
+<td><strong>Supermemory</strong></td>
+<td>Cloud/Self-hosted</td>
+<td>Free/Paid</td>
+<td>4</td>
+<td><code>supermemory</code></td>
+<td>Context fencing + session graph ingest + multi-container</td>
+</tr>
+<tr>
+<td><strong>Memori</strong></td>
+<td>Cloud</td>
+<td>Free/Paid</td>
+<td>5</td>
+<td><code>hermes-memori</code></td>
+<td>Tool-aware memory + structured recall</td>
+</tr>
+</tbody>
+</table>
+<h2 id="profile-isolation">Profile Isolation</h2>
+<p>Each provider's data is isolated per <a href="../profiles.html">profile</a>:</p>
+<ul>
+<li><strong>Local storage providers</strong> (Holographic, ByteRover) use <code>$HERMES_HOME/</code> paths which differ per profile</li>
+<li><strong>Config file providers</strong> (Honcho, Mem0, Hindsight, Supermemory) store config in <code>$HERMES_HOME/</code> so each profile has its own credentials</li>
+<li><strong>Cloud providers</strong> (RetainDB) auto-derive profile-scoped project names</li>
+<li><strong>Env var providers</strong> (OpenViking) are configured via each profile's <code>.env</code> file</li>
+</ul>
+<h2 id="providers-moving-to-the-plugin-catalog">Providers Moving to the Plugin Catalog</h2>
+<p>Memory providers are moving out of the Hermes tree into their maintainers' own repositories,
+published through the <a href="plugins.html">plugin catalog</a>. Nothing changes for you: the
+provider name, your <code>memory.&lt;name&gt;</code> settings, its data directory and its tools stay the same.
+When a provider you have configured stops shipping with Hermes, <code>hermes update</code> installs its
+catalog plugin for every profile that names it; if you update through the Desktop app, the
+agent does the same the first time it starts (unless <code>security.allow_lazy_installs</code> is
+<code>false</code>, in which case it prints the <code>hermes plugins install &lt;name&gt;</code> one-liner instead).</p>
+<h2 id="building-a-memory-provider">Building a Memory Provider</h2>
+<p>See the <a href="../../developer-guide/memory-provider-plugin.html">Developer Guide: Memory Provider Plugins</a> for how to create your own.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#quick-start">Quick Start</a></li>
+<li class="lvl2"><a href="#how-it-works">How It Works</a></li>
+<li class="lvl2"><a href="#available-providers">Available Providers</a></li>
+<li class="lvl3"><a href="#honcho">Honcho</a></li>
+<li class="lvl3"><a href="#new-profile-fresh-honcho-peer">New profile, fresh Honcho peer</a></li>
+<li class="lvl3"><a href="#existing-profiles-backfill-honcho-peers">Existing profiles, backfill Honcho peers</a></li>
+<li class="lvl3"><a href="#per-profile-observation">Per-profile observation</a></li>
+<li class="lvl3"><a href="#gateway-identity-mapping">Gateway identity mapping</a></li>
+<li class="lvl3"><a href="#openviking">OpenViking</a></li>
+<li class="lvl3"><a href="#mem0">Mem0</a></li>
+<li class="lvl3"><a href="#hindsight">Hindsight</a></li>
+<li class="lvl3"><a href="#holographic">Holographic</a></li>
+<li class="lvl3"><a href="#retaindb">RetainDB</a></li>
+<li class="lvl3"><a href="#byterover">ByteRover</a></li>
+<li class="lvl3"><a href="#supermemory">Supermemory</a></li>
+<li class="lvl3"><a href="#memori">Memori</a></li>
+<li class="lvl2"><a href="#provider-comparison">Provider Comparison</a></li>
+<li class="lvl2"><a href="#profile-isolation">Profile Isolation</a></li>
+<li class="lvl2"><a href="#providers-moving-to-the-plugin-catalog">Providers Moving to the Plugin Catalog</a></li>
+<li class="lvl2"><a href="#building-a-memory-provider">Building a Memory Provider</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

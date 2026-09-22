@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Context Engine Plugins · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/context-engine-plugin</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="building-a-context-engine-plugin">Building a Context Engine Plugin</h1>
+<p>Context engine plugins replace the built-in <code>ContextCompressor</code> with an alternative strategy for managing conversation context. For example, a Lossless Context Management (LCM) engine that builds a knowledge DAG instead of lossy summarization.</p>
+<h2 id="how-it-works">How it works</h2>
+<p>The agent's context management is built on the <code>ContextEngine</code> ABC (<code>agent/context_engine.py</code>). The built-in <code>ContextCompressor</code> is the default implementation. Plugin engines must implement the same interface.</p>
+<p>Only <strong>one</strong> context engine can be active at a time. Selection is config-driven:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">context</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">engine</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;compressor&quot;</span><span class="w">    </span><span class="c1"># default built-in</span>
+<span class="w">  </span><span class="nt">engine</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;lcm&quot;</span><span class="w">           </span><span class="c1"># activates a plugin engine named &quot;lcm&quot;</span>
+</code></pre></div>
+
+<p>Plugin engines are <strong>never auto-activated</strong> — the user must explicitly set <code>context.engine</code> to the plugin's name.</p>
+<h2 id="directory-structure">Directory structure</h2>
+<p>Each context engine lives in <code>plugins/context_engine/&lt;name&gt;/</code>:</p>
+<div class="highlight"><pre><span></span><code>plugins/context_engine/lcm/
+├── __init__.py      # exports the ContextEngine subclass
+├── plugin.yaml      # metadata (name, description, version)
+└── ...              # any other modules your engine needs
+</code></pre></div>
+
+<h2 id="the-contextengine-abc">The ContextEngine ABC</h2>
+<p>Your engine must implement these <strong>required</strong> methods:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.context_engine</span><span class="w"> </span><span class="kn">import</span> <span class="n">ContextEngine</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">LCMEngine</span><span class="p">(</span><span class="n">ContextEngine</span><span class="p">):</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Short identifier, e.g. &#39;lcm&#39;. Must match config.yaml value.&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="s2">&quot;lcm&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">update_from_response</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">usage</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Called after every LLM call with the usage dict.</span>
+
+<span class="sd">        Update self.last_prompt_tokens, self.last_completion_tokens,</span>
+<span class="sd">        self.last_total_tokens from the response.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">should_compress</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">prompt_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return True if compaction should fire this turn.&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">compress</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">messages</span><span class="p">:</span> <span class="nb">list</span><span class="p">,</span> <span class="n">current_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+                 <span class="n">focus_topic</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Compact the message list and return a new (possibly shorter) list.</span>
+
+<span class="sd">        The returned list must be a valid OpenAI-format message sequence.</span>
+
+<span class="sd">        ``focus_topic`` is an optional topic string from manual</span>
+<span class="sd">        ``/compress &lt;focus&gt;``; engines that support guided compression should</span>
+<span class="sd">        prioritise preserving information related to it, others may ignore it.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+</code></pre></div>
+
+<h3 id="class-attributes-your-engine-must-maintain">Class attributes your engine must maintain</h3>
+<p>The agent reads these directly for display and logging:</p>
+<div class="highlight"><pre><span></span><code><span class="n">last_prompt_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">last_completion_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">last_total_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">threshold_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>        <span class="c1"># when compression triggers</span>
+<span class="n">context_length</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>          <span class="c1"># model&#39;s full context window</span>
+<span class="n">compression_count</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>       <span class="c1"># how many times compress() has run</span>
+</code></pre></div>
+
+<h3 id="optional-methods">Optional methods</h3>
+<p>These have sensible defaults in the ABC. Override as needed:</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Default</th>
+<th>Override when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>on_session_start(session_id, **kwargs)</code></td>
+<td>No-op</td>
+<td>You need to load persisted state (DAG, DB)</td>
+</tr>
+<tr>
+<td><code>on_session_end(session_id, messages)</code></td>
+<td>No-op</td>
+<td>You need to flush state, close connections</td>
+</tr>
+<tr>
+<td><code>on_session_reset()</code></td>
+<td>Resets token counters</td>
+<td>You have per-session state to clear</td>
+</tr>
+<tr>
+<td><code>update_model(model, context_length, ...)</code></td>
+<td>Updates context_length + threshold</td>
+<td>You need to recalculate budgets on model switch</td>
+</tr>
+<tr>
+<td><code>get_tool_schemas()</code></td>
+<td>Returns <code>[]</code></td>
+<td>Your engine provides agent-callable tools (e.g., <code>lcm_grep</code>)</td>
+</tr>
+<tr>
+<td><code>handle_tool_call(name, args, **kwargs)</code></td>
+<td>Returns error JSON</td>
+<td>You implement tool handlers</td>
+</tr>
+<tr>
+<td><code>should_compress_preflight(messages)</code></td>
+<td>Returns <code>False</code></td>
+<td>You can do a cheap pre-API-call estimate</td>
+</tr>
+<tr>
+<td><code>get_status()</code></td>
+<td>Standard token/threshold dict</td>
+<td>You have custom metrics to expose</td>
+</tr>
+<tr>
+<td><code>select_context(request_messages, *, conversation_messages, incoming_message, budget_tokens)</code></td>
+<td>Returns <code>None</code> (no-op)</td>
+<td>You select/route which context enters <strong>this</strong> request (retrieval, topic routing) — see below</td>
+</tr>
+<tr>
+<td><code>on_turn_complete(messages, usage=None, **kwargs)</code></td>
+<td>No-op</td>
+<td>You ingest/index/observe the finished turn — see below</td>
+</tr>
+</tbody>
+</table>
+<h2 id="per-turn-context-selection-and-observation">Per-turn context selection and observation</h2>
+<p><code>compress()</code> answers "context is too long → make it shorter". Two optional,
+no-op-default hooks cover the orthogonal <em>selection / observation</em> axis, so an
+engine no longer has to force <code>should_compress()</code> to <code>True</code> and abuse
+<code>compress()</code> as a per-turn callback:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">select_context</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request_messages</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">conversation_messages</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+                   <span class="n">incoming_message</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">budget_tokens</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Choose/replace the context for THIS request, before dispatch.</span>
+
+<span class="sd">    Return a new message list to use for this one provider call (retrieval,</span>
+<span class="sd">    topic routing, role/branch switching), or None to leave it unchanged.</span>
+<span class="sd">    Request-only: the persisted conversation history is never mutated.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">on_turn_complete</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">messages</span><span class="p">,</span> <span class="n">usage</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Observe a finished turn after the assistant/tool loop completes.</span>
+
+<span class="sd">    Receives a shallow copy of the finalized transcript plus the turn&#39;s</span>
+<span class="sd">    canonical usage dict (or None if no provider response was reached), so the</span>
+<span class="sd">    engine can ingest/index/summarize for the next select_context(). The return</span>
+<span class="sd">    value is ignored.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+</code></pre></div>
+
+<p>Contract:</p>
+<ul>
+<li><strong>No-op by default, fail-open.</strong> Both default to <code>return None</code>. A missing hook, an exception, or an invalid return value leaves the request untouched — so a failing engine is never worse than not installing one. The host also identity-checks for the inherited ABC default and skips it entirely, so non-implementing engines (including the built-in compressor) pay no per-request work at all.</li>
+<li><strong><code>select_context()</code> is request-only.</strong> The returned list replaces the messages for a single provider call; persisted history is never written. Returning <code>None</code>, <code>[]</code>, a non-list, or a list containing non-dicts all fall open to the unmodified request.</li>
+<li><strong>Ordering / cache stability.</strong> The hook runs <strong>before</strong> prompt cache-control and every request sanitizer, so (a) a replacement still passes the same validation as any request, and (b) the no-op default leaves the request byte-identical — prompt-cache behaviour is unchanged for non-implementing engines. An engine that replaces the list changes only its own cache prefix. Evaluated per provider request (re-runs on retries).</li>
+<li><strong><code>on_turn_complete()</code></strong> is post-turn observation only; treat <code>messages</code> as read-only. <strong>Coverage is best-effort:</strong> it fires from the standard turn-finalization seam. Some abnormal early-return paths in the loop (e.g. a content-policy block or a provider terminal failure) persist and return without routing through finalization, so they do not currently emit this hook — treat it as a best-effort observation for completed turns, not a guaranteed callback for every early exit. Unifying all terminal paths behind one finalization seam is a separate follow-up.</li>
+</ul>
+<h3 id="when-to-use-these-hooks--and-when-not-to">When to use these hooks — and when NOT to</h3>
+<ul>
+<li><strong>Implement <code>select_context()</code> only when your engine must <em>replace</em> the
+  per-request context</strong> — retrieval-augmented selection, topic/branch routing,
+  role switching. It is the only verb that can swap which messages enter a
+  request: the <code>pre_llm_call</code> plugin hook is inject-only by documented design
+  (it appends to the user message and never rewrites the list, to preserve the
+  prompt-cache prefix). If you don't need replacement, don't implement it.</li>
+<li><strong>If your plugin only needs post-turn observation / ingestion</strong> (indexing,
+  memory sync, analytics), implement a <strong>memory provider</strong> (<code>sync_turn()</code> —
+  see <a href="memory-provider-plugin.html">Memory Provider Plugins</a>) instead of a
+  context engine. A context engine takes ownership of the session's compaction
+  policy; a memory provider observes turns without owning anything.
+  <code>on_turn_complete()</code> exists as the observation mirror for engines that
+  <em>already</em> need <code>select_context()</code> — so the same component can learn from the
+  turn it just routed — not as a general-purpose turn callback.</li>
+<li><strong>Prompt-cache impact of a real <code>select_context()</code>.</strong> A non-no-op selection
+  naturally changes the prompt-cache prefix for the turns where it changes the
+  selection — that request's prefix no longer matches the provider's cached
+  prefix, so those turns re-write cache instead of reading it. Engines should
+  return <strong>stable selections when nothing has changed</strong> (same object or an
+  equal list), and only reshape the context when the routing decision actually
+  differs; a selection that shuffles per turn silently forfeits cache reuse
+  every turn.</li>
+</ul>
+<h2 id="engine-tools">Engine tools</h2>
+<p>Context engines can expose tools the agent calls directly. Return schemas from <code>get_tool_schemas()</code> and handle calls in <code>handle_tool_call()</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">get_tool_schemas</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">[{</span>
+        <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;lcm_grep&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Search the context knowledge graph&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;parameters&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;object&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;properties&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;query&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;string&quot;</span><span class="p">,</span> <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Search query&quot;</span><span class="p">}</span>
+            <span class="p">},</span>
+            <span class="s2">&quot;required&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;query&quot;</span><span class="p">],</span>
+        <span class="p">},</span>
+    <span class="p">}]</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">handle_tool_call</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;lcm_grep&quot;</span><span class="p">:</span>
+        <span class="n">results</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_search_dag</span><span class="p">(</span><span class="n">args</span><span class="p">[</span><span class="s2">&quot;query&quot;</span><span class="p">])</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;results&quot;</span><span class="p">:</span> <span class="n">results</span><span class="p">})</span>
+    <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Unknown tool: </span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">})</span>
+</code></pre></div>
+
+<p>Engine tools are injected into the agent's tool list at startup and dispatched automatically — no registry registration needed.</p>
+<h2 id="registration">Registration</h2>
+<h3 id="via-directory-recommended">Via directory (recommended)</h3>
+<p>Place your engine in <code>plugins/context_engine/&lt;name&gt;/</code>. The <code>__init__.py</code> must export a <code>ContextEngine</code> subclass. The discovery system finds and instantiates it automatically.</p>
+<h3 id="via-general-plugin-system">Via general plugin system</h3>
+<p>A general plugin can also register a context engine:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">engine</span> <span class="o">=</span> <span class="n">LCMEngine</span><span class="p">(</span><span class="n">context_length</span><span class="o">=</span><span class="mi">200000</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_context_engine</span><span class="p">(</span><span class="n">engine</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Only one engine can be registered. A second plugin attempting to register is rejected with a warning.</p>
+<h2 id="lifecycle">Lifecycle</h2>
+<div class="highlight"><pre><span></span><code>1. Engine instantiated (plugin load or directory discovery)
+2. on_session_start() — conversation begins
+3. update_from_response() — after each API call
+4. should_compress() — checked each turn
+5. compress() — called when should_compress() returns True
+6. on_session_end() — session boundary (CLI exit, /reset, gateway shutdown)
+</code></pre></div>
+
+<p><code>on_session_reset()</code> is called on <code>/new</code> or <code>/reset</code> to clear per-session state without a full shutdown.</p>
+<h2 id="configuration">Configuration</h2>
+<p>Users select your engine via <code>hermes plugins</code> → Provider Plugins → Context Engine, or by editing <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">context</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">engine</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;lcm&quot;</span><span class="w">   </span><span class="c1"># must match your engine&#39;s name property</span>
+</code></pre></div>
+
+<p>The <code>compression</code> config block (<code>compression.threshold</code>, <code>compression.protect_last_n</code>, etc.) is specific to the built-in <code>ContextCompressor</code>, with one explicit exception: <code>compression.model_thresholds</code> (per-model threshold overrides) is part of the context-engine contract. The host assigns the resolved map to <code>engine.model_thresholds</code> <em>before</em> the initial <code>update_model()</code> call, and the base-class <code>update_model()</code> applies it (longest substring match, falling back to the engine's configured threshold). Engines that override <code>update_model()</code> own their own compaction policy and may honor or ignore the map — <code>from agent.context_compressor import resolve_model_threshold</code> to reuse the same resolution logic. For everything else, your engine should define its own config format if needed, reading from <code>config.yaml</code> during initialization.</p>
+<h2 id="testing">Testing</h2>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.context_engine</span><span class="w"> </span><span class="kn">import</span> <span class="n">ContextEngine</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_engine_satisfies_abc</span><span class="p">():</span>
+    <span class="n">engine</span> <span class="o">=</span> <span class="n">YourEngine</span><span class="p">(</span><span class="n">context_length</span><span class="o">=</span><span class="mi">200000</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">ContextEngine</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="n">engine</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;your-name&quot;</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_compress_returns_valid_messages</span><span class="p">():</span>
+    <span class="n">engine</span> <span class="o">=</span> <span class="n">YourEngine</span><span class="p">(</span><span class="n">context_length</span><span class="o">=</span><span class="mi">200000</span><span class="p">)</span>
+    <span class="n">msgs</span> <span class="o">=</span> <span class="p">[{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;hello&quot;</span><span class="p">}]</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">engine</span><span class="o">.</span><span class="n">compress</span><span class="p">(</span><span class="n">msgs</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="nb">list</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="nb">all</span><span class="p">(</span><span class="s2">&quot;role&quot;</span> <span class="ow">in</span> <span class="n">m</span> <span class="k">for</span> <span class="n">m</span> <span class="ow">in</span> <span class="n">result</span><span class="p">)</span>
+</code></pre></div>
+
+<p>See <code>tests/agent/test_context_engine.py</code> for the full ABC contract test suite.</p>
+<h2 id="thread-safety">Thread safety</h2>
+<p>When <code>compression.context_timeout_seconds &gt; 0</code> (the default), Hermes runs the
+whole compression pass — including your engine's <code>compress()</code> and boundary
+callbacks, and any memory provider's <code>on_pre_compress</code> /
+<code>on_session_switch</code> — on a pooled daemon thread with a host-side timeout.
+Your engine must therefore assume:</p>
+<ul>
+<li>Calls may arrive on an arbitrary pooled thread. Do not rely on thread
+  affinity or <code>threading.local</code> state shared with the conversation thread.</li>
+<li>The message list you receive is a private deep snapshot; mutating it in
+  place is allowed (legacy contract), but the mutation only becomes visible
+  if the pass commits. After a host timeout your still-running work is
+  discarded — never publish to external/durable state outside the commit.</li>
+<li>Passes for <em>different</em> sessions can run concurrently on pool siblings; a
+  single engine/provider instance shared across sessions must be thread-safe.</li>
+</ul>
+<h2 id="see-also">See also</h2>
+<ul>
+<li><a href="context-compression-and-caching.html">Context Compression and Caching</a> — how the built-in compressor works</li>
+<li><a href="memory-provider-plugin.html">Memory Provider Plugins</a> — analogous single-select plugin system for memory</li>
+<li><a href="../user-guide/features/plugins.html">Plugins</a> — general plugin system overview</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/context-engine-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-it-works">How it works</a></li>
+<li class="lvl2"><a href="#directory-structure">Directory structure</a></li>
+<li class="lvl2"><a href="#the-contextengine-abc">The ContextEngine ABC</a></li>
+<li class="lvl3"><a href="#class-attributes-your-engine-must-maintain">Class attributes your engine must maintain</a></li>
+<li class="lvl3"><a href="#optional-methods">Optional methods</a></li>
+<li class="lvl2"><a href="#per-turn-context-selection-and-observation">Per-turn context selection and observation</a></li>
+<li class="lvl3"><a href="#when-to-use-these-hooks--and-when-not-to">When to use these hooks — and when NOT to</a></li>
+<li class="lvl2"><a href="#engine-tools">Engine tools</a></li>
+<li class="lvl2"><a href="#registration">Registration</a></li>
+<li class="lvl3"><a href="#via-directory-recommended">Via directory (recommended)</a></li>
+<li class="lvl3"><a href="#via-general-plugin-system">Via general plugin system</a></li>
+<li class="lvl2"><a href="#lifecycle">Lifecycle</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl2"><a href="#testing">Testing</a></li>
+<li class="lvl2"><a href="#thread-safety">Thread safety</a></li>
+<li class="lvl2"><a href="#see-also">See also</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

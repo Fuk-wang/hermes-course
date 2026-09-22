@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Billing Lifecycle (TUI) · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/billing-lifecycle</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="billing-lifecycle-client-side-state-errors-and-recovery">Billing lifecycle: client-side state, errors, and recovery</h1>
+<p>This is the map from every <code>billing.*</code>/<code>subscription.*</code> state shape the gateway
+serves (from NAS) to what the terminal actually renders, and from every typed
+refusal/error code to its exact user-facing copy and recovery action. The
+guarantee: no NAS billing state and no typed refusal falls through to a
+generic toast — every case below is an explicit branch in
+<code>ui-tui/src/app/slash/commands/topup.ts</code>, <code>ui-tui/src/components/billingOverlay.tsx</code>,
+or <code>ui-tui/src/components/subscriptionOverlay.tsx</code>. An <strong>unknown</strong> code still
+degrades gracefully: it hits the <code>default</code> branch (a generic-but-real message
+pulled from the server payload, never a blank toast) rather than crashing or
+silently dropping the refusal.</p>
+<h2 id="1-billingstate-shapes--render">1. <code>billing.state</code> shapes → render</h2>
+<p>Source: <code>ui-tui/src/components/billingOverlay.tsx</code> (<code>OverviewScreen</code>,
+<code>BuyScreen</code>, <code>AutoReloadScreen</code>), <code>ui-tui/src/app/slash/commands/topup.ts</code> (<code>/topup</code> run).</p>
+<table>
+<thead>
+<tr>
+<th>State shape</th>
+<th>Render</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Logged out (<code>s.logged_in === false</code>)</td>
+<td>Overlay never opens. <code>sys</code>: <code>💳 Not logged into Nous Portal — run /portal to log in, then /topup.</code></td>
+</tr>
+<tr>
+<td><code>billing.state</code> RPC fetch fails (transport/timeout)</td>
+<td><strong>Fail-closed</strong>: <code>.catch(ctx.guardedErr)</code> — overlay never opens, no state is assumed. <code>sys</code>: <code>error: &lt;message or "request failed"&gt;</code>. Never renders "no card" or any other guessed state; user must retry <code>/topup</code>.</td>
+</tr>
+<tr>
+<td><code>card: null</code> (no saved card), full menu (<code>is_admin &amp;&amp; cli_billing_enabled</code>)</td>
+<td>Overview shows <code>No saved card on file — "Add funds" walks you through adding one.</code> "Add funds" opens the <strong>add-card path</strong>: <code>Add a card on the portal</code> / <code>I've added it — check again</code> / <code>Back</code> (never an amount picker, which would 403 <code>no_payment_method</code>).</td>
+</tr>
+<tr>
+<td><code>card</code> present, <code>resolved_via</code> set</td>
+<td><code>Card: {display}</code> (e.g. <code>Visa ····4242 — the card on your subscription</code>) using the provenance-aware <code>display</code> field.</td>
+</tr>
+<tr>
+<td><code>card</code> present, <code>resolved_via</code> absent (older NAS)</td>
+<td>Falls back to the generic <code>Card: {masked}</code>; Confirm screen adds <code>Your card saved on the portal will be charged.</code></td>
+</tr>
+<tr>
+<td><code>auto_reload: null</code></td>
+<td>No auto-reload line at all (<code>autoReloadLine</code> returns <code>null</code>) — the feature isn't surfaced.</td>
+</tr>
+<tr>
+<td><code>auto_reload.card.kind: 'canonical'</code></td>
+<td>No distinct-card warning; card line falls back to the card on file.</td>
+</tr>
+<tr>
+<td><code>auto_reload.card.kind: 'distinct'</code></td>
+<td><code>⚠ Auto-refill is charging {brand} ••{last4} — not your card on file.</code> in the Auto-reload screen (the divergence notice).</td>
+</tr>
+<tr>
+<td><code>auto_reload.card.kind: 'none'</code></td>
+<td>Same as <code>canonical</code> rendering-wise — no distinct-card warning shown.</td>
+</tr>
+<tr>
+<td><code>monthly_cap</code> present, <code>limit_usd != null</code></td>
+<td><code>{spent_display} of {limit_display} used this month</code> (+ <code>(default ceiling)</code> iff <code>is_default_ceiling</code>).</td>
+</tr>
+<tr>
+<td><code>monthly_cap</code> absent or <code>limit_usd == null</code></td>
+<td><code>No monthly cap visible (managed on the portal).</code></td>
+</tr>
+<tr>
+<td>Role without billing capability (<code>!is_admin</code>, menu collapses)</td>
+<td>Note: <code>Billing actions need someone with billing permissions (owner, admin, or finance admin).</code> Menu collapses to <code>Manage on portal</code> / <code>Cancel</code>.</td>
+</tr>
+<tr>
+<td>Org kill-switch off (<code>is_admin</code> but <code>!cli_billing_enabled</code>)</td>
+<td>Note: <code>Remote spending is off for this org — a billing admin can turn it on from the portal's Hermes Agent page.</code> Same collapsed menu.</td>
+</tr>
+</tbody>
+</table>
+<p>Note: <code>full = s.is_admin &amp;&amp; s.cli_billing_enabled</code> gates the <strong>org-level</strong>
+switch, not the per-terminal <code>billing:manage</code> scope — that's discovered
+reactively (a charge 403s <code>insufficient_scope</code>) and routes to the resumable
+step-up screen instead of a preflight check.</p>
+<h2 id="2-refusal-codes-renderbillingerror-in-code-order">2. Refusal codes (<code>renderBillingError</code>, in code order)</h2>
+<p>Source: <code>renderBillingError</code> in <code>ui-tui/src/app/slash/commands/topup.ts:37-149</code>.
+"Portal" row = <code>sys('Portal: {portal_url}')</code> is appended whenever <code>portal_url</code> is present, for every code (including default).</p>
+<table>
+<thead>
+<tr>
+<th><code>error</code> code</th>
+<th>Copy</th>
+<th style="text-align: center;">Portal URL</th>
+<th style="text-align: center;"><code>retry_after</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>insufficient_scope</code></td>
+<td><code>This needs Remote Spending allowed. Start a top-up to allow it, then retry.</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>remote_spending_revoked</code> (CF-4)</td>
+<td><code>{An admin stopped remote spending for this terminal. \| You stopped remote spending for this terminal.}</code> (by <code>actor</code>) <code>Reconnect to restore — run /portal to re-authorize this terminal.</code> Also clears <code>billing</code> overlay state immediately (doesn't wait for token refresh).</td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>session_revoked</code></td>
+<td><code>Your session was logged out. Run /portal to log in again.</code> Also clears <code>billing</code> overlay state.</td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>cli_billing_disabled</code> / <code>remote_spending_disabled</code> (dual-emitted)</td>
+<td><code>Remote spending is off for this account — a billing admin can turn it on from the portal's Hermes Agent page.</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>role_required</code></td>
+<td><code>Adding funds needs someone with billing permissions (owner, admin, or finance admin), or manage this on the portal.</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>consent_required</code></td>
+<td><code>This action needs a one-time card confirmation and consent step on the portal before it can proceed.</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>org_access_denied</code></td>
+<td><code>This token isn't bound to an org you can manage. Sign in with the right org, or manage this on the portal.</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>upgrade_cap_exceeded</code></td>
+<td><code>🔴 Daily plan-change limit reached (5 per org) — try again tomorrow, or manage this on the portal.</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>auto_top_up_disabled_failures</code></td>
+<td><code>Auto-reload was turned off after repeated charge failures. Fix the card issue, then re-enable it from /topup → Auto-reload.</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>idempotency_conflict</code></td>
+<td><code>🔴 That charge key was already used for a different amount. Start a fresh top-up.</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>no_payment_method</code></td>
+<td><code>💳 No saved card for terminal charges yet. Set one up on the portal (one-time credit buys don't save a reusable card).</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>monthly_cap_exceeded</code></td>
+<td><code>🔴 Monthly spend cap reached — ${remainingUsd} headroom left.</code> if <code>payload.remainingUsd</code> present, else <code>🔴 Monthly spend cap reached.</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+<tr>
+<td><code>rate_limited</code> / <code>temporarily_unavailable</code></td>
+<td><code>🟡 Too many charges right now{ (try again in ~N min)}. This isn't a payment failure.</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;"><strong>yes</strong> — minutes computed as <code>max(1, round(retry_after/60))</code></td>
+</tr>
+<tr>
+<td><code>stripe_unavailable</code></td>
+<td><code>🟡 Stripe is having trouble right now — try again shortly{ (try again in ~N min)}.</code></td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;"><strong>yes</strong> (same formula)</td>
+</tr>
+<tr>
+<td><em>default (unknown/other)</em></td>
+<td><code>🔴 {message \|\| error \|\| 'Billing request failed.'}</code> — still surfaces whatever the server said, never a blank toast.</td>
+<td style="text-align: center;">if present</td>
+<td style="text-align: center;">—</td>
+</tr>
+</tbody>
+</table>
+<h2 id="3-charge-settlement-outcomes-pollcharge--renderchargefailed">3. Charge settlement outcomes (<code>pollCharge</code> / <code>renderChargeFailed</code>)</h2>
+<p>Source: <code>pollCharge</code> (<code>ui-tui/src/app/slash/commands/topup.ts:170-258</code>) and
+<code>renderChargeFailed</code> (<code>:260-290</code>). Poll cadence: 2s interval, 5-minute cap
+(<code>POLL_INTERVAL_MS=2000</code>, <code>POLL_CAP_MS=5*60*1000</code>), applied on <strong>every</strong>
+non-terminal path (pending <em>and</em> throttled), so a sustained 429/503 can't
+keep the poll alive forever.</p>
+<table>
+<thead>
+<tr>
+<th>Outcome</th>
+<th>Copy</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>status: 'settled'</code></td>
+<td><code>✅ ${amount_usd} added.</code> (or <code>✅ Credits added.</code> if no amount)</td>
+<td>Terminal success.</td>
+</tr>
+<tr>
+<td><code>status: 'failed'</code>, <code>reason: 'authentication_required'</code></td>
+<td><code>🔴 Your bank requires verification (3DS). Complete it on the portal to finish this purchase.</code></td>
+<td>+ <code>Portal:</code> line if <code>portalUrl</code>.</td>
+</tr>
+<tr>
+<td><code>status: 'failed'</code>, <code>reason: 'payment_method_expired'</code></td>
+<td><code>🔴 Your card has expired. Update it on the portal.</code></td>
+<td>+ <code>Portal:</code> line.</td>
+</tr>
+<tr>
+<td><code>status: 'failed'</code>, <code>reason: 'card_declined'</code></td>
+<td><code>🔴 Your card was declined. Try another card on the portal.</code></td>
+<td>+ <code>Portal:</code> line.</td>
+</tr>
+<tr>
+<td><code>status: 'failed'</code>, <code>reason: 'processing_error'</code></td>
+<td><code>🔴 The charge didn't go through (processing_error).</code></td>
+<td>+ <code>Portal:</code> line.</td>
+</tr>
+<tr>
+<td><code>status: 'failed'</code>, unrecognized/missing <code>reason</code></td>
+<td><code>🔴 The charge didn't go through ({reason \|\| 'processing_error'}).</code></td>
+<td>Same portal funnel — parity with <code>cli.py</code>'s <code>_billing_portal_hint</code>.</td>
+</tr>
+<tr>
+<td>Poll timeout (still <code>pending</code> past the 5-min cap)</td>
+<td><code>🟡 Still processing after 5 minutes — this is a timeout, not a failure. Check /topup or the portal shortly.</code></td>
+<td>+ <code>Portal:</code> line if <code>portalUrl</code>. Explicitly NOT called a failure.</td>
+</tr>
+<tr>
+<td>Revocation mid-poll (<code>remote_spending_revoked</code> / <code>session_revoked</code> while polling)</td>
+<td>Renders the matching §2 copy, <strong>then</strong> appends: <code>🟡 Your last charge's outcome is unconfirmed — check your balance/history before retrying.</code></td>
+<td>CF-7 rule 4: a post-revoke 403 while polling is ambiguous (the charge may have already settled) — never call it "failed".</td>
+</tr>
+<tr>
+<td>429/503 while polling (<code>rate_limited</code>/<code>temporarily_unavailable</code>/<code>stripe_unavailable</code>)</td>
+<td>No error shown; backs off using <code>retry_after</code> (default 5s, capped at 30s) and keeps polling until the 5-min cap, then reads as timeout.</td>
+<td>Not a payment failure.</td>
+</tr>
+<tr>
+<td>Other <code>!ok</code> status-check error</td>
+<td><code>🔴 Could not check the charge: {message \|\| error \|\| 'error'}</code></td>
+<td></td>
+</tr>
+<tr>
+<td>Transport loss (poll RPC throws/rejects)</td>
+<td><code>🟡 Your last charge's outcome is unconfirmed — check your balance/history before retrying.</code> (<code>UNCONFIRMED_CHARGE_MESSAGE</code>)</td>
+<td>Same "unconfirmed, check balance" framing as revocation mid-poll — a dropped connection can never be read as "failed".</td>
+</tr>
+</tbody>
+</table>
+<h2 id="4-subscription-preview--pending-change--upgrade-outcomes">4. Subscription preview / pending-change / upgrade outcomes</h2>
+<p>Source: <code>previewAndRoute</code>, <code>applyPendingAndRoute</code>, <code>upgradeResult</code>,
+<code>stepUpDenialResult</code> in <code>ui-tui/src/components/subscriptionOverlay.tsx</code>.</p>
+<p><strong>Preview <code>effect</code> values</strong> (drive the Confirm screen):</p>
+<table>
+<thead>
+<tr>
+<th><code>effect</code></th>
+<th>Confirm screen copy</th>
+<th>Primary action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>charge_now</code></td>
+<td><code>Upgrade to {target}. You will be charged {amount} now (prorated).</code> (+ monthly-credits delta, + which card if resolver confidently knows)</td>
+<td><code>Pay {amount} &amp; upgrade now</code></td>
+</tr>
+<tr>
+<td><code>scheduled</code></td>
+<td><code>Change to {target} — takes effect {date}. No charge now; you keep your current plan until then.</code></td>
+<td><code>Schedule change to {target}</code></td>
+</tr>
+<tr>
+<td><code>no_op</code></td>
+<td><code>You are already on {target} — nothing to change.</code></td>
+<td>none (Back only)</td>
+</tr>
+<tr>
+<td><code>blocked</code></td>
+<td><code>{preview.reason}</code> or fallback <code>That change cannot be made here — manage it on the portal.</code></td>
+<td><code>Manage on portal</code></td>
+</tr>
+<tr>
+<td>Preview RPC returns <code>null</code>/transport failure</td>
+<td>routes straight to Result: <code>Could not preview that change.</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td>Preview <code>!ok</code>, <code>insufficient_scope</code></td>
+<td>routes to <code>stepup</code> screen (<code>{kind:'preview', tierId}</code>)</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Preview <code>!ok</code>, other error</td>
+<td>routes to Result with <code>errorResult(p)</code> (<code>message \|\| error \|\| 'Something went wrong. Try again, or manage on the portal.'</code>)</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Pending-change apply outcomes</strong> (<code>applyPendingAndRoute</code>):</p>
+<table>
+<thead>
+<tr>
+<th><code>pending.kind</code></th>
+<th>Success copy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cancellation</code></td>
+<td><code>Scheduled — your plan stays active until the end of the billing period, then it cancels. Nothing changes today.</code></td>
+</tr>
+<tr>
+<td><code>tier_change</code> (downgrade/schedule)</td>
+<td><code>Scheduled — your plan doesn't change today. You keep your current plan until the end of the billing period, then it switches.</code></td>
+</tr>
+<tr>
+<td><code>upgrade</code></td>
+<td>routed through <code>upgradeResult</code> (below)</td>
+</tr>
+<tr>
+<td>any kind, mutation <code>insufficient_scope</code></td>
+<td>routes to stepup (<code>{kind:'apply'}</code>)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Upgrade <code>status</code> × <code>reason</code> matrix</strong> (<code>upgradeResult</code>, checked in this
+order — <code>reason</code> is checked <em>before</em> <code>status</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>r === null</code> (transport failure on the charging route)</td>
+<td><code>Couldn't confirm the upgrade — your card may or may not have been charged. Re-run /subscription to check your plan before trying again.</code> — ambiguous, never a blind retry.</td>
+</tr>
+<tr>
+<td><code>reason: 'authentication_required'</code> <strong>or</strong> <code>reason: 'subscription_payment_intent_requires_action'</code></td>
+<td><code>Please verify your card in the portal to finish this upgrade.</code> → <code>recovery_url</code>. <strong>Both reasons map to the same SCA copy</strong> — the client branches on <code>reason</code>, not <code>status</code>, specifically so an SCA case that pre-#711 NAS mislabels with <code>status: 'payment_failed'</code> (no distinguishing reason yet) still routes to the correct "verify your card" copy instead of reading as a hard decline.</td>
+</tr>
+<tr>
+<td><code>reason: 'card_declined'</code></td>
+<td><code>Your card was declined — try a different card on the portal.</code> → <code>recovery_url</code>.</td>
+</tr>
+<tr>
+<td><code>ok &amp;&amp; status: 'already_on_tier'</code></td>
+<td><code>You are already on {target_tier_name}.</code> (success)</td>
+</tr>
+<tr>
+<td><code>ok &amp;&amp; status: 'upgraded'</code></td>
+<td><code>Upgraded to {target_tier_name}. Your new monthly credits land in a moment.</code> — starts the eventual-consistency apply-poll (below).</td>
+</tr>
+<tr>
+<td><code>status: 'requires_action'</code> (no distinguishing reason)</td>
+<td><code>This upgrade needs extra verification (3DS). Finish it on the portal.</code> → <code>recovery_url</code>.</td>
+</tr>
+<tr>
+<td><code>status: 'payment_failed'</code> (no distinguishing reason)</td>
+<td><code>Your card was declined. Update your payment method on the portal and try again.</code> → <code>recovery_url</code>.</td>
+</tr>
+<tr>
+<td>anything else</td>
+<td><code>errorResult(r)</code>: <code>message \|\| error \|\| 'Something went wrong. Try again, or manage on the portal.'</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Eventual-consistency apply-poll</strong> (<code>ResultScreen</code>, only after <code>status:
+'upgraded'</code>): polls <code>billing</code>/subscription state every 2s
+(<code>UPGRADE_CONFIRM_INTERVAL_MS</code>) up to 15 attempts
+(<code>UPGRADE_CONFIRM_ATTEMPTS</code>, i.e. ~30s) until <code>current.tier_id</code> flips to the
+target. While waiting the screen reads <code>Applying…</code>; if it never flips inside
+the budget it reads <code>Still applying</code> / <code>Your upgrade succeeded and is still
+applying — refresh in a moment.</code> — the upgrade is never re-reported as failed
+just because NAS hasn't caught up yet.</p>
+<p><strong>Step-up denial copy</strong> (<code>stepUpDenialResult</code>, subscription flow):</p>
+<table>
+<thead>
+<tr>
+<th><code>error</code></th>
+<th>Copy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>session_revoked</code></td>
+<td><code>Your session expired — run /portal to log in again, then retry the change.</code></td>
+</tr>
+<tr>
+<td><code>remote_spending_revoked</code></td>
+<td><code>{message}</code> or <code>Remote spending was stopped for this terminal — reconnect from the portal, then retry.</code></td>
+</tr>
+<tr>
+<td><code>rate_limited</code></td>
+<td><code>Too many attempts — wait a moment, then try again.</code></td>
+</tr>
+<tr>
+<td>other/unknown</td>
+<td><code>{message}</code> or <code>Remote Spending was not allowed — someone with billing permissions (owner, admin, or finance admin) must approve it. You can also make this change on the portal.</code></td>
+</tr>
+</tbody>
+</table>
+<p>A <strong>repeat</strong> scope denial during a post-grant replay never re-enters the
+step-up screen (it's already mounted there — re-patching would freeze it);
+<code>allowStepUp=false</code> instead surfaces a terminal result: <code>Remote Spending still
+isn’t active for this terminal — the authorization didn’t take. Retry, or make
+this change on the portal.</code></p>
+<h2 id="text-mode-cli-parity">Text-mode (CLI) parity</h2>
+<p><code>cli.py</code>'s <code>_show_billing</code> / <code>_billing_overview</code> and <code>_show_subscription</code> /
+<code>_subscription_overview</code> render the same state shapes (balance title, two-bar
+dollar usage, auto-reload line, card line, monthly cap) and share the
+"fail-open on logged-out/portal-hiccup, never crash" discipline. The CLI's
+<code>/subscription</code> gives a paid admin/owner in an interactive context the <strong>full
+in-terminal change flow</strong> (tier picker → preview → confirm → apply, parity
+with the TUI overlay); members and non-interactive contexts fall back to
+<code>_billing_portal_hint</code>'s deep-link to <code>subscription_manage_url</code>. <code>/topup</code>'s
+interactive modal (prompt_toolkit) mirrors the TUI overlay the same way, and
+non-interactive contexts fall back to the same text + portal-link rendering,
+never prompting.</p>
+<table>
+<thead>
+<tr>
+<th>CLI surface / state</th>
+<th>Behavior (parity with TUI / desktop)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/subscription</code> on <strong>Free</strong> + admin/owner + interactive</td>
+<td><code>_subscription_free_catalog</code> prints the plan catalog from the same <code>tiers[]</code> data the TUI uses — one row per enabled paid tier, cheapest first, <code>name · $/mo · $credits/mo</code> (monthly credits are DOLLARS → <code>$22 credits/mo</code>, never a bare number). A numbered pick opens the <code>/manage-subscription</code> deep-link with <code>plan=&lt;tier_id&gt;</code> appended so the portal preselects the chosen plan. Starting a new subscription needs a fresh card, so the only action is the portal hand-off (the terminal never charges here).</td>
+</tr>
+<tr>
+<td>Any CLI-built manage/subscribe URL</td>
+<td><code>subscription_manage_url(state, tier_id=…)</code> appends <code>plan=&lt;tier_id&gt;</code> (the stable <code>tiers[]</code> id, never a name/slug) <strong>only when a tier was picked</strong> (the Free catalog). The portal validates it server-side and ignores an unknown tier, so the CLI appends unconditionally on a pick, mirroring the TUI's <code>?plan=</code>. <code>org_id</code> is emitted first, <code>plan</code> second.</td>
+</tr>
+<tr>
+<td><strong>Downgrades</strong> in the CLI</td>
+<td>Stay <strong>native / in-app</strong> for normal changes (chargeless scheduling via <code>put_subscription_pending_change</code>). A blocked downgrade may still print the generic manage URL, but it never carries <code>plan=&lt;tier_id&gt;</code> — selected-tier deep-links are reserved for new subscriptions and upgrades.</td>
+</tr>
+<tr>
+<td><code>/topup</code> overview action copy</td>
+<td>Splits one-time top-up from automatic refill, the distinction stated up front in each first sentence: <code>Add funds now — a single charge, added to your balance today.</code> vs <code>Refill when low — charges $X automatically when your balance falls below $Y.</code> ("credits" stays out of the dollars-only <code>/topup</code> surface — "Add funds now" carries the one-time meaning without it). When auto-reload is off, the automatic line omits concrete amounts.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="forward-compatibility">Forward compatibility</h2>
+<p>Any <code>error</code>/<code>status</code>/<code>reason</code> code not in the tables above lands on the
+<code>default</code> branch in <code>renderBillingError</code> (§2) or <code>errorResult</code>/<code>upgradeResult</code>'s
+fallthrough (§4): it still renders the server's own <code>message</code> (never blank,
+never a crash), just without bespoke copy or a typed recovery affordance.
+NAS W3 introduces card-health codes (<code>card_paused</code>, <code>card_expired</code>,
+<code>card_mismatch</code>) that are not yet typed here — until a client update adds
+explicit branches, they will arrive as unknown codes and degrade to this
+default path.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/billing-lifecycle</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#1-billingstate-shapes--render">1. billing.state shapes → render</a></li>
+<li class="lvl2"><a href="#2-refusal-codes-renderbillingerror-in-code-order">2. Refusal codes (renderBillingError, in code order)</a></li>
+<li class="lvl2"><a href="#3-charge-settlement-outcomes-pollcharge--renderchargefailed">3. Charge settlement outcomes (pollCharge / renderChargeFailed)</a></li>
+<li class="lvl2"><a href="#4-subscription-preview--pending-change--upgrade-outcomes">4. Subscription preview / pending-change / upgrade outcomes</a></li>
+<li class="lvl2"><a href="#text-mode-cli-parity">Text-mode (CLI) parity</a></li>
+<li class="lvl2"><a href="#forward-compatibility">Forward compatibility</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

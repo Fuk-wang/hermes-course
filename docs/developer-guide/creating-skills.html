@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Creating Skills · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/creating-skills</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="creating-skills">Creating Skills</h1>
+<p>Skills are the preferred way to add new capabilities to Hermes Agent. They're easier to create than tools, require no code changes to the agent, and can be shared with the community.</p>
+<h2 id="should-it-be-a-skill-or-a-tool">Should it be a Skill or a Tool?</h2>
+<p>Make it a <strong>Skill</strong> when:
+- The capability can be expressed as instructions + shell commands + existing tools
+- It wraps an external CLI or API that the agent can call via <code>terminal</code> or <code>web_extract</code>
+- It doesn't need custom Python integration or API key management baked into the agent
+- Examples: arXiv search, git workflows, Docker management, PDF processing, email via CLI tools</p>
+<p>Make it a <strong>Tool</strong> when:
+- It requires end-to-end integration with API keys, auth flows, or multi-component configuration
+- It needs custom processing logic that must execute precisely every time
+- It handles binary data, streaming, or real-time events
+- Examples: browser automation, TTS, vision analysis</p>
+<h2 id="skill-directory-structure">Skill Directory Structure</h2>
+<p>Bundled skills live in <code>skills/</code> organized by category. Official optional skills use the same structure in <code>optional-skills/</code>:</p>
+<div class="highlight"><pre><span></span><code>skills/
+├── research/
+│   └── arxiv/
+│       ├── SKILL.md              # Required: main instructions
+│       └── scripts/              # Optional: helper scripts
+│           └── search_arxiv.py
+├── productivity/
+│   └── ocr-and-documents/
+│       ├── SKILL.md
+│       ├── scripts/
+│       └── references/
+└── ...
+</code></pre></div>
+
+<h2 id="skillmd-format">SKILL.md Format</h2>
+<div class="highlight"><pre><span></span><code>---
+name: my-skill
+description: Brief description (shown in skill search results)
+version: 1.0.0
+author: Your Name
+license: MIT
+platforms: [macos, linux]          # Optional — restrict to specific OS platforms
+                                   #   Valid: macos, linux, windows
+                                   #   Omit to load on all platforms (default)
+metadata:
+  hermes:
+    tags: [Category, Subcategory, Keywords]
+    related_skills: [other-skill-name]
+    requires_toolsets: [web]            # Optional — only show when these toolsets are active
+    requires_tools: [web_search]        # Optional — only show when these tools are available
+    fallback_for_toolsets: [browser]    # Optional — hide when these toolsets are active
+    fallback_for_tools: [browser_navigate]  # Optional — hide when these tools exist
+    config:                              # Optional — config.yaml settings the skill needs
+<span class="w">      </span><span class="k">-</span><span class="w"> </span>key: my.setting
+        description: &quot;What this setting controls&quot;
+        default: &quot;sensible-default&quot;
+        prompt: &quot;Display prompt for setup&quot;
+    blueprint:                              # Optional — marks this skill a runnable automation
+      schedule: &quot;0 9 * * *&quot;              #   cron expr / &quot;every 2h&quot; / ISO timestamp
+      deliver: origin                    #   optional (default origin)
+      prompt: &quot;Task instruction for each run&quot;  # optional
+      no_agent: false                    # optional
+required_environment_variables:          # Optional — env vars the skill needs
+<span class="w">  </span><span class="k">-</span><span class="w"> </span>name: MY_API_KEY
+    prompt: &quot;Enter your API key&quot;
+    help: &quot;Get one at https://example.com&quot;
+<span class="gu">    required_for: &quot;API access&quot;</span>
+<span class="gu">---</span>
+
+<span class="gh"># Skill Title</span>
+
+Brief intro.
+
+<span class="gu">## When to Use</span>
+Trigger conditions — when should the agent load this skill?
+
+<span class="gu">## Quick Reference</span>
+Table of common commands or API calls.
+
+<span class="gu">## Procedure</span>
+Step-by-step instructions the agent follows.
+
+<span class="gu">## Pitfalls</span>
+Known failure modes and how to handle them.
+
+<span class="gu">## Verification</span>
+How the agent confirms it worked.
+</code></pre></div>
+
+<h3 id="platform-specific-skills">Platform-Specific Skills</h3>
+<p>Skills can restrict themselves to specific operating systems using the <code>platforms</code> field:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">macos</span><span class="p p-Indicator">]</span><span class="w">            </span><span class="c1"># macOS only (e.g., iMessage, Apple Reminders)</span>
+<span class="nt">platforms</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">macos</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">linux</span><span class="p p-Indicator">]</span><span class="w">     </span><span class="c1"># macOS and Linux</span>
+<span class="nt">platforms</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">windows</span><span class="p p-Indicator">]</span><span class="w">          </span><span class="c1"># Windows only</span>
+</code></pre></div>
+
+<p>When set, the skill is automatically hidden from the system prompt, <code>skills_list()</code>, and slash commands on incompatible platforms. If omitted or empty, the skill loads on all platforms (backward compatible).</p>
+<h3 id="conditional-skill-activation">Conditional Skill Activation</h3>
+<p>Skills can declare dependencies on specific tools or toolsets. This controls whether the skill appears in the system prompt for a given session.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">requires_toolsets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">web</span><span class="p p-Indicator">]</span><span class="w">           </span><span class="c1"># Hide if the web toolset is NOT active</span>
+<span class="w">    </span><span class="nt">requires_tools</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">web_search</span><span class="p p-Indicator">]</span><span class="w">       </span><span class="c1"># Hide if web_search tool is NOT available</span>
+<span class="w">    </span><span class="nt">fallback_for_toolsets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">browser</span><span class="p p-Indicator">]</span><span class="w">   </span><span class="c1"># Hide if the browser toolset IS active</span>
+<span class="w">    </span><span class="nt">fallback_for_tools</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">browser_navigate</span><span class="p p-Indicator">]</span><span class="w">  </span><span class="c1"># Hide if browser_navigate IS available</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>requires_toolsets</code></td>
+<td>Skill is <strong>hidden</strong> when ANY listed toolset is <strong>not</strong> available</td>
+</tr>
+<tr>
+<td><code>requires_tools</code></td>
+<td>Skill is <strong>hidden</strong> when ANY listed tool is <strong>not</strong> available</td>
+</tr>
+<tr>
+<td><code>fallback_for_toolsets</code></td>
+<td>Skill is <strong>hidden</strong> when ANY listed toolset <strong>is</strong> available</td>
+</tr>
+<tr>
+<td><code>fallback_for_tools</code></td>
+<td>Skill is <strong>hidden</strong> when ANY listed tool <strong>is</strong> available</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Use case for <code>fallback_for_*</code>:</strong> Create a skill that serves as a workaround when a primary tool isn't available. For example, a <code>duckduckgo-search</code> skill with <code>fallback_for_tools: [web_search]</code> only shows when the web search tool (which requires an API key) is not configured.</p>
+<p><strong>Use case for <code>requires_*</code>:</strong> Create a skill that only makes sense when certain tools are present. For example, a web scraping workflow skill with <code>requires_toolsets: [web]</code> won't clutter the prompt when web tools are disabled.</p>
+<h3 id="environment-variable-requirements">Environment Variable Requirements</h3>
+<p>Skills can declare environment variables they need. When a skill is loaded via <code>skill_view</code>, its required vars are automatically registered for passthrough into sandboxed execution environments (terminal, execute_code).</p>
+<div class="highlight"><pre><span></span><code><span class="nt">required_environment_variables</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">TENOR_API_KEY</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Tenor</span><span class="nv"> </span><span class="s">API</span><span class="nv"> </span><span class="s">key&quot;</span><span class="w">               </span><span class="c1"># Shown when prompting user</span>
+<span class="w">    </span><span class="nt">help</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Get</span><span class="nv"> </span><span class="s">your</span><span class="nv"> </span><span class="s">key</span><span class="nv"> </span><span class="s">at</span><span class="nv"> </span><span class="s">https://tenor.com&quot;</span><span class="w">  </span><span class="c1"># Help text or URL</span>
+<span class="w">    </span><span class="nt">required_for</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;GIF</span><span class="nv"> </span><span class="s">search</span><span class="nv"> </span><span class="s">functionality&quot;</span><span class="w">   </span><span class="c1"># What needs this var</span>
+</code></pre></div>
+
+<p>Each entry supports:
+- <code>name</code> (required) — the environment variable name
+- <code>prompt</code> (optional) — prompt text when asking the user for the value
+- <code>help</code> (optional) — help text or URL for obtaining the value
+- <code>required_for</code> (optional) — describes which feature needs this variable</p>
+<p>Users can also manually configure passthrough variables in <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">terminal</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">env_passthrough</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_CUSTOM_VAR</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ANOTHER_VAR</span>
+</code></pre></div>
+
+<p>See <code>skills/apple/</code> for examples of macOS-only skills.</p>
+<h2 id="secure-setup-on-load">Secure Setup on Load</h2>
+<p>Use <code>required_environment_variables</code> when a skill needs an API key or token. Missing values do <strong>not</strong> hide the skill from discovery. Instead, Hermes prompts for them securely when the skill is loaded in the local CLI.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">required_environment_variables</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">TENOR_API_KEY</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Tenor API key</span>
+<span class="w">    </span><span class="nt">help</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Get a key from https://developers.google.com/tenor</span>
+<span class="w">    </span><span class="nt">required_for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">full functionality</span>
+</code></pre></div>
+
+<p>The user can skip setup and keep loading the skill. Hermes never exposes the raw secret value to the model. Gateway and messaging sessions show local setup guidance instead of collecting secrets in-band.</p>
+<div class="admonition adm-tip"><p class="adm-title">Sandbox Passthrough</p>
+<p>When your skill is loaded, any declared <code>required_environment_variables</code> that are set are <strong>automatically passed through</strong> to <code>execute_code</code> and <code>terminal</code> sandboxes — including remote backends like Docker and Modal. Your skill's scripts can access <code>$TENOR_API_KEY</code> (or <code>os.environ["TENOR_API_KEY"]</code> in Python) without the user needing to configure anything extra. See <a href="../user-guide/security.html#environment-variable-passthrough">Environment Variable Passthrough</a> for details.</p>
+</div>
+<p>Legacy <code>prerequisites.env_vars</code> remains supported as a backward-compatible alias.</p>
+<h3 id="config-settings-configyaml">Config Settings (config.yaml)</h3>
+<p>Skills can declare non-secret settings that are stored in <code>config.yaml</code> under the <code>skills.config</code> namespace. Unlike environment variables (which are secrets stored in <code>.env</code>), config settings are for paths, preferences, and other non-sensitive values.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">config</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">myplugin.path</span>
+<span class="w">        </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Path to the plugin data directory</span>
+<span class="w">        </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;~/myplugin-data&quot;</span>
+<span class="w">        </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Plugin data directory path</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">myplugin.domain</span>
+<span class="w">        </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Domain the plugin operates on</span>
+<span class="w">        </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span>
+<span class="w">        </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Plugin domain (e.g., AI/ML research)</span>
+</code></pre></div>
+
+<p>Each entry supports:
+- <code>key</code> (required) — dotpath for the setting (e.g., <code>myplugin.path</code>)
+- <code>description</code> (required) — explains what the setting controls
+- <code>default</code> (optional) — default value if the user doesn't configure it
+- <code>prompt</code> (optional) — prompt text shown during <code>hermes config migrate</code>; falls back to <code>description</code></p>
+<p><strong>How it works:</strong></p>
+<ol>
+<li>
+<p><strong>Storage:</strong> Values are written to <code>config.yaml</code> under <code>skills.config.&lt;key&gt;</code>:
+   <code>yaml
+   skills:
+     config:
+       myplugin:
+         path: ~/my-data</code></p>
+</li>
+<li>
+<p><strong>Discovery:</strong> <code>hermes config migrate</code> scans all enabled skills, finds unconfigured settings, and prompts the user. Settings also appear in <code>hermes config show</code> under "Skill Settings."</p>
+</li>
+<li>
+<p><strong>Runtime injection:</strong> When a skill loads, its config values are resolved and appended to the skill message:
+   <code>[Skill config (from ~/.hermes/config.yaml):
+     myplugin.path = /home/user/my-data
+   ]</code>
+   The agent sees the configured values without needing to read <code>config.yaml</code> itself.</p>
+</li>
+<li>
+<p><strong>Manual setup:</strong> Users can also set values directly:
+   <code>bash
+   hermes config set skills.config.myplugin.path ~/my-data</code></p>
+</li>
+</ol>
+<div class="admonition adm-tip"><p class="adm-title">When to use which</p>
+<p>Use <code>required_environment_variables</code> for API keys, tokens, and other <strong>secrets</strong> (stored in <code>~/.hermes/.env</code>, never shown to the model). Use <code>config</code> for <strong>paths, preferences, and non-sensitive settings</strong> (stored in <code>config.yaml</code>, visible in config show).</p>
+</div>
+<h3 id="credential-file-requirements-oauth-tokens-etc">Credential File Requirements (OAuth tokens, etc.)</h3>
+<p>Skills that use OAuth or file-based credentials can declare files that need to be mounted into remote sandboxes. This is for credentials stored as <strong>files</strong> (not env vars) — typically OAuth token files produced by a setup script.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">required_credential_files</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">google_token.json</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Google OAuth2 token (created by setup script)</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">google_client_secret.json</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Google OAuth2 client credentials</span>
+</code></pre></div>
+
+<p>Each entry supports:
+- <code>path</code> (required) — file path relative to <code>~/.hermes/</code>
+- <code>description</code> (optional) — explains what the file is and how it's created</p>
+<p>When loaded, Hermes checks if these files exist. Missing files trigger <code>setup_needed</code>. Existing files are automatically:
+- <strong>Mounted into Docker</strong> containers as read-only bind mounts
+- <strong>Synced into Modal</strong> sandboxes (at creation + before each command, so mid-session OAuth works)
+- Available on <strong>local</strong> backend without any special handling</p>
+<div class="admonition adm-tip"><p class="adm-title">When to use which</p>
+<p>Use <code>required_environment_variables</code> for simple API keys and tokens (strings stored in <code>~/.hermes/.env</code>). Use <code>required_credential_files</code> for OAuth token files, client secrets, service account JSON, certificates, or any credential that's a file on disk.</p>
+</div>
+<p>See the <code>skills/productivity/google-workspace/SKILL.md</code> for a complete example using both.</p>
+<h2 id="skill-guidelines">Skill Guidelines</h2>
+<h3 id="no-external-dependencies">No External Dependencies</h3>
+<p>Prefer stdlib Python, curl, and existing Hermes tools (<code>web_extract</code>, <code>terminal</code>, <code>read_file</code>). If a dependency is needed, document installation steps in the skill.</p>
+<h3 id="progressive-disclosure">Progressive Disclosure</h3>
+<p>Put the most common workflow first. Edge cases and advanced usage go at the bottom. This keeps token usage low for common tasks.</p>
+<h3 id="include-helper-scripts">Include Helper Scripts</h3>
+<p>For XML/JSON parsing or complex logic, include helper scripts in <code>scripts/</code> — don't expect the LLM to write parsers inline every time.</p>
+<h3 id="deliver-media-as-documents-as_document">Deliver media as documents (<code>[[as_document]]</code>)</h3>
+<p>If your skill produces a high-resolution screenshot, chart, or any image where lossy preview compression would hurt — emit the literal directive <code>[[as_document]]</code> somewhere in the response (commonly the last line). The gateway strips the directive and delivers every extracted media path in that response as a downloadable file attachment instead of an inline image bubble. See <a href="../user-guide/features/skills.html#skill-output-and-media-delivery">Skill output and media delivery</a> for the full semantics.</p>
+<h4 id="referencing-bundled-scripts-from-skillmd">Referencing bundled scripts from SKILL.md</h4>
+<p>When a skill is loaded, the activation message exposes the absolute skill directory as <code>[Skill directory: /abs/path]</code> and also substitutes two template tokens anywhere in the SKILL.md body:</p>
+<table>
+<thead>
+<tr>
+<th>Token</th>
+<th>Replaced with</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>${HERMES_SKILL_DIR}</code></td>
+<td>Absolute path to the skill's directory</td>
+</tr>
+<tr>
+<td><code>${HERMES_SESSION_ID}</code></td>
+<td>The active session id (left in place if there is no session)</td>
+</tr>
+</tbody>
+</table>
+<p>So a SKILL.md can tell the agent to run a bundled script directly with:</p>
+<div class="highlight"><pre><span></span><code>To analyse the input, run:
+
+    node ${HERMES_SKILL_DIR}/scripts/analyse.js &lt;input&gt;
+</code></pre></div>
+
+<p>The agent sees the substituted absolute path and invokes the <code>terminal</code> tool with a ready-to-run command — no path math, no extra <code>skill_view</code> round-trip. Disable substitution globally with <code>skills.template_vars: false</code> in <code>config.yaml</code>.</p>
+<h4 id="inline-shell-snippets-opt-in">Inline shell snippets (opt-in)</h4>
+<p>Skills can also embed inline shell snippets written as <code>!`cmd`</code> in the SKILL.md body. When enabled, each snippet's stdout is inlined into the message before the agent reads it, so skills can inject dynamic context:</p>
+<div class="highlight"><pre><span></span><code>Current date: !<span class="sb">`date -u +%Y-%m-%d`</span>
+Git branch: !<span class="sb">`git -C ${HERMES_SKILL_DIR} rev-parse --abbrev-ref HEAD`</span>
+</code></pre></div>
+
+<p>This is <strong>off by default</strong> — any snippet in a SKILL.md runs on the host without approval, so only enable it for skill sources you trust:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">skills</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">inline_shell</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">inline_shell_timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span><span class="w">   </span><span class="c1"># seconds per snippet</span>
+</code></pre></div>
+
+<p>Snippets run with the skill directory as their working directory, and output is capped at 4000 characters. Failures (timeouts, non-zero exits) show up as a short <code>[inline-shell error: ...]</code> marker instead of breaking the whole skill.</p>
+<h3 id="test-it">Test It</h3>
+<p>Run the skill and verify the agent follows the instructions correctly:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>chat<span class="w"> </span>--toolsets<span class="w"> </span>skills<span class="w"> </span>-q<span class="w"> </span><span class="s2">&quot;Use the X skill to do Y&quot;</span>
+</code></pre></div>
+
+<h2 id="where-should-the-skill-live">Where Should the Skill Live?</h2>
+<p>Bundled skills (in <code>skills/</code>) ship with every Hermes install. They should be <strong>broadly useful to most users</strong>:</p>
+<ul>
+<li>Document handling, web research, common dev workflows, system administration</li>
+<li>Used regularly by a wide range of people</li>
+</ul>
+<p>If your skill is official and useful but not universally needed (e.g., a paid service integration, a heavyweight dependency), put it in <strong><code>optional-skills/</code></strong> — it ships with the repo, is discoverable via <code>hermes skills browse</code> (labeled "official"), and installs with built-in trust.</p>
+<p>If your skill is specialized, community-contributed, or niche, it's better suited for a <strong>Skills Hub</strong> — upload it to a registry and share it via <code>hermes skills install</code>.</p>
+<h2 id="blueprints-skills-that-are-also-automations">Blueprints: skills that are also automations</h2>
+<p>A <strong>blueprint</strong> is an ordinary skill that additionally declares a schedule in its frontmatter. Add a <code>metadata.hermes.blueprint</code> block and the skill becomes a shareable, runnable automation:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">tags</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">blueprint</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">email</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">blueprint</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">schedule</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;0</span><span class="nv"> </span><span class="s">8</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*&quot;</span><span class="w">     </span><span class="c1"># presence of `blueprint:` marks it runnable</span>
+<span class="w">      </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">telegram</span><span class="w">          </span><span class="c1"># optional (default: origin)</span>
+<span class="w">      </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Summarize</span><span class="nv"> </span><span class="s">my</span><span class="nv"> </span><span class="s">unread</span><span class="nv"> </span><span class="s">email</span><span class="nv"> </span><span class="s">and</span><span class="nv"> </span><span class="s">today&#39;s</span><span class="nv"> </span><span class="s">calendar.&quot;</span><span class="w">  </span><span class="c1"># optional</span>
+<span class="w">      </span><span class="nt">no_agent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">            </span><span class="c1"># optional</span>
+</code></pre></div>
+
+<p>Because a blueprint <strong>is</strong> a skill, it flows through the entire skills pipeline unchanged — search, inspect, install, security scan, provenance, taps, the centralized index, and <code>hermes skills publish</code> for sharing. Nothing new to learn.</p>
+<p><strong>Installing a blueprint.</strong> When you install a skill that carries a <code>blueprint:</code> block, Hermes registers it as a <strong>suggested cron job</strong> rather than scheduling it. Scheduling is <strong>opt-in</strong> — installing never silently creates a recurring job. You review and accept it via <code>/suggestions</code>:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>owner/morning-brief
+<span class="c1"># → Blueprint: &#39;morning-brief&#39; is an automation (schedule 0 8 * * *).</span>
+<span class="c1">#   Added to your suggestions — run /suggestions to schedule or dismiss it.</span>
+
+<span class="c1"># then, in a session:</span>
+/suggestions<span class="w">             </span><span class="c1"># lists pending suggestions, numbered</span>
+/suggestions<span class="w"> </span>accept<span class="w"> </span><span class="m">1</span><span class="w">    </span><span class="c1"># creates the cron job</span>
+/suggestions<span class="w"> </span>dismiss<span class="w"> </span><span class="m">1</span><span class="w">   </span><span class="c1"># never offer it again</span>
+</code></pre></div>
+
+<p>Blueprints are one <strong>source</strong> of the unified Suggested Cron Jobs surface — the same place curated starter automations and (later) usage-pattern and integration suggestions appear. See <a href="#suggested-cron-jobs">Suggested Cron Jobs</a> below.</p>
+<p><strong>Sharing an automation you built.</strong> A blueprint loaded by a cron job (<code>hermes cron create --skill &lt;name&gt; ...</code>) can be exported back to a SKILL.md and published like any other skill, so an automation you tuned for yourself becomes a one-command install for someone else.</p>
+<p>The blueprint layer adds no new object type, store, or transport — the blueprint is a skill, the schedule is a cron job, and sharing is the existing publish/tap/index path.</p>
+<h2 id="suggested-cron-jobs">Suggested Cron Jobs</h2>
+<p>Hermes can <em>propose</em> automations and let you accept them with one tap, instead of making you assemble cron jobs by hand. Every proposal flows through one surface — the <code>/suggestions</code> command — regardless of where it came from:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Trigger</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>catalog</code></td>
+<td>Curated starter automations (<code>/suggestions catalog</code>) — daily briefing, important-mail monitor, weekly review, workday-start reminder</td>
+</tr>
+<tr>
+<td><code>blueprint</code></td>
+<td>You installed a skill carrying a <code>blueprint:</code> block</td>
+</tr>
+<tr>
+<td><code>usage</code></td>
+<td>The background review noticed a recurring ask a schedule would serve</td>
+</tr>
+<tr>
+<td><code>integration</code></td>
+<td>You connected an account (Gmail, GitHub, ...) and the obvious automations are offered</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>/suggestions<span class="w">             </span><span class="c1"># list pending</span>
+/suggestions<span class="w"> </span>accept<span class="w"> </span>N<span class="w">    </span><span class="c1"># schedule suggestion N (creates the cron job)</span>
+/suggestions<span class="w"> </span>dismiss<span class="w"> </span>N<span class="w">   </span><span class="c1"># dismiss it — latched, never re-offered</span>
+/suggestions<span class="w"> </span>catalog<span class="w">     </span><span class="c1"># add the curated starter automations</span>
+</code></pre></div>
+
+<p>Accepting a suggestion calls the same <code>cron.jobs.create_job</code> the <code>cronjob</code> tool uses — there is no second job engine. Suggestions <strong>never</strong> auto-create jobs; acceptance is always explicit. Dismissed suggestions latch by a stable key so the same proposal is never re-offered. The pending list is capped so it never becomes a nag wall.</p>
+<p>The <strong>important-mail monitor</strong> catalog entry is the poll→classify→surface pattern: it scores inbox items with a cheap classifier model (<code>auxiliary.monitor</code> in <code>config.yaml</code>) and delivers only the ones above an urgency threshold, staying silent otherwise.</p>
+<h2 id="publishing-skills">Publishing Skills</h2>
+<h3 id="to-the-skills-hub">To the Skills Hub</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>publish<span class="w"> </span>skills/my-skill<span class="w"> </span>--to<span class="w"> </span>github<span class="w"> </span>--repo<span class="w"> </span>owner/repo
+</code></pre></div>
+
+<h3 id="to-a-custom-repository">To a Custom Repository</h3>
+<p>Add your repo as a tap:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>add<span class="w"> </span>owner/repo
+</code></pre></div>
+
+<p>Users can then search and install from your repository.</p>
+<h2 id="security-scanning">Security Scanning</h2>
+<p>All hub-installed skills go through a security scanner that checks for:</p>
+<ul>
+<li>Data exfiltration patterns</li>
+<li>Prompt injection attempts</li>
+<li>Destructive commands</li>
+<li>Shell injection</li>
+</ul>
+<p>Trust levels:
+- <code>builtin</code> — ships with Hermes (always trusted)
+- <code>official</code> — from <code>optional-skills/</code> in the repo (built-in trust, no third-party warning)
+- <code>trusted</code> — from openai/skills, anthropics/skills, huggingface/skills
+- <code>community</code> — non-dangerous findings can be overridden with <code>--force</code>; <code>dangerous</code> verdicts remain blocked</p>
+<p>Hermes can now consume third-party skills from multiple external discovery models:
+- direct GitHub identifiers (for example <code>openai/skills/k8s</code>)
+- <code>skills.sh</code> identifiers (for example <code>skills-sh/vercel-labs/json-render/json-render-react</code>)
+- well-known endpoints served from <code>/.well-known/skills/index.json</code></p>
+<p>If you want your skills to be discoverable without a GitHub-specific installer, consider serving them from a well-known endpoint in addition to publishing them in a repo or marketplace.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/creating-skills</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#should-it-be-a-skill-or-a-tool">Should it be a Skill or a Tool?</a></li>
+<li class="lvl2"><a href="#skill-directory-structure">Skill Directory Structure</a></li>
+<li class="lvl2"><a href="#skillmd-format">SKILL.md Format</a></li>
+<li class="lvl3"><a href="#platform-specific-skills">Platform-Specific Skills</a></li>
+<li class="lvl3"><a href="#conditional-skill-activation">Conditional Skill Activation</a></li>
+<li class="lvl3"><a href="#environment-variable-requirements">Environment Variable Requirements</a></li>
+<li class="lvl2"><a href="#secure-setup-on-load">Secure Setup on Load</a></li>
+<li class="lvl3"><a href="#config-settings-configyaml">Config Settings (config.yaml)</a></li>
+<li class="lvl3"><a href="#credential-file-requirements-oauth-tokens-etc">Credential File Requirements (OAuth tokens, etc.)</a></li>
+<li class="lvl2"><a href="#skill-guidelines">Skill Guidelines</a></li>
+<li class="lvl3"><a href="#no-external-dependencies">No External Dependencies</a></li>
+<li class="lvl3"><a href="#progressive-disclosure">Progressive Disclosure</a></li>
+<li class="lvl3"><a href="#include-helper-scripts">Include Helper Scripts</a></li>
+<li class="lvl3"><a href="#deliver-media-as-documents-as_document">Deliver media as documents ([[as_document]])</a></li>
+<li class="lvl3"><a href="#test-it">Test It</a></li>
+<li class="lvl2"><a href="#where-should-the-skill-live">Where Should the Skill Live?</a></li>
+<li class="lvl2"><a href="#blueprints-skills-that-are-also-automations">Blueprints: skills that are also automations</a></li>
+<li class="lvl2"><a href="#suggested-cron-jobs">Suggested Cron Jobs</a></li>
+<li class="lvl2"><a href="#publishing-skills">Publishing Skills</a></li>
+<li class="lvl3"><a href="#to-the-skills-hub">To the Skills Hub</a></li>
+<li class="lvl3"><a href="#to-a-custom-repository">To a Custom Repository</a></li>
+<li class="lvl2"><a href="#security-scanning">Security Scanning</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

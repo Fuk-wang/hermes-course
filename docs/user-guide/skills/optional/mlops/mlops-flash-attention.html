@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash Attention — Speed up long-sequence transformer training and inference · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/mlops/mlops-flash-attention</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="flash-attention">Flash Attention</h1>
+<p>Speed up long-sequence transformer training and inference.</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/mlops/flash-attention</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/mlops\flash-attention</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>1.0.1</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>Orchestra Research</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Dependencies</td>
+<td><code>flash-attn</code>, <code>torch</code>, <code>transformers</code></td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>Optimization</code>, <code>Flash Attention</code>, <code>Attention Optimization</code>, <code>Memory Efficiency</code>, <code>Speed Optimization</code>, <code>Long Context</code>, <code>PyTorch</code>, <code>SDPA</code>, <code>H100</code>, <code>FP8</code>, <code>Transformers</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="flash-attention---fast-memory-efficient-attention">Flash Attention - Fast Memory-Efficient Attention</h1>
+<h2 id="quick-start">Quick start</h2>
+<p>Flash Attention provides 2-4x speedup and 10-20x memory reduction for transformer attention through IO-aware tiling and recomputation.</p>
+<p><strong>PyTorch native (easiest, PyTorch 2.2+)</strong>:</p>
+<div class="highlight"><pre><span></span><code><span class="n">q</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>  <span class="c1"># [batch, heads, seq, dim]</span>
+<span class="n">k</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>
+<span class="n">v</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>
+
+<span class="c1"># Automatically uses Flash Attention if available</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">scaled_dot_product_attention</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>flash-attn library (more features)</strong>:</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>flash-attn<span class="w"> </span>--no-build-isolation
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">flash_attn</span><span class="w"> </span><span class="kn">import</span> <span class="n">flash_attn_func</span>
+
+<span class="c1"># q, k, v: [batch, seqlen, nheads, headdim]</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">dropout_p</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">causal</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="common-workflows">Common workflows</h2>
+<h3 id="workflow-1-enable-in-existing-pytorch-model">Workflow 1: Enable in existing PyTorch model</h3>
+<p>Copy this checklist:</p>
+<div class="highlight"><pre><span></span><code>Flash Attention Integration:
+- [ ] Step 1: Check PyTorch version (≥2.2)
+- [ ] Step 2: Enable Flash Attention backend
+- [ ] Step 3: Verify speedup with profiling
+- [ ] Step 4: Test accuracy matches baseline
+</code></pre></div>
+
+<p><strong>Step 1: Check PyTorch version</strong></p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;import torch; print(torch.__version__)&quot;</span>
+<span class="c1"># Should be ≥2.2.0</span>
+</code></pre></div>
+
+<p>If &lt;2.2, upgrade:</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>--upgrade<span class="w"> </span>torch
+</code></pre></div>
+
+<p><strong>Step 2: Enable Flash Attention backend</strong></p>
+<p>Replace standard attention:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Before (standard attention)</span>
+<span class="n">attn_weights</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">q</span> <span class="o">@</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="n">math</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">d_k</span><span class="p">),</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">attn_weights</span> <span class="o">@</span> <span class="n">v</span>
+
+<span class="c1"># After (Flash Attention)</span>
+
+<span class="n">out</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">scaled_dot_product_attention</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">attn_mask</span><span class="o">=</span><span class="n">mask</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Force Flash Attention backend (<code>torch.backends.cuda.sdp_kernel</code> is deprecated; use
+<code>torch.nn.attention.sdpa_kernel</code> with <code>SDPBackend</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">torch.nn.attention</span><span class="w"> </span><span class="kn">import</span> <span class="n">SDPBackend</span><span class="p">,</span> <span class="n">sdpa_kernel</span>
+
+<span class="k">with</span> <span class="n">sdpa_kernel</span><span class="p">(</span><span class="n">SDPBackend</span><span class="o">.</span><span class="n">FLASH_ATTENTION</span><span class="p">):</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">scaled_dot_product_attention</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Step 3: Verify speedup with profiling</strong></p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">test_attention</span><span class="p">(</span><span class="n">use_flash</span><span class="p">):</span>
+    <span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="o">=</span> <span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">2048</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">)]</span>
+
+    <span class="k">if</span> <span class="n">use_flash</span><span class="p">:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">torch.nn.attention</span><span class="w"> </span><span class="kn">import</span> <span class="n">SDPBackend</span><span class="p">,</span> <span class="n">sdpa_kernel</span>
+        <span class="k">with</span> <span class="n">sdpa_kernel</span><span class="p">(</span><span class="n">SDPBackend</span><span class="o">.</span><span class="n">FLASH_ATTENTION</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">F</span><span class="o">.</span><span class="n">scaled_dot_product_attention</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">attn</span> <span class="o">=</span> <span class="p">(</span><span class="n">q</span> <span class="o">@</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="mf">8.0</span><span class="p">)</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">attn</span> <span class="o">@</span> <span class="n">v</span>
+
+<span class="c1"># Benchmark</span>
+<span class="n">t_flash</span> <span class="o">=</span> <span class="n">benchmark</span><span class="o">.</span><span class="n">Timer</span><span class="p">(</span><span class="n">stmt</span><span class="o">=</span><span class="s1">&#39;test_attention(True)&#39;</span><span class="p">,</span> <span class="nb">globals</span><span class="o">=</span><span class="nb">globals</span><span class="p">())</span>
+<span class="n">t_standard</span> <span class="o">=</span> <span class="n">benchmark</span><span class="o">.</span><span class="n">Timer</span><span class="p">(</span><span class="n">stmt</span><span class="o">=</span><span class="s1">&#39;test_attention(False)&#39;</span><span class="p">,</span> <span class="nb">globals</span><span class="o">=</span><span class="nb">globals</span><span class="p">())</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Flash: </span><span class="si">{</span><span class="n">t_flash</span><span class="o">.</span><span class="n">timeit</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="o">.</span><span class="n">mean</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">s&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Standard: </span><span class="si">{</span><span class="n">t_standard</span><span class="o">.</span><span class="n">timeit</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="o">.</span><span class="n">mean</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">s&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Expected: 2-4x speedup for sequences &gt;512 tokens.</p>
+<p><strong>Step 4: Test accuracy matches baseline</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Compare outputs</span>
+<span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="o">=</span> <span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">)]</span>
+
+<span class="c1"># Flash Attention</span>
+<span class="n">out_flash</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">scaled_dot_product_attention</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+
+<span class="c1"># Standard attention</span>
+<span class="n">attn_weights</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">q</span> <span class="o">@</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="mf">8.0</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">out_standard</span> <span class="o">=</span> <span class="n">attn_weights</span> <span class="o">@</span> <span class="n">v</span>
+
+<span class="c1"># Check difference</span>
+<span class="n">diff</span> <span class="o">=</span> <span class="p">(</span><span class="n">out_flash</span> <span class="o">-</span> <span class="n">out_standard</span><span class="p">)</span><span class="o">.</span><span class="n">abs</span><span class="p">()</span><span class="o">.</span><span class="n">max</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Max difference: </span><span class="si">{</span><span class="n">diff</span><span class="si">:</span><span class="s2">.6f</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="c1"># Should be &lt;1e-3 for float16</span>
+</code></pre></div>
+
+<h3 id="workflow-2-use-flash-attn-library-for-advanced-features">Workflow 2: Use flash-attn library for advanced features</h3>
+<p>For multi-query attention, sliding window, or H100 FP8.</p>
+<p>Copy this checklist:</p>
+<div class="highlight"><pre><span></span><code>flash-attn Library Setup:
+- [ ] Step 1: Install flash-attn library
+- [ ] Step 2: Modify attention code
+- [ ] Step 3: Enable advanced features
+- [ ] Step 4: Benchmark performance
+</code></pre></div>
+
+<p><strong>Step 1: Install flash-attn library</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># NVIDIA GPUs (CUDA 12.0+)</span>
+pip<span class="w"> </span>install<span class="w"> </span>flash-attn<span class="w"> </span>--no-build-isolation
+
+<span class="c1"># Verify installation</span>
+python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;from flash_attn import flash_attn_func; print(&#39;Success&#39;)&quot;</span>
+</code></pre></div>
+
+<p><strong>Step 2: Modify attention code</strong></p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">flash_attn</span><span class="w"> </span><span class="kn">import</span> <span class="n">flash_attn_func</span>
+
+<span class="c1"># Input: [batch_size, seq_len, num_heads, head_dim]</span>
+<span class="c1"># Transpose from [batch, heads, seq, dim] if needed</span>
+<span class="n">q</span> <span class="o">=</span> <span class="n">q</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>  <span class="c1"># [batch, seq, heads, dim]</span>
+<span class="n">k</span> <span class="o">=</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+<span class="n">v</span> <span class="o">=</span> <span class="n">v</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+
+<span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span>
+    <span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span>
+    <span class="n">dropout_p</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>
+    <span class="n">causal</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>  <span class="c1"># For autoregressive models</span>
+    <span class="n">window_size</span><span class="o">=</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">),</span>  <span class="c1"># No sliding window</span>
+    <span class="n">softmax_scale</span><span class="o">=</span><span class="kc">None</span>  <span class="c1"># Auto-scale</span>
+<span class="p">)</span>
+
+<span class="n">out</span> <span class="o">=</span> <span class="n">out</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>  <span class="c1"># Back to [batch, heads, seq, dim]</span>
+</code></pre></div>
+
+<p><strong>Step 3: Enable advanced features</strong></p>
+<p>Multi-query attention (shared K/V across heads):</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">flash_attn</span><span class="w"> </span><span class="kn">import</span> <span class="n">flash_attn_func</span>
+
+<span class="c1"># q: [batch, seq, num_q_heads, dim]</span>
+<span class="c1"># k, v: [batch, seq, num_kv_heads, dim]  # Fewer KV heads</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>  <span class="c1"># Automatically handles MQA</span>
+</code></pre></div>
+
+<p>Sliding window attention (local attention):</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Only attend to window of 256 tokens before/after</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span>
+    <span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span>
+    <span class="n">window_size</span><span class="o">=</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="mi">256</span><span class="p">),</span>  <span class="c1"># (left, right) window</span>
+    <span class="n">causal</span><span class="o">=</span><span class="kc">True</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Step 4: Benchmark performance</strong></p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">flash_attn</span><span class="w"> </span><span class="kn">import</span> <span class="n">flash_attn_func</span>
+
+<span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="o">=</span> <span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">4096</span><span class="p">,</span> <span class="mi">32</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">)]</span>
+
+<span class="c1"># Warmup</span>
+<span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">10</span><span class="p">):</span>
+    <span class="n">_</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+
+<span class="c1"># Benchmark</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">synchronize</span><span class="p">()</span>
+<span class="n">start</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+<span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">100</span><span class="p">):</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+    <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">synchronize</span><span class="p">()</span>
+<span class="n">end</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Time per iteration: </span><span class="si">{</span><span class="p">(</span><span class="n">end</span><span class="o">-</span><span class="n">start</span><span class="p">)</span><span class="o">/</span><span class="mi">100</span><span class="o">*</span><span class="mi">1000</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">ms&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Memory allocated: </span><span class="si">{</span><span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">max_memory_allocated</span><span class="p">()</span><span class="o">/</span><span class="mf">1e9</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">GB&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="workflow-3-h100-fp8-optimization-flashattention-3">Workflow 3: H100 FP8 optimization (FlashAttention-3)</h3>
+<p>For maximum performance on Hopper GPUs (H100).</p>
+<blockquote>
+<p><strong>Important:</strong> The pip package <code>flash-attn</code> (2.8.x) ships <strong>FlashAttention-2 only</strong> — it does
+<strong>not</strong> contain FA3 or FP8 H100 kernels, and <code>flash_attn_func</code> does <strong>not</strong> auto-use FP8.
+FlashAttention-3 is a separate <strong>beta</strong> build compiled from source from the repo's <code>hopper/</code>
+directory, exposed via the <code>flash_attn_interface</code> module. FA3 supports FP16/BF16 forward+backward
+and <strong>FP8 forward only</strong>.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code>FP8 Setup:
+- [ ] Step 1: Verify Hopper (H100) GPU available
+- [ ] Step 2: Build &amp; install FlashAttention-3 from source (hopper/)
+- [ ] Step 3: Use the FA3 interface (FP8 forward)
+</code></pre></div>
+
+<p><strong>Step 1: Verify H100 GPU</strong></p>
+<div class="highlight"><pre><span></span><code>nvidia-smi<span class="w"> </span>--query-gpu<span class="o">=</span>name<span class="w"> </span>--format<span class="o">=</span>csv
+<span class="c1"># Should show &quot;H100&quot; or &quot;H800&quot;</span>
+</code></pre></div>
+
+<p><strong>Step 2: Build &amp; install FlashAttention-3 from source</strong></p>
+<p>FA3 is NOT included in <code>pip install flash-attn</code>. Build it from the <code>hopper/</code> subdirectory:</p>
+<div class="highlight"><pre><span></span><code>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/Dao-AILab/flash-attention.git
+<span class="nb">cd</span><span class="w"> </span>flash-attention/hopper
+python<span class="w"> </span>setup.py<span class="w"> </span>install
+<span class="c1"># (compilation is heavy and requires a CUDA toolchain + Hopper GPU)</span>
+</code></pre></div>
+
+<p><strong>Step 3: Use the FA3 interface (FP8 forward)</strong></p>
+<p>FA3 exposes its own module <code>flash_attn_interface</code> (distinct from the FA2 <code>flash_attn</code>).
+FP8 is a <strong>forward-only</strong> path and expects <code>float8_e4m3fn</code> inputs:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">flash_attn_interface</span><span class="w"> </span><span class="kn">import</span> <span class="n">flash_attn_func</span>  <span class="c1"># FA3 (hopper build), not `flash_attn`</span>
+
+<span class="c1"># q, k, v: [batch, seqlen, nheads, headdim]</span>
+<span class="n">q</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4096</span><span class="p">,</span> <span class="mi">32</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>
+<span class="n">k</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4096</span><span class="p">,</span> <span class="mi">32</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>
+<span class="n">v</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4096</span><span class="p">,</span> <span class="mi">32</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>
+
+<span class="c1"># FP8 forward (inference / forward-only): cast to float8_e4m3fn</span>
+<span class="n">q_fp8</span> <span class="o">=</span> <span class="n">q</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float8_e4m3fn</span><span class="p">)</span>
+<span class="n">k_fp8</span> <span class="o">=</span> <span class="n">k</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float8_e4m3fn</span><span class="p">)</span>
+<span class="n">v_fp8</span> <span class="o">=</span> <span class="n">v</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float8_e4m3fn</span><span class="p">)</span>
+
+<span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span><span class="n">q_fp8</span><span class="p">,</span> <span class="n">k_fp8</span><span class="p">,</span> <span class="n">v_fp8</span><span class="p">,</span> <span class="n">causal</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="c1"># FP16/BF16 forward+backward is also supported by the FA3 interface.</span>
+</code></pre></div>
+
+<h2 id="when-to-use-vs-alternatives">When to use vs alternatives</h2>
+<p><strong>Use Flash Attention when:</strong>
+- Training transformers with sequences &gt;512 tokens
+- Running inference with long context (&gt;2K tokens)
+- GPU memory constrained (OOM with standard attention)
+- Need 2-4x speedup without accuracy loss
+- Using PyTorch 2.2+ or can install flash-attn</p>
+<p><strong>Use alternatives instead:</strong>
+- <strong>Standard attention</strong>: Sequences &lt;256 tokens (overhead not worth it)
+- <strong>xFormers</strong>: Need more attention variants (not just speed)
+- <strong>Memory-efficient attention</strong>: CPU inference (Flash Attention needs GPU)</p>
+<h2 id="common-issues">Common issues</h2>
+<p><strong>Issue: ImportError: cannot import flash_attn</strong></p>
+<p>Install with no-build-isolation flag:</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>flash-attn<span class="w"> </span>--no-build-isolation
+</code></pre></div>
+
+<p>Or install CUDA toolkit first:</p>
+<div class="highlight"><pre><span></span><code>conda<span class="w"> </span>install<span class="w"> </span>cuda<span class="w"> </span>-c<span class="w"> </span>nvidia
+pip<span class="w"> </span>install<span class="w"> </span>flash-attn<span class="w"> </span>--no-build-isolation
+</code></pre></div>
+
+<p><strong>Issue: Slower than expected (no speedup)</strong></p>
+<p>Flash Attention benefits increase with sequence length:
+- &lt;512 tokens: Minimal speedup (10-20%)
+- 512-2K tokens: 2-3x speedup
+- &gt;2K tokens: 3-4x speedup</p>
+<p>Check sequence length is sufficient.</p>
+<p><strong>Issue: RuntimeError: CUDA error</strong></p>
+<p>Verify GPU supports Flash Attention:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">print</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">get_device_capability</span><span class="p">())</span>
+<span class="c1"># Should be ≥(7, 5) for Turing+</span>
+</code></pre></div>
+
+<p>Flash Attention requires:
+- Ampere (A100, A10): ✅ Full support
+- Turing (T4): ✅ Supported
+- Volta (V100): ❌ Not supported</p>
+<p><strong>Issue: Accuracy degradation</strong></p>
+<p>Check dtype is float16 or bfloat16 (not float32):</p>
+<div class="highlight"><pre><span></span><code><span class="n">q</span> <span class="o">=</span> <span class="n">q</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>  <span class="c1"># Or torch.bfloat16</span>
+</code></pre></div>
+
+<p>Flash Attention uses float16/bfloat16 for speed. Float32 not supported.</p>
+<h2 id="advanced-topics">Advanced topics</h2>
+<p><strong>Integration with HuggingFace Transformers</strong>: See <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops\flash-attention/references/transformers-integration.md" class="ext" target="_blank" rel="noopener">references/transformers-integration.md</a> for enabling Flash Attention in BERT, GPT, Llama models.</p>
+<p><strong>Performance benchmarks</strong>: See <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops\flash-attention/references/benchmarks.md" class="ext" target="_blank" rel="noopener">references/benchmarks.md</a> for detailed speed and memory comparisons across GPUs and sequence lengths.</p>
+<h2 id="hardware-requirements">Hardware requirements</h2>
+<ul>
+<li><strong>GPU</strong>: NVIDIA Ampere+ (A100, A10, A30) or AMD MI200+</li>
+<li><strong>VRAM</strong>: Same as standard attention (Flash Attention doesn't increase memory)</li>
+<li><strong>CUDA</strong>: 12.0+ (11.8 minimum)</li>
+<li><strong>PyTorch</strong>: 2.2+ for native support</li>
+</ul>
+<p><strong>Not supported</strong>: V100 (Volta), CPU inference</p>
+<h2 id="resources">Resources</h2>
+<ul>
+<li>Paper: "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness" (NeurIPS 2022)</li>
+<li>Paper: "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning" (ICLR 2024)</li>
+<li>Blog: https://tridao.me/blog/2024/flash3/</li>
+<li>GitHub: https://github.com/Dao-AILab/flash-attention</li>
+<li>PyTorch docs: https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/mlops/mlops-flash-attention</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#quick-start">Quick start</a></li>
+<li class="lvl2"><a href="#common-workflows">Common workflows</a></li>
+<li class="lvl3"><a href="#workflow-1-enable-in-existing-pytorch-model">Workflow 1: Enable in existing PyTorch model</a></li>
+<li class="lvl3"><a href="#workflow-2-use-flash-attn-library-for-advanced-features">Workflow 2: Use flash-attn library for advanced features</a></li>
+<li class="lvl3"><a href="#workflow-3-h100-fp8-optimization-flashattention-3">Workflow 3: H100 FP8 optimization (FlashAttention-3)</a></li>
+<li class="lvl2"><a href="#when-to-use-vs-alternatives">When to use vs alternatives</a></li>
+<li class="lvl2"><a href="#common-issues">Common issues</a></li>
+<li class="lvl2"><a href="#advanced-topics">Advanced topics</a></li>
+<li class="lvl2"><a href="#hardware-requirements">Hardware requirements</a></li>
+<li class="lvl2"><a href="#resources">Resources</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

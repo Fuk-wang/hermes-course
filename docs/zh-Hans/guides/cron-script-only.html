@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>纯脚本 Cron 任务（无 LLM） · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / guides/cron-script-only</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="纯脚本-cron-任务">纯脚本 Cron 任务</h1>
+<p>有时你已经清楚地知道要发送什么消息。你不需要 agent 来推理——你只需要一个脚本按计时器运行，并将其输出（如有）发送到 Telegram / Discord / Slack / Signal。</p>
+<p>Hermes 将此称为<strong>无 agent 模式</strong>。这是去掉 LLM 的 cron 系统。</p>
+<!-- ascii-guard-ignore -->
+
+<div class="highlight"><pre><span></span><code>   ┌──────────────────┐          ┌──────────────────┐
+   │ scheduler tick   │  every   │ run script       │
+   │ (every N minutes)│ ──────▶ │ (bash or python) │
+   └──────────────────┘          └──────────────────┘
+                                          │
+                                          │ stdout
+                                          ▼
+                                 ┌──────────────────┐
+                                 │ delivery router  │
+                                 │ (telegram/disc…) │
+                                 └──────────────────┘
+</code></pre></div>
+
+<!-- ascii-guard-ignore-end -->
+
+<ul>
+<li><strong>无 LLM 调用。</strong> 零 token，零 agent 循环，零模型费用。</li>
+<li><strong>脚本即任务。</strong> 由脚本决定是否告警。有输出 → 发送消息；无输出 → 静默执行。</li>
+<li><strong>Bash 或 Python。</strong> <code>.sh</code> / <code>.bash</code> 文件在 <code>/bin/bash</code> 下运行；其他扩展名在当前 Python 解释器下运行。<code>~/.hermes/scripts/</code> 中的任何文件均可接受。</li>
+<li><strong>同一调度器。</strong> 与 LLM 任务共存于 <code>cronjob</code> 中——暂停、恢复、列出、日志和投递目标的操作方式完全相同。</li>
+</ul>
+<h2 id="适用场景">适用场景</h2>
+<p>以下情况使用无 agent 模式：</p>
+<ul>
+<li><strong>内存 / 磁盘 / GPU 看门狗。</strong> 每 5 分钟运行一次，仅在超过阈值时告警。</li>
+<li><strong>CI hook（钩子）。</strong> 部署完成 → 发送 commit SHA；构建失败 → 发送最后 100 行日志。</li>
+<li><strong>定期指标。</strong> "每天上午 9 点的 Stripe 收入"——一次简单的 API 调用加格式化输出。</li>
+<li><strong>外部事件轮询。</strong> 检查 API，在状态变化时告警。</li>
+<li><strong>心跳。</strong> 每 N 分钟 ping 一次仪表板，证明主机存活。</li>
+</ul>
+<p>当你需要 agent <strong>决定</strong>说什么时——总结长文档、从 feed 中挑选有趣条目、起草友好提醒——请使用普通的（LLM 驱动的）cron 任务。无 agent 路径适用于脚本的 stdout 本身就是消息内容的场景。</p>
+<h2 id="通过聊天创建">通过聊天创建</h2>
+<p>无 agent 模式的真正优势在于：agent 本身可以为你设置看门狗——无需编辑器、无需 shell、无需记忆 CLI 参数。你描述需求，Hermes 编写脚本、安排计划，并告知你何时触发。</p>
+<h3 id="示例对话">示例对话</h3>
+<blockquote>
+<p><strong>你：</strong> 每 5 分钟检查一次，如果内存超过 85% 就在 telegram 通知我</p>
+<p><strong>Hermes：</strong> <em>（写入 <code>~/.hermes/scripts/memory-watchdog.sh</code>，然后以 <code>no_agent=true</code> 调用 <code>cronjob(...)</code>）</em></p>
+<p>已设置。每 5 分钟运行一次，仅在内存超过 85% 时告警 Telegram。脚本：<code>memory-watchdog.sh</code>。任务 ID：<code>abc123</code>。</p>
+</blockquote>
+<p>在底层，agent 进行了两次工具调用：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. 写入检查脚本</span>
+<span class="n">write_file</span><span class="p">(</span>
+    <span class="n">path</span><span class="o">=</span><span class="s2">&quot;~/.hermes/scripts/memory-watchdog.sh&quot;</span><span class="p">,</span>
+    <span class="n">content</span><span class="o">=</span><span class="s1">&#39;&#39;&#39;#!/usr/bin/env bash</span>
+<span class="s1">ram_pct=$(free | awk &#39;/^Mem:/ {printf &quot;</span><span class="si">%d</span><span class="s1">&quot;, $3 * 100 / $2}&#39;)</span>
+<span class="s1">if [ &quot;$ram_pct&quot; -ge 85 ]; then</span>
+<span class="s1">  echo &quot;RAM $</span><span class="si">{ram_pct}% o</span><span class="s1">n $(hostname)&quot;</span>
+<span class="s1">fi</span>
+<span class="s1"># Empty stdout = silent tick; no message sent.</span>
+<span class="s1">&#39;&#39;&#39;</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># 2. 调度任务 — no_agent=True 在每次触发时跳过 LLM</span>
+<span class="n">cronjob</span><span class="p">(</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span>
+    <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;every 5m&quot;</span><span class="p">,</span>
+    <span class="n">script</span><span class="o">=</span><span class="s2">&quot;memory-watchdog.sh&quot;</span><span class="p">,</span>
+    <span class="n">no_agent</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">deliver</span><span class="o">=</span><span class="s2">&quot;telegram&quot;</span><span class="p">,</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;memory-watchdog&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>此后每次触发都是免费的：调度器运行脚本，若 stdout 非空则将其发送到 Telegram，且从不调用模型。</p>
+<h3 id="agent-为你决定的内容">agent 为你决定的内容</h3>
+<p>当你的请求类似"当 X 时告警我"或"每 N 分钟检查 Y，如果 Z 则通知我"，Hermes 的 <code>cronjob</code> 工具描述会指示它在消息内容完全由脚本决定时使用 <code>no_agent=True</code>。当请求需要推理时（<em>"总结新 issue"</em>、<em>"挑选最有趣的头条"</em>、<em>"起草一条友好提醒"</em>），则回退到普通的 LLM 驱动路径。</p>
+<p>你不必自己指定 <code>--no-agent</code>。只需描述你想要的行为即可。</p>
+<h3 id="通过聊天管理看门狗">通过聊天管理看门狗</h3>
+<p>agent 可以用与创建任务相同的方式暂停、恢复、编辑和删除任务：</p>
+<blockquote>
+<p><strong>你：</strong> 今晚先停掉内存看门狗</p>
+<p><strong>Hermes：</strong> <em>（调用 <code>cronjob(action='pause', job_id='abc123')</code>）</em></p>
+<p>已暂停。说"重新开启"或执行 <code>hermes cron resume abc123</code> 可恢复。</p>
+<p><strong>你：</strong> 改成每 15 分钟一次</p>
+<p><strong>Hermes：</strong> <em>（调用 <code>cronjob(action='update', job_id='abc123', schedule='every 15m')</code>）</em></p>
+</blockquote>
+<p>完整生命周期（创建 / 列出 / 更新 / 暂停 / 恢复 / 立即运行 / 删除）均可由 agent 操作，无需你学习任何 CLI 命令。</p>
+<h2 id="通过-cli-创建">通过 CLI 创建</h2>
+<p>偏好 shell？CLI 路径用三条命令即可达到相同效果：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. 编写脚本</span>
+cat<span class="w"> </span>&gt;<span class="w"> </span>~/.hermes/scripts/memory-watchdog.sh<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<span class="s">#!/usr/bin/env bash</span>
+<span class="s"># Alert when RAM usage is over 85%. Silent otherwise.</span>
+<span class="s">RAM_PCT=$(free | awk &#39;/^Mem:/ {printf &quot;%d&quot;, $3 * 100 / $2}&#39;)</span>
+<span class="s">if [ &quot;$RAM_PCT&quot; -ge 85 ]; then</span>
+<span class="s">  echo &quot;⚠ RAM ${RAM_PCT}% on $(hostname)&quot;</span>
+<span class="s">fi</span>
+<span class="s"># Empty stdout = silent run; no message sent.</span>
+<span class="s">EOF</span>
+chmod<span class="w"> </span>+x<span class="w"> </span>~/.hermes/scripts/memory-watchdog.sh
+
+<span class="c1"># 2. 调度任务</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 5m&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--no-agent<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--script<span class="w"> </span>memory-watchdog.sh<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;memory-watchdog&quot;</span>
+
+<span class="c1"># 3. 验证</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>list
+hermes<span class="w"> </span>cron<span class="w"> </span>run<span class="w"> </span>&lt;job_id&gt;<span class="w">    </span><span class="c1"># 触发一次以测试</span>
+</code></pre></div>
+
+<p>就这些。无 prompt（提示词），无技能，无模型。</p>
+<h2 id="脚本输出与投递的映射关系">脚本输出与投递的映射关系</h2>
+<table>
+<thead>
+<tr>
+<th>脚本行为</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>退出码 0，stdout 非空</td>
+<td>stdout 原样投递</td>
+</tr>
+<tr>
+<td>退出码 0，stdout 为空</td>
+<td>静默执行——不投递</td>
+</tr>
+<tr>
+<td>退出码 0，stdout 最后一行包含 <code>{"wakeAgent": false}</code></td>
+<td>静默执行（与 LLM 任务共用的门控）</td>
+</tr>
+<tr>
+<td>非零退出码</td>
+<td>投递错误告警（确保损坏的看门狗不会静默失败）</td>
+</tr>
+<tr>
+<td>脚本超时</td>
+<td>投递错误告警</td>
+</tr>
+</tbody>
+</table>
+<p>"空则静默"的行为是经典看门狗模式的关键：脚本可以每分钟运行一次，但只有在真正需要关注时，频道才会收到消息。</p>
+<h2 id="脚本规则">脚本规则</h2>
+<p>脚本必须位于 <code>~/.hermes/scripts/</code>。这在任务创建时和运行时均会强制检查——绝对路径、<code>~/</code> 展开以及路径穿越模式（<code>../</code>）均会被拒绝。该目录与 LLM 任务使用的预检脚本门控共享。</p>
+<p>解释器由文件扩展名决定：</p>
+<table>
+<thead>
+<tr>
+<th>扩展名</th>
+<th>解释器</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.sh</code>、<code>.bash</code></td>
+<td><code>/bin/bash</code></td>
+</tr>
+<tr>
+<td>其他任意扩展名</td>
+<td><code>sys.executable</code>（当前 Python）</td>
+</tr>
+</tbody>
+</table>
+<p>我们有意<strong>不</strong>遵循 <code>#!/...</code> shebang——保持解释器集合明确且精简，可减少调度器信任的攻击面。</p>
+<h2 id="计划语法">计划语法</h2>
+<p>与所有其他 cron 任务相同：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 5m&quot;</span><span class="w">        </span><span class="c1"># 间隔</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 2h&quot;</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;0 9 * * *&quot;</span><span class="w">       </span><span class="c1"># 标准 cron：每天上午 9 点</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;30m&quot;</span><span class="w">             </span><span class="c1"># 单次：30 分钟后运行一次</span>
+</code></pre></div>
+
+<p>完整语法请参阅 <a href="../user-guide/features/cron.html">cron 功能参考</a>。</p>
+<h2 id="投递目标">投递目标</h2>
+<p><code>--deliver</code> 接受 gateway 已知的所有目标。常见形式：</p>
+<div class="highlight"><pre><span></span><code>--deliver<span class="w"> </span>telegram<span class="w">                       </span><span class="c1"># 平台默认频道</span>
+--deliver<span class="w"> </span>telegram:-1001234567890<span class="w">        </span><span class="c1"># 指定聊天</span>
+--deliver<span class="w"> </span>telegram:-1001234567890:17585<span class="w">  </span><span class="c1"># 指定 Telegram 论坛话题</span>
+--deliver<span class="w"> </span>discord:#ops
+--deliver<span class="w"> </span>slack:#engineering
+--deliver<span class="w"> </span>signal:+15551234567
+--deliver<span class="w"> </span><span class="nb">local</span><span class="w">                          </span><span class="c1"># 仅保存到 ~/.hermes/cron/output/</span>
+</code></pre></div>
+
+<p>对于使用 bot token 的平台（Telegram、Discord、Slack、Signal、SMS、WhatsApp），脚本运行时无需运行中的 gateway——工具直接使用 <code>~/.hermes/.env</code> / <code>~/.hermes/config.yaml</code> 中已有的凭据调用各平台的 REST 端点。</p>
+<h2 id="编辑与生命周期">编辑与生命周期</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>list<span class="w">                                    </span><span class="c1"># 查看所有任务</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>pause<span class="w"> </span>&lt;job_id&gt;<span class="w">                          </span><span class="c1"># 停止触发，保留定义</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>resume<span class="w"> </span>&lt;job_id&gt;
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--schedule<span class="w"> </span><span class="s2">&quot;every 10m&quot;</span><span class="w">    </span><span class="c1"># 调整频率</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--agent<span class="w">                   </span><span class="c1"># 切换为 LLM 模式</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--no-agent<span class="w"> </span>--script<span class="w"> </span>…<span class="w">     </span><span class="c1"># 切换回无 agent 模式</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>remove<span class="w"> </span>&lt;job_id&gt;<span class="w">                         </span><span class="c1"># 删除任务</span>
+</code></pre></div>
+
+<p>所有适用于 LLM 任务的操作（暂停、恢复、手动触发、投递目标变更）同样适用于无 agent 任务。</p>
+<h2 id="实战示例磁盘空间告警">实战示例：磁盘空间告警</h2>
+<div class="highlight"><pre><span></span><code>cat<span class="w"> </span>&gt;<span class="w"> </span>~/.hermes/scripts/disk-alert.sh<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<span class="s">#!/usr/bin/env bash</span>
+<span class="s"># Alert when / or /home is over 90% full.</span>
+<span class="s">THRESHOLD=90</span>
+<span class="s">df -h / /home 2&gt;/dev/null | awk -v t=&quot;$THRESHOLD&quot; &#39;</span>
+<span class="s">  NR &gt; 1 &amp;&amp; $5+0 &gt;= t {</span>
+<span class="s">    printf &quot;⚠ Disk %s full on %s\n&quot;, $5, $6</span>
+<span class="s">  }</span>
+<span class="s">&#39;</span>
+<span class="s">EOF</span>
+chmod<span class="w"> </span>+x<span class="w"> </span>~/.hermes/scripts/disk-alert.sh
+
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;*/15 * * * *&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--no-agent<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--script<span class="w"> </span>disk-alert.sh<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;disk-alert&quot;</span>
+</code></pre></div>
+
+<p>当两个文件系统均低于 90% 时静默；当某个文件系统超出阈值时，每个超限文件系统触发一行告警。</p>
+<h2 id="与其他模式的对比">与其他模式的对比</h2>
+<table>
+<thead>
+<tr>
+<th>方式</th>
+<th>运行内容</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cronjob --no-agent</code>（本页）</td>
+<td>你的脚本，由 Hermes 调度</td>
+<td>不需要推理的周期性看门狗 / 告警 / 指标</td>
+</tr>
+<tr>
+<td><code>cronjob</code>（默认，LLM）</td>
+<td>带可选预检脚本的 agent</td>
+<td>消息内容需要对数据进行推理时</td>
+</tr>
+<tr>
+<td>OS cron + <code>curl</code> 到 <a href="../user-guide/messaging/webhooks.html">webhook 订阅</a></td>
+<td>你的脚本，由 OS 调度</td>
+<td>当 Hermes 本身可能不健康时（即被监控对象）</td>
+</tr>
+</tbody>
+</table>
+<p>对于必须在 <strong>gateway 宕机时也能触发</strong>的关键系统健康看门狗，请使用 OS 级 cron 配合 <code>curl</code> 调用 Hermes webhook 订阅（或任何外部告警端点）——这些作为独立 OS 进程运行，不依赖 Hermes 是否在线。当被监控对象是外部系统时，in-gateway 调度器才是正确选择。</p>
+<h2 id="相关文档">相关文档</h2>
+<ul>
+<li><a href="automate-with-cron.html">用 Cron 自动化一切</a> — LLM 驱动的 cron 模式。</li>
+<li><a href="../user-guide/features/cron.html">定时任务（Cron）参考</a> — 完整计划语法、生命周期、投递路由。</li>
+<li><a href="../user-guide/messaging/webhooks.html">Webhook 订阅</a> — 供外部调度器使用的即发即忘 HTTP 入口。</li>
+<li><a href="../developer-guide/gateway-internals.html">Gateway 内部机制</a> — 投递路由器内部实现。</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/guides/cron-script-only</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#适用场景">适用场景</a></li>
+<li class="lvl2"><a href="#通过聊天创建">通过聊天创建</a></li>
+<li class="lvl3"><a href="#示例对话">示例对话</a></li>
+<li class="lvl3"><a href="#agent-为你决定的内容">agent 为你决定的内容</a></li>
+<li class="lvl3"><a href="#通过聊天管理看门狗">通过聊天管理看门狗</a></li>
+<li class="lvl2"><a href="#通过-cli-创建">通过 CLI 创建</a></li>
+<li class="lvl2"><a href="#脚本输出与投递的映射关系">脚本输出与投递的映射关系</a></li>
+<li class="lvl2"><a href="#脚本规则">脚本规则</a></li>
+<li class="lvl2"><a href="#计划语法">计划语法</a></li>
+<li class="lvl2"><a href="#投递目标">投递目标</a></li>
+<li class="lvl2"><a href="#编辑与生命周期">编辑与生命周期</a></li>
+<li class="lvl2"><a href="#实战示例磁盘空间告警">实战示例：磁盘空间告警</a></li>
+<li class="lvl2"><a href="#与其他模式的对比">与其他模式的对比</a></li>
+<li class="lvl2"><a href="#相关文档">相关文档</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

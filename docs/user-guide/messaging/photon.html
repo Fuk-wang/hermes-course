@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photon iMessage · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/messaging/photon</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="photon-imessage">Photon iMessage</h1>
+<p>Connect Hermes to <strong>iMessage</strong> through <a href="https://photon.codes/" class="ext" target="_blank" rel="noopener">Photon</a>, a managed
+service that handles the Apple line allocation and abuse-prevention
+layer so you don't have to run your own Mac relay.</p>
+<p>The free tier uses Photon's shared iMessage line pool — different
+recipients may see different sending numbers, but each conversation
+stays stable. The paid Business tier gives every user the same
+dedicated number; the plugin supports both, and the free tier is the
+recommended starting point.</p>
+<div class="admonition adm-info"><p class="adm-title">Free to start</p>
+<p>Photon's shared-line pool is free. No subscription is required to send
+your first iMessage from Hermes — just a phone number we can bind to
+your account.</p>
+</div>
+<h2 id="architecture">Architecture</h2>
+<p>Photon is a <strong>persistent-connection</strong> channel, like Discord or Slack —
+<strong>no webhook, no public URL, no signing secret to manage.</strong></p>
+<p>The <code>spectrum-ts</code> SDK holds a long-lived <strong>gRPC stream</strong> to Photon for
+both directions. Because the SDK is TypeScript-only, Hermes runs it in a
+small supervised <strong>Node sidecar</strong> and talks to it over loopback:</p>
+<ul>
+<li><strong>Inbound</strong> — the sidecar consumes the SDK's <code>app.messages</code> gRPC
+  stream and forwards each message to the Python adapter over a loopback
+  <code>GET /inbound</code> (NDJSON). The adapter dedupes and dispatches it to the
+  agent, reconnecting automatically if the stream drops.</li>
+<li><strong>Outbound</strong> — replies are loopback POSTs to the sidecar, which calls
+  <code>space.send(...)</code> on the SDK.</li>
+</ul>
+<p>The Python plugin starts, supervises, and shuts down the sidecar
+automatically.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>A Photon account — sign up at <a href="https://app.photon.codes/" class="ext" target="_blank" rel="noopener">app.photon.codes</a></li>
+<li><strong>Node.js 18.17 or newer</strong> on PATH (<code>node --version</code>)</li>
+<li>A phone number that can receive iMessage (used to bind your account)</li>
+</ul>
+<p>That's it — there is no public URL or tunnel to set up.</p>
+<h2 id="first-time-setup">First-time setup</h2>
+<p>Either run the unified gateway wizard and pick <strong>Photon iMessage</strong>:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>setup
+</code></pre></div>
+
+<p>…or run the Photon setup directly (the wizard calls the same flow):</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Device-code login + project + user + sidecar deps, all in one</span>
+hermes<span class="w"> </span>photon<span class="w"> </span>setup<span class="w"> </span>--phone<span class="w"> </span>+15551234567
+</code></pre></div>
+
+<p>The setup, in order:</p>
+<ol>
+<li><strong>Device login</strong> (<code>client_id=photon-cli</code>) — opens
+   <code>https://app.photon.codes/</code> for approval and stores the bearer token.</li>
+<li><strong>Finds or creates</strong> the <code>Hermes Agent</code> project on your account.</li>
+<li><strong>Enables Spectrum</strong>, reads the project's Spectrum id, and rotates
+   the project secret.</li>
+<li><strong>Registers your phone number</strong> as a Spectrum user — skipped if a
+   user with that number already exists, so re-running is safe.</li>
+<li><strong>Prints your assigned iMessage line</strong> — the number you text to reach
+   your agent.</li>
+<li><strong>Runs <code>npm install</code></strong> inside the plugin's sidecar directory. On
+   read-only / immutable install trees (hosted Docker images, Podman,
+   Nix) the sidecar automatically falls back to a writable mirror under
+   <code>~/.hermes/photon/sidecar</code>; set <code>PHOTON_SIDECAR_DIR</code> to pin an
+   explicit location.</li>
+</ol>
+<p>Runtime credentials are written to <code>~/.hermes/.env</code>
+(<code>PHOTON_PROJECT_ID</code> = the Spectrum project id, <code>PHOTON_PROJECT_SECRET</code>),
+the same place every other channel keeps its token. Management metadata
+(device token, dashboard project id) lives in <code>~/.hermes/auth.json</code> under
+<code>credential_pool.photon</code> / <code>credential_pool.photon_project</code>.</p>
+<h2 id="authorizing-users">Authorizing users</h2>
+<p>Photon uses the same authorization model as every other Hermes
+channel. Choose one approach:</p>
+<p><strong>DM pairing (default).</strong> When an unknown number messages your Photon
+line, Hermes replies with a pairing code. Approve it with:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>pairing<span class="w"> </span>approve<span class="w"> </span>photon<span class="w"> </span>&lt;CODE&gt;
+</code></pre></div>
+
+<p>Use <code>hermes pairing list</code> to see pending codes and approved users.</p>
+<p><strong>Pre-authorize specific numbers</strong> (in <code>~/.hermes/.env</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="nv">PHOTON_ALLOWED_USERS</span><span class="o">=</span>+15551234567,+15559876543
+</code></pre></div>
+
+<p><strong>Open access</strong> (dev only, in <code>~/.hermes/.env</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="nv">PHOTON_ALLOW_ALL_USERS</span><span class="o">=</span><span class="nb">true</span>
+</code></pre></div>
+
+<p>When <code>PHOTON_ALLOWED_USERS</code> is set, unknown senders are silently
+ignored rather than offered a pairing code (the allowlist signals you
+deliberately restricted access).</p>
+<h3 id="require-mentions-in-group-chats">Require mentions in group chats</h3>
+<p>By default Hermes responds to every authorized DM and group message.
+To make group chats opt-in, enable mention gating (DMs still always
+work):</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">photon</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">      </span><span class="nt">require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>With <code>require_mention: true</code>, group-chat messages are ignored unless
+they match a wake-word pattern. The defaults match <code>Hermes</code> and
+<code>@Hermes agent</code> variants. For a custom agent name, set regex patterns:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">photon</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">      </span><span class="nt">mention_patterns</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&#39;(?&lt;![\w@])@?amos\b[,:\-]?&#39;</span>
+</code></pre></div>
+
+<p>Both keys also accept env vars (<code>PHOTON_REQUIRE_MENTION</code>,
+<code>PHOTON_MENTION_PATTERNS</code>). This is the same mention-gating model the
+BlueBubbles iMessage channel uses.</p>
+<h2 id="start-the-gateway">Start the gateway</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>start
+</code></pre></div>
+
+<p>You'll see something like:</p>
+<div class="highlight"><pre><span></span><code>[photon] connected — sidecar on 127.0.0.1:8789, streaming inbound over gRPC
+</code></pre></div>
+
+<p>Send an iMessage to your assigned number and Hermes will reply.</p>
+<h2 id="status--troubleshooting">Status &amp; troubleshooting</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>photon<span class="w"> </span>status
+</code></pre></div>
+
+<p>Prints saved credentials, sidecar health, your registered number, and the
+assigned iMessage line Hermes uses. When a Photon token and dashboard project
+are available, <code>status</code> refreshes missing number rows from the dashboard
+without provisioning new lines.</p>
+<div class="highlight"><pre><span></span><code>Photon iMessage status
+──────────────────────
+  device token        : ✓ stored
+  dashboard project   : 3c90c3cc-0d44-4b50-...
+  spectrum project id : sp-...
+  project secret      : ✓ stored
+  my number           : +15551234567
+  assigned number     : +16282679185
+  node binary         : /usr/bin/node
+  sidecar deps        : ✓ installed
+</code></pre></div>
+
+<p>Common issues:</p>
+<ul>
+<li><strong><code>sidecar deps : ✗ run hermes photon install-sidecar</code></strong> — Node is
+  installed but <code>spectrum-ts</code> isn't. Run the suggested command.</li>
+<li><strong><code>device token : ✗ missing</code></strong> — run <code>hermes photon setup</code> to log in.</li>
+<li><strong><code>No iMessage line assigned yet</code></strong> — Spectrum is enabled but no line
+  has been provisioned; re-run <code>hermes photon setup</code> or check the
+  <a href="https://app.photon.codes/" class="ext" target="_blank" rel="noopener">dashboard</a>.</li>
+<li><strong>Sidecar won't start</strong> — confirm <code>node --version</code> is 18.17+ and that
+  <code>hermes photon install-sidecar</code> completed without errors.</li>
+</ul>
+<h2 id="limits-today">Limits today</h2>
+<ul>
+<li><strong>Inbound attachments are metadata-only.</strong> Inbound events carry the
+  filename + MIME type; the agent sees a marker but can't yet read the
+  bytes. The SDK exposes attachment bytes via <code>content.read()</code>, so this
+  is a sidecar follow-up.</li>
+<li><strong>Outbound attachments are supported.</strong> Hermes sends images, voice
+  notes, video, and documents through spectrum-ts' <code>attachment()</code> /
+  <code>voice()</code> content builders via the sidecar's <code>/send-attachment</code>
+  endpoint. Captions arrive as a separate iMessage bubble after the
+  media.</li>
+<li><strong>Native polls are supported.</strong> Hermes sends poll content through
+  spectrum-ts' <code>poll()</code> builder via the sidecar's <code>/send-poll</code> endpoint.</li>
+<li><strong>Read receipts are supported.</strong> The sidecar marks an inbound iMessage
+  read after forwarding it to Hermes, so the sender sees <code>Read</code> without
+  waiting for a model/tool turn. Inbound receipts for Hermes-sent messages
+  are consumed as presence telemetry and never create an agent turn. Set
+  <code>PHOTON_READ_RECEIPTS=false</code> to keep messages at <code>Delivered</code>.</li>
+<li><strong>Message effects are supported.</strong> Hermes sends text with native iMessage
+  bubble/screen effects through spectrum-ts' iMessage <code>effect()</code> builder
+  via the sidecar's <code>/send-effect</code> endpoint.</li>
+<li><strong>Photon's free quotas:</strong> 5,000 messages per server per day,
+  50 new-conversation initiations per shared line per day. Increases
+  available — email <code>help@photon.codes</code>.</li>
+<li><strong>Cron and standalone sends need the gateway running.</strong> Out-of-process
+  senders (cron jobs, <code>hermes send</code>, the dashboard) reuse the sidecar the
+  gateway spawned — they read its port/token from
+  <code>&lt;hermes-home&gt;/runtime/photon-sidecar.json</code>, written once the sidecar
+  passes its health check and removed when it stops. If a standalone send
+  reports the gateway appears to be down, start (or restart) the gateway
+  first.</li>
+<li><strong>Shared/free-tier lines can't initiate conversations with new
+  targets.</strong> Photon-side policy: a shared line can only message a number
+  after that number has texted the line first. A cron/standalone send to a
+  brand-new recipient will be rejected by Photon even when Hermes is set
+  up correctly — either have the recipient message the line once, or move
+  to a dedicated line.</li>
+</ul>
+<h2 id="env-vars">Env vars</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PHOTON_PROJECT_ID</code></td>
+<td>from <code>.env</code></td>
+<td>Spectrum project id (the SDK's <code>projectId</code>); set by setup</td>
+</tr>
+<tr>
+<td><code>PHOTON_PROJECT_SECRET</code></td>
+<td>from <code>.env</code></td>
+<td>Project secret; set by setup</td>
+</tr>
+<tr>
+<td><code>PHOTON_SIDECAR_PORT</code></td>
+<td><code>8789</code></td>
+<td>Loopback port for the sidecar control + inbound channel</td>
+</tr>
+<tr>
+<td><code>PHOTON_SIDECAR_AUTOSTART</code></td>
+<td><code>true</code></td>
+<td>Whether the adapter spawns the sidecar</td>
+</tr>
+<tr>
+<td><code>PHOTON_NODE_BIN</code></td>
+<td><code>which node</code></td>
+<td>Override the Node binary path</td>
+</tr>
+<tr>
+<td><code>PHOTON_HOME_CHANNEL</code></td>
+<td>(unset)</td>
+<td>Default space id for cron / notifications</td>
+</tr>
+<tr>
+<td><code>PHOTON_HOME_CHANNEL_NAME</code></td>
+<td>(unset)</td>
+<td>Human label for the home channel</td>
+</tr>
+<tr>
+<td><code>PHOTON_ALLOWED_USERS</code></td>
+<td>(unset)</td>
+<td>Comma-separated E.164 allowlist</td>
+</tr>
+<tr>
+<td><code>PHOTON_ALLOW_ALL_USERS</code></td>
+<td><code>false</code></td>
+<td>Dev only — accept any sender</td>
+</tr>
+<tr>
+<td><code>PHOTON_REQUIRE_MENTION</code></td>
+<td><code>false</code></td>
+<td>Require a wake word before responding in groups</td>
+</tr>
+<tr>
+<td><code>PHOTON_MENTION_PATTERNS</code></td>
+<td>Hermes wake words</td>
+<td>JSON list / comma / newline regex patterns for group mentions</td>
+</tr>
+<tr>
+<td><code>PHOTON_DASHBOARD_HOST</code></td>
+<td><code>app.photon.codes</code></td>
+<td>Override the dashboard / device-login host</td>
+</tr>
+<tr>
+<td><code>PHOTON_SPECTRUM_HOST</code></td>
+<td><code>spectrum.photon.codes</code></td>
+<td>Override the Spectrum API host</td>
+</tr>
+</tbody>
+</table>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/messaging/photon</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#architecture">Architecture</a></li>
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#first-time-setup">First-time setup</a></li>
+<li class="lvl2"><a href="#authorizing-users">Authorizing users</a></li>
+<li class="lvl3"><a href="#require-mentions-in-group-chats">Require mentions in group chats</a></li>
+<li class="lvl2"><a href="#start-the-gateway">Start the gateway</a></li>
+<li class="lvl2"><a href="#status--troubleshooting">Status &amp;amp; troubleshooting</a></li>
+<li class="lvl2"><a href="#limits-today">Limits today</a></li>
+<li class="lvl2"><a href="#env-vars">Env vars</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

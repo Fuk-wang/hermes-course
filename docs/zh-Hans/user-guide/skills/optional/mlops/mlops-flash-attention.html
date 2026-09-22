@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>优化注意力 Flash · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/optional/mlops/mlops-flash-attention</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="优化注意力-flash">优化注意力 Flash</h1>
+<p>通过 Flash Attention 优化 Transformer 注意力机制，实现 2-4 倍加速和 10-20 倍内存减少。适用于以下场景：使用长序列（&gt;512 token）训练/运行 Transformer、遇到注意力相关的 GPU 内存问题，或需要更快的推理速度。支持 PyTorch 原生 SDPA、flash-attn 库、H100 FP8 以及滑动窗口注意力。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>可选 — 通过 <code>hermes skills install official/mlops/flash-attention</code> 安装</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>optional-skills/mlops/flash-attention</code></td>
+</tr>
+<tr>
+<td>版本</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>作者</td>
+<td>Orchestra Research</td>
+</tr>
+<tr>
+<td>许可证</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>依赖项</td>
+<td><code>flash-attn</code>, <code>torch</code>, <code>transformers</code></td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos</td>
+</tr>
+<tr>
+<td>标签</td>
+<td><code>Optimization</code>, <code>Flash Attention</code>, <code>Attention Optimization</code>, <code>Memory Efficiency</code>, <code>Speed Optimization</code>, <code>Long Context</code>, <code>PyTorch</code>, <code>SDPA</code>, <code>H100</code>, <code>FP8</code>, <code>Transformers</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发该 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。</p>
+</div>
+<h1 id="flash-attention---快速内存高效注意力">Flash Attention - 快速内存高效注意力</h1>
+<h2 id="快速开始">快速开始</h2>
+<p>Flash Attention 通过 IO 感知分块（IO-aware tiling）和重计算（recomputation）技术，为 Transformer 注意力提供 2-4 倍加速和 10-20 倍内存减少。</p>
+<p><strong>PyTorch 原生方式（最简单，PyTorch 2.2+）</strong>：</p>
+<div class="highlight"><pre><span></span><code><span class="n">q</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>  <span class="c1"># [batch, heads, seq, dim]</span>
+<span class="n">k</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>
+<span class="n">v</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>
+
+<span class="c1"># 如果可用，自动使用 Flash Attention</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">scaled_dot_product_attention</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>flash-attn 库（功能更多）</strong>：</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>flash-attn<span class="w"> </span>--no-build-isolation
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">flash_attn</span><span class="w"> </span><span class="kn">import</span> <span class="n">flash_attn_func</span>
+
+<span class="c1"># q, k, v: [batch, seqlen, nheads, headdim]</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">dropout_p</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">causal</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="常见工作流">常见工作流</h2>
+<h3 id="工作流-1在现有-pytorch-模型中启用">工作流 1：在现有 PyTorch 模型中启用</h3>
+<p>复制此检查清单：</p>
+<div class="highlight"><pre><span></span><code>Flash Attention 集成：
+- [ ] 步骤 1：检查 PyTorch 版本（≥2.2）
+- [ ] 步骤 2：启用 Flash Attention 后端
+- [ ] 步骤 3：通过性能分析验证加速效果
+- [ ] 步骤 4：测试精度与基线一致
+</code></pre></div>
+
+<p><strong>步骤 1：检查 PyTorch 版本</strong></p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;import torch; print(torch.__version__)&quot;</span>
+<span class="c1"># 应为 ≥2.2.0</span>
+</code></pre></div>
+
+<p>如果 &lt;2.2，请升级：</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>--upgrade<span class="w"> </span>torch
+</code></pre></div>
+
+<p><strong>步骤 2：启用 Flash Attention 后端</strong></p>
+<p>替换标准注意力：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 之前（标准注意力）</span>
+<span class="n">attn_weights</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">q</span> <span class="o">@</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="n">math</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">d_k</span><span class="p">),</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">attn_weights</span> <span class="o">@</span> <span class="n">v</span>
+
+<span class="c1"># 之后（Flash Attention）</span>
+
+<span class="n">out</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">scaled_dot_product_attention</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">attn_mask</span><span class="o">=</span><span class="n">mask</span><span class="p">)</span>
+</code></pre></div>
+
+<p>强制使用 Flash Attention 后端：</p>
+<div class="highlight"><pre><span></span><code><span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">backends</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">sdp_kernel</span><span class="p">(</span>
+    <span class="n">enable_flash</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">enable_math</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">enable_mem_efficient</span><span class="o">=</span><span class="kc">False</span>
+<span class="p">):</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">scaled_dot_product_attention</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>步骤 3：通过性能分析验证加速效果</strong></p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">test_attention</span><span class="p">(</span><span class="n">use_flash</span><span class="p">):</span>
+    <span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="o">=</span> <span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">2048</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">)]</span>
+
+    <span class="k">if</span> <span class="n">use_flash</span><span class="p">:</span>
+        <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">backends</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">sdp_kernel</span><span class="p">(</span><span class="n">enable_flash</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">F</span><span class="o">.</span><span class="n">scaled_dot_product_attention</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">attn</span> <span class="o">=</span> <span class="p">(</span><span class="n">q</span> <span class="o">@</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="mf">8.0</span><span class="p">)</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">attn</span> <span class="o">@</span> <span class="n">v</span>
+
+<span class="c1"># 基准测试</span>
+<span class="n">t_flash</span> <span class="o">=</span> <span class="n">benchmark</span><span class="o">.</span><span class="n">Timer</span><span class="p">(</span><span class="n">stmt</span><span class="o">=</span><span class="s1">&#39;test_attention(True)&#39;</span><span class="p">,</span> <span class="nb">globals</span><span class="o">=</span><span class="nb">globals</span><span class="p">())</span>
+<span class="n">t_standard</span> <span class="o">=</span> <span class="n">benchmark</span><span class="o">.</span><span class="n">Timer</span><span class="p">(</span><span class="n">stmt</span><span class="o">=</span><span class="s1">&#39;test_attention(False)&#39;</span><span class="p">,</span> <span class="nb">globals</span><span class="o">=</span><span class="nb">globals</span><span class="p">())</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Flash: </span><span class="si">{</span><span class="n">t_flash</span><span class="o">.</span><span class="n">timeit</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="o">.</span><span class="n">mean</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">s&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Standard: </span><span class="si">{</span><span class="n">t_standard</span><span class="o">.</span><span class="n">timeit</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="o">.</span><span class="n">mean</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">s&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>预期效果：序列长度 &gt;512 token 时有 2-4 倍加速。</p>
+<p><strong>步骤 4：测试精度与基线一致</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 比较输出</span>
+<span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="o">=</span> <span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">)]</span>
+
+<span class="c1"># Flash Attention</span>
+<span class="n">out_flash</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">scaled_dot_product_attention</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+
+<span class="c1"># 标准注意力</span>
+<span class="n">attn_weights</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">q</span> <span class="o">@</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="mf">8.0</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">out_standard</span> <span class="o">=</span> <span class="n">attn_weights</span> <span class="o">@</span> <span class="n">v</span>
+
+<span class="c1"># 检查差异</span>
+<span class="n">diff</span> <span class="o">=</span> <span class="p">(</span><span class="n">out_flash</span> <span class="o">-</span> <span class="n">out_standard</span><span class="p">)</span><span class="o">.</span><span class="n">abs</span><span class="p">()</span><span class="o">.</span><span class="n">max</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Max difference: </span><span class="si">{</span><span class="n">diff</span><span class="si">:</span><span class="s2">.6f</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="c1"># float16 下应 &lt;1e-3</span>
+</code></pre></div>
+
+<h3 id="工作流-2使用-flash-attn-库实现高级功能">工作流 2：使用 flash-attn 库实现高级功能</h3>
+<p>适用于多查询注意力（multi-query attention）、滑动窗口或 H100 FP8。</p>
+<p>复制此检查清单：</p>
+<div class="highlight"><pre><span></span><code>flash-attn 库安装：
+- [ ] 步骤 1：安装 flash-attn 库
+- [ ] 步骤 2：修改注意力代码
+- [ ] 步骤 3：启用高级功能
+- [ ] 步骤 4：基准测试性能
+</code></pre></div>
+
+<p><strong>步骤 1：安装 flash-attn 库</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># NVIDIA GPU（CUDA 12.0+）</span>
+pip<span class="w"> </span>install<span class="w"> </span>flash-attn<span class="w"> </span>--no-build-isolation
+
+<span class="c1"># 验证安装</span>
+python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;from flash_attn import flash_attn_func; print(&#39;Success&#39;)&quot;</span>
+</code></pre></div>
+
+<p><strong>步骤 2：修改注意力代码</strong></p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">flash_attn</span><span class="w"> </span><span class="kn">import</span> <span class="n">flash_attn_func</span>
+
+<span class="c1"># 输入：[batch_size, seq_len, num_heads, head_dim]</span>
+<span class="c1"># 如需要，从 [batch, heads, seq, dim] 转置</span>
+<span class="n">q</span> <span class="o">=</span> <span class="n">q</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>  <span class="c1"># [batch, seq, heads, dim]</span>
+<span class="n">k</span> <span class="o">=</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+<span class="n">v</span> <span class="o">=</span> <span class="n">v</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+
+<span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span>
+    <span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span>
+    <span class="n">dropout_p</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>
+    <span class="n">causal</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>  <span class="c1"># 用于自回归模型</span>
+    <span class="n">window_size</span><span class="o">=</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">),</span>  <span class="c1"># 无滑动窗口</span>
+    <span class="n">softmax_scale</span><span class="o">=</span><span class="kc">None</span>  <span class="c1"># 自动缩放</span>
+<span class="p">)</span>
+
+<span class="n">out</span> <span class="o">=</span> <span class="n">out</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>  <span class="c1"># 转回 [batch, heads, seq, dim]</span>
+</code></pre></div>
+
+<p><strong>步骤 3：启用高级功能</strong></p>
+<p>多查询注意力（跨 head 共享 K/V）：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">flash_attn</span><span class="w"> </span><span class="kn">import</span> <span class="n">flash_attn_func</span>
+
+<span class="c1"># q: [batch, seq, num_q_heads, dim]</span>
+<span class="c1"># k, v: [batch, seq, num_kv_heads, dim]  # 更少的 KV head</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>  <span class="c1"># 自动处理 MQA</span>
+</code></pre></div>
+
+<p>滑动窗口注意力（局部注意力）：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 仅关注前后 256 个 token 的窗口</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span>
+    <span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span>
+    <span class="n">window_size</span><span class="o">=</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="mi">256</span><span class="p">),</span>  <span class="c1"># (左, 右) 窗口</span>
+    <span class="n">causal</span><span class="o">=</span><span class="kc">True</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><strong>步骤 4：基准测试性能</strong></p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">flash_attn</span><span class="w"> </span><span class="kn">import</span> <span class="n">flash_attn_func</span>
+
+<span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="o">=</span> <span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">4096</span><span class="p">,</span> <span class="mi">32</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">)]</span>
+
+<span class="c1"># 预热</span>
+<span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">10</span><span class="p">):</span>
+    <span class="n">_</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+
+<span class="c1"># 基准测试</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">synchronize</span><span class="p">()</span>
+<span class="n">start</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+<span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">100</span><span class="p">):</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+    <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">synchronize</span><span class="p">()</span>
+<span class="n">end</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Time per iteration: </span><span class="si">{</span><span class="p">(</span><span class="n">end</span><span class="o">-</span><span class="n">start</span><span class="p">)</span><span class="o">/</span><span class="mi">100</span><span class="o">*</span><span class="mi">1000</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">ms&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Memory allocated: </span><span class="si">{</span><span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">max_memory_allocated</span><span class="p">()</span><span class="o">/</span><span class="mf">1e9</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">GB&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="工作流-3h100-fp8-优化flashattention-3">工作流 3：H100 FP8 优化（FlashAttention-3）</h3>
+<p>在 H100 GPU 上获得最大性能。</p>
+<div class="highlight"><pre><span></span><code>FP8 设置：
+- [ ] 步骤 1：确认 H100 GPU 可用
+- [ ] 步骤 2：安装支持 FP8 的 flash-attn
+- [ ] 步骤 3：将输入转换为 FP8
+- [ ] 步骤 4：使用 FP8 注意力运行
+</code></pre></div>
+
+<p><strong>步骤 1：确认 H100 GPU</strong></p>
+<div class="highlight"><pre><span></span><code>nvidia-smi<span class="w"> </span>--query-gpu<span class="o">=</span>name<span class="w"> </span>--format<span class="o">=</span>csv
+<span class="c1"># 应显示 &quot;H100&quot; 或 &quot;H800&quot;</span>
+</code></pre></div>
+
+<p><strong>步骤 2：安装支持 FP8 的 flash-attn</strong></p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>flash-attn<span class="w"> </span>--no-build-isolation
+<span class="c1"># H100 的 FP8 支持已包含在内</span>
+</code></pre></div>
+
+<p><strong>步骤 3：将输入转换为 FP8</strong></p>
+<div class="highlight"><pre><span></span><code><span class="n">q</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4096</span><span class="p">,</span> <span class="mi">32</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>
+<span class="n">k</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4096</span><span class="p">,</span> <span class="mi">32</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>
+<span class="n">v</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4096</span><span class="p">,</span> <span class="mi">32</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s1">&#39;cuda&#39;</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>
+
+<span class="c1"># 转换为 float8_e4m3（FP8）</span>
+<span class="n">q_fp8</span> <span class="o">=</span> <span class="n">q</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float8_e4m3fn</span><span class="p">)</span>
+<span class="n">k_fp8</span> <span class="o">=</span> <span class="n">k</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float8_e4m3fn</span><span class="p">)</span>
+<span class="n">v_fp8</span> <span class="o">=</span> <span class="n">v</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float8_e4m3fn</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>步骤 4：使用 FP8 注意力运行</strong></p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">flash_attn</span><span class="w"> </span><span class="kn">import</span> <span class="n">flash_attn_func</span>
+
+<span class="c1"># FlashAttention-3 在 H100 上自动使用 FP8 内核</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">flash_attn_func</span><span class="p">(</span><span class="n">q_fp8</span><span class="p">,</span> <span class="n">k_fp8</span><span class="p">,</span> <span class="n">v_fp8</span><span class="p">)</span>
+<span class="c1"># 结果：约 1.2 PFLOPS，比 FP16 快 1.5-2 倍</span>
+</code></pre></div>
+
+<h2 id="何时使用与替代方案">何时使用与替代方案</h2>
+<p><strong>使用 Flash Attention 的场景：</strong>
+- 使用 &gt;512 token 的序列训练 Transformer
+- 使用长上下文（&gt;2K token）进行推理
+- GPU 内存受限（标准注意力 OOM）
+- 需要 2-4 倍加速且不损失精度
+- 使用 PyTorch 2.2+ 或可安装 flash-attn</p>
+<p><strong>改用替代方案的场景：</strong>
+- <strong>标准注意力</strong>：序列 &lt;256 token（开销不值得）
+- <strong>xFormers</strong>：需要更多注意力变体（不仅仅是速度）
+- <strong>内存高效注意力</strong>：CPU 推理（Flash Attention 需要 GPU）</p>
+<h2 id="常见问题">常见问题</h2>
+<p><strong>问题：ImportError: cannot import flash_attn</strong></p>
+<p>使用 no-build-isolation 标志安装：</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>flash-attn<span class="w"> </span>--no-build-isolation
+</code></pre></div>
+
+<p>或先安装 CUDA toolkit：</p>
+<div class="highlight"><pre><span></span><code>conda<span class="w"> </span>install<span class="w"> </span>cuda<span class="w"> </span>-c<span class="w"> </span>nvidia
+pip<span class="w"> </span>install<span class="w"> </span>flash-attn<span class="w"> </span>--no-build-isolation
+</code></pre></div>
+
+<p><strong>问题：速度低于预期（无加速效果）</strong></p>
+<p>Flash Attention 的收益随序列长度增加而提升：
+- &lt;512 token：加速极小（10-20%）
+- 512-2K token：2-3 倍加速
+- &gt;2K token：3-4 倍加速</p>
+<p>请确认序列长度是否足够。</p>
+<p><strong>问题：RuntimeError: CUDA error</strong></p>
+<p>验证 GPU 是否支持 Flash Attention：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">print</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">get_device_capability</span><span class="p">())</span>
+<span class="c1"># 应为 ≥(7, 5)，即 Turing 及以上</span>
+</code></pre></div>
+
+<p>Flash Attention 要求：
+- Ampere（A100、A10）：✅ 完全支持
+- Turing（T4）：✅ 支持
+- Volta（V100）：❌ 不支持</p>
+<p><strong>问题：精度下降</strong></p>
+<p>检查 dtype 是否为 float16 或 bfloat16（而非 float32）：</p>
+<div class="highlight"><pre><span></span><code><span class="n">q</span> <span class="o">=</span> <span class="n">q</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">)</span>  <span class="c1"># 或 torch.bfloat16</span>
+</code></pre></div>
+
+<p>Flash Attention 使用 float16/bfloat16 以提升速度，不支持 float32。</p>
+<h2 id="高级主题">高级主题</h2>
+<p><strong>与 HuggingFace Transformers 集成</strong>：参见 <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/flash-attention/references/transformers-integration.md" class="ext" target="_blank" rel="noopener">references/transformers-integration.md</a>，了解如何在 BERT、GPT、Llama 模型中启用 Flash Attention。</p>
+<p><strong>性能基准测试</strong>：参见 <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/flash-attention/references/benchmarks.md" class="ext" target="_blank" rel="noopener">references/benchmarks.md</a>，查看跨 GPU 和序列长度的详细速度与内存对比。</p>
+<h2 id="硬件要求">硬件要求</h2>
+<ul>
+<li><strong>GPU</strong>：NVIDIA Ampere 及以上（A100、A10、A30）或 AMD MI200 及以上</li>
+<li><strong>显存</strong>：与标准注意力相同（Flash Attention 不增加内存占用）</li>
+<li><strong>CUDA</strong>：12.0+（最低 11.8）</li>
+<li><strong>PyTorch</strong>：2.2+ 以获得原生支持</li>
+</ul>
+<p><strong>不支持</strong>：V100（Volta）、CPU 推理</p>
+<h2 id="资源">资源</h2>
+<ul>
+<li>论文："FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness"（NeurIPS 2022）</li>
+<li>论文："FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning"（ICLR 2024）</li>
+<li>博客：https://tridao.me/blog/2024/flash3/</li>
+<li>GitHub：https://github.com/Dao-AILab/flash-attention</li>
+<li>PyTorch 文档：https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/optional/mlops/mlops-flash-attention</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#快速开始">快速开始</a></li>
+<li class="lvl2"><a href="#常见工作流">常见工作流</a></li>
+<li class="lvl3"><a href="#工作流-1在现有-pytorch-模型中启用">工作流 1：在现有 PyTorch 模型中启用</a></li>
+<li class="lvl3"><a href="#工作流-2使用-flash-attn-库实现高级功能">工作流 2：使用 flash-attn 库实现高级功能</a></li>
+<li class="lvl3"><a href="#工作流-3h100-fp8-优化flashattention-3">工作流 3：H100 FP8 优化（FlashAttention-3）</a></li>
+<li class="lvl2"><a href="#何时使用与替代方案">何时使用与替代方案</a></li>
+<li class="lvl2"><a href="#常见问题">常见问题</a></li>
+<li class="lvl2"><a href="#高级主题">高级主题</a></li>
+<li class="lvl2"><a href="#硬件要求">硬件要求</a></li>
+<li class="lvl2"><a href="#资源">资源</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

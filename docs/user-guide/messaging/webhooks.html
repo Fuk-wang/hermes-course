@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webhooks · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/messaging/webhooks</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="webhooks">Webhooks</h1>
+<p>Receive events from external services (GitHub, GitLab, JIRA, Stripe, etc.) and trigger Hermes agent runs automatically. The webhook adapter runs an HTTP server that accepts POST requests, validates HMAC signatures, transforms payloads into agent prompts, and routes responses back to the source or to another configured platform.</p>
+<p>The agent processes the event and can respond by posting comments on PRs, sending messages to Telegram/Discord, or logging the result.</p>
+<h2 id="video-tutorial">Video Tutorial</h2>
+<div style={{position: 'relative', width: '100%', aspectRatio: '16 / 9', marginBottom: '1.5rem'}}>
+  <iframe
+    src="https://www.youtube.com/embed/WNYe5mD4fY8"
+    title="Hermes Agent — Webhooks Tutorial"
+    style={{position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', border: 0}}
+    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+    allowFullScreen
+  />
+</div>
+
+<hr />
+<h2 id="quick-start">Quick Start</h2>
+<ol>
+<li>Enable via <code>hermes gateway setup</code> or environment variables</li>
+<li>Define routes in <code>config.yaml</code> <strong>or</strong> create them dynamically with <code>hermes webhook subscribe</code></li>
+<li>Point your service at <code>http://your-server:8644/webhooks/&lt;route-name&gt;</code></li>
+</ol>
+<hr />
+<h2 id="setup">Setup</h2>
+<p>There are two ways to enable the webhook adapter.</p>
+<h3 id="via-setup-wizard">Via setup wizard</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>setup
+</code></pre></div>
+
+<p>Follow the prompts to enable webhooks, set the port, and set a global HMAC secret.</p>
+<h3 id="via-environment-variables">Via environment variables</h3>
+<p>Add to <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">WEBHOOK_ENABLED</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">WEBHOOK_PORT</span><span class="o">=</span><span class="m">8644</span><span class="w">        </span><span class="c1"># default</span>
+<span class="nv">WEBHOOK_SECRET</span><span class="o">=</span>your-global-secret
+</code></pre></div>
+
+<h3 id="verify-the-server">Verify the server</h3>
+<p>Once the gateway is running:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8644/health
+</code></pre></div>
+
+<p>Expected response:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ok&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;platform&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;webhook&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="configuring-routes">Configuring Routes</h2>
+<p>Routes define how different webhook sources are handled. Each route is a named entry under <code>platforms.webhook.extra.routes</code> in your <code>config.yaml</code>. Adapter settings (<code>port</code>, <code>host</code>, <code>secret</code>, <code>routes</code>) may also be written directly under <code>platforms.webhook:</code> — both spellings reach the adapter; a value nested under <code>extra:</code> wins if the same key appears in both places.</p>
+<h3 id="route-properties">Route properties</h3>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>events</code></td>
+<td>No</td>
+<td>List of event types to accept (e.g. <code>["pull_request"]</code>). If empty, all events are accepted. Event type is read from <code>X-GitHub-Event</code>, <code>X-GitLab-Event</code>, or <code>event_type</code> in the payload.</td>
+</tr>
+<tr>
+<td><code>secret</code></td>
+<td><strong>Yes</strong></td>
+<td>HMAC secret for signature validation. Falls back to the global <code>secret</code> if not set on the route. Set to <code>"INSECURE_NO_AUTH"</code> for testing only (skips validation).</td>
+</tr>
+<tr>
+<td><code>profile</code></td>
+<td>No</td>
+<td>Profile authorized to execute this route when <code>gateway.multiplex_profiles</code> is enabled. Omit it for a default-profile-only route; set a profile name (for example <code>coder</code>) to bind the route and its secret to <code>/p/coder/webhooks/&lt;route&gt;</code>. Dynamic subscriptions set it with <code>hermes webhook subscribe &lt;name&gt; --route-profile coder</code>.</td>
+</tr>
+<tr>
+<td><code>prompt</code></td>
+<td>No</td>
+<td>Template string with dot-notation payload access (e.g. <code>{pull_request.title}</code>). If omitted, the full JSON payload is dumped into the prompt. Payload fields are untrusted — see <a href="#authenticated-does-not-mean-trusted">Authenticated does not mean trusted</a>.</td>
+</tr>
+<tr>
+<td><code>filters</code></td>
+<td>No</td>
+<td>Declarative payload filters evaluated after auth/body/event filtering and before agent or direct delivery work. Non-matches return <code>{"status":"ignored","reason":"filter"}</code> with HTTP 200.</td>
+</tr>
+<tr>
+<td><code>script</code></td>
+<td>No</td>
+<td>Filter/transform script under <code>~/.hermes/scripts/</code>. The webhook payload is passed as JSON on stdin. JSON object stdout replaces the payload before templating; text stdout is exposed as <code>script_output</code>; empty stdout, <code>[SILENT]</code>, or a nonzero exit code ignores the webhook.</td>
+</tr>
+<tr>
+<td><code>skills</code></td>
+<td>No</td>
+<td>List of skill names to load for the agent run.</td>
+</tr>
+<tr>
+<td><code>toolsets</code></td>
+<td>No</td>
+<td>List of toolset keys (e.g. <code>["terminal", "file", "web"]</code>) that <strong>replaces</strong> the platform-level webhook toolset for runs triggered by this route only. Manual config edit only — not settable via <code>hermes webhook subscribe</code>, so agent-created subscriptions cannot self-grant elevated tools. Names are validated the same way as <code>platform_toolsets</code> entries (unknown or platform-restricted names are dropped). See <a href="#per-route-toolsets">Per-route toolsets</a>.</td>
+</tr>
+<tr>
+<td><code>deliver</code></td>
+<td>No</td>
+<td>Where to send the response: <code>github_comment</code>, <code>telegram</code>, <code>discord</code>, <code>slack</code>, <code>signal</code>, <code>sms</code>, <code>whatsapp</code>, <code>matrix</code>, <code>mattermost</code>, <code>homeassistant</code>, <code>email</code>, <code>dingtalk</code>, <code>feishu</code>, <code>wecom</code>, <code>weixin</code>, <code>bluebubbles</code>, <code>qqbot</code>, or <code>log</code> (default).</td>
+</tr>
+<tr>
+<td><code>deliver_extra</code></td>
+<td>No</td>
+<td>Additional delivery config — keys depend on <code>deliver</code> type (e.g. <code>repo</code>, <code>pr_number</code>, <code>chat_id</code>). Values support the same <code>{dot.notation}</code> templates as <code>prompt</code>.</td>
+</tr>
+<tr>
+<td><code>deliver_only</code></td>
+<td>No</td>
+<td>If <code>true</code>, skip the agent entirely — the rendered <code>prompt</code> template becomes the literal message that gets delivered. Zero LLM cost, sub-second delivery. See <a href="#direct-delivery-mode">Direct Delivery Mode</a> for use cases. Requires <code>deliver</code> to be a real target (not <code>log</code>).</td>
+</tr>
+<tr>
+<td><code>cron_job</code></td>
+<td>No</td>
+<td>Fire an existing cron job (by ID or name) on each event instead of starting a fresh webhook agent session. The rendered <code>prompt</code> becomes transient per-run context; the job's own prompt, skills, model, and delivery settings apply. Mutually exclusive with <code>deliver_only</code>. See <a href="#event-triggered-cron-jobs">Event-Triggered Cron Jobs</a>.</td>
+</tr>
+<tr>
+<td><code>coalesce</code></td>
+<td>No</td>
+<td>Debounce rapid distinct events on the same logical entity into one agent run. Block with a required <code>key</code> (payload field or template identifying the entity, e.g. <code>pull_request.number</code>), optional <code>window_seconds</code> (quiet window, default 30) and <code>max_wait_seconds</code> (dispatch cap, default 300). See <a href="#event-coalescing">Event Coalescing</a>. Mutually exclusive with <code>deliver_only</code> and <code>cron_job</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="full-example">Full example</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8644</span>
+<span class="w">      </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;global-fallback-secret&quot;</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">github-pr</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;pull_request&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;github-webhook-secret&quot;</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">            </span><span class="no">Review this pull request:</span>
+<span class="w">            </span><span class="no">Repository: {repository.full_name}</span>
+<span class="w">            </span><span class="no">PR #{number}: {pull_request.title}</span>
+<span class="w">            </span><span class="no">Author: {pull_request.user.login}</span>
+<span class="w">            </span><span class="no">URL: {pull_request.html_url}</span>
+<span class="w">            </span><span class="no">Diff URL: {pull_request.diff_url}</span>
+<span class="w">            </span><span class="no">Action: {action}</span>
+<span class="w">          </span><span class="nt">skills</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;github-code-review&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;github_comment&quot;</span>
+<span class="w">          </span><span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">repo</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{repository.full_name}&quot;</span>
+<span class="w">            </span><span class="nt">pr_number</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{number}&quot;</span>
+<span class="w">        </span><span class="nt">deploy-notify</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;push&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;deploy-secret&quot;</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;New</span><span class="nv"> </span><span class="s">push</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">{repository.full_name}</span><span class="nv"> </span><span class="s">branch</span><span class="nv"> </span><span class="s">{ref}:</span><span class="nv"> </span><span class="s">{head_commit.message}&quot;</span>
+<span class="w">          </span><span class="nt">filters</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;ref&quot;</span>
+<span class="w">              </span><span class="nt">equals</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;refs/heads/main&quot;</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;telegram&quot;</span>
+</code></pre></div>
+
+<h3 id="payload-filters">Payload Filters</h3>
+<p>Use <code>filters</code> when a provider sends a broad event stream but only some payloads should wake the agent or trigger <code>deliver_only</code> delivery. Filters run after signature validation, body parsing, and <code>events</code>, but before prompt rendering, idempotency, agent dispatch, or direct delivery.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">todoist</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;item:updated&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;todoist-secret&quot;</span>
+<span class="w">          </span><span class="nt">filters</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;payload.labels&quot;</span>
+<span class="w">              </span><span class="nt">contains</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;hermes&quot;</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">any</span><span class="p">:</span>
+<span class="w">                </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;payload.priority&quot;</span>
+<span class="w">                  </span><span class="nt">equals</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span>
+<span class="w">                </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;payload.project_id&quot;</span>
+<span class="w">                  </span><span class="nt">in_file</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;~/.hermes/data/todoist/watchlist.json&quot;</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Todoist</span><span class="nv"> </span><span class="s">task</span><span class="nv"> </span><span class="s">changed:</span><span class="nv"> </span><span class="s">{payload.content}&quot;</span>
+</code></pre></div>
+
+<p>Supported operators:</p>
+<ul>
+<li><code>exists: true|false</code></li>
+<li><code>missing: true</code></li>
+<li><code>equals</code> / <code>not_equals</code></li>
+<li><code>contains</code> for strings, lists, and dict keys</li>
+<li><code>in</code> for inline lists</li>
+<li><code>in_file</code> for JSON arrays, JSON objects (keys are used), or newline-delimited text files</li>
+<li><code>regex</code></li>
+<li><code>all</code>, <code>any</code>, and <code>not</code> groups</li>
+</ul>
+<p>Field paths use dot notation. <code>payload.foo</code> reads from a top-level <code>payload</code> object when one exists, or from the root webhook body for flat payloads. <code>event</code> / <code>event_type</code> match the resolved event type, and <code>headers.&lt;Name&gt;</code> reads request headers.</p>
+<h3 id="event-coalescing">Event Coalescing</h3>
+<p>Providers often fire several distinct events for the same logical entity in quick succession — five rapid pushes to one pull request, a burst of edits to one ticket, a flapping monitoring alert. Each event carries a fresh delivery ID, so the idempotency cache cannot suppress them and every event wakes a separate agent run.</p>
+<p>Set <code>coalesce</code> on a route to debounce these into a single run per entity:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">github-pr</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;pull_request&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;github-webhook-secret&quot;</span>
+<span class="w">          </span><span class="nt">coalesce</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{repository.full_name}#{pull_request.number}&quot;</span>
+<span class="w">            </span><span class="nt">window_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span><span class="w">      </span><span class="c1"># quiet window (default 30)</span>
+<span class="w">            </span><span class="nt">max_wait_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span><span class="w">   </span><span class="c1"># dispatch cap (default 300)</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Review</span><span class="nv"> </span><span class="s">PR</span><span class="nv"> </span><span class="s">#{pull_request.number}:</span><span class="nv"> </span><span class="s">{pull_request.title}&quot;</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;github_comment&quot;</span>
+<span class="w">          </span><span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">repo</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{repository.full_name}&quot;</span>
+<span class="w">            </span><span class="nt">pr_number</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{pull_request.number}&quot;</span>
+</code></pre></div>
+
+<p>How it works:</p>
+<ul>
+<li>Events are grouped per route by the rendered <code>key</code>. A bare dotted field (<code>pull_request.number</code>) or a full template (<code>{repository.full_name}#{pull_request.number}</code>) both work.</li>
+<li>Each new event <strong>replaces</strong> the pending one and pushes the quiet-window timer back. When <code>window_seconds</code> pass with no new event, the group dispatches <strong>one</strong> agent run using the latest event's payload, prompt, and delivery templates.</li>
+<li><code>max_wait_seconds</code> caps total buffering from the group's first event, so a steady event stream cannot postpone dispatch forever.</li>
+<li>When more than one event was coalesced, the prompt gets a short note telling the agent how many earlier events were superseded.</li>
+<li>If the <code>key</code> does not resolve for an event (the payload lacks the field — e.g. an <code>issue_comment</code> event on a route keyed by <code>pull_request.number</code>), that event is <strong>dispatched immediately</strong> instead of being coalesced, so unrelated entities never collapse into one group. Pick a key present on every event type the route accepts.</li>
+<li>Coalesced requests return HTTP 202 with <code>{"status": "coalesced"}</code>. Delivery-ID idempotency still runs first, so provider retries of the same delivery are dropped rather than counted.</li>
+<li>Pending groups are flushed (dispatched immediately) when the adapter disconnects — a gateway reconnect or <code>hermes gateway stop</code> — not dropped. Buffered events live in memory, so a hard process kill loses at most the current window's buffered burst.</li>
+<li><code>coalesce</code> applies to agent-mode routes only; combining it with <code>deliver_only</code> or <code>cron_job</code> is rejected at startup.</li>
+</ul>
+<h3 id="script-filters-and-transforms">Script Filters and Transforms</h3>
+<p>Use <code>script</code> when declarative filters are not enough. Scripts must live under <code>~/.hermes/scripts/</code> for the active profile; relative paths resolve there, and path traversal outside that directory is blocked. <code>.sh</code> and <code>.bash</code> scripts run with bash, and all other extensions run with the current Python interpreter.</p>
+<p>The route payload is sent to stdin as JSON:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/scripts/todoist-hermes-label.py</span>
+
+
+<span class="n">payload</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">stdin</span><span class="p">)</span>
+<span class="n">labels</span> <span class="o">=</span> <span class="n">payload</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;payload&quot;</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;labels&quot;</span><span class="p">,</span> <span class="p">[])</span>
+<span class="k">if</span> <span class="s2">&quot;hermes&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">labels</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;[SILENT]&quot;</span><span class="p">)</span>
+    <span class="k">raise</span> <span class="ne">SystemExit</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+<span class="n">payload</span><span class="p">[</span><span class="s2">&quot;body&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">payload</span><span class="p">[</span><span class="s2">&quot;payload&quot;</span><span class="p">][</span><span class="s2">&quot;content&quot;</span><span class="p">]</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">payload</span><span class="p">))</span>
+</code></pre></div>
+
+<p>Script outcomes:</p>
+<ul>
+<li>JSON object stdout replaces the payload used by <code>prompt</code> and <code>deliver_extra</code>.</li>
+<li>Non-JSON text stdout is added to the payload as <code>script_output</code>.</li>
+<li>Empty stdout, exact <code>[SILENT]</code>, <code>{"__hermes_ignore__": true}</code>, timeout, missing script, or nonzero exit code returns HTTP 200 with <code>{"status":"ignored","reason":"script"}</code>.</li>
+</ul>
+<h3 id="prompt-templates">Prompt Templates</h3>
+<p>Prompts use dot-notation to access nested fields in the webhook payload:</p>
+<ul>
+<li><code>{pull_request.title}</code> resolves to <code>payload["pull_request"]["title"]</code></li>
+<li><code>{repository.full_name}</code> resolves to <code>payload["repository"]["full_name"]</code></li>
+<li><code>{__raw__}</code> — special token that dumps the <strong>entire payload</strong> as indented JSON (truncated at 4000 characters). Useful for monitoring alerts or generic webhooks where the agent needs the full context.</li>
+<li>Missing keys are left as the literal <code>{key}</code> string (no error)</li>
+<li>Nested dicts and lists are JSON-serialized and truncated at 2000 characters</li>
+</ul>
+<p>You can mix <code>{__raw__}</code> with regular template variables:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;PR</span><span class="nv"> </span><span class="s">#{pull_request.number}</span><span class="nv"> </span><span class="s">by</span><span class="nv"> </span><span class="s">{pull_request.user.login}:</span><span class="nv"> </span><span class="s">{__raw__}&quot;</span>
+</code></pre></div>
+
+<p>If no <code>prompt</code> template is configured for a route, the entire payload is dumped as indented JSON (truncated at 4000 characters).</p>
+<p>The same dot-notation templates work in <code>deliver_extra</code> values.</p>
+<h3 id="forum-topic-delivery">Forum Topic Delivery</h3>
+<p>When delivering webhook responses to Telegram, you can target a specific forum topic by including <code>message_thread_id</code> (or <code>thread_id</code>) in <code>deliver_extra</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">webhooks</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">alerts</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;alert&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Alert:</span><span class="nv"> </span><span class="s">{__raw__}&quot;</span>
+<span class="w">      </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;telegram&quot;</span>
+<span class="w">      </span><span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;-1001234567890&quot;</span>
+<span class="w">        </span><span class="nt">message_thread_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;42&quot;</span>
+</code></pre></div>
+
+<p>If <code>chat_id</code> is not provided in <code>deliver_extra</code>, the delivery falls back to the home channel configured for the target platform.</p>
+<hr />
+<h2 id="github-pr-review">GitHub PR Review (Step by Step)</h2>
+<p>This walkthrough sets up automatic code review on every pull request.</p>
+<h3 id="1-create-the-webhook-in-github">1. Create the webhook in GitHub</h3>
+<ol>
+<li>Go to your repository → <strong>Settings</strong> → <strong>Webhooks</strong> → <strong>Add webhook</strong></li>
+<li>Set <strong>Payload URL</strong> to <code>http://your-server:8644/webhooks/github-pr</code></li>
+<li>Set <strong>Content type</strong> to <code>application/json</code></li>
+<li>Set <strong>Secret</strong> to match your route config (e.g. <code>github-webhook-secret</code>)</li>
+<li>Under <strong>Which events?</strong>, select <strong>Let me select individual events</strong> and check <strong>Pull requests</strong></li>
+<li>Click <strong>Add webhook</strong></li>
+</ol>
+<h3 id="2-add-the-route-config">2. Add the route config</h3>
+<p>Add the <code>github-pr</code> route to your <code>~/.hermes/config.yaml</code> as shown in the example above.</p>
+<h3 id="3-ensure-gh-cli-is-authenticated">3. Ensure <code>gh</code> CLI is authenticated</h3>
+<p>The <code>github_comment</code> delivery type uses the GitHub CLI to post comments:</p>
+<div class="highlight"><pre><span></span><code>gh<span class="w"> </span>auth<span class="w"> </span>login
+</code></pre></div>
+
+<h3 id="4-test-it">4. Test it</h3>
+<p>Open a pull request on the repository. The webhook fires, Hermes processes the event, and posts a review comment on the PR.</p>
+<hr />
+<h2 id="gitlab-webhook-setup">GitLab Webhook Setup</h2>
+<p>GitLab webhooks work similarly but use a different authentication mechanism. GitLab sends the secret as a plain <code>X-Gitlab-Token</code> header (exact string match, not HMAC).</p>
+<h3 id="1-create-the-webhook-in-gitlab">1. Create the webhook in GitLab</h3>
+<ol>
+<li>Go to your project → <strong>Settings</strong> → <strong>Webhooks</strong></li>
+<li>Set the <strong>URL</strong> to <code>http://your-server:8644/webhooks/gitlab-mr</code></li>
+<li>Enter your <strong>Secret token</strong></li>
+<li>Select <strong>Merge request events</strong> (and any other events you want)</li>
+<li>Click <strong>Add webhook</strong></li>
+</ol>
+<h3 id="2-add-the-route-config_1">2. Add the route config</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">gitlab-mr</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;merge_request&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-gitlab-secret-token&quot;</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">            </span><span class="no">Review this merge request:</span>
+<span class="w">            </span><span class="no">Project: {project.path_with_namespace}</span>
+<span class="w">            </span><span class="no">MR !{object_attributes.iid}: {object_attributes.title}</span>
+<span class="w">            </span><span class="no">Author: {object_attributes.last_commit.author.name}</span>
+<span class="w">            </span><span class="no">URL: {object_attributes.url}</span>
+<span class="w">            </span><span class="no">Action: {object_attributes.action}</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;log&quot;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="delivery-options">Delivery Options</h2>
+<p>The <code>deliver</code> field controls where the agent's response goes after processing the webhook event.</p>
+<table>
+<thead>
+<tr>
+<th>Deliver Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>log</code></td>
+<td>Logs the response to the gateway log output. This is the default and is useful for testing.</td>
+</tr>
+<tr>
+<td><code>github_comment</code></td>
+<td>Posts the response as a PR/issue comment via the <code>gh</code> CLI. Requires <code>deliver_extra.repo</code> and <code>deliver_extra.pr_number</code>. The <code>gh</code> CLI must be installed and authenticated on the gateway host (<code>gh auth login</code>).</td>
+</tr>
+<tr>
+<td><code>telegram</code></td>
+<td>Routes the response to Telegram. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>discord</code></td>
+<td>Routes the response to Discord. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>slack</code></td>
+<td>Routes the response to Slack. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>signal</code></td>
+<td>Routes the response to Signal. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>sms</code></td>
+<td>Routes the response to SMS via Twilio. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>whatsapp</code></td>
+<td>Routes the response to WhatsApp. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>matrix</code></td>
+<td>Routes the response to Matrix. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>mattermost</code></td>
+<td>Routes the response to Mattermost. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>homeassistant</code></td>
+<td>Routes the response to Home Assistant. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>email</code></td>
+<td>Routes the response to Email. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>dingtalk</code></td>
+<td>Routes the response to DingTalk. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>feishu</code></td>
+<td>Routes the response to Feishu/Lark. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>wecom</code></td>
+<td>Routes the response to WeCom. Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>weixin</code></td>
+<td>Routes the response to Weixin (WeChat). Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+<tr>
+<td><code>bluebubbles</code></td>
+<td>Routes the response to BlueBubbles (iMessage). Uses the home channel, or specify <code>chat_id</code> in <code>deliver_extra</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>For cross-platform delivery, the target platform must also be enabled and connected in the gateway. If no <code>chat_id</code> is provided in <code>deliver_extra</code>, the response is sent to that platform's configured home channel.</p>
+<hr />
+<h2 id="direct-delivery-mode">Direct Delivery Mode</h2>
+<p>By default, every webhook POST triggers an agent run — the payload becomes a prompt, the agent processes it, and the agent's response is delivered. This costs LLM tokens on every event.</p>
+<p>For use cases where you just want to <strong>push a plain notification</strong> — no reasoning, no agent loop, just deliver the message — set <code>deliver_only: true</code> on the route. The rendered <code>prompt</code> template becomes the literal message body, and the adapter dispatches it directly to the configured delivery target.</p>
+<h3 id="when-to-use-direct-delivery">When to use direct delivery</h3>
+<ul>
+<li><strong>External service push</strong> — Supabase/Firebase webhook fires on a database change → notify a user in Telegram instantly</li>
+<li><strong>Monitoring alerts</strong> — Datadog/Grafana alert webhook → push to a Discord channel</li>
+<li><strong>Inter-agent pings</strong> — Agent A notifies Agent B's user that a long-running task finished</li>
+<li><strong>Background job completion</strong> — Cron job finishes → post result to Slack</li>
+</ul>
+<p>Benefits:</p>
+<ul>
+<li><strong>Zero LLM tokens</strong> — the agent is never invoked</li>
+<li><strong>Sub-second delivery</strong> — a single adapter call, no reasoning loop</li>
+<li><strong>Same security as agent mode</strong> — HMAC auth, rate limits, idempotency, and body-size limits all still apply</li>
+<li><strong>Synchronous response</strong> — the POST returns <code>200 OK</code> once delivery succeeds, or <code>502</code> if the target rejects it, so your upstream service can retry intelligently</li>
+</ul>
+<h3 id="example-telegram-push-from-supabase">Example: Telegram push from Supabase</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8644</span>
+<span class="w">      </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;global-secret&quot;</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">antenna-matches</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;antenna-webhook-secret&quot;</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;telegram&quot;</span>
+<span class="w">          </span><span class="nt">deliver_only</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;🎉</span><span class="nv"> </span><span class="s">New</span><span class="nv"> </span><span class="s">match:</span><span class="nv"> </span><span class="s">{match.user_name}</span><span class="nv"> </span><span class="s">matched</span><span class="nv"> </span><span class="s">with</span><span class="nv"> </span><span class="s">you!&quot;</span>
+<span class="w">          </span><span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{match.telegram_chat_id}&quot;</span>
+</code></pre></div>
+
+<p>Your Supabase edge function signs the payload with HMAC-SHA256 and POSTs to <code>https://your-server:8644/webhooks/antenna-matches</code>. The webhook adapter validates the signature, renders the template from the payload, delivers to Telegram, and returns <code>200 OK</code>.</p>
+<h3 id="example-dynamic-subscription-via-cli">Example: Dynamic subscription via CLI</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span>subscribe<span class="w"> </span>antenna-matches<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver-chat-id<span class="w"> </span><span class="s2">&quot;123456789&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver-only<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--prompt<span class="w"> </span><span class="s2">&quot;🎉 New match: {match.user_name} matched with you!&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--description<span class="w"> </span><span class="s2">&quot;Antenna match notifications&quot;</span>
+</code></pre></div>
+
+<h3 id="response-codes">Response codes</h3>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>200 OK</code></td>
+<td>Delivered successfully. Body: <code>{"status": "delivered", "route": "...", "target": "...", "delivery_id": "..."}</code></td>
+</tr>
+<tr>
+<td><code>200 OK</code> (status=duplicate)</td>
+<td>Duplicate <code>X-GitHub-Delivery</code> ID within the idempotency TTL (1 hour). Not re-delivered.</td>
+</tr>
+<tr>
+<td><code>401 Unauthorized</code></td>
+<td>HMAC signature invalid or missing.</td>
+</tr>
+<tr>
+<td><code>400 Bad Request</code></td>
+<td>Malformed JSON body.</td>
+</tr>
+<tr>
+<td><code>404 Not Found</code></td>
+<td>Unknown route name.</td>
+</tr>
+<tr>
+<td><code>413 Payload Too Large</code></td>
+<td>Body exceeded <code>max_body_bytes</code>.</td>
+</tr>
+<tr>
+<td><code>429 Too Many Requests</code></td>
+<td>Route rate limit exceeded.</td>
+</tr>
+<tr>
+<td><code>502 Bad Gateway</code></td>
+<td>Target adapter rejected the message or raised. The error is logged server-side; the response body is a generic <code>Delivery failed</code> to avoid leaking adapter internals.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="configuration-gotchas">Configuration gotchas</h3>
+<ul>
+<li><code>deliver_only: true</code> requires <code>deliver</code> to be a real target. <code>deliver: log</code> (or omitting <code>deliver</code>) is rejected at startup — the adapter refuses to start if it finds a misconfigured route.</li>
+<li>The <code>skills</code> field is ignored in direct delivery mode (no agent runs, so there's nothing to inject skills into).</li>
+<li>Template rendering uses the same <code>{dot.notation}</code> syntax as agent mode, including the <code>{__raw__}</code> token.</li>
+<li>Idempotency uses the same <code>X-GitHub-Delivery</code> / <code>X-Request-ID</code> header — retries with the same ID return <code>status=duplicate</code> and do NOT re-deliver.</li>
+</ul>
+<hr />
+<h2 id="event-triggered-cron-jobs">Event-Triggered Cron Jobs</h2>
+<p>Set <code>cron_job</code> on a route to fire an <strong>existing cron job</strong> whenever an event arrives — instead of polling on a fixed cadence or starting a fresh webhook agent session. This turns any scheduled job into an event-driven task: keep the schedule as a fallback sweep (or make it a rarely-firing one) and let the webhook fire it the moment something actually changes.</p>
+<p>How it works:</p>
+<ol>
+<li>The event passes the same HMAC auth, rate limiting, <code>events</code>/<code>filters</code>/<code>script</code> filtering, and idempotency as any other route.</li>
+<li>The route's <code>prompt</code> template is rendered from the payload and injected into the job as <strong>transient per-run context</strong> (the same rail as <code>cronjob(action='run', prompt=...)</code> — the job's stored prompt is never mutated).</li>
+<li>The job fires through the same at-most-once claim the scheduler uses, so a webhook burst cannot double-fire a job that is already running, and the job's own delivery target receives the output.</li>
+</ol>
+<h3 id="example-fire-a-pr-review-job-on-review-feedback">Example: fire a PR-review job on review feedback</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">pr-feedback</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;pull_request_review&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;github-webhook-secret&quot;</span>
+<span class="w">          </span><span class="nt">cron_job</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;pr-review-sweeper&quot;</span><span class="w">        </span><span class="c1"># existing job ID or name</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">            </span><span class="no">PR #{number} in {repository.full_name} received new review feedback</span>
+<span class="w">            </span><span class="no">from {review.user.login}: {review.body}</span>
+</code></pre></div>
+
+<h3 id="via-the-cli">Via the CLI</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span>subscribe<span class="w"> </span>pr-feedback<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--events<span class="w"> </span><span class="s2">&quot;pull_request_review&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cron-job<span class="w"> </span><span class="s2">&quot;pr-review-sweeper&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--prompt<span class="w"> </span><span class="s2">&quot;PR #{number} received feedback: {review.body}&quot;</span>
+</code></pre></div>
+
+<p>The job reference is validated when you create the subscription, so typos surface immediately.</p>
+<h3 id="notes">Notes</h3>
+<ul>
+<li><code>cron_job</code> and <code>deliver_only</code> are mutually exclusive (the adapter refuses to start if a route sets both). A cron job handles its own delivery.</li>
+<li>The route-level <code>deliver</code>, <code>deliver_extra</code>, and <code>skills</code> fields are ignored on <code>cron_job</code> routes — the job's own settings apply.</li>
+<li>Paused/disabled jobs are not fired; the event is logged and dropped.</li>
+<li>The POST returns <code>202 Accepted</code> immediately; the job runs in the background.</li>
+</ul>
+<hr />
+<h2 id="dynamic-subscriptions">Dynamic Subscriptions (CLI)</h2>
+<p>In addition to static routes in <code>config.yaml</code>, you can create webhook subscriptions dynamically using the <code>hermes webhook</code> CLI command. This is especially useful when the agent itself needs to set up event-driven triggers.</p>
+<h3 id="create-a-subscription">Create a subscription</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span>subscribe<span class="w"> </span>github-issues<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--events<span class="w"> </span><span class="s2">&quot;issues&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--prompt<span class="w"> </span><span class="s2">&quot;New issue #{issue.number}: {issue.title}\nBy: {issue.user.login}\n\n{issue.body}&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver-chat-id<span class="w"> </span><span class="s2">&quot;-100123456789&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--description<span class="w"> </span><span class="s2">&quot;Triage new GitHub issues&quot;</span>
+</code></pre></div>
+
+<p>This returns the webhook URL and an auto-generated HMAC secret. Configure your service to POST to that URL.</p>
+<h3 id="list-subscriptions">List subscriptions</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span>list
+</code></pre></div>
+
+<h3 id="remove-a-subscription">Remove a subscription</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span>remove<span class="w"> </span>github-issues
+</code></pre></div>
+
+<h3 id="test-a-subscription">Test a subscription</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span><span class="nb">test</span><span class="w"> </span>github-issues
+hermes<span class="w"> </span>webhook<span class="w"> </span><span class="nb">test</span><span class="w"> </span>github-issues<span class="w"> </span>--payload<span class="w"> </span><span class="s1">&#39;{&quot;issue&quot;: {&quot;number&quot;: 42, &quot;title&quot;: &quot;Test&quot;}}&#39;</span>
+</code></pre></div>
+
+<h3 id="how-dynamic-subscriptions-work">How dynamic subscriptions work</h3>
+<ul>
+<li>Subscriptions are stored in <code>~/.hermes/webhook_subscriptions.json</code></li>
+<li>The webhook adapter hot-reloads this file on each incoming request (mtime-gated, negligible overhead)</li>
+<li>Static routes from <code>config.yaml</code> always take precedence over dynamic ones with the same name</li>
+<li>Dynamic subscriptions use the same route format and capabilities as static routes (events, prompt templates, skills, delivery)</li>
+<li>No gateway restart required — subscribe and it's immediately live</li>
+</ul>
+<h3 id="agent-driven-subscriptions">Agent-driven subscriptions</h3>
+<p>The agent can create subscriptions via the terminal tool when guided by the <code>webhook-subscriptions</code> skill. Ask the agent to "set up a webhook for GitHub issues" and it will run the appropriate <code>hermes webhook subscribe</code> command.</p>
+<hr />
+<h2 id="per-route-toolsets">Per-route toolsets</h2>
+<p>Webhook agent runs default to a deliberately constrained toolset (<code>web_search</code>, <code>web_extract</code>, <code>vision_analyze</code>, <code>clarify</code>) because webhook payloads can carry untrusted third-party content — a public PR title or issue comment should never be able to prompt-inject its way into your terminal.</p>
+<p>For <strong>trusted</strong> routes — a localhost monitoring daemon pushing system alerts, an internal CI system — you can grant a wider toolset to that route only, without widening every other webhook route:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">oom-emergency</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;monitor-secret&quot;</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Memory</span><span class="nv"> </span><span class="s">emergency:</span><span class="nv"> </span><span class="s">{detail}.</span><span class="nv"> </span><span class="s">Diagnose</span><span class="nv"> </span><span class="s">with</span><span class="nv"> </span><span class="s">ps/free/py-spy</span><span class="nv"> </span><span class="s">and</span><span class="nv"> </span><span class="s">report.&quot;</span>
+<span class="w">          </span><span class="nt">toolsets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;terminal&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;file&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;code_execution&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;web&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;telegram&quot;</span>
+</code></pre></div>
+
+<p>For dynamic subscriptions, add the <code>toolsets</code> key by editing <code>~/.hermes/webhook_subscriptions.json</code> directly:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;oom-emergency&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;secret&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;prompt&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;toolsets&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;terminal&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;file&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;web&quot;</span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;deliver&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;telegram&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Behavior and safety properties:</p>
+<ul>
+<li>The route list <strong>replaces</strong> the platform-level webhook toolset resolution for that route's runs (it is not merged).</li>
+<li>Names are validated through the same path as <code>platform_toolsets</code> config — unknown names and platform-restricted toolsets are dropped.</li>
+<li><code>hermes webhook subscribe</code> deliberately does <strong>not</strong> accept a toolsets flag. Granting elevated tools is a manual config-file edit, so an agent creating its own subscription at runtime cannot self-grant <code>terminal</code>.</li>
+<li>Only grant elevated toolsets to routes whose senders you fully control, with a real HMAC secret. Anyone who can POST a validly-signed payload to that route is effectively running an agent with those tools.</li>
+</ul>
+<hr />
+<h2 id="security">Security</h2>
+<p>The webhook adapter includes multiple layers of security:</p>
+<h3 id="hmac-signature-validation">HMAC signature validation</h3>
+<p>The adapter validates incoming webhook signatures using the appropriate method for each source:</p>
+<ul>
+<li><strong>GitHub</strong>: <code>X-Hub-Signature-256</code> header — HMAC-SHA256 hex digest prefixed with <code>sha256=</code></li>
+<li><strong>GitLab</strong>: <code>X-Gitlab-Token</code> header — plain secret string match</li>
+<li><strong>Standard Webhooks</strong>: <code>webhook-id</code>, <code>webhook-timestamp</code>, and <code>webhook-signature</code> headers — signed content is <code>{id}.{timestamp}.{raw_body}</code> with a <code>v1,&lt;base64-hmac-sha256&gt;</code> signature</li>
+<li><strong>Generic (V2, recommended)</strong>: <code>X-Webhook-Signature-V2</code> + <code>X-Webhook-Timestamp</code> headers — HMAC-SHA256 hex digest of <code>&lt;timestamp&gt;.&lt;body&gt;</code>. The timestamp (Unix seconds) must be within ±300 seconds of the server clock, which prevents captured requests from being replayed later.</li>
+<li><strong>Generic (V1, legacy)</strong>: <code>X-Webhook-Signature</code> header — raw HMAC-SHA256 hex digest of the body only. Still accepted for backward compatibility, but it has no replay protection (a captured request replays indefinitely); the gateway logs a deprecation warning once per route. Switch senders to V2.</li>
+</ul>
+<p>If a secret is configured but no recognized signature header is present, the request is rejected.</p>
+<h3 id="secret-is-required">Secret is required</h3>
+<p>Every route must have a secret — either set directly on the route or inherited from the global <code>secret</code>. Routes without a secret cause the adapter to fail at startup with an error. For development/testing only, you can set the secret to <code>"INSECURE_NO_AUTH"</code> to skip validation entirely.</p>
+<p>When multi-profile routing is enabled, the route's <code>profile</code> field also
+binds that secret to one execution target. A route without <code>profile</code> is
+default-profile-only. A request carrying a valid route signature is still
+rejected if its <code>/p/&lt;profile&gt;/</code> prefix does not match the route binding.</p>
+<p><code>INSECURE_NO_AUTH</code> is only accepted when the gateway is bound to a loopback host (<code>127.0.0.1</code>, <code>localhost</code>, <code>::1</code>). If it is combined with a non-loopback bind such as <code>0.0.0.0</code> or a LAN IP, the adapter refuses to start — this prevents accidentally exposing an unauthenticated endpoint on a public interface.</p>
+<h3 id="rate-limiting">Rate limiting</h3>
+<p>Each route is rate-limited to <strong>30 requests per minute</strong> by default (fixed-window). Configure this globally:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">rate_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60</span><span class="w">  </span><span class="c1"># requests per minute</span>
+</code></pre></div>
+
+<p>Requests exceeding the limit receive a <code>429 Too Many Requests</code> response.</p>
+<h3 id="idempotency">Idempotency</h3>
+<p>Delivery IDs (from <code>X-GitHub-Delivery</code>, <code>svix-id</code>, <code>webhook-id</code>, <code>X-Request-ID</code>, or a timestamp fallback) are cached for <strong>1 hour</strong>. Duplicate deliveries (e.g. webhook retries) are silently skipped with a <code>200</code> response, preventing duplicate agent runs.</p>
+<h3 id="body-size-limits">Body size limits</h3>
+<p>Payloads exceeding <strong>1 MB</strong> are rejected before the body is read. Configure this:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">max_body_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2097152</span><span class="w">  </span><span class="c1"># 2 MB</span>
+</code></pre></div>
+
+<h3 id="authenticated-does-not-mean-trusted">Authenticated does not mean trusted</h3>
+<div class="admonition adm-warning"><p class="adm-title">Warning</p>
+<p><strong>HMAC validation authenticates the <em>sender</em>, not the <em>content</em>.</strong> A valid signature only proves the request came from a party holding the route's secret (e.g. GitHub). It says nothing about who wrote the <em>business fields</em> inside the payload — PR titles, commit messages, issue descriptions, and any other upstream text are authored by arbitrary third parties and must be treated as untrusted.</p>
+<p>This is the same trust model that applies to everything the agent reads: web pages, files, and tool output are all untrusted input. Hermes does not — and cannot reliably — sanitize untrusted text with a blocklist; phrasing, encoding, and translation make that trivially bypassable. <strong>The trust boundary is the agent's capability surface, not the input channel.</strong> Harden there:</p>
+<ul>
+<li><strong>Sandbox the runtime.</strong> Run the gateway with the Docker or SSH terminal backend (or in a VM) when exposed to the internet, so a hijacked turn cannot touch the host.</li>
+<li><strong>Scope the toolset.</strong> Disable <code>terminal</code>, <code>file</code>, and outbound-action tools on webhook-triggered sessions if the route only needs to read and summarize. Fewer capabilities means a smaller blast radius if a payload field carries injected instructions.</li>
+<li><strong>Keep approvals on</strong> for any destructive or outbound operation, so an injected instruction cannot act unattended.</li>
+<li><strong>Template narrowly.</strong> Prefer a specific <code>prompt</code> with named fields (<code>{pull_request.title}</code>) over <code>{__raw__}</code> or an empty template that dumps the whole payload, so only the fields you intend reach the prompt.</li>
+</ul>
+</div>
+<hr />
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="webhook-not-arriving">Webhook not arriving</h3>
+<ul>
+<li>Verify the port is exposed and accessible from the webhook source</li>
+<li>Check firewall rules — port <code>8644</code> (or your configured port) must be open</li>
+<li>Verify the URL path matches: <code>http://your-server:8644/webhooks/&lt;route-name&gt;</code></li>
+<li>Use the <code>/health</code> endpoint to confirm the server is running</li>
+</ul>
+<h3 id="signature-validation-failing">Signature validation failing</h3>
+<ul>
+<li>Ensure the secret in your route config exactly matches the secret configured in the webhook source</li>
+<li>For GitHub, the secret is HMAC-based — check <code>X-Hub-Signature-256</code></li>
+<li>For GitLab, the secret is a plain token match — check <code>X-Gitlab-Token</code></li>
+<li>Check gateway logs for <code>Invalid signature</code> warnings</li>
+</ul>
+<h3 id="event-being-ignored">Event being ignored</h3>
+<ul>
+<li>Check that the event type is in your route's <code>events</code> list</li>
+<li>GitHub events use values like <code>pull_request</code>, <code>push</code>, <code>issues</code> (the <code>X-GitHub-Event</code> header value)</li>
+<li>GitLab events use values like <code>merge_request</code>, <code>push</code> (the <code>X-GitLab-Event</code> header value)</li>
+<li>If <code>events</code> is empty or not set, all events are accepted</li>
+</ul>
+<h3 id="agent-not-responding">Agent not responding</h3>
+<ul>
+<li>Run the gateway in foreground to see logs: <code>hermes gateway run</code></li>
+<li>Check that the prompt template is rendering correctly</li>
+<li>Verify the delivery target is configured and connected</li>
+</ul>
+<h3 id="duplicate-responses">Duplicate responses</h3>
+<ul>
+<li>The idempotency cache should prevent this — check that the webhook source is sending a delivery ID header (<code>X-GitHub-Delivery</code>, <code>svix-id</code>, <code>webhook-id</code>, or <code>X-Request-ID</code>)</li>
+<li>Delivery IDs are cached for 1 hour</li>
+</ul>
+<h3 id="gh-cli-errors-github-comment-delivery"><code>gh</code> CLI errors (GitHub comment delivery)</h3>
+<ul>
+<li>Run <code>gh auth login</code> on the gateway host</li>
+<li>Ensure the authenticated GitHub user has write access to the repository</li>
+<li>Check that <code>gh</code> is installed and on the PATH</li>
+</ul>
+<hr />
+<h2 id="environment-variables">Environment Variables</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>WEBHOOK_ENABLED</code></td>
+<td>Enable the webhook platform adapter</td>
+<td><code>false</code></td>
+</tr>
+<tr>
+<td><code>WEBHOOK_PORT</code></td>
+<td>HTTP server port for receiving webhooks</td>
+<td><code>8644</code></td>
+</tr>
+<tr>
+<td><code>WEBHOOK_SECRET</code></td>
+<td>Global HMAC secret (used as fallback when routes don't specify their own)</td>
+<td><em>(none)</em></td>
+</tr>
+</tbody>
+</table>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/messaging/webhooks</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#video-tutorial">Video Tutorial</a></li>
+<li class="lvl2"><a href="#quick-start">Quick Start</a></li>
+<li class="lvl2"><a href="#setup">Setup</a></li>
+<li class="lvl3"><a href="#via-setup-wizard">Via setup wizard</a></li>
+<li class="lvl3"><a href="#via-environment-variables">Via environment variables</a></li>
+<li class="lvl3"><a href="#verify-the-server">Verify the server</a></li>
+<li class="lvl2"><a href="#configuring-routes">Configuring Routes</a></li>
+<li class="lvl3"><a href="#route-properties">Route properties</a></li>
+<li class="lvl3"><a href="#full-example">Full example</a></li>
+<li class="lvl3"><a href="#payload-filters">Payload Filters</a></li>
+<li class="lvl3"><a href="#event-coalescing">Event Coalescing</a></li>
+<li class="lvl3"><a href="#script-filters-and-transforms">Script Filters and Transforms</a></li>
+<li class="lvl3"><a href="#prompt-templates">Prompt Templates</a></li>
+<li class="lvl3"><a href="#forum-topic-delivery">Forum Topic Delivery</a></li>
+<li class="lvl2"><a href="#github-pr-review">GitHub PR Review (Step by Step)</a></li>
+<li class="lvl3"><a href="#1-create-the-webhook-in-github">1. Create the webhook in GitHub</a></li>
+<li class="lvl3"><a href="#2-add-the-route-config">2. Add the route config</a></li>
+<li class="lvl3"><a href="#3-ensure-gh-cli-is-authenticated">3. Ensure gh CLI is authenticated</a></li>
+<li class="lvl3"><a href="#4-test-it">4. Test it</a></li>
+<li class="lvl2"><a href="#gitlab-webhook-setup">GitLab Webhook Setup</a></li>
+<li class="lvl3"><a href="#1-create-the-webhook-in-gitlab">1. Create the webhook in GitLab</a></li>
+<li class="lvl3"><a href="#2-add-the-route-config_1">2. Add the route config</a></li>
+<li class="lvl2"><a href="#delivery-options">Delivery Options</a></li>
+<li class="lvl2"><a href="#direct-delivery-mode">Direct Delivery Mode</a></li>
+<li class="lvl3"><a href="#when-to-use-direct-delivery">When to use direct delivery</a></li>
+<li class="lvl3"><a href="#example-telegram-push-from-supabase">Example: Telegram push from Supabase</a></li>
+<li class="lvl3"><a href="#example-dynamic-subscription-via-cli">Example: Dynamic subscription via CLI</a></li>
+<li class="lvl3"><a href="#response-codes">Response codes</a></li>
+<li class="lvl3"><a href="#configuration-gotchas">Configuration gotchas</a></li>
+<li class="lvl2"><a href="#event-triggered-cron-jobs">Event-Triggered Cron Jobs</a></li>
+<li class="lvl3"><a href="#example-fire-a-pr-review-job-on-review-feedback">Example: fire a PR-review job on review feedback</a></li>
+<li class="lvl3"><a href="#via-the-cli">Via the CLI</a></li>
+<li class="lvl3"><a href="#notes">Notes</a></li>
+<li class="lvl2"><a href="#dynamic-subscriptions">Dynamic Subscriptions (CLI)</a></li>
+<li class="lvl3"><a href="#create-a-subscription">Create a subscription</a></li>
+<li class="lvl3"><a href="#list-subscriptions">List subscriptions</a></li>
+<li class="lvl3"><a href="#remove-a-subscription">Remove a subscription</a></li>
+<li class="lvl3"><a href="#test-a-subscription">Test a subscription</a></li>
+<li class="lvl3"><a href="#how-dynamic-subscriptions-work">How dynamic subscriptions work</a></li>
+<li class="lvl3"><a href="#agent-driven-subscriptions">Agent-driven subscriptions</a></li>
+<li class="lvl2"><a href="#per-route-toolsets">Per-route toolsets</a></li>
+<li class="lvl2"><a href="#security">Security</a></li>
+<li class="lvl3"><a href="#hmac-signature-validation">HMAC signature validation</a></li>
+<li class="lvl3"><a href="#secret-is-required">Secret is required</a></li>
+<li class="lvl3"><a href="#rate-limiting">Rate limiting</a></li>
+<li class="lvl3"><a href="#idempotency">Idempotency</a></li>
+<li class="lvl3"><a href="#body-size-limits">Body size limits</a></li>
+<li class="lvl3"><a href="#authenticated-does-not-mean-trusted">Authenticated does not mean trusted</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl3"><a href="#webhook-not-arriving">Webhook not arriving</a></li>
+<li class="lvl3"><a href="#signature-validation-failing">Signature validation failing</a></li>
+<li class="lvl3"><a href="#event-being-ignored">Event being ignored</a></li>
+<li class="lvl3"><a href="#agent-not-responding">Agent not responding</a></li>
+<li class="lvl3"><a href="#duplicate-responses">Duplicate responses</a></li>
+<li class="lvl3"><a href="#gh-cli-errors-github-comment-delivery">gh CLI errors (GitHub comment delivery)</a></li>
+<li class="lvl2"><a href="#environment-variables">Environment Variables</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

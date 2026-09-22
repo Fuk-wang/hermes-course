@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Torchtitan — Pretrain LLMs at scale with PyTorch 4D parallelism · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/mlops/mlops-torchtitan</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="torchtitan">Torchtitan</h1>
+<p>Pretrain LLMs at scale with PyTorch 4D parallelism.</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/mlops/torchtitan</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/mlops\torchtitan</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>1.0.1</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>Orchestra Research</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Dependencies</td>
+<td><code>torch&gt;=2.6.0</code>, <code>torchtitan&gt;=0.2.0</code>, <code>torchao&gt;=0.5.0</code></td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>Model Architecture</code>, <code>Distributed Training</code>, <code>TorchTitan</code>, <code>FSDP2</code>, <code>Tensor Parallel</code>, <code>Pipeline Parallel</code>, <code>Context Parallel</code>, <code>Float8</code>, <code>Llama</code>, <code>Pretraining</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="torchtitan---pytorch-native-distributed-llm-pretraining">TorchTitan - PyTorch Native Distributed LLM Pretraining</h1>
+<h2 id="quick-start">Quick start</h2>
+<p>TorchTitan is PyTorch's official platform for large-scale LLM pretraining with composable 4D parallelism (FSDP2, TP, PP, CP), achieving 65%+ speedups over baselines on H100 GPUs.</p>
+<p><strong>Installation</strong>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># From PyPI (stable)</span>
+pip<span class="w"> </span>install<span class="w"> </span>torchtitan
+
+<span class="c1"># From source (latest features, requires PyTorch nightly)</span>
+git<span class="w"> </span>clone<span class="w"> </span>https://github.com/pytorch/torchtitan
+<span class="nb">cd</span><span class="w"> </span>torchtitan
+pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements.txt
+</code></pre></div>
+
+<p><strong>Download tokenizer</strong>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Get HF token from https://huggingface.co/settings/tokens</span>
+python<span class="w"> </span>scripts/download_hf_assets.py<span class="w"> </span>--repo_id<span class="w"> </span>meta-llama/Llama-3.1-8B<span class="w"> </span>--assets<span class="w"> </span>tokenizer<span class="w"> </span>--hf_token<span class="o">=</span>...
+</code></pre></div>
+
+<p><strong>Start training on 8 GPUs</strong>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Configs are selected by name from the Python config registry</span>
+<span class="c1"># (torchtitan/models/llama3/config_registry.py), not by TOML path</span>
+<span class="nv">MODULE</span><span class="o">=</span>llama3<span class="w"> </span><span class="nv">CONFIG</span><span class="o">=</span>llama3_8b<span class="w"> </span>./run_train.sh
+</code></pre></div>
+
+<h2 id="common-workflows">Common workflows</h2>
+<h3 id="workflow-1-pretrain-llama-31-8b-on-single-node">Workflow 1: Pretrain Llama 3.1 8B on single node</h3>
+<p>Copy this checklist:</p>
+<div class="highlight"><pre><span></span><code>Single Node Pretraining:
+- [ ] Step 1: Download tokenizer
+- [ ] Step 2: Configure training
+- [ ] Step 3: Launch training
+- [ ] Step 4: Monitor and checkpoint
+</code></pre></div>
+
+<p><strong>Step 1: Download tokenizer</strong></p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>scripts/download_hf_assets.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--repo_id<span class="w"> </span>meta-llama/Llama-3.1-8B<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--assets<span class="w"> </span>tokenizer<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--hf_token<span class="o">=</span>YOUR_HF_TOKEN
+</code></pre></div>
+
+<p><strong>Step 2: Configure training</strong></p>
+<p>In torchtitan's current layout, run configs are defined in a Python <strong>config registry</strong>
+(<code>torchtitan/models/llama3/config_registry.py</code>) and selected by name via <code>CONFIG=&lt;name&gt;</code>
+(or <code>--config &lt;name&gt;</code>). To customize, register your own config in the registry, or override
+individual fields on the command line (e.g. <code>--optimizer.lr 3e-4 --training.steps 1000</code>).</p>
+<p>The equivalent settings for an 8B run look like this (shown as fields; set them in the
+registry entry or as <code>--section.key value</code> overrides):</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># fields for a llama3 8B run (register in config_registry.py or pass as --overrides)</span>
+<span class="k">[job]</span>
+<span class="n">dump_folder</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;./outputs&quot;</span>
+<span class="n">description</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Llama 3.1 8B training&quot;</span>
+
+<span class="k">[model]</span>
+<span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;llama3&quot;</span>
+<span class="n">flavor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;8B&quot;</span>
+<span class="n">hf_assets_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;./assets/hf/Llama-3.1-8B&quot;</span>
+
+<span class="k">[optimizer]</span>
+<span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;AdamW&quot;</span>
+<span class="n">lr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">3e-4</span>
+
+<span class="k">[lr_scheduler]</span>
+<span class="n">warmup_steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">200</span>
+
+<span class="k">[training]</span>
+<span class="n">local_batch_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span>
+<span class="n">seq_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8192</span>
+<span class="n">max_norm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1.0</span>
+<span class="n">steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1000</span>
+<span class="n">dataset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;c4&quot;</span>
+
+<span class="k">[parallelism]</span>
+<span class="n">data_parallel_shard_degree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="w">  </span><span class="c1"># Use all GPUs for FSDP</span>
+
+<span class="k">[activation_checkpoint]</span>
+<span class="n">mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;selective&quot;</span>
+<span class="n">selective_ac_option</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;op&quot;</span>
+
+<span class="k">[checkpoint]</span>
+<span class="n">enable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">folder</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;checkpoint&quot;</span>
+<span class="n">interval</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">500</span>
+</code></pre></div>
+
+<p><strong>Step 3: Launch training</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 8 GPUs on single node (config selected by name from the registry)</span>
+<span class="nv">MODULE</span><span class="o">=</span>llama3<span class="w"> </span><span class="nv">CONFIG</span><span class="o">=</span>llama3_8b<span class="w"> </span>./run_train.sh
+
+<span class="c1"># Override individual fields on the command line</span>
+<span class="nv">MODULE</span><span class="o">=</span>llama3<span class="w"> </span><span class="nv">CONFIG</span><span class="o">=</span>llama3_8b<span class="w"> </span>./run_train.sh<span class="w"> </span>--optimizer.lr<span class="w"> </span>3e-4<span class="w"> </span>--training.steps<span class="w"> </span><span class="m">1000</span>
+
+<span class="c1"># Or explicitly with torchrun (run_train.sh wraps this)</span>
+torchrun<span class="w"> </span>--nproc_per_node<span class="o">=</span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-m<span class="w"> </span>torchtitan.train<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--module<span class="w"> </span>llama3<span class="w"> </span>--config<span class="w"> </span>llama3_8b
+</code></pre></div>
+
+<p><strong>Step 4: Monitor and checkpoint</strong></p>
+<p>TensorBoard logs are saved to <code>./outputs/tb/</code>:</p>
+<div class="highlight"><pre><span></span><code>tensorboard<span class="w"> </span>--logdir<span class="w"> </span>./outputs/tb
+</code></pre></div>
+
+<h3 id="workflow-2-multi-node-training-with-slurm">Workflow 2: Multi-node training with SLURM</h3>
+<div class="highlight"><pre><span></span><code>Multi-Node Training:
+- [ ] Step 1: Configure parallelism for scale
+- [ ] Step 2: Set up SLURM script
+- [ ] Step 3: Submit job
+- [ ] Step 4: Resume from checkpoint
+</code></pre></div>
+
+<p><strong>Step 1: Configure parallelism for scale</strong></p>
+<p>For 70B model on 256 GPUs (32 nodes):</p>
+<div class="highlight"><pre><span></span><code><span class="k">[parallelism]</span>
+<span class="n">data_parallel_shard_degree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">32</span><span class="w">  </span><span class="c1"># FSDP across 32 ranks</span>
+<span class="n">tensor_parallel_degree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="w">        </span><span class="c1"># TP within node</span>
+<span class="n">pipeline_parallel_degree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w">      </span><span class="c1"># No PP for 70B</span>
+<span class="n">context_parallel_degree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w">       </span><span class="c1"># Increase for long sequences</span>
+</code></pre></div>
+
+<p><strong>Step 2: Set up SLURM script</strong></p>
+<div class="highlight"><pre><span></span><code><span class="ch">#!/bin/bash</span>
+<span class="c1">#SBATCH --job-name=llama70b</span>
+<span class="c1">#SBATCH --nodes=32</span>
+<span class="c1">#SBATCH --ntasks-per-node=8</span>
+<span class="c1">#SBATCH --gpus-per-node=8</span>
+
+srun<span class="w"> </span>torchrun<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--nnodes<span class="o">=</span><span class="m">32</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--nproc_per_node<span class="o">=</span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--rdzv_backend<span class="o">=</span>c10d<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--rdzv_endpoint<span class="o">=</span><span class="nv">$MASTER_ADDR</span>:<span class="nv">$MASTER_PORT</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-m<span class="w"> </span>torchtitan.train<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--module<span class="w"> </span>llama3<span class="w"> </span>--config<span class="w"> </span>llama3_70b
+</code></pre></div>
+
+<p><strong>Step 3: Submit job</strong></p>
+<div class="highlight"><pre><span></span><code>sbatch<span class="w"> </span>multinode_trainer.slurm
+</code></pre></div>
+
+<p><strong>Step 4: Resume from checkpoint</strong></p>
+<p>Training auto-resumes if checkpoint exists in configured folder.</p>
+<h3 id="workflow-3-enable-float8-training-for-h100s">Workflow 3: Enable Float8 training for H100s</h3>
+<p>Float8 provides 30-50% speedup on H100 GPUs.</p>
+<div class="highlight"><pre><span></span><code>Float8 Training:
+- [ ] Step 1: Install torchao
+- [ ] Step 2: Configure Float8
+- [ ] Step 3: Launch with compile
+</code></pre></div>
+
+<p><strong>Step 1: Install torchao</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nv">USE_CPP</span><span class="o">=</span><span class="m">0</span><span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>git+https://github.com/pytorch/ao.git
+</code></pre></div>
+
+<p><strong>Step 2: Configure Float8</strong></p>
+<p>In the current torchtitan, Float8 is applied at config time via the <code>quantization</code>
+parameter in your <code>model_registry()</code> call inside the config registry (not via a
+<code>[quantize.linear.float8]</code> TOML section). Add a <code>Float8LinearConverter.Config</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># in torchtitan/models/llama3/config_registry.py (your model_registry(...) call)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">torchtitan.components.quantization</span><span class="w"> </span><span class="kn">import</span> <span class="n">Float8LinearConverter</span>
+
+<span class="n">model_spec</span> <span class="o">=</span> <span class="n">model_registry</span><span class="p">(</span>
+    <span class="s2">&quot;8B&quot;</span><span class="p">,</span>
+    <span class="n">quantization</span><span class="o">=</span><span class="p">[</span>
+        <span class="n">Float8LinearConverter</span><span class="o">.</span><span class="n">Config</span><span class="p">(</span>
+            <span class="n">recipe_name</span><span class="o">=</span><span class="s2">&quot;rowwise&quot;</span><span class="p">,</span>          <span class="c1"># or &quot;rowwise_with_gw_hp&quot;</span>
+            <span class="n">filter_fqns</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;output&quot;</span><span class="p">],</span>          <span class="c1"># skip layers too small to benefit</span>
+            <span class="n">model_compile_enabled</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>      <span class="c1"># requires torch.compile for competitive perf</span>
+        <span class="p">),</span>
+    <span class="p">],</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>Enable <code>torch.compile</code> in your run config too:</p>
+<div class="highlight"><pre><span></span><code><span class="k">[compile]</span>
+<span class="n">enable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">components</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;model&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;loss&quot;</span><span class="p">]</span>
+</code></pre></div>
+
+<p><strong>Step 3: Launch with compile</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Float8 config is baked into the registered config; just select it and enable compile</span>
+<span class="nv">MODULE</span><span class="o">=</span>llama3<span class="w"> </span><span class="nv">CONFIG</span><span class="o">=</span>llama3_8b<span class="w"> </span>./run_train.sh<span class="w"> </span>--compile.enable
+</code></pre></div>
+
+<h3 id="workflow-4-4d-parallelism-for-405b-models">Workflow 4: 4D parallelism for 405B models</h3>
+<div class="highlight"><pre><span></span><code>4D Parallelism (FSDP + TP + PP + CP):
+- [ ] Step 1: Create seed checkpoint
+- [ ] Step 2: Configure 4D parallelism
+- [ ] Step 3: Launch on 512 GPUs
+</code></pre></div>
+
+<p><strong>Step 1: Create seed checkpoint</strong></p>
+<p>Required for consistent initialization across PP stages:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">NGPU</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">MODULE</span><span class="o">=</span>llama3<span class="w"> </span><span class="nv">CONFIG</span><span class="o">=</span>llama3_405b<span class="w"> </span>./run_train.sh<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--checkpoint.enable<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--checkpoint.create_seed_checkpoint<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--parallelism.data_parallel_shard_degree<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--parallelism.tensor_parallel_degree<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--parallelism.pipeline_parallel_degree<span class="w"> </span><span class="m">1</span>
+</code></pre></div>
+
+<p><strong>Step 2: Configure 4D parallelism</strong></p>
+<div class="highlight"><pre><span></span><code><span class="k">[parallelism]</span>
+<span class="n">data_parallel_shard_degree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="w">   </span><span class="c1"># FSDP</span>
+<span class="n">tensor_parallel_degree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="w">       </span><span class="c1"># TP within node</span>
+<span class="n">pipeline_parallel_degree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="w">     </span><span class="c1"># PP across nodes</span>
+<span class="n">context_parallel_degree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w">      </span><span class="c1"># CP for long sequences</span>
+
+<span class="k">[training]</span>
+<span class="n">local_batch_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">32</span>
+<span class="n">seq_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8192</span>
+</code></pre></div>
+
+<p><strong>Step 3: Launch on 512 GPUs</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 64 nodes x 8 GPUs = 512 GPUs</span>
+srun<span class="w"> </span>torchrun<span class="w"> </span>--nnodes<span class="o">=</span><span class="m">64</span><span class="w"> </span>--nproc_per_node<span class="o">=</span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-m<span class="w"> </span>torchtitan.train<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--module<span class="w"> </span>llama3<span class="w"> </span>--config<span class="w"> </span>llama3_405b
+</code></pre></div>
+
+<h2 id="when-to-use-vs-alternatives">When to use vs alternatives</h2>
+<p><strong>Use TorchTitan when:</strong>
+- Pretraining LLMs from scratch (8B to 405B+)
+- Need PyTorch-native solution without third-party dependencies
+- Require composable 4D parallelism (FSDP2, TP, PP, CP)
+- Training on H100s with Float8 support
+- Want interoperable checkpoints with torchtune/HuggingFace</p>
+<p><strong>Use alternatives instead:</strong>
+- <strong>Megatron-LM</strong>: Maximum performance for NVIDIA-only deployments
+- <strong>DeepSpeed</strong>: Broader ZeRO optimization ecosystem, inference support
+- <strong>Axolotl/TRL</strong>: Fine-tuning rather than pretraining
+- <strong>LitGPT</strong>: Educational, smaller-scale training</p>
+<h2 id="common-issues">Common issues</h2>
+<p><strong>Issue: Out of memory on large models</strong></p>
+<p>Enable activation checkpointing and reduce batch size:</p>
+<div class="highlight"><pre><span></span><code><span class="k">[activation_checkpoint]</span>
+<span class="n">mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;full&quot;</span><span class="w">  </span><span class="c1"># Instead of &quot;selective&quot;</span>
+
+<span class="k">[training]</span>
+<span class="n">local_batch_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+</code></pre></div>
+
+<p>Or use gradient accumulation:</p>
+<div class="highlight"><pre><span></span><code><span class="k">[training]</span>
+<span class="n">local_batch_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">global_batch_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">32</span><span class="w">  </span><span class="c1"># Accumulates gradients</span>
+</code></pre></div>
+
+<p><strong>Issue: TP causes high memory with async collectives</strong></p>
+<p>Set environment variable:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">TORCH_NCCL_AVOID_RECORD_STREAMS</span><span class="o">=</span><span class="m">1</span>
+</code></pre></div>
+
+<p><strong>Issue: Float8 training not faster</strong></p>
+<p>Float8 only benefits large GEMMs. Filter small layers via the converter's <code>filter_fqns</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">torchtitan.components.quantization</span><span class="w"> </span><span class="kn">import</span> <span class="n">Float8LinearConverter</span>
+
+<span class="n">Float8LinearConverter</span><span class="o">.</span><span class="n">Config</span><span class="p">(</span>
+    <span class="c1"># add &quot;auto_filter_small_kn&quot; to auto-skip layers too small to benefit</span>
+    <span class="n">filter_fqns</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;attention.wk&quot;</span><span class="p">,</span> <span class="s2">&quot;attention.wv&quot;</span><span class="p">,</span> <span class="s2">&quot;output&quot;</span><span class="p">,</span> <span class="s2">&quot;auto_filter_small_kn&quot;</span><span class="p">],</span>
+    <span class="n">model_compile_enabled</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Issue: Checkpoint loading fails after parallelism change</strong></p>
+<p>Use DCP's resharding capability:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Convert sharded checkpoint to single file</span>
+python<span class="w"> </span>-m<span class="w"> </span>torch.distributed.checkpoint.format_utils<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>dcp_to_torch<span class="w"> </span>checkpoint/step-1000<span class="w"> </span>checkpoint.pt
+</code></pre></div>
+
+<p><strong>Issue: Pipeline parallelism initialization</strong></p>
+<p>Create seed checkpoint first (see Workflow 4, Step 1).</p>
+<h2 id="supported-models">Supported models</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Sizes</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Llama 3.1</td>
+<td>8B, 70B, 405B</td>
+<td>Production</td>
+</tr>
+<tr>
+<td>Llama 4</td>
+<td>Various</td>
+<td>Experimental</td>
+</tr>
+<tr>
+<td>DeepSeek V3</td>
+<td>16B, 236B, 671B (MoE)</td>
+<td>Experimental</td>
+</tr>
+<tr>
+<td>GPT-OSS</td>
+<td>20B, 120B (MoE)</td>
+<td>Experimental</td>
+</tr>
+<tr>
+<td>Qwen 3</td>
+<td>Various</td>
+<td>Experimental</td>
+</tr>
+<tr>
+<td>Flux</td>
+<td>Diffusion</td>
+<td>Experimental</td>
+</tr>
+</tbody>
+</table>
+<h2 id="performance-benchmarks-h100">Performance benchmarks (H100)</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>GPUs</th>
+<th>Parallelism</th>
+<th>TPS/GPU</th>
+<th>Techniques</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Llama 8B</td>
+<td>8</td>
+<td>FSDP</td>
+<td>5,762</td>
+<td>Baseline</td>
+</tr>
+<tr>
+<td>Llama 8B</td>
+<td>8</td>
+<td>FSDP+compile+FP8</td>
+<td>8,532</td>
+<td>+48%</td>
+</tr>
+<tr>
+<td>Llama 70B</td>
+<td>256</td>
+<td>FSDP+TP+AsyncTP</td>
+<td>876</td>
+<td>2D parallel</td>
+</tr>
+<tr>
+<td>Llama 405B</td>
+<td>512</td>
+<td>FSDP+TP+PP</td>
+<td>128</td>
+<td>3D parallel</td>
+</tr>
+</tbody>
+</table>
+<h2 id="advanced-topics">Advanced topics</h2>
+<p><strong>FSDP2 configuration</strong>: See <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops\torchtitan/references/fsdp.md" class="ext" target="_blank" rel="noopener">references/fsdp.md</a> for detailed FSDP2 vs FSDP1 comparison and ZeRO equivalents.</p>
+<p><strong>Float8 training</strong>: See <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops\torchtitan/references/float8.md" class="ext" target="_blank" rel="noopener">references/float8.md</a> for tensorwise vs rowwise scaling recipes.</p>
+<p><strong>Checkpointing</strong>: See <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops\torchtitan/references/checkpoint.md" class="ext" target="_blank" rel="noopener">references/checkpoint.md</a> for HuggingFace conversion and async checkpointing.</p>
+<p><strong>Adding custom models</strong>: See <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops\torchtitan/references/custom-models.md" class="ext" target="_blank" rel="noopener">references/custom-models.md</a> for TrainSpec protocol.</p>
+<h2 id="resources">Resources</h2>
+<ul>
+<li>GitHub: https://github.com/pytorch/torchtitan</li>
+<li>Paper: https://arxiv.org/abs/2410.06511</li>
+<li>ICLR 2025: https://iclr.cc/virtual/2025/poster/29620</li>
+<li>PyTorch Forum: https://discuss.pytorch.org/c/distributed/torchtitan/44</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/mlops/mlops-torchtitan</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#quick-start">Quick start</a></li>
+<li class="lvl2"><a href="#common-workflows">Common workflows</a></li>
+<li class="lvl3"><a href="#workflow-1-pretrain-llama-31-8b-on-single-node">Workflow 1: Pretrain Llama 3.1 8B on single node</a></li>
+<li class="lvl3"><a href="#workflow-2-multi-node-training-with-slurm">Workflow 2: Multi-node training with SLURM</a></li>
+<li class="lvl3"><a href="#workflow-3-enable-float8-training-for-h100s">Workflow 3: Enable Float8 training for H100s</a></li>
+<li class="lvl3"><a href="#workflow-4-4d-parallelism-for-405b-models">Workflow 4: 4D parallelism for 405B models</a></li>
+<li class="lvl2"><a href="#when-to-use-vs-alternatives">When to use vs alternatives</a></li>
+<li class="lvl2"><a href="#common-issues">Common issues</a></li>
+<li class="lvl2"><a href="#supported-models">Supported models</a></li>
+<li class="lvl2"><a href="#performance-benchmarks-h100">Performance benchmarks (H100)</a></li>
+<li class="lvl2"><a href="#advanced-topics">Advanced topics</a></li>
+<li class="lvl2"><a href="#resources">Resources</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

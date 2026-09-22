@@ -1,0 +1,1171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extending the Dashboard · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/extending-the-dashboard</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="extending-the-dashboard">Extending the Dashboard</h1>
+<p>The Hermes web dashboard (<code>hermes dashboard</code>) is built to be reskinned and extended without forking the codebase. Three layers are exposed:</p>
+<ol>
+<li><strong>Themes</strong> — YAML files that repaint the dashboard's palette, typography, layout, and per-component chrome. Drop a file in <code>~/.hermes/dashboard-themes/</code>; it appears in the theme switcher.</li>
+<li><strong>UI plugins</strong> — a directory with <code>manifest.json</code> + a JavaScript bundle that registers a tab, replaces a built-in page, augments one via page-scoped slots, or injects components into named shell slots.</li>
+<li><strong>Backend plugins</strong> — a Python file inside that plugin directory that exposes a FastAPI <code>router</code>; routes are mounted under <code>/api/plugins/&lt;name&gt;/</code> and called from the plugin's UI.</li>
+</ol>
+<p>All three are <strong>drop-in at runtime</strong>: no repo clone, no <code>npm run build</code>, no patching the dashboard source. This page is the canonical reference for all three.</p>
+<p>If you just want to use the dashboard, see <a href="web-dashboard.html">Web Dashboard</a>. If you want to reskin the terminal CLI (not the web dashboard), see <a href="skins.html">Skins &amp; Themes</a> — the CLI skin system is unrelated to dashboard themes.</p>
+<div class="admonition adm-note"><p class="adm-title">Not the desktop app</p>
+<p>This page covers the <strong>web dashboard</strong> (<code>hermes dashboard</code>) plugin system — <code>window.__HERMES_PLUGIN_SDK__</code>, a <code>manifest.json</code>, and a pre-built JS bundle. The <strong>native desktop app</strong> (<code>hermes desktop</code>) has its own, unrelated SDK — <code>@hermes/plugin-sdk</code>, a single ESM file, no build step — documented at <a href="../../developer-guide/desktop-plugin-sdk.html">Desktop Plugin SDK</a>. Only the backend <code>plugin_api.py</code> namespace (<code>/api/plugins/&lt;name&gt;</code>) is shared between them.</p>
+</div>
+<div class="admonition adm-note"><p class="adm-title">How the pieces compose</p>
+<p>Themes and plugins are independent but synergistic. A theme can stand alone (just a YAML file). A plugin can stand alone (just a tab). Together they let you build a complete visual reskin with custom HUDs — the example <code>strike-freedom-cockpit</code> demo (lives in the <code>hermes-example-plugins</code> companion repo — see <a href="#combined-theme--plugin-demo">Combined theme + plugin demo</a> for install steps) does exactly that.</p>
+</div>
+<hr />
+<h2 id="table-of-contents">Table of contents</h2>
+<ul>
+<li><a href="#themes">Themes</a></li>
+<li><a href="#quick-start--your-first-theme">Quick start — your first theme</a></li>
+<li><a href="#palette-typography-layout">Palette, typography, layout</a></li>
+<li><a href="#layout-variants">Layout variants</a></li>
+<li><a href="#theme-assets-images-as-css-vars">Theme assets (images as CSS vars)</a></li>
+<li><a href="#component-chrome-overrides">Component chrome overrides</a></li>
+<li><a href="#color-overrides">Color overrides</a></li>
+<li><a href="#raw-customcss">Raw <code>customCSS</code></a></li>
+<li><a href="#built-in-themes">Built-in themes</a></li>
+<li><a href="#full-theme-yaml-reference">Full theme YAML reference</a></li>
+<li><a href="#plugins">Plugins</a></li>
+<li><a href="#quick-start--your-first-plugin">Quick start — your first plugin</a></li>
+<li><a href="#directory-layout">Directory layout</a></li>
+<li><a href="#manifest-reference">Manifest reference</a></li>
+<li><a href="#the-plugin-sdk">The Plugin SDK</a></li>
+<li><a href="#shell-slots">Shell slots</a></li>
+<li><a href="#replacing-built-in-pages-taboverride">Replacing built-in pages (<code>tab.override</code>)</a></li>
+<li><a href="#augmenting-built-in-pages-page-scoped-slots">Augmenting built-in pages (page-scoped slots)</a></li>
+<li><a href="#slot-only-plugins-tabhidden">Slot-only plugins (<code>tab.hidden</code>)</a></li>
+<li><a href="#backend-api-routes">Backend API routes</a></li>
+<li><a href="#custom-css-per-plugin">Custom CSS per plugin</a></li>
+<li><a href="#plugin-discovery--reload">Plugin discovery &amp; reload</a></li>
+<li><a href="#combined-theme--plugin-demo">Combined theme + plugin demo</a></li>
+<li><a href="#api-reference">API reference</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+</ul>
+<hr />
+<h2 id="themes">Themes</h2>
+<p>Themes are YAML files stored in <code>~/.hermes/dashboard-themes/</code>. The file name doesn't matter (the theme's <code>name:</code> field is what the system uses), but convention is <code>&lt;name&gt;.yaml</code>. Every field is optional — missing keys fall back to the built-in <code>default</code> theme, so a theme can be as small as one color.</p>
+<h3 id="quick-start--your-first-theme">Quick start — your first theme</h3>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.hermes/dashboard-themes
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/dashboard-themes/neon.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">neon</span>
+<span class="nt">label</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Neon</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Pure magenta on black</span>
+
+<span class="nt">palette</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">background</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#000000&quot;</span>
+<span class="w">  </span><span class="nt">midground</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#ff00ff&quot;</span>
+</code></pre></div>
+
+<p>Refresh the dashboard. Click the palette icon in the header and pick <strong>Neon</strong>. The background goes black, text and accents go magenta, and every derived color (card, border, muted, ring, etc.) is recomputed from that 2-color triplet via <code>color-mix()</code> in CSS.</p>
+<p>That's the whole onboarding: one file, two colors. Everything below is optional refinement.</p>
+<h3 id="palette-typography-layout">Palette, typography, layout</h3>
+<p>These three blocks are the heart of a theme. Each is independent — override one, leave the others.</p>
+<h4 id="palette-3-layer">Palette (3-layer)</h4>
+<p>The palette is a triplet of color layers plus a warm-glow vignette color and a noise-grain multiplier. The dashboard's design-system cascade derives every shadcn-compatible token (card, popover, muted, border, primary, destructive, ring, etc.) from this triplet via CSS <code>color-mix()</code>. Overriding three colors cascades into the whole UI.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>palette.background</code></td>
+<td>Deepest canvas color — typically near-black. Drives the page background and card fill.</td>
+</tr>
+<tr>
+<td><code>palette.midground</code></td>
+<td>Primary text and accent. Most UI chrome reads this (foreground text, button outlines, focus rings).</td>
+</tr>
+<tr>
+<td><code>palette.foreground</code></td>
+<td>Top-layer highlight. The default theme sets this to white at alpha 0 (invisible); themes that want a bright accent on top can raise its alpha.</td>
+</tr>
+<tr>
+<td><code>palette.warmGlow</code></td>
+<td><code>rgba(...)</code> string used as the vignette color by <code>&lt;Backdrop /&gt;</code>.</td>
+</tr>
+<tr>
+<td><code>palette.noiseOpacity</code></td>
+<td>0–1.2 multiplier on the grain overlay. Lower = softer, higher = grittier.</td>
+</tr>
+</tbody>
+</table>
+<p>Each layer accepts either <code>{hex: "#RRGGBB", alpha: 0.0–1.0}</code> or a bare hex string (alpha defaults to 1.0).</p>
+<div class="highlight"><pre><span></span><code><span class="nt">palette</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">background</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#05091a&quot;</span>
+<span class="w">    </span><span class="nt">alpha</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0</span>
+<span class="w">  </span><span class="nt">midground</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#d8f0ff&quot;</span><span class="w">          </span><span class="c1"># bare hex, alpha = 1.0</span>
+<span class="w">  </span><span class="nt">foreground</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#ffffff&quot;</span>
+<span class="w">    </span><span class="nt">alpha</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span><span class="w">                    </span><span class="c1"># invisible top layer</span>
+<span class="w">  </span><span class="nt">warmGlow</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;rgba(255,</span><span class="nv"> </span><span class="s">199,</span><span class="nv"> </span><span class="s">55,</span><span class="nv"> </span><span class="s">0.24)&quot;</span>
+<span class="w">  </span><span class="nt">noiseOpacity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.7</span>
+</code></pre></div>
+
+<h4 id="typography">Typography</h4>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fontSans</code></td>
+<td>string</td>
+<td>CSS font-family stack for body copy (applied to <code>html</code>, <code>body</code>).</td>
+</tr>
+<tr>
+<td><code>fontMono</code></td>
+<td>string</td>
+<td>CSS font-family stack for code blocks, <code>&lt;code&gt;</code>, <code>.font-mono</code> utilities.</td>
+</tr>
+<tr>
+<td><code>fontDisplay</code></td>
+<td>string</td>
+<td>Optional heading/display stack. Falls back to <code>fontSans</code>.</td>
+</tr>
+<tr>
+<td><code>fontUrl</code></td>
+<td>string</td>
+<td>Optional external stylesheet URL. Injected as <code>&lt;link rel="stylesheet"&gt;</code> in <code>&lt;head&gt;</code> on theme switch. Same URL is never injected twice. Works with Google Fonts, Bunny Fonts, self-hosted <code>@font-face</code> sheets — anything linkable.</td>
+</tr>
+<tr>
+<td><code>baseSize</code></td>
+<td>string</td>
+<td>Root font size — controls the rem scale. E.g. <code>"14px"</code>, <code>"16px"</code>.</td>
+</tr>
+<tr>
+<td><code>lineHeight</code></td>
+<td>string</td>
+<td>Default line-height. E.g. <code>"1.5"</code>, <code>"1.65"</code>.</td>
+</tr>
+<tr>
+<td><code>letterSpacing</code></td>
+<td>string</td>
+<td>Default letter-spacing. E.g. <code>"0"</code>, <code>"0.01em"</code>, <code>"-0.01em"</code>.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nt">typography</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">fontSans</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&quot;Orbitron&quot;,</span><span class="nv"> </span><span class="s">&quot;Eurostile&quot;,</span><span class="nv"> </span><span class="s">&quot;Impact&quot;,</span><span class="nv"> </span><span class="s">sans-serif&#39;</span>
+<span class="w">  </span><span class="nt">fontMono</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&quot;Share</span><span class="nv"> </span><span class="s">Tech</span><span class="nv"> </span><span class="s">Mono&quot;,</span><span class="nv"> </span><span class="s">ui-monospace,</span><span class="nv"> </span><span class="s">monospace&#39;</span>
+<span class="w">  </span><span class="nt">fontDisplay</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&quot;Orbitron&quot;,</span><span class="nv"> </span><span class="s">&quot;Eurostile&quot;,</span><span class="nv"> </span><span class="s">sans-serif&#39;</span>
+<span class="w">  </span><span class="nt">fontUrl</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700&amp;family=Share+Tech+Mono&amp;display=swap&quot;</span>
+<span class="w">  </span><span class="nt">baseSize</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;14px&quot;</span>
+<span class="w">  </span><span class="nt">lineHeight</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;1.5&quot;</span>
+<span class="w">  </span><span class="nt">letterSpacing</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;0.04em&quot;</span>
+</code></pre></div>
+
+<h5 id="changing-the-font-from-the-ui-no-yaml">Changing the font from the UI (no YAML)</h5>
+<p>The theme picker in the dashboard header has a <strong>Font</strong> section below the
+theme list. Pick any font there and it overrides the body font of whatever
+theme is active — the choice is independent of the theme and persists across
+theme switches (stored in <code>config.yaml</code> under <code>dashboard.font</code>). Choose
+<strong>Theme default</strong> to clear the override and fall back to the active theme's
+own <code>fontSans</code>.</p>
+<p>The picker offers a curated catalog (system stacks plus a set of Google-Fonts
+families across sans / serif / mono). It deliberately does <strong>not</strong> accept a
+free-text font URL — the font's stylesheet is injected as a <code>&lt;link&gt;</code>, so the
+catalog keeps the injected origins fixed. For a fully custom face, set
+<code>fontSans</code> + <code>fontUrl</code> in a theme YAML as shown above. The theme's <code>fontMono</code>
+(code blocks, terminal) is always left untouched by the UI override.</p>
+<h4 id="layout">Layout</h4>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Values</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>radius</code></td>
+<td>any CSS length (<code>"0"</code>, <code>"0.25rem"</code>, <code>"0.5rem"</code>, <code>"1rem"</code>, ...)</td>
+<td>Corner-radius token. Maps to <code>--radius</code> and cascades into <code>--radius-sm/md/lg/xl</code> — every rounded element shifts together.</td>
+</tr>
+<tr>
+<td><code>density</code></td>
+<td><code>compact</code> | <code>comfortable</code> | <code>spacious</code></td>
+<td>Spacing multiplier applied as the <code>--spacing-mul</code> CSS var. <code>compact = 0.85×</code>, <code>comfortable = 1.0×</code> (default), <code>spacious = 1.2×</code>. Scales Tailwind's base spacing, so padding, gap, and space-between utilities all shift proportionally.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nt">layout</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">radius</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;0&quot;</span>
+<span class="w">  </span><span class="nt">density</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">compact</span>
+</code></pre></div>
+
+<h3 id="layout-variants">Layout variants</h3>
+<p><code>layoutVariant</code> picks the overall shell layout. Defaults to <code>"standard"</code> when absent.</p>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>standard</code></td>
+<td>Single column, 1600px max-width (default).</td>
+</tr>
+<tr>
+<td><code>cockpit</code></td>
+<td>Left sidebar rail (260px) + main content. Populated by plugins via the <code>sidebar</code> slot — see <a href="#shell-slots">Shell slots</a>. Without a plugin the rail shows a placeholder.</td>
+</tr>
+<tr>
+<td><code>tiled</code></td>
+<td>Drops the max-width clamp so pages can use the full viewport width.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nt">layoutVariant</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cockpit</span>
+</code></pre></div>
+
+<p>The current variant is exposed as <code>document.documentElement.dataset.layoutVariant</code>, so raw CSS in <code>customCSS</code> can target it via <code>:root[data-layout-variant="cockpit"] ...</code>.</p>
+<h3 id="theme-assets-images-as-css-vars">Theme assets (images as CSS vars)</h3>
+<p>Ship artwork URLs with a theme. Each named slot becomes a CSS var (<code>--theme-asset-&lt;name&gt;</code>) that the built-in shell and any plugin can read. The <code>bg</code> slot is automatically wired into the backdrop; other slots are plugin-facing.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">assets</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">bg</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://example.com/hero-bg.jpg&quot;</span><span class="w">           </span><span class="c1"># auto-wired into &lt;Backdrop /&gt;</span>
+<span class="w">  </span><span class="nt">hero</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/my-images/strike-freedom.png&quot;</span><span class="w">           </span><span class="c1"># for plugin sidebars</span>
+<span class="w">  </span><span class="nt">crest</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/my-images/crest.svg&quot;</span><span class="w">                   </span><span class="c1"># for header-left plugins</span>
+<span class="w">  </span><span class="nt">logo</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/my-images/logo.png&quot;</span>
+<span class="w">  </span><span class="nt">sidebar</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/my-images/rail.png&quot;</span>
+<span class="w">  </span><span class="nt">header</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/my-images/header-art.png&quot;</span>
+<span class="w">  </span><span class="nt">custom</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">scanLines</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/my-images/scanlines.png&quot;</span><span class="w">         </span><span class="c1"># → --theme-asset-custom-scanLines</span>
+</code></pre></div>
+
+<p>Values accept:</p>
+<ul>
+<li>Bare URLs — wrapped in <code>url(...)</code> automatically.</li>
+<li>Pre-wrapped <code>url(...)</code>, <code>linear-gradient(...)</code>, <code>radial-gradient(...)</code> expressions — used as-is.</li>
+<li><code>"none"</code> — explicit opt-out.</li>
+</ul>
+<p>Every asset is also emitted as <code>--theme-asset-&lt;name&gt;-raw</code> (the unwrapped URL), in case a plugin needs to pass it to <code>&lt;img src&gt;</code> instead of <code>background-image</code>.</p>
+<p>Plugins read these with plain CSS or JS:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// In a plugin slot</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">hero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getComputedStyle</span><span class="p">(</span><span class="nb">document</span><span class="p">.</span><span class="nx">documentElement</span><span class="p">)</span>
+<span class="w">  </span><span class="p">.</span><span class="nx">getPropertyValue</span><span class="p">(</span><span class="s2">&quot;--theme-asset-hero&quot;</span><span class="p">).</span><span class="nx">trim</span><span class="p">();</span>
+</code></pre></div>
+
+<h3 id="component-chrome-overrides">Component chrome overrides</h3>
+<p><code>componentStyles</code> restyles individual shell components without writing CSS selectors. Each bucket's entries become CSS vars (<code>--component-&lt;bucket&gt;-&lt;kebab-property&gt;</code>) that the shell's shared components read. So <code>card:</code> overrides apply to every <code>&lt;Card&gt;</code>, <code>header:</code> to the app bar, etc.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">componentStyles</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">card</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">clipPath</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;polygon(12px</span><span class="nv"> </span><span class="s">0,</span><span class="nv"> </span><span class="s">100%</span><span class="nv"> </span><span class="s">0,</span><span class="nv"> </span><span class="s">100%</span><span class="nv"> </span><span class="s">calc(100%</span><span class="nv"> </span><span class="s">-</span><span class="nv"> </span><span class="s">12px),</span><span class="nv"> </span><span class="s">calc(100%</span><span class="nv"> </span><span class="s">-</span><span class="nv"> </span><span class="s">12px)</span><span class="nv"> </span><span class="s">100%,</span><span class="nv"> </span><span class="s">0</span><span class="nv"> </span><span class="s">100%,</span><span class="nv"> </span><span class="s">0</span><span class="nv"> </span><span class="s">12px)&quot;</span>
+<span class="w">    </span><span class="nt">background</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;linear-gradient(180deg,</span><span class="nv"> </span><span class="s">rgba(10,</span><span class="nv"> </span><span class="s">22,</span><span class="nv"> </span><span class="s">52,</span><span class="nv"> </span><span class="s">0.85),</span><span class="nv"> </span><span class="s">rgba(5,</span><span class="nv"> </span><span class="s">9,</span><span class="nv"> </span><span class="s">26,</span><span class="nv"> </span><span class="s">0.92))&quot;</span>
+<span class="w">    </span><span class="nt">boxShadow</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;inset</span><span class="nv"> </span><span class="s">0</span><span class="nv"> </span><span class="s">0</span><span class="nv"> </span><span class="s">0</span><span class="nv"> </span><span class="s">1px</span><span class="nv"> </span><span class="s">rgba(64,</span><span class="nv"> </span><span class="s">200,</span><span class="nv"> </span><span class="s">255,</span><span class="nv"> </span><span class="s">0.28)&quot;</span>
+<span class="w">  </span><span class="nt">header</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">background</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;linear-gradient(180deg,</span><span class="nv"> </span><span class="s">rgba(16,</span><span class="nv"> </span><span class="s">32,</span><span class="nv"> </span><span class="s">72,</span><span class="nv"> </span><span class="s">0.95),</span><span class="nv"> </span><span class="s">rgba(5,</span><span class="nv"> </span><span class="s">9,</span><span class="nv"> </span><span class="s">26,</span><span class="nv"> </span><span class="s">0.9))&quot;</span>
+<span class="w">  </span><span class="nt">tab</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">clipPath</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;polygon(6px</span><span class="nv"> </span><span class="s">0,</span><span class="nv"> </span><span class="s">100%</span><span class="nv"> </span><span class="s">0,</span><span class="nv"> </span><span class="s">calc(100%</span><span class="nv"> </span><span class="s">-</span><span class="nv"> </span><span class="s">6px)</span><span class="nv"> </span><span class="s">100%,</span><span class="nv"> </span><span class="s">0</span><span class="nv"> </span><span class="s">100%)&quot;</span>
+<span class="w">  </span><span class="nt">sidebar</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span>
+<span class="w">  </span><span class="nt">backdrop</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span>
+<span class="w">  </span><span class="nt">footer</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span>
+<span class="w">  </span><span class="nt">progress</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span>
+<span class="w">  </span><span class="nt">badge</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span>
+<span class="w">  </span><span class="nt">page</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span>
+</code></pre></div>
+
+<p>Supported buckets: <code>card</code>, <code>header</code>, <code>footer</code>, <code>sidebar</code>, <code>tab</code>, <code>progress</code>, <code>badge</code>, <code>backdrop</code>, <code>page</code>.</p>
+<p>Property names use camelCase (<code>clipPath</code>) and are emitted as kebab (<code>clip-path</code>). Values are plain CSS strings — anything CSS accepts (<code>clip-path</code>, <code>border-image</code>, <code>background</code>, <code>box-shadow</code>, <code>animation</code>, ...).</p>
+<h3 id="color-overrides">Color overrides</h3>
+<p>Most themes won't need this — the 3-layer palette derives every shadcn token. Use <code>colorOverrides</code> when you want a specific accent the derivation won't produce (a softer destructive red for a pastel theme, a specific success green for a brand).</p>
+<div class="highlight"><pre><span></span><code><span class="nt">colorOverrides</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">primary</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#ffce3a&quot;</span>
+<span class="w">  </span><span class="nt">primaryForeground</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#05091a&quot;</span>
+<span class="w">  </span><span class="nt">accent</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#3fd3ff&quot;</span>
+<span class="w">  </span><span class="nt">ring</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#3fd3ff&quot;</span>
+<span class="w">  </span><span class="nt">destructive</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#ff3a5e&quot;</span>
+<span class="w">  </span><span class="nt">border</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;rgba(64,</span><span class="nv"> </span><span class="s">200,</span><span class="nv"> </span><span class="s">255,</span><span class="nv"> </span><span class="s">0.28)&quot;</span>
+</code></pre></div>
+
+<p>Supported keys: <code>card</code>, <code>cardForeground</code>, <code>popover</code>, <code>popoverForeground</code>, <code>primary</code>, <code>primaryForeground</code>, <code>secondary</code>, <code>secondaryForeground</code>, <code>muted</code>, <code>mutedForeground</code>, <code>accent</code>, <code>accentForeground</code>, <code>destructive</code>, <code>destructiveForeground</code>, <code>success</code>, <code>warning</code>, <code>border</code>, <code>input</code>, <code>ring</code>.</p>
+<p>Each key maps 1:1 to the <code>--color-&lt;kebab&gt;</code> CSS var (e.g. <code>primaryForeground</code> → <code>--color-primary-foreground</code>). Any key set here wins over the palette cascade for the active theme only — switching to another theme clears the overrides.</p>
+<h3 id="raw-customcss">Raw <code>customCSS</code></h3>
+<p>For selector-level chrome that <code>componentStyles</code> can't express — pseudo-elements, animations, media queries, theme-scoped overrides — drop raw CSS into <code>customCSS</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">customCSS</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">  </span><span class="no">/* Scanline overlay — only visible when cockpit variant is active. */</span>
+<span class="w">  </span><span class="no">:root[data-layout-variant=&quot;cockpit&quot;] body::before {</span>
+<span class="w">    </span><span class="no">content: &quot;&quot;;</span>
+<span class="w">    </span><span class="no">position: fixed;</span>
+<span class="w">    </span><span class="no">inset: 0;</span>
+<span class="w">    </span><span class="no">pointer-events: none;</span>
+<span class="w">    </span><span class="no">z-index: 100;</span>
+<span class="w">    </span><span class="no">background: repeating-linear-gradient(to bottom,</span>
+<span class="w">      </span><span class="no">transparent 0px, transparent 2px,</span>
+<span class="w">      </span><span class="no">rgba(64, 200, 255, 0.035) 3px, rgba(64, 200, 255, 0.035) 4px);</span>
+<span class="w">    </span><span class="no">mix-blend-mode: screen;</span>
+<span class="w">  </span><span class="no">}</span>
+</code></pre></div>
+
+<p>The CSS is injected as a single scoped <code>&lt;style data-hermes-theme-css&gt;</code> tag on theme apply and cleaned up on theme switch. <strong>Capped at 32 KiB per theme.</strong></p>
+<h3 id="built-in-themes">Built-in themes</h3>
+<p>Each built-in ships its own palette, typography, and layout — switching produces visible changes beyond color alone.</p>
+<table>
+<thead>
+<tr>
+<th>Theme</th>
+<th>Palette</th>
+<th>Typography</th>
+<th>Layout</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Hermes Teal</strong> (<code>default</code>)</td>
+<td>Dark teal + cream</td>
+<td>System stack, 15px</td>
+<td>0.5rem radius, comfortable</td>
+</tr>
+<tr>
+<td><strong>Hermes Teal (Large)</strong> (<code>default-large</code>)</td>
+<td>Same as default</td>
+<td>System stack, 18px, line-height 1.65</td>
+<td>0.5rem radius, spacious</td>
+</tr>
+<tr>
+<td><strong>Midnight</strong> (<code>midnight</code>)</td>
+<td>Deep blue-violet</td>
+<td>Inter + JetBrains Mono, 14px</td>
+<td>0.75rem radius, comfortable</td>
+</tr>
+<tr>
+<td><strong>Ember</strong> (<code>ember</code>)</td>
+<td>Warm crimson + bronze</td>
+<td>Spectral (serif) + IBM Plex Mono, 15px</td>
+<td>0.25rem radius, comfortable</td>
+</tr>
+<tr>
+<td><strong>Mono</strong> (<code>mono</code>)</td>
+<td>Grayscale</td>
+<td>IBM Plex Sans + IBM Plex Mono, 13px</td>
+<td>0 radius, compact</td>
+</tr>
+<tr>
+<td><strong>Cyberpunk</strong> (<code>cyberpunk</code>)</td>
+<td>Neon green on black</td>
+<td>Share Tech Mono everywhere, 14px</td>
+<td>0 radius, compact</td>
+</tr>
+<tr>
+<td><strong>Rosé</strong> (<code>rose</code>)</td>
+<td>Pink + ivory</td>
+<td>Fraunces (serif) + DM Mono, 16px</td>
+<td>1rem radius, spacious</td>
+</tr>
+</tbody>
+</table>
+<p>Themes that reference Google Fonts (all except Hermes Teal) load the stylesheet on demand — the first time you switch to them a <code>&lt;link&gt;</code> tag is injected into <code>&lt;head&gt;</code>.</p>
+<h3 id="full-theme-yaml-reference">Full theme YAML reference</h3>
+<p>Every knob in one file — copy and trim what you don't need:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/dashboard-themes/ocean.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ocean</span>
+<span class="nt">label</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Ocean Deep</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Deep sea blues with coral accents</span>
+
+<span class="c1"># 3-layer palette (accepts {hex, alpha} or bare hex)</span>
+<span class="nt">palette</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">background</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#0a1628&quot;</span>
+<span class="w">    </span><span class="nt">alpha</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0</span>
+<span class="w">  </span><span class="nt">midground</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#a8d0ff&quot;</span>
+<span class="w">    </span><span class="nt">alpha</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0</span>
+<span class="w">  </span><span class="nt">foreground</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#ffffff&quot;</span>
+<span class="w">    </span><span class="nt">alpha</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.0</span>
+<span class="w">  </span><span class="nt">warmGlow</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;rgba(255,</span><span class="nv"> </span><span class="s">107,</span><span class="nv"> </span><span class="s">107,</span><span class="nv"> </span><span class="s">0.35)&quot;</span>
+<span class="w">  </span><span class="nt">noiseOpacity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.7</span>
+
+<span class="nt">typography</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">fontSans</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Poppins,</span><span class="nv"> </span><span class="s">system-ui,</span><span class="nv"> </span><span class="s">sans-serif&quot;</span>
+<span class="w">  </span><span class="nt">fontMono</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Fira</span><span class="nv"> </span><span class="s">Code,</span><span class="nv"> </span><span class="s">ui-monospace,</span><span class="nv"> </span><span class="s">monospace&quot;</span>
+<span class="w">  </span><span class="nt">fontDisplay</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Poppins,</span><span class="nv"> </span><span class="s">system-ui,</span><span class="nv"> </span><span class="s">sans-serif&quot;</span><span class="w">   </span><span class="c1"># optional</span>
+<span class="w">  </span><span class="nt">fontUrl</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&amp;family=Fira+Code:wght@400;500&amp;display=swap&quot;</span>
+<span class="w">  </span><span class="nt">baseSize</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;15px&quot;</span>
+<span class="w">  </span><span class="nt">lineHeight</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;1.6&quot;</span>
+<span class="w">  </span><span class="nt">letterSpacing</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;-0.003em&quot;</span>
+
+<span class="nt">layout</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">radius</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;0.75rem&quot;</span>
+<span class="w">  </span><span class="nt">density</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">comfortable</span>
+
+<span class="nt">layoutVariant</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">standard</span><span class="w">        </span><span class="c1"># standard | cockpit | tiled</span>
+
+<span class="nt">assets</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">bg</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://example.com/ocean-bg.jpg&quot;</span>
+<span class="w">  </span><span class="nt">hero</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/my-images/kraken.png&quot;</span>
+<span class="w">  </span><span class="nt">crest</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/my-images/anchor.svg&quot;</span>
+<span class="w">  </span><span class="nt">logo</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/my-images/logo.png&quot;</span>
+<span class="w">  </span><span class="nt">custom</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/my-images/waves.svg&quot;</span>
+
+<span class="nt">componentStyles</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">card</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">boxShadow</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;inset</span><span class="nv"> </span><span class="s">0</span><span class="nv"> </span><span class="s">0</span><span class="nv"> </span><span class="s">0</span><span class="nv"> </span><span class="s">1px</span><span class="nv"> </span><span class="s">rgba(168,</span><span class="nv"> </span><span class="s">208,</span><span class="nv"> </span><span class="s">255,</span><span class="nv"> </span><span class="s">0.18)&quot;</span>
+<span class="w">  </span><span class="nt">header</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">background</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;linear-gradient(180deg,</span><span class="nv"> </span><span class="s">rgba(10,</span><span class="nv"> </span><span class="s">22,</span><span class="nv"> </span><span class="s">40,</span><span class="nv"> </span><span class="s">0.95),</span><span class="nv"> </span><span class="s">rgba(5,</span><span class="nv"> </span><span class="s">9,</span><span class="nv"> </span><span class="s">26,</span><span class="nv"> </span><span class="s">0.9))&quot;</span>
+
+<span class="nt">colorOverrides</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">destructive</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#ff6b6b&quot;</span>
+<span class="w">  </span><span class="nt">ring</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#ff6b6b&quot;</span>
+
+<span class="nt">customCSS</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">  </span><span class="no">/* Any additional selector-level tweaks */</span>
+</code></pre></div>
+
+<p>Refresh the dashboard after creating the file. Switch themes live from the header bar — click the palette icon. Selection persists to <code>config.yaml</code> under <code>dashboard.theme</code> and is restored on reload.</p>
+<hr />
+<h2 id="plugins">Plugins</h2>
+<p>A dashboard plugin is a directory with a <code>manifest.json</code>, a pre-built JS bundle, and optionally a CSS file and a Python file with FastAPI routes. Plugins live next to other Hermes plugins in <code>~/.hermes/plugins/&lt;name&gt;/</code> — the dashboard extension is a <code>dashboard/</code> subfolder inside that plugin directory, so one plugin can extend both the CLI/gateway and the dashboard from a single install.</p>
+<p>Plugins don't bundle React or UI components. They use the <strong>Plugin SDK</strong> exposed on <code>window.__HERMES_PLUGIN_SDK__</code>. This keeps plugin bundles tiny (typically a few KB) and avoids version conflicts.</p>
+<h3 id="quick-start--your-first-plugin">Quick start — your first plugin</h3>
+<p>Create the directory structure:</p>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.hermes/plugins/my-plugin/dashboard/dist
+</code></pre></div>
+
+<p>Write the manifest:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// ~/.hermes/plugins/my-plugin/dashboard/manifest.json</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-plugin&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;My Plugin&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;icon&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Sparkles&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1.0.0&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;tab&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/my-plugin&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;position&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;after:skills&quot;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;entry&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;dist/index.js&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Write the JS bundle (a plain IIFE — no build step needed):</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// ~/.hermes/plugins/my-plugin/dashboard/dist/index.js</span>
+<span class="p">(</span><span class="kd">function</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="s2">&quot;use strict&quot;</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">SDK</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">window</span><span class="p">.</span><span class="nx">__HERMES_PLUGIN_SDK__</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">React</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">SDK</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Card</span><span class="p">,</span><span class="w"> </span><span class="nx">CardHeader</span><span class="p">,</span><span class="w"> </span><span class="nx">CardTitle</span><span class="p">,</span><span class="w"> </span><span class="nx">CardContent</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">function</span><span class="w"> </span><span class="nx">MyPage</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">React</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="nx">Card</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">React</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="nx">CardHeader</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">React</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="nx">CardTitle</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;My Plugin&quot;</span><span class="p">),</span>
+<span class="w">      </span><span class="p">),</span>
+<span class="w">      </span><span class="nx">React</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="nx">CardContent</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">React</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="s2">&quot;p&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">className</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;text-sm text-muted-foreground&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="s2">&quot;Hello from my custom dashboard tab.&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="p">),</span>
+<span class="w">      </span><span class="p">),</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nb">window</span><span class="p">.</span><span class="nx">__HERMES_PLUGINS__</span><span class="p">.</span><span class="nx">register</span><span class="p">(</span><span class="s2">&quot;my-plugin&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">MyPage</span><span class="p">);</span>
+<span class="p">})();</span>
+</code></pre></div>
+
+<p>Refresh the dashboard — your tab appears in the nav bar, after <strong>Skills</strong>.</p>
+<div class="admonition adm-tip"><p class="adm-title">Skip React.createElement</p>
+<p>If you prefer JSX, use any bundler (esbuild, Vite, rollup) with React as an external and IIFE output. The only hard requirement is that the final file is a single JS file loadable via <code>&lt;script&gt;</code>. React is never bundled; it comes from <code>SDK.React</code>.</p>
+</div>
+<h3 id="directory-layout">Directory layout</h3>
+<div class="highlight"><pre><span></span><code>~/.hermes/plugins/my-plugin/
+├── plugin.yaml              # optional — existing CLI/gateway plugin manifest
+├── __init__.py              # optional — existing CLI/gateway hooks
+└── dashboard/               # dashboard extension
+    ├── manifest.json        # required — tab config, icon, entry point
+    ├── dist/
+    │   ├── index.js         # required — pre-built JS bundle (IIFE)
+    │   └── style.css        # optional — custom CSS
+    └── plugin_api.py        # optional — backend API routes (FastAPI)
+</code></pre></div>
+
+<p>A single plugin directory can carry three orthogonal extensions:</p>
+<ul>
+<li><code>plugin.yaml</code> + <code>__init__.py</code> — CLI/gateway plugin (<a href="plugins.html">see plugins page</a>).</li>
+<li><code>dashboard/manifest.json</code> + <code>dashboard/dist/index.js</code> — dashboard UI plugin.</li>
+<li><code>dashboard/plugin_api.py</code> — dashboard backend routes.</li>
+</ul>
+<p>None of them are required; include only the layers you need.</p>
+<h3 id="manifest-reference">Manifest reference</h3>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-plugin&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;My Plugin&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;description&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;What this plugin does&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;icon&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Sparkles&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1.0.0&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;tab&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/my-plugin&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;position&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;after:skills&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;override&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;hidden&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;slots&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;sidebar&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;header-left&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;entry&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;dist/index.js&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;css&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;dist/style.css&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;api&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;plugin_api.py&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>Yes</td>
+<td>Unique plugin identifier. Lowercase, hyphens ok. Used in URLs and registration.</td>
+</tr>
+<tr>
+<td><code>label</code></td>
+<td>Yes</td>
+<td>Display name shown in the nav tab.</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>No</td>
+<td>Short description (shown in dashboard admin surfaces).</td>
+</tr>
+<tr>
+<td><code>icon</code></td>
+<td>No</td>
+<td>Lucide icon name. Defaults to <code>Puzzle</code>. Unknown names fall back to <code>Puzzle</code>.</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td>No</td>
+<td>Semver string. Defaults to <code>0.0.0</code>.</td>
+</tr>
+<tr>
+<td><code>tab.path</code></td>
+<td>Yes</td>
+<td>URL path for the tab (e.g. <code>/my-plugin</code>).</td>
+</tr>
+<tr>
+<td><code>tab.position</code></td>
+<td>No</td>
+<td>Where to insert the tab. <code>"end"</code> (default), <code>"after:&lt;path&gt;"</code>, or <code>"before:&lt;path&gt;"</code> — value after the colon is the <strong>path segment</strong> of the target tab (no leading slash). Examples: <code>"after:skills"</code>, <code>"before:config"</code>.</td>
+</tr>
+<tr>
+<td><code>tab.override</code></td>
+<td>No</td>
+<td>Set to a built-in route path (<code>"/"</code>, <code>"/sessions"</code>, <code>"/config"</code>, ...) to <strong>replace</strong> that page instead of adding a new tab. See <a href="#replacing-built-in-pages-taboverride">Replacing built-in pages</a>.</td>
+</tr>
+<tr>
+<td><code>tab.hidden</code></td>
+<td>No</td>
+<td>When true, register the component and any slots without adding a tab to the nav. Used by slot-only plugins. See <a href="#slot-only-plugins-tabhidden">Slot-only plugins</a>.</td>
+</tr>
+<tr>
+<td><code>slots</code></td>
+<td>No</td>
+<td>Named shell slots this plugin populates. <strong>Documentation aid only</strong> — actual registration happens from the JS bundle via <code>registerSlot()</code>. Listing slots here makes discovery surfaces more informative.</td>
+</tr>
+<tr>
+<td><code>entry</code></td>
+<td>Yes</td>
+<td>Path to the JS bundle relative to <code>dashboard/</code>. Defaults to <code>dist/index.js</code>.</td>
+</tr>
+<tr>
+<td><code>css</code></td>
+<td>No</td>
+<td>Path to a CSS file to inject as a <code>&lt;link&gt;</code> tag.</td>
+</tr>
+<tr>
+<td><code>api</code></td>
+<td>No</td>
+<td>Path to a Python file with FastAPI routes. Mounted at <code>/api/plugins/&lt;name&gt;/</code>.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="available-icons">Available icons</h4>
+<p>Plugins use Lucide icon names. The dashboard maps these by name — unknown names silently fall back to <code>Puzzle</code>.</p>
+<p>Currently mapped: <code>Activity</code>, <code>BarChart3</code>, <code>Clock</code>, <code>Code</code>, <code>Database</code>, <code>Eye</code>, <code>FileText</code>, <code>Globe</code>, <code>Heart</code>, <code>KeyRound</code>, <code>MessageSquare</code>, <code>Package</code>, <code>Puzzle</code>, <code>Settings</code>, <code>Shield</code>, <code>Sparkles</code>, <code>Star</code>, <code>Terminal</code>, <code>Wrench</code>, <code>Zap</code>.</p>
+<p>Need a different icon? Open a PR to <code>web/src/App.tsx</code>'s <code>ICON_MAP</code> — pure additive change.</p>
+<h3 id="the-plugin-sdk">The Plugin SDK</h3>
+<p>Everything a plugin needs is on <code>window.__HERMES_PLUGIN_SDK__</code>. Plugins should never import React directly.</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">SDK</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">window</span><span class="p">.</span><span class="nx">__HERMES_PLUGIN_SDK__</span><span class="p">;</span>
+
+<span class="c1">// React + hooks</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">React</span><span class="w">                    </span><span class="c1">// the React instance</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">hooks</span><span class="p">.</span><span class="nx">useState</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">hooks</span><span class="p">.</span><span class="nx">useEffect</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">hooks</span><span class="p">.</span><span class="nx">useCallback</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">hooks</span><span class="p">.</span><span class="nx">useMemo</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">hooks</span><span class="p">.</span><span class="nx">useRef</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">hooks</span><span class="p">.</span><span class="nx">useContext</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">hooks</span><span class="p">.</span><span class="nx">createContext</span>
+
+<span class="c1">// UI components (shadcn/ui primitives)</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">Card</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">CardHeader</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">CardTitle</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">CardContent</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">Badge</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">Button</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">Input</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">Label</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">Select</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">SelectOption</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">Separator</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">Tabs</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">TabsList</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">TabsTrigger</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">.</span><span class="nx">PluginSlot</span><span class="w">    </span><span class="c1">// render a named slot (useful for nested plugin UIs)</span>
+
+<span class="c1">// Hermes API client + raw fetcher</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">api</span><span class="w">                      </span><span class="c1">// typed client — getStatus, getSessions, getConfig, ...</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">fetchJSON</span><span class="w">                </span><span class="c1">// raw fetch for custom endpoints (plugin-registered routes)</span>
+
+<span class="c1">// Utilities</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">utils</span><span class="p">.</span><span class="nx">cn</span><span class="w">                 </span><span class="c1">// Tailwind class merger (clsx + twMerge)</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">utils</span><span class="p">.</span><span class="nx">timeAgo</span><span class="w">            </span><span class="c1">// &quot;5m ago&quot; from unix timestamp</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">utils</span><span class="p">.</span><span class="nx">isoTimeAgo</span><span class="w">         </span><span class="c1">// &quot;5m ago&quot; from ISO string</span>
+
+<span class="c1">// Hooks</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">useI18n</span><span class="w">                  </span><span class="c1">// i18n hook for multi-language plugins</span>
+</code></pre></div>
+
+<h4 id="calling-your-plugins-backend">Calling your plugin's backend</h4>
+<div class="highlight"><pre><span></span><code><span class="nx">SDK</span><span class="p">.</span><span class="nx">fetchJSON</span><span class="p">(</span><span class="s2">&quot;/api/plugins/my-plugin/data&quot;</span><span class="p">)</span>
+<span class="w">  </span><span class="p">.</span><span class="nx">then</span><span class="p">((</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">data</span><span class="p">))</span>
+<span class="w">  </span><span class="p">.</span><span class="k">catch</span><span class="p">((</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s2">&quot;API call failed:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">));</span>
+</code></pre></div>
+
+<p><code>fetchJSON</code> injects the session auth token, surfaces errors as thrown exceptions, and parses JSON automatically.</p>
+<h4 id="calling-built-in-hermes-endpoints">Calling built-in Hermes endpoints</h4>
+<div class="highlight"><pre><span></span><code><span class="c1">// Agent status</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">api</span><span class="p">.</span><span class="nx">getStatus</span><span class="p">().</span><span class="nx">then</span><span class="p">((</span><span class="nx">s</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">&quot;Version:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">version</span><span class="p">));</span>
+
+<span class="c1">// Recent sessions</span>
+<span class="nx">SDK</span><span class="p">.</span><span class="nx">api</span><span class="p">.</span><span class="nx">getSessions</span><span class="p">(</span><span class="mf">10</span><span class="p">).</span><span class="nx">then</span><span class="p">((</span><span class="nx">resp</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">resp</span><span class="p">.</span><span class="nx">sessions</span><span class="p">.</span><span class="nx">length</span><span class="p">));</span>
+</code></pre></div>
+
+<p>See <a href="web-dashboard.html#rest-api">Web Dashboard → REST API</a> for the full list.</p>
+<h3 id="shell-slots">Shell slots</h3>
+<p>Slots let a plugin inject components into named locations of the app shell — the cockpit sidebar, the header, the footer, an overlay layer — without claiming a whole tab. Multiple plugins can populate the same slot; they render stacked in registration order.</p>
+<p>Register from inside the plugin bundle:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">window</span><span class="p">.</span><span class="nx">__HERMES_PLUGINS__</span><span class="p">.</span><span class="nx">registerSlot</span><span class="p">(</span><span class="s2">&quot;my-plugin&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;sidebar&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">MySidebar</span><span class="p">);</span>
+<span class="nb">window</span><span class="p">.</span><span class="nx">__HERMES_PLUGINS__</span><span class="p">.</span><span class="nx">registerSlot</span><span class="p">(</span><span class="s2">&quot;my-plugin&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;header-left&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">MyCrest</span><span class="p">);</span>
+</code></pre></div>
+
+<h4 id="slot-catalogue">Slot catalogue</h4>
+<p><strong>Shell-wide slots</strong> (render anywhere in the app chrome):</p>
+<table>
+<thead>
+<tr>
+<th>Slot</th>
+<th>Location</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>backdrop</code></td>
+<td>Inside the <code>&lt;Backdrop /&gt;</code> layer stack, above the noise layer.</td>
+</tr>
+<tr>
+<td><code>header-left</code></td>
+<td>Before the Hermes brand in the top bar.</td>
+</tr>
+<tr>
+<td><code>header-right</code></td>
+<td>Before the theme/language switchers in the top bar.</td>
+</tr>
+<tr>
+<td><code>header-banner</code></td>
+<td>Full-width strip below the nav.</td>
+</tr>
+<tr>
+<td><code>sidebar</code></td>
+<td>Cockpit sidebar rail — <strong>only rendered when <code>layoutVariant === "cockpit"</code></strong>.</td>
+</tr>
+<tr>
+<td><code>pre-main</code></td>
+<td>Above the route outlet (inside <code>&lt;main&gt;</code>).</td>
+</tr>
+<tr>
+<td><code>post-main</code></td>
+<td>Below the route outlet (inside <code>&lt;main&gt;</code>).</td>
+</tr>
+<tr>
+<td><code>footer-left</code></td>
+<td>Footer cell content (replaces default).</td>
+</tr>
+<tr>
+<td><code>footer-right</code></td>
+<td>Footer cell content (replaces default).</td>
+</tr>
+<tr>
+<td><code>overlay</code></td>
+<td>Fixed-position layer above everything else. Useful for chrome (scanlines, vignettes) <code>customCSS</code> can't achieve alone.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Page-scoped slots</strong> (render only on the named built-in page — use these to inject widgets, cards, or toolbars into an existing page without overriding the whole route):</p>
+<table>
+<thead>
+<tr>
+<th>Slot</th>
+<th>Where it renders</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>sessions:top</code> / <code>sessions:bottom</code></td>
+<td>Top / bottom of the <code>/sessions</code> page.</td>
+</tr>
+<tr>
+<td><code>analytics:top</code> / <code>analytics:bottom</code></td>
+<td>Top / bottom of the <code>/analytics</code> page.</td>
+</tr>
+<tr>
+<td><code>logs:top</code> / <code>logs:bottom</code></td>
+<td>Top (above filter toolbar) / bottom (below log viewer) of <code>/logs</code>.</td>
+</tr>
+<tr>
+<td><code>cron:top</code> / <code>cron:bottom</code></td>
+<td>Top / bottom of the <code>/cron</code> page.</td>
+</tr>
+<tr>
+<td><code>skills:top</code> / <code>skills:bottom</code></td>
+<td>Top / bottom of the <code>/skills</code> page.</td>
+</tr>
+<tr>
+<td><code>config:top</code> / <code>config:bottom</code></td>
+<td>Top / bottom of the <code>/config</code> page.</td>
+</tr>
+<tr>
+<td><code>env:top</code> / <code>env:bottom</code></td>
+<td>Top / bottom of the <code>/env</code> (Keys) page.</td>
+</tr>
+<tr>
+<td><code>docs:top</code> / <code>docs:bottom</code></td>
+<td>Top (above the iframe) / bottom of <code>/docs</code>.</td>
+</tr>
+<tr>
+<td><code>chat:top</code> / <code>chat:bottom</code></td>
+<td>Top / bottom of <code>/chat</code> (only active when embedded chat is enabled).</td>
+</tr>
+</tbody>
+</table>
+<p>Example — add a banner card to the top of the Sessions page:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">function</span><span class="w"> </span><span class="nx">PinnedSessionsBanner</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">React</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="nx">Card</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">React</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="nx">CardContent</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">className</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;py-2 text-xs&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="s2">&quot;Pinned note injected by my-plugin&quot;</span><span class="p">),</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="nb">window</span><span class="p">.</span><span class="nx">__HERMES_PLUGINS__</span><span class="p">.</span><span class="nx">registerSlot</span><span class="p">(</span><span class="s2">&quot;my-plugin&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;sessions:top&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">PinnedSessionsBanner</span><span class="p">);</span>
+</code></pre></div>
+
+<p>Combine page-scoped slots with <code>tab.hidden: true</code> if your plugin only augments existing pages and doesn't need a sidebar tab of its own.</p>
+<p>The shell only renders <code>&lt;PluginSlot name="..." /&gt;</code> for the slots above. Additional names are accepted by the registry for nested plugin UIs — a plugin can expose its own slots via <code>SDK.components.PluginSlot</code>.</p>
+<h4 id="re-registration-and-hmr">Re-registration and HMR</h4>
+<p>If the same <code>(plugin, slot)</code> pair is registered twice, the later call replaces the earlier one — this matches how React HMR expects plugin re-mounts to behave.</p>
+<h3 id="replacing-built-in-pages-taboverride">Replacing built-in pages (<code>tab.override</code>)</h3>
+<p>Setting <code>tab.override</code> to a built-in route path makes the plugin's component replace that page instead of adding a new tab. Useful when a theme wants a custom home page (<code>/</code>) but wants to keep the rest of the dashboard intact.</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-home&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Home&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;tab&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/my-home&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;override&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;position&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;end&quot;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;entry&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;dist/index.js&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>With <code>override</code> set:</p>
+<ul>
+<li>The original page component at <code>/</code> is removed from the router.</li>
+<li>Your plugin renders at <code>/</code> instead.</li>
+<li>No nav tab is added for <code>tab.path</code> (the override is the point).</li>
+</ul>
+<p>Only one plugin can override a given path. If two plugins claim the same override, the first wins and the second is ignored with a dev-mode warning.</p>
+<p>If you only need to add a card or toolbar to an existing page without taking it over, use <a href="#augmenting-built-in-pages-page-scoped-slots">page-scoped slots</a> instead.</p>
+<h3 id="augmenting-built-in-pages-page-scoped-slots">Augmenting built-in pages (page-scoped slots)</h3>
+<p>Full replacement via <code>tab.override</code> is heavy — your plugin now owns the entire page, including any future updates we ship to it. Most of the time you just want to add a banner, card, or toolbar to an existing page. That's what <strong>page-scoped slots</strong> are for.</p>
+<p>Every built-in page exposes <code>&lt;page&gt;:top</code> and <code>&lt;page&gt;:bottom</code> slots rendered at the top and bottom of its content area. Your plugin populates one by calling <code>registerSlot()</code> — the built-in page keeps working normally, and your component renders alongside it.</p>
+<p>Available slots: <code>sessions:*</code>, <code>analytics:*</code>, <code>logs:*</code>, <code>cron:*</code>, <code>skills:*</code>, <code>config:*</code>, <code>env:*</code>, <code>docs:*</code>, <code>chat:*</code> (each with <code>:top</code> and <code>:bottom</code>). See the full catalogue in <a href="#slot-catalogue">Shell slots → Slot catalogue</a>.</p>
+<p>Minimal example — pin a banner to the top of the Sessions page:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// ~/.hermes/plugins/session-notes/dashboard/manifest.json</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;session-notes&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Session Notes&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;tab&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/session-notes&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;hidden&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;slots&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;sessions:top&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;entry&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;dist/index.js&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// ~/.hermes/plugins/session-notes/dashboard/dist/index.js</span>
+<span class="p">(</span><span class="kd">function</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">SDK</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">window</span><span class="p">.</span><span class="nx">__HERMES_PLUGIN_SDK__</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">React</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">SDK</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Card</span><span class="p">,</span><span class="w"> </span><span class="nx">CardContent</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">SDK</span><span class="p">.</span><span class="nx">components</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">function</span><span class="w"> </span><span class="nx">Banner</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">React</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="nx">Card</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">React</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="nx">CardContent</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">className</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;py-2 text-xs&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="s2">&quot;Remember to label important sessions before archiving.&quot;</span><span class="p">),</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Placeholder for the hidden tab.</span>
+<span class="w">  </span><span class="nb">window</span><span class="p">.</span><span class="nx">__HERMES_PLUGINS__</span><span class="p">.</span><span class="nx">register</span><span class="p">(</span><span class="s2">&quot;session-notes&quot;</span><span class="p">,</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// The real work.</span>
+<span class="w">  </span><span class="nb">window</span><span class="p">.</span><span class="nx">__HERMES_PLUGINS__</span><span class="p">.</span><span class="nx">registerSlot</span><span class="p">(</span><span class="s2">&quot;session-notes&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;sessions:top&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">Banner</span><span class="p">);</span>
+<span class="p">})();</span>
+</code></pre></div>
+
+<p>Key points:</p>
+<ul>
+<li><code>tab.hidden: true</code> keeps the plugin out of the sidebar — it has no standalone page.</li>
+<li>The <code>slots</code> manifest field is documentation only. The actual binding happens in the JS bundle via <code>registerSlot()</code>.</li>
+<li>Multiple plugins can claim the same page-scoped slot. They render stacked in registration order.</li>
+<li>Zero footprint when no plugin registers: the built-in page renders exactly as before.</li>
+</ul>
+<p>A reference plugin (<code>example-dashboard</code> in <a href="https://github.com/NousResearch/hermes-example-plugins/tree/main/example-dashboard" class="ext" target="_blank" rel="noopener"><code>hermes-example-plugins</code></a>) ships a live demo that injects a banner into <code>sessions:top</code> — install it to see the pattern end-to-end.</p>
+<h3 id="slot-only-plugins-tabhidden">Slot-only plugins (<code>tab.hidden</code>)</h3>
+<p>When <code>tab.hidden: true</code>, the plugin registers its component (for direct URL visits) and any slots, but never adds a tab to the navigation. Used by plugins that only exist to inject into slots — a header crest, a sidebar HUD, an overlay.</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;header-crest&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Header Crest&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;tab&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/header-crest&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;position&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;end&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;hidden&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;slots&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;header-left&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;entry&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;dist/index.js&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The bundle still calls <code>register()</code> with a placeholder component (good practice in case someone hits the URL directly) and then <code>registerSlot()</code> to do the real work.</p>
+<h3 id="backend-api-routes">Backend API routes</h3>
+<p>Plugins can register FastAPI routes by setting <code>api</code> in the manifest. Create the file and export a <code>router</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/plugins/my-plugin/dashboard/plugin_api.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fastapi</span><span class="w"> </span><span class="kn">import</span> <span class="n">APIRouter</span>
+
+<span class="n">router</span> <span class="o">=</span> <span class="n">APIRouter</span><span class="p">()</span>
+
+<span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/data&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_data</span><span class="p">():</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;items&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;one&quot;</span><span class="p">,</span> <span class="s2">&quot;two&quot;</span><span class="p">,</span> <span class="s2">&quot;three&quot;</span><span class="p">]}</span>
+
+<span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/action&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">do_action</span><span class="p">(</span><span class="n">body</span><span class="p">:</span> <span class="nb">dict</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;ok&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;received&quot;</span><span class="p">:</span> <span class="n">body</span><span class="p">}</span>
+</code></pre></div>
+
+<p>Routes are mounted under <code>/api/plugins/&lt;name&gt;/</code>, so the above becomes:</p>
+<ul>
+<li><code>GET  /api/plugins/my-plugin/data</code></li>
+<li><code>POST /api/plugins/my-plugin/action</code></li>
+</ul>
+<p>Plugin API routes sit behind the dashboard's normal auth gate — unauthenticated requests get a <code>401</code> before the plugin route runs, and requests to a disabled plugin's routes are rejected at request time. Still, <strong>don't expose the dashboard on a public interface with <code>--host 0.0.0.0</code> if you run untrusted plugins</strong> — an authenticated session can reach their routes too.</p>
+<h4 id="accessing-hermes-internals">Accessing Hermes internals</h4>
+<p>Backend routes run inside the dashboard process, so they can import from the hermes-agent codebase directly:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">fastapi</span><span class="w"> </span><span class="kn">import</span> <span class="n">APIRouter</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">hermes_state</span><span class="w"> </span><span class="kn">import</span> <span class="n">SessionDB</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">hermes_cli.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">load_config</span>
+
+<span class="n">router</span> <span class="o">=</span> <span class="n">APIRouter</span><span class="p">()</span>
+
+<span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/session-count&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">session_count</span><span class="p">():</span>
+    <span class="n">db</span> <span class="o">=</span> <span class="n">SessionDB</span><span class="p">()</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">count</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">db</span><span class="o">.</span><span class="n">list_sessions</span><span class="p">(</span><span class="n">limit</span><span class="o">=</span><span class="mi">9999</span><span class="p">))</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;count&quot;</span><span class="p">:</span> <span class="n">count</span><span class="p">}</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">db</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+<span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/config-snapshot&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">config_snapshot</span><span class="p">():</span>
+    <span class="n">cfg</span> <span class="o">=</span> <span class="n">load_config</span><span class="p">()</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="n">cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;model&quot;</span><span class="p">,</span> <span class="p">{})}</span>
+</code></pre></div>
+
+<h3 id="custom-css-per-plugin">Custom CSS per plugin</h3>
+<p>If your plugin needs styles beyond Tailwind classes and inline <code>style=</code>, add a CSS file and reference it in the manifest:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;css&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;dist/style.css&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The file is injected as a <code>&lt;link&gt;</code> tag on plugin load. Use specific class names to avoid conflicts with the dashboard's styles, and reference the dashboard's CSS vars to stay theme-aware:</p>
+<div class="highlight"><pre><span></span><code><span class="c">/* dist/style.css */</span>
+<span class="p">.</span><span class="nc">my-plugin-chart</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">border</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="kt">px</span><span class="w"> </span><span class="kc">solid</span><span class="w"> </span><span class="nf">var</span><span class="p">(</span><span class="nv">--color-border</span><span class="p">);</span>
+<span class="w">  </span><span class="k">background</span><span class="p">:</span><span class="w"> </span><span class="nf">var</span><span class="p">(</span><span class="nv">--color-card</span><span class="p">);</span>
+<span class="w">  </span><span class="k">color</span><span class="p">:</span><span class="w"> </span><span class="nf">var</span><span class="p">(</span><span class="nv">--color-card-foreground</span><span class="p">);</span>
+<span class="w">  </span><span class="k">padding</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="kt">rem</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="p">.</span><span class="nc">my-plugin-chart</span><span class="p">:</span><span class="nd">hover</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">border-color</span><span class="p">:</span><span class="w"> </span><span class="nf">var</span><span class="p">(</span><span class="nv">--color-ring</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The dashboard exposes every shadcn token as <code>--color-*</code> plus theme extras (<code>--theme-asset-*</code>, <code>--component-&lt;bucket&gt;-*</code>, <code>--radius</code>, <code>--spacing-mul</code>). Reference those and your plugin automatically reskins with the active theme.</p>
+<h3 id="plugin-discovery--reload">Plugin discovery &amp; reload</h3>
+<p>The dashboard scans three directories for <code>dashboard/manifest.json</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Priority</th>
+<th>Directory</th>
+<th>Source label</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1 (wins on conflict)</td>
+<td><code>~/.hermes/plugins/&lt;name&gt;/dashboard/</code></td>
+<td><code>user</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>&lt;repo&gt;/plugins/memory/&lt;name&gt;/dashboard/</code></td>
+<td><code>bundled</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>&lt;repo&gt;/plugins/&lt;name&gt;/dashboard/</code></td>
+<td><code>bundled</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>./.hermes/plugins/&lt;name&gt;/dashboard/</code></td>
+<td><code>project</code> — only when <code>HERMES_ENABLE_PROJECT_PLUGINS</code> is set</td>
+</tr>
+</tbody>
+</table>
+<p>Discovery results are cached per dashboard process. After adding a new plugin, either:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Force a rescan without restart</span>
+curl<span class="w"> </span>http://127.0.0.1:9119/api/dashboard/plugins/rescan
+</code></pre></div>
+
+<p>…or restart <code>hermes dashboard</code>.</p>
+<h4 id="plugin-load-lifecycle">Plugin load lifecycle</h4>
+<ol>
+<li>Dashboard loads. <code>main.tsx</code> exposes the SDK on <code>window.__HERMES_PLUGIN_SDK__</code> and the registry on <code>window.__HERMES_PLUGINS__</code>.</li>
+<li><code>App.tsx</code> calls <code>usePlugins()</code> → fetches <code>GET /api/dashboard/plugins</code>.</li>
+<li>For each manifest: CSS <code>&lt;link&gt;</code> is injected (if declared), then a <code>&lt;script&gt;</code> tag loads the JS bundle.</li>
+<li>The plugin's IIFE runs and calls <code>window.__HERMES_PLUGINS__.register(name, Component)</code> — and optionally <code>.registerSlot(name, slot, Component)</code> for each slot.</li>
+<li>The dashboard resolves the registered component against the manifest, adds the tab to navigation (unless <code>hidden</code>), and mounts the component as a route.</li>
+</ol>
+<p>Plugins have up to <strong>2 seconds</strong> after their script loads to call <code>register()</code>. After that the dashboard stops waiting and finishes initial render. If a plugin later registers, it still appears — the nav is reactive.</p>
+<p>If a plugin's script fails to load (404, syntax error, exception during IIFE), the dashboard logs a warning to the browser console and continues without it.</p>
+<hr />
+<h2 id="combined-theme--plugin-demo">Combined theme + plugin demo</h2>
+<p>The <a href="https://github.com/NousResearch/hermes-example-plugins/tree/main/strike-freedom-cockpit" class="ext" target="_blank" rel="noopener"><code>strike-freedom-cockpit</code></a> plugin (companion repo <code>hermes-example-plugins</code>) is a complete reskin demo. It pairs a theme YAML with a slot-only plugin to produce a cockpit-style HUD without forking the dashboard.</p>
+<p><strong>What it demonstrates:</strong></p>
+<ul>
+<li>A full theme using palette, typography, <code>fontUrl</code>, <code>layoutVariant: cockpit</code>, <code>assets</code>, <code>componentStyles</code> (notched card corners, gradient backgrounds), <code>colorOverrides</code>, and <code>customCSS</code> (scanline overlay).</li>
+<li>A slot-only plugin (<code>tab.hidden: true</code>) that registers into three slots:</li>
+<li><code>sidebar</code> — an MS-STATUS panel with live telemetry bars driven by <code>SDK.api.getStatus()</code>.</li>
+<li><code>header-left</code> — a faction crest that reads <code>--theme-asset-crest</code> from the active theme.</li>
+<li><code>footer-right</code> — a custom tagline replacing the default org line.</li>
+<li>The plugin reads theme-supplied artwork via CSS vars, so swapping themes changes the hero/crest without plugin code changes.</li>
+</ul>
+<p><strong>Install:</strong></p>
+<div class="highlight"><pre><span></span><code>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/NousResearch/hermes-example-plugins.git
+
+<span class="c1"># Theme</span>
+cp<span class="w"> </span>hermes-example-plugins/strike-freedom-cockpit/theme/strike-freedom.yaml<span class="w"> </span><span class="se">\</span>
+<span class="w">   </span>~/.hermes/dashboard-themes/
+
+<span class="c1"># Plugin</span>
+cp<span class="w"> </span>-r<span class="w"> </span>hermes-example-plugins/strike-freedom-cockpit<span class="w"> </span>~/.hermes/plugins/
+</code></pre></div>
+
+<p>Open the dashboard, pick <strong>Strike Freedom</strong> from the theme switcher. The cockpit sidebar appears, the crest shows in the header, the tagline replaces the footer. Switch back to <strong>Hermes Teal</strong> and the plugin remains installed but invisible (the <code>sidebar</code> slot only renders under the <code>cockpit</code> layout variant).</p>
+<p>Read the plugin source (<code>strike-freedom-cockpit/dashboard/dist/index.js</code> in the companion repo) to see how it reads CSS vars, guards against older dashboards without slot support, and registers three slots from one bundle.</p>
+<hr />
+<h2 id="api-reference">API reference</h2>
+<h3 id="theme-endpoints">Theme endpoints</h3>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/api/dashboard/themes</code></td>
+<td>GET</td>
+<td>List available themes + active name. Built-ins return <code>{name, label, description}</code>; user themes also include a <code>definition</code> field with the full normalised theme object.</td>
+</tr>
+<tr>
+<td><code>/api/dashboard/theme</code></td>
+<td>PUT</td>
+<td>Set active theme. Body: <code>{"name": "midnight"}</code>. Persists to <code>config.yaml</code> under <code>dashboard.theme</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="plugin-endpoints">Plugin endpoints</h3>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/api/dashboard/plugins</code></td>
+<td>GET</td>
+<td>List discovered plugins (with manifests, minus internal fields).</td>
+</tr>
+<tr>
+<td><code>/api/dashboard/plugins/rescan</code></td>
+<td>GET</td>
+<td>Force re-scan the plugin directories without restarting.</td>
+</tr>
+<tr>
+<td><code>/dashboard-plugins/&lt;name&gt;/&lt;path&gt;</code></td>
+<td>GET</td>
+<td>Serve static assets from a plugin's <code>dashboard/</code> directory. Path traversal is blocked.</td>
+</tr>
+<tr>
+<td><code>/api/plugins/&lt;name&gt;/*</code></td>
+<td>*</td>
+<td>Plugin-registered backend routes.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="sdk-on-window">SDK on <code>window</code></h3>
+<table>
+<thead>
+<tr>
+<th>Global</th>
+<th>Type</th>
+<th>Provider</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>window.__HERMES_PLUGIN_SDK__</code></td>
+<td>object</td>
+<td><code>registry.ts</code> — React, hooks, UI components, API client, utils.</td>
+</tr>
+<tr>
+<td><code>window.__HERMES_PLUGINS__.register(name, Component)</code></td>
+<td>function</td>
+<td>Register a plugin's main component.</td>
+</tr>
+<tr>
+<td><code>window.__HERMES_PLUGINS__.registerSlot(name, slot, Component)</code></td>
+<td>function</td>
+<td>Register into a named shell slot.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p><strong>My theme doesn't appear in the picker.</strong>
+Check that the file is in <code>~/.hermes/dashboard-themes/</code> and ends in <code>.yaml</code> or <code>.yml</code>. Refresh the page. Run <code>curl http://127.0.0.1:9119/api/dashboard/themes</code> — your theme should be in the response. If the YAML has a parse error, the dashboard logs to <code>errors.log</code> under <code>~/.hermes/logs/</code>.</p>
+<p><strong>My plugin's tab doesn't show up.</strong>
+1. Check the manifest is at <code>~/.hermes/plugins/&lt;name&gt;/dashboard/manifest.json</code> (note the <code>dashboard/</code> subdirectory).
+2. <code>curl http://127.0.0.1:9119/api/dashboard/plugins/rescan</code> to force re-discovery.
+3. Open browser dev tools → Network — confirm <code>manifest.json</code>, <code>index.js</code>, and any CSS loaded without 404s.
+4. Open browser dev tools → Console — look for errors during the IIFE or <code>window.__HERMES_PLUGINS__ is undefined</code> (indicates the SDK didn't initialize, usually a React render crash earlier).
+5. Verify your bundle calls <code>window.__HERMES_PLUGINS__.register(...)</code> with the <strong>same name</strong> as <code>manifest.json:name</code>.</p>
+<p><strong>Slot-registered components don't render.</strong>
+The <code>sidebar</code> slot only renders when the active theme has <code>layoutVariant: cockpit</code>. Other slots always render. If you're registering into a slot with no hits, add <code>console.log</code> inside <code>registerSlot</code> to confirm the plugin bundle ran at all.</p>
+<p><strong>Plugin backend routes return 404.</strong>
+1. Confirm the manifest has <code>"api": "plugin_api.py"</code> pointing to an existing file inside <code>dashboard/</code>.
+2. Restart <code>hermes dashboard</code> — plugin API routes are mounted once at startup, <strong>not</strong> on rescan.
+3. Check that <code>plugin_api.py</code> exports a module-level <code>router = APIRouter()</code>. Other export names are not picked up.
+4. Tail <code>~/.hermes/logs/errors.log</code> for <code>Failed to load plugin &lt;name&gt; API routes</code> — import errors are logged there.</p>
+<p><strong>Theme change drops my color overrides.</strong>
+<code>colorOverrides</code> are scoped to the active theme and cleared on theme switch — that's by design. If you want overrides that persist, put them in your theme's YAML, not in the live switcher.</p>
+<p><strong>Theme customCSS gets truncated.</strong>
+The <code>customCSS</code> block is capped at 32 KiB per theme. Split large stylesheets across multiple themes, or switch to a plugin that injects a full stylesheet via its <code>css</code> field (no size cap).</p>
+<p><strong>I want to ship a plugin on PyPI.</strong>
+Dashboard plugins are installed by directory layout, not by pip entry point. The cleanest distribution path today is a git repo the user clones into <code>~/.hermes/plugins/</code>. A pip-based installer for dashboard plugins is not currently wired up.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/extending-the-dashboard</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#table-of-contents">Table of contents</a></li>
+<li class="lvl2"><a href="#themes">Themes</a></li>
+<li class="lvl3"><a href="#quick-start--your-first-theme">Quick start — your first theme</a></li>
+<li class="lvl3"><a href="#palette-typography-layout">Palette, typography, layout</a></li>
+<li class="lvl3"><a href="#layout-variants">Layout variants</a></li>
+<li class="lvl3"><a href="#theme-assets-images-as-css-vars">Theme assets (images as CSS vars)</a></li>
+<li class="lvl3"><a href="#component-chrome-overrides">Component chrome overrides</a></li>
+<li class="lvl3"><a href="#color-overrides">Color overrides</a></li>
+<li class="lvl3"><a href="#raw-customcss">Raw customCSS</a></li>
+<li class="lvl3"><a href="#built-in-themes">Built-in themes</a></li>
+<li class="lvl3"><a href="#full-theme-yaml-reference">Full theme YAML reference</a></li>
+<li class="lvl2"><a href="#plugins">Plugins</a></li>
+<li class="lvl3"><a href="#quick-start--your-first-plugin">Quick start — your first plugin</a></li>
+<li class="lvl3"><a href="#directory-layout">Directory layout</a></li>
+<li class="lvl3"><a href="#manifest-reference">Manifest reference</a></li>
+<li class="lvl3"><a href="#the-plugin-sdk">The Plugin SDK</a></li>
+<li class="lvl3"><a href="#shell-slots">Shell slots</a></li>
+<li class="lvl3"><a href="#replacing-built-in-pages-taboverride">Replacing built-in pages (tab.override)</a></li>
+<li class="lvl3"><a href="#augmenting-built-in-pages-page-scoped-slots">Augmenting built-in pages (page-scoped slots)</a></li>
+<li class="lvl3"><a href="#slot-only-plugins-tabhidden">Slot-only plugins (tab.hidden)</a></li>
+<li class="lvl3"><a href="#backend-api-routes">Backend API routes</a></li>
+<li class="lvl3"><a href="#custom-css-per-plugin">Custom CSS per plugin</a></li>
+<li class="lvl3"><a href="#plugin-discovery--reload">Plugin discovery &amp;amp; reload</a></li>
+<li class="lvl2"><a href="#combined-theme--plugin-demo">Combined theme + plugin demo</a></li>
+<li class="lvl2"><a href="#api-reference">API reference</a></li>
+<li class="lvl3"><a href="#theme-endpoints">Theme endpoints</a></li>
+<li class="lvl3"><a href="#plugin-endpoints">Plugin endpoints</a></li>
+<li class="lvl3"><a href="#sdk-on-window">SDK on window</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

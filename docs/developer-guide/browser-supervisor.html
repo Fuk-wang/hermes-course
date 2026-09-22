@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Browser CDP Supervisor · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/browser-supervisor</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="browser-cdp-supervisor">Browser CDP Supervisor</h1>
+<p>The CDP supervisor closes two long-standing gaps in Hermes' browser tooling:</p>
+<ol>
+<li><strong>Native JS dialogs</strong> (<code>alert</code>/<code>confirm</code>/<code>prompt</code>/<code>beforeunload</code>) block the
+   page's JS thread. Without supervision, the agent has no way to know a
+   dialog is open — subsequent tool calls hang or throw opaque errors.</li>
+<li><strong>Cross-origin iframes (OOPIFs)</strong> are invisible to top-level
+   <code>Runtime.evaluate</code>. The agent can see iframe nodes in the DOM snapshot but
+   can't click, type, or eval inside them without a CDP session attached to
+   the child target.</li>
+</ol>
+<p>The supervisor solves both by holding a persistent WebSocket to the backend's
+CDP endpoint per browser task, surfacing pending dialogs and frame structure
+into <code>browser_snapshot</code>, and exposing a <code>browser_dialog</code> tool for explicit
+responses.</p>
+<h2 id="backend-support">Backend support</h2>
+<table>
+<thead>
+<tr>
+<th>Backend</th>
+<th>Dialog detect</th>
+<th>Dialog respond</th>
+<th>Frame tree</th>
+<th>OOPIF <code>Runtime.evaluate</code> via <code>browser_cdp(frame_id=...)</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Local Chrome (<code>--remote-debugging-port</code>) / <code>/browser connect</code></td>
+<td>✓</td>
+<td>✓ full workflow</td>
+<td>✓</td>
+<td>✓</td>
+</tr>
+<tr>
+<td>Browserbase</td>
+<td>✓ (via bridge)</td>
+<td>✓ full workflow (via bridge)</td>
+<td>✓</td>
+<td>✓</td>
+</tr>
+<tr>
+<td>Camofox</td>
+<td>✗ no CDP (REST-only)</td>
+<td>✗</td>
+<td>partial via DOM snapshot</td>
+<td>✗</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Browserbase quirk.</strong> Browserbase's CDP proxy uses Playwright internally and
+auto-dismisses native dialogs within ~10ms, so <code>Page.handleJavaScriptDialog</code>
+can't keep up. The supervisor injects a bridge script via
+<code>Page.addScriptToEvaluateOnNewDocument</code> that overrides
+<code>window.alert</code>/<code>confirm</code>/<code>prompt</code> with a synchronous XHR to a magic host
+(<code>hermes-dialog-bridge.invalid</code>). <code>Fetch.enable</code> intercepts those XHRs before
+they touch the network — the dialog becomes a <code>Fetch.requestPaused</code> event the
+supervisor captures, and <code>respond_to_dialog</code> fulfills via
+<code>Fetch.fulfillRequest</code> with a JSON body the injected script decodes.</p>
+<p>From the page's perspective, <code>prompt()</code> still returns the agent-supplied
+string. From the agent's perspective, it's the same <code>browser_dialog(action=...)</code>
+API either way.</p>
+<p>Camofox is unsupported — no CDP surface, REST-only.</p>
+<h2 id="architecture">Architecture</h2>
+<h3 id="cdpsupervisor">CDPSupervisor</h3>
+<p>One <code>asyncio.Task</code> running in a background daemon thread per Hermes <code>task_id</code>.
+Holds a persistent WebSocket to the backend's CDP endpoint. Maintains:</p>
+<ul>
+<li><strong>Dialog queue</strong> — <code>List[PendingDialog]</code> with <code>{id, type, message, default_prompt, session_id, opened_at}</code></li>
+<li><strong>Frame tree</strong> — <code>Dict[frame_id, FrameInfo]</code> with parent relationships, URL, origin, whether cross-origin child session</li>
+<li><strong>Session map</strong> — <code>Dict[session_id, SessionInfo]</code> so interaction tools can route to the right attached session for OOPIF operations</li>
+<li><strong>Recent console errors</strong> — ring buffer of the last 50 for diagnostics</li>
+</ul>
+<p>Subscribes on attach:</p>
+<ul>
+<li><code>Page.enable</code> — <code>javascriptDialogOpening</code>, <code>frameAttached</code>, <code>frameNavigated</code>, <code>frameDetached</code></li>
+<li><code>Runtime.enable</code> — <code>executionContextCreated</code>, <code>consoleAPICalled</code>, <code>exceptionThrown</code></li>
+<li><code>Target.setAutoAttach {autoAttach: true, flatten: true}</code> — surfaces child OOPIF targets; supervisor enables <code>Page</code>+<code>Runtime</code> on each</li>
+</ul>
+<p>Thread-safe state access via a snapshot lock; tool handlers (sync) read the
+frozen snapshot without awaiting.</p>
+<h3 id="lifecycle">Lifecycle</h3>
+<ul>
+<li><strong>Start:</strong> <code>SupervisorRegistry.get_or_start(task_id, cdp_url)</code> — called by
+  <code>browser_navigate</code>, Browserbase session create, <code>/browser connect</code>.
+  Idempotent.</li>
+<li><strong>Stop:</strong> session teardown or <code>/browser disconnect</code>. Cancels the asyncio
+  task, closes the WebSocket, discards state.</li>
+<li><strong>Dropped endpoint:</strong> after a successful attach the supervisor reconnects with
+  backoff (≤10 s) but gives up after <code>MAX_POST_ATTACH_RECONNECT_FAILURES</code>
+  consecutive failures — one final warning, the thread exits and the registry
+  entry is dropped. A dead local Chrome (its task finished) therefore never leaves
+  a retrying thread behind; the next browser call starts a fresh supervisor.</li>
+<li><strong>Rebind:</strong> if the CDP URL changes (user reconnects to a new Chrome), the
+  old supervisor is stopped and a fresh one started — state is never reused
+  across endpoints.</li>
+</ul>
+<h3 id="dialog-policy">Dialog policy</h3>
+<p>Configurable via <code>config.yaml</code> under <code>browser.dialog_policy</code>:</p>
+<ul>
+<li><strong><code>must_respond</code></strong> (default) — capture, surface in <code>browser_snapshot</code>, wait
+  for explicit <code>browser_dialog(action=...)</code> call. After a 300s safety timeout
+  with no response, auto-dismiss and log. Prevents a buggy agent from stalling
+  forever.</li>
+<li><code>auto_dismiss</code> — record and dismiss immediately; agent sees it after the
+  fact via <code>browser_state</code> inside <code>browser_snapshot</code>.</li>
+<li><code>auto_accept</code> — record and accept (useful for <code>beforeunload</code> where the
+  workflow wants to navigate away cleanly).</li>
+</ul>
+<p>Policy is per-task; no per-dialog overrides.</p>
+<h2 id="agent-surface">Agent surface</h2>
+<h3 id="browser_dialog-tool"><code>browser_dialog</code> tool</h3>
+<div class="highlight"><pre><span></span><code>browser_dialog(action, prompt_text=None, dialog_id=None)
+</code></pre></div>
+
+<ul>
+<li><code>action="accept"</code> / <code>"dismiss"</code> → responds to the specified or sole pending dialog (required)</li>
+<li><code>prompt_text=...</code> → text to supply to a <code>prompt()</code> dialog</li>
+<li><code>dialog_id=...</code> → disambiguate when multiple dialogs are queued (rare)</li>
+</ul>
+<p>Tool is response-only. The agent reads pending dialogs from <code>browser_snapshot</code>
+output before calling.</p>
+<h3 id="browser_snapshot-extension"><code>browser_snapshot</code> extension</h3>
+<p>Adds three optional fields to the existing snapshot output when a supervisor
+is attached:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;pending_dialogs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;d-1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;alert&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Hello&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;opened_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1650000000.0</span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;recent_dialogs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;d-1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;alert&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;opened_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1650000000.0</span><span class="p">,</span>
+<span class="w">     </span><span class="nt">&quot;closed_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1650000000.1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;closed_by&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;remote&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;frame_tree&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;top&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;frame_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;FRAME_A&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://example.com/&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;origin&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://example.com&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;children&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;frame_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;FRAME_B&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;about:srcdoc&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;is_oopif&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;frame_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;FRAME_C&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://ads.example.net/&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;is_oopif&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SID_C&quot;</span><span class="p">}</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;truncated&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li>
+<p><strong><code>pending_dialogs</code></strong> — dialogs currently blocking the page's JS thread.
+  The agent must call <code>browser_dialog(action=...)</code> to respond. Empty on
+  Browserbase because their CDP proxy auto-dismisses within ~10ms.</p>
+</li>
+<li>
+<p><strong><code>recent_dialogs</code></strong> — ring buffer of up to 20 recently-closed dialogs with
+  a <code>closed_by</code> tag: <code>"agent"</code> (we responded), <code>"auto_policy"</code> (local
+  auto_dismiss/auto_accept), <code>"watchdog"</code> (must_respond timeout hit), or
+  <code>"remote"</code> (browser/backend closed it on us, e.g. Browserbase). This is
+  how agents on Browserbase still get visibility into what happened.</p>
+</li>
+<li>
+<p><strong><code>frame_tree</code></strong> — frame structure including cross-origin (OOPIF) children.
+  Capped at 30 entries + OOPIF depth 2 to bound snapshot size on ad-heavy
+  pages. <code>truncated: true</code> surfaces when limits were hit; agents needing
+  the full tree can use <code>browser_cdp</code> with <code>Page.getFrameTree</code>.</p>
+</li>
+</ul>
+<p>No new tool schema surface for any of these — the agent reads the snapshot it
+already requests.</p>
+<h3 id="availability-gating">Availability gating</h3>
+<p>Both surfaces gate on <code>_browser_cdp_check</code> (supervisor can only run when a CDP
+endpoint is reachable). On Camofox / no-backend sessions, the dialog tool is
+hidden and the snapshot omits the new fields — no schema bloat.</p>
+<h2 id="cross-origin-iframe-interaction">Cross-origin iframe interaction</h2>
+<p><code>browser_cdp(frame_id=...)</code> routes CDP calls (notably <code>Runtime.evaluate</code>)
+through the supervisor's already-connected WebSocket using the OOPIF's child
+<code>sessionId</code>. Agents pick frame_ids out of
+<code>browser_snapshot.frame_tree.children[]</code> where <code>is_oopif=true</code> and pass them
+to <code>browser_cdp</code>. For same-origin iframes (no dedicated CDP session), the
+agent uses <code>contentWindow</code>/<code>contentDocument</code> from a top-level
+<code>Runtime.evaluate</code> instead — the supervisor surfaces an error pointing at that
+fallback when <code>frame_id</code> belongs to a non-OOPIF.</p>
+<p>On Browserbase, this is the only reliable path for iframe interaction —
+stateless CDP connections (opened per <code>browser_cdp</code> call) hit signed-URL
+expiry, while the supervisor's long-lived connection keeps a valid session.</p>
+<h2 id="file-layout">File layout</h2>
+<ul>
+<li><code>tools/browser_supervisor.py</code> — <code>CDPSupervisor</code>, <code>SupervisorRegistry</code>, <code>PendingDialog</code>, <code>FrameInfo</code></li>
+<li><code>tools/browser_dialog_tool.py</code> — <code>browser_dialog</code> tool handler</li>
+<li><code>tools/browser_tool.py</code> — <code>browser_navigate</code> start-hook, <code>browser_snapshot</code> merge, <code>/browser connect</code> reattach, <code>_cleanup_browser_session</code> teardown</li>
+<li><code>toolsets.py</code> — registers <code>browser_dialog</code> in <code>browser</code>, <code>hermes-acp</code>, <code>hermes-api-server</code>, and core toolsets (gated on CDP reachability)</li>
+<li><code>hermes_cli/config.py</code> — <code>browser.dialog_policy</code> and <code>browser.dialog_timeout_s</code> defaults</li>
+</ul>
+<h2 id="non-goals">Non-goals</h2>
+<ul>
+<li>Detection/interaction for Camofox (upstream gap; tracked separately)</li>
+<li>Streaming dialog/frame events live to the user (would require gateway hooks)</li>
+<li>Persisting dialog history across sessions (in-memory only)</li>
+<li>Per-iframe dialog policies (agent can express this via <code>dialog_id</code>)</li>
+<li>Replacing <code>browser_cdp</code> — it stays as the escape hatch for the long tail (cookies, viewport, network throttling)</li>
+</ul>
+<h2 id="testing">Testing</h2>
+<p>Unit tests (<code>tests/tools/test_browser_supervisor.py</code>) use an asyncio mock CDP
+server that speaks enough of the protocol to exercise all state transitions:
+attach, enable, navigate, dialog fire, dialog dismiss, frame attach/detach,
+child target attach, session teardown. Real-backend E2E (Browserbase + local
+Chromium-family browser) is manual — exercise via <code>/browser connect</code> to a
+live Chromium-family browser and run the dialog/frame test cases described
+above.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/browser-supervisor</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#backend-support">Backend support</a></li>
+<li class="lvl2"><a href="#architecture">Architecture</a></li>
+<li class="lvl3"><a href="#cdpsupervisor">CDPSupervisor</a></li>
+<li class="lvl3"><a href="#lifecycle">Lifecycle</a></li>
+<li class="lvl3"><a href="#dialog-policy">Dialog policy</a></li>
+<li class="lvl2"><a href="#agent-surface">Agent surface</a></li>
+<li class="lvl3"><a href="#browser_dialog-tool">browser_dialog tool</a></li>
+<li class="lvl3"><a href="#browser_snapshot-extension">browser_snapshot extension</a></li>
+<li class="lvl3"><a href="#availability-gating">Availability gating</a></li>
+<li class="lvl2"><a href="#cross-origin-iframe-interaction">Cross-origin iframe interaction</a></li>
+<li class="lvl2"><a href="#file-layout">File layout</a></li>
+<li class="lvl2"><a href="#non-goals">Non-goals</a></li>
+<li class="lvl2"><a href="#testing">Testing</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

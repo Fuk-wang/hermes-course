@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tldraw Offline — Drive and script tldraw offline canvases with an agent · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/creative/creative-tldraw-offline</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="tldraw-offline">Tldraw Offline</h1>
+<p>Drive and script tldraw offline canvases with an agent.</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/creative/tldraw-offline</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/creative\tldraw-offline</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>Teknium + Hermes Agent</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>tldraw</code>, <code>canvas</code>, <code>whiteboard</code>, <code>document-script</code>, <code>diagramming</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="tldraw-offline-skill">tldraw offline Skill</h1>
+<p>Work with the tldraw offline desktop app (offline.tldraw.com): read the open
+canvas, make edits, and write <strong>document scripts</strong> — JavaScript embedded in a
+<code>.tldraw</code> file that runs on load and gives the file durable behavior. The app
+runs a <strong>local HTTP API</strong> (default <code>localhost:7236</code>) that a coding agent drives
+with plain <code>curl</code> from its terminal — this is exactly how the app's own homepage
+demo (Codex editing a canvas live) works. The agent does NOT use computer-use /
+GUI clicking, and does NOT hand-edit the <code>.tldraw</code> file directly. Keep tldraw
+offline open while you work.</p>
+<h2 id="when-to-use">When to Use</h2>
+<ul>
+<li>The user has tldraw offline open and asks you to build or modify a canvas
+  (diagrams, wireframes, layouts).</li>
+<li>You want to add durable behavior to a drawing (reactive shapes, interactive
+  buttons, animation, connection logic) via an embedded document script.</li>
+</ul>
+<p>Do NOT hand-place shapes to imitate a drawing — write the code that generates
+them. Agents are far better at scripting the canvas than at drawing on it.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li><strong>tldraw offline installed and running</strong>, with a document open. Releases:
+  https://github.com/tldraw/tldraw-offline/releases/latest (macOS DMG, Windows
+  x64/Arm64, Linux <code>x86_64</code>/<code>arm64</code> AppImage or amd64/arm64 <code>.deb</code>).</li>
+<li><strong>Agent skills installed in the app</strong>: <code>Develop → Install Agent Skills</code>. The
+  app writes its own tldraw skill into <code>~/.codex/skills/</code>, <code>~/.claude/skills/</code>,
+  <code>~/.cursor/skills/</code>, and <code>~/.gemini/skills/</code> — teaching that agent the <code>curl</code>
+  recipes below. (This Hermes skill mirrors that guidance for Hermes.)</li>
+<li><strong>The local control API.</strong> On launch the app writes <code>server.json</code> to its config
+  dir (Linux <code>~/.config/tldraw/</code>, macOS <code>~/Library/Application Support/tldraw/</code>,
+  Windows <code>%APPDATA%\tldraw\</code>) with <code>port</code> (default <code>7236</code>), a bearer <code>token</code>,
+  <code>pid</code>, and <code>startedAt</code>. Every request except <code>GET /</code> needs
+  <code>Authorization: Bearer &lt;token&gt;</code>. A clean quit removes <code>server.json</code>; if it's
+  present but the port doesn't answer, the app quit uncleanly — treat as not
+  running.</li>
+<li><strong>Re-read port + token on EVERY shell call.</strong> Each terminal call is a fresh
+  shell, so an <code>export</code>ed token does not persist — "export once and reuse" sends
+  an empty token and 401s. Read both inline at the top of each call:
+  <code>PORT=$(jq -r .port &lt;server.json&gt;); TOKEN=$(jq -r .token &lt;server.json&gt;)</code>.</li>
+<li>No account or network needed for local editing.</li>
+</ul>
+<h2 id="how-to-run">How to Run</h2>
+<p>Two distinct workflows. Pick by whether the change must survive a reload.</p>
+<p><strong>A. One-off canvas edits (<code>/exec</code>)</strong> — layout, generating shapes, cleanup. This
+is a live edit, not saved script:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">BASE</span><span class="o">=</span>http://localhost:7236
+<span class="nv">TOKEN</span><span class="o">=</span><span class="k">$(</span>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;import json;print(json.load(open(&#39;</span><span class="nv">$HOME</span><span class="s2">/.config/tldraw/server.json&#39;))[&#39;token&#39;])&quot;</span><span class="k">)</span>
+<span class="c1"># find the focused document id</span>
+<span class="nv">DOC</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$BASE</span><span class="s2">/api/search&quot;</span><span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="nv">$TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;code&quot;:&quot;return (await api.getFocusedDoc()).id&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;import sys,json;print(json.load(sys.stdin)[&#39;result&#39;])&quot;</span><span class="k">)</span>
+<span class="c1"># run code with the live `editor` + `helpers` in scope</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$BASE</span><span class="s2">/api/doc/</span><span class="nv">$DOC</span><span class="s2">/exec&quot;</span><span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="nv">$TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;code&quot;:&quot;const {createShapeId,toRichText}=await import(\&quot;tldraw\&quot;); editor.createShape({id:createShapeId(),type:\&quot;geo\&quot;,x:0,y:0,props:{geo:\&quot;rectangle\&quot;,w:200,h:100,color:\&quot;blue\&quot;,fill:\&quot;solid\&quot;,richText:toRichText(\&quot;hello\&quot;)}}); return editor.getCurrentPageShapes().length&quot;}&#39;</span>
+</code></pre></div>
+
+<p><strong>B. Durable behavior (<code>script/main.js</code>)</strong> — reactive/interactive logic that must
+survive reload. Edit the file on disk; the app's watcher applies it:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># get the live script file path for the doc</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$BASE</span><span class="s2">/api/doc/</span><span class="nv">$DOC</span><span class="s2">/script-workspace&quot;</span><span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="nv">$TOKEN</span><span class="s2">&quot;</span><span class="w">          </span><span class="c1"># -&gt; result.mainJsPath, result.isDefaultScript</span>
+<span class="c1"># edit result.mainJsPath with read_file / patch / write_file (see scripts/main.js)</span>
+<span class="c1"># then confirm the watcher applied it:</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$BASE</span><span class="s2">/api/doc/</span><span class="nv">$DOC</span><span class="s2">/script-status&quot;</span><span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="nv">$TOKEN</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>The ready-to-adapt document script is <code>scripts/main.js</code>.</p>
+<h2 id="quick-reference">Quick Reference</h2>
+<p>The document-script contract (verified against the app's bundled
+<code>script-context.d.ts</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="k">export</span><span class="w"> </span><span class="k">default</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">editor</span><span class="p">,</span><span class="w"> </span><span class="nx">helpers</span><span class="p">,</span><span class="w"> </span><span class="nx">signal</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">editor</span><span class="p">.</span><span class="nx">run</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w">                                 </span><span class="c1">// batch = one undo step</span>
+<span class="w">    </span><span class="nx">helpers</span><span class="p">.</span><span class="nx">createShapeIfMissing</span><span class="p">({</span><span class="w">                   </span><span class="c1">// idempotent furniture</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">createShapeId</span><span class="p">(</span><span class="s1">&#39;node-1&#39;</span><span class="p">),</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;geo&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">x</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">y</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">props</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">geo</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;rectangle&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">w</span><span class="o">:</span><span class="w"> </span><span class="mf">200</span><span class="p">,</span><span class="w"> </span><span class="nx">h</span><span class="o">:</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span><span class="w"> </span><span class="nx">richText</span><span class="o">:</span><span class="w"> </span><span class="nx">toRichText</span><span class="p">(</span><span class="s1">&#39;hi&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">})</span>
+<span class="w">  </span><span class="p">})</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">stop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">editor</span><span class="p">.</span><span class="nx">store</span><span class="p">.</span><span class="nx">listen</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="cm">/* react */</span><span class="w"> </span><span class="p">})</span><span class="w">  </span><span class="c1">// fires the tick AFTER a commit</span>
+<span class="w">  </span><span class="nx">signal</span><span class="p">.</span><span class="nx">addEventListener</span><span class="p">(</span><span class="s1">&#39;abort&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">stop</span><span class="p">())</span><span class="w">           </span><span class="c1">// REQUIRED cleanup on rerun/close</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li><code>ctx.editor</code> — the live <code>Editor</code> (<code>createShape</code>, <code>updateShape</code>, <code>deleteShapes</code>,
+  <code>getCurrentPageShapes</code>, <code>getShape</code>, <code>getBindingsFromShape</code>, <code>zoomToFit</code>,
+  <code>on('tick'|'event', fn)</code>, <code>run(fn, { history: 'ignore' })</code>).</li>
+<li><code>ctx.helpers</code> — <code>createShapeIfMissing</code>, <code>createShapesIfMissing</code>,
+  <code>createArrowBetweenShapes(from, to, { arrowheadEnd })</code>, <code>translateShapes</code>,
+  <code>onShapeTranslate(id, fn, { signal })</code>, <code>richTextToPlainText</code>, <code>boxShapes</code>,
+  <code>getLints</code>.</li>
+<li><code>ctx.signal</code> — <code>AbortSignal</code>; attach every listener/interval teardown to it.</li>
+<li><code>config.js</code> (separate file) registers custom shape/tool/component utils and
+  runs before mount; <code>main.js</code> runs against the mounted editor and reruns on save.</li>
+</ul>
+<h2 id="interactive-ui-clickable-buttons-that-drive-state">Interactive UI (clickable buttons that drive state)</h2>
+<p>Drawn shapes can behave like a real app — the thing a static whiteboard can't do.
+Full example: <code>scripts/counter.js</code> (a number display + MINUS/RESET/PLUS buttons).</p>
+<p>Verification boundary — read this before claiming interaction works or doesn't.
+The app's OWN agent playbook says to verify a clickable-UI script with "one
+simulated click and one state read" via <code>/exec</code> (<code>editor.dispatch</code> a pointer
+event, await a tick, read the shape's state) — NOT by driving a real mouse. By
+that standard the counter is verified: dispatched clicks stepped it
+<code>0 → 1 → 2 → 1 → 0</code>. Two caveats worth writing down:
+- <strong>The script only runs once the app's file-watcher applies it.</strong> On Linux that
+  watcher uses inotify; a host with an exhausted <code>fs.inotify.max_user_instances</code>
+  logs <code>inotify_add_watch ... No space left on device</code>, <code>script-status</code> shows
+  <code>state: "not-watching"</code> / <code>hasEntry: false</code>, and the script never executes.
+  This is a host limit, not a script bug — a normal desktop is unaffected.
+- <strong>Driving the canvas with computer-use needs FOREGROUND delivery, not
+  background.</strong> cua-driver's default <code>background</code> delivery returns
+  <code>background_unavailable</code> against Electron's occluded renderer — but that is the
+  first rung, not a wall. cua-driver returns an <code>escalation: "foreground"</code> hint;
+  set <code>delivery_mode: "foreground"</code> (pair with <code>bring_to_front</code>) and its X11 XTest
+  path (<code>x11_xtest_fg</code>) clicks land — this dismisses the "Run Script" consent
+  dialog and clicks the canvas. Verified by the Cua team on this exact v1.11.0
+  AppImage (Linux/X11). Do NOT conclude "Electron rejects synthetic clicks" and
+  give up in background mode — climb to foreground. (The real product path is
+  still <code>/exec</code>, not clicks; this note is for computer-use-driven testing.)</p>
+<p>The pattern:</p>
+<div class="highlight"><pre><span></span><code><span class="k">export</span><span class="w"> </span><span class="k">default</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">editor</span><span class="p">,</span><span class="w"> </span><span class="nx">helpers</span><span class="p">,</span><span class="w"> </span><span class="nx">signal</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1. Build buttons idempotently; tag each with meta so the handler finds them.</span>
+<span class="w">  </span><span class="c1">//    Give buttons a visible label AND a meta.action.</span>
+<span class="w">  </span><span class="c1">// 2. Hit-test pointer_down in PAGE coordinates against the button bounds:</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">inside</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">b</span><span class="p">,</span><span class="w"> </span><span class="nx">p</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">x</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">x</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">x</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">x</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">w</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">y</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">y</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">y</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">y</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">h</span>
+<span class="w">  </span><span class="kd">function</span><span class="w"> </span><span class="nx">onEvent</span><span class="p">(</span><span class="nx">info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">info</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">info</span><span class="p">.</span><span class="nx">name</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;pointer_down&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">return</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">info</span><span class="p">.</span><span class="nx">point</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">editor</span><span class="p">.</span><span class="nx">screenToPage</span><span class="p">)</span><span class="w"> </span><span class="nx">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">editor</span><span class="p">.</span><span class="nx">screenToPage</span><span class="p">(</span><span class="nx">info</span><span class="p">.</span><span class="nx">point</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">{}</span>
+<span class="w">    </span><span class="nx">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">p</span><span class="w"> </span><span class="o">??</span><span class="w"> </span><span class="nx">editor</span><span class="p">.</span><span class="nx">inputs</span><span class="o">?</span><span class="p">.</span><span class="nx">currentPagePoint</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">p</span><span class="p">)</span><span class="w"> </span><span class="k">return</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">hit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">editor</span><span class="p">.</span><span class="nx">getCurrentPageShapes</span><span class="p">().</span><span class="nx">find</span><span class="p">(</span>
+<span class="w">      </span><span class="p">(</span><span class="nx">s</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">meta</span><span class="o">?</span><span class="p">.</span><span class="nx">ui</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;button&#39;</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">        </span><span class="nx">inside</span><span class="p">({</span><span class="w"> </span><span class="nx">x</span><span class="o">:</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">x</span><span class="p">,</span><span class="w"> </span><span class="nx">y</span><span class="o">:</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">y</span><span class="p">,</span><span class="w"> </span><span class="nx">w</span><span class="o">:</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">props</span><span class="p">.</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">h</span><span class="o">:</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">props</span><span class="p">.</span><span class="nx">h</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="nx">p</span><span class="p">)</span>
+<span class="w">    </span><span class="p">)</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">hit</span><span class="p">)</span><span class="w"> </span><span class="nx">runAction</span><span class="p">(</span><span class="nx">hit</span><span class="p">.</span><span class="nx">meta</span><span class="p">.</span><span class="nx">action</span><span class="p">)</span><span class="w">   </span><span class="c1">// mutate state; store it in a shape&#39;s meta</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="nx">editor</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;event&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">onEvent</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">signal</span><span class="p">.</span><span class="nx">addEventListener</span><span class="p">(</span><span class="s1">&#39;abort&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">editor</span><span class="p">.</span><span class="nx">off</span><span class="p">(</span><span class="s1">&#39;event&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">onEvent</span><span class="p">))</span><span class="w">  </span><span class="c1">// REQUIRED</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li>Find buttons by <code>meta</code> (or visible label via <code>helpers.richTextToPlainText</code>),
+  not by hard-coded coordinates.</li>
+<li><strong>One script owns both build and read.</strong> If the shapes are created by one code
+  path (with <code>meta.action: 'inc'</code>) and the handler reads another convention
+  (<code>meta.action === 'PLUS'</code>), clicks silently do nothing. Ship the buttons built
+  by the same script that handles them, or ship an empty canvas so the script
+  builds them fresh — never pre-bake mismatched shapes into the file's db.</li>
+<li>Keep app state in a shape's <code>meta</code> (e.g. <code>meta.count</code>) and render it as that
+  shape's <code>richText</code> label, so it survives save and is readable for verification.</li>
+<li><strong>Detach the listener on <code>signal</code> abort.</strong> Skipping this is not cosmetic: on
+  the next save the old <code>onEvent</code> stays attached alongside the new one, so every
+  click fires twice and a counter jumps by 2 instead of 1.</li>
+<li>For continuous motion use <code>editor.on('tick', fn)</code>; for a moving anchor with
+  attached pieces use <code>helpers.onShapeTranslate(id, fn, { signal })</code>.</li>
+</ul>
+<h3 id="shipping-a-self-running-scripted-tldraw">Shipping a self-running scripted <code>.tldraw</code></h3>
+<p>A <code>.tldraw</code> is a zip of <code>metadata.json</code> + <code>session.json</code> + <code>db.sqlite</code> + <code>assets/</code>
++ <code>script/</code> (only those entries are packable). For the script to auto-run without
+the "This document contains a script → Run Script" consent dialog:</p>
+<ul>
+<li><code>metadata.json</code> must carry a <code>script</code> manifest: <code>{ "sha256": "&lt;digest&gt;" }</code>, where
+  the digest is <code>sha256</code> over each sorted <code>script/</code> path as <code>`${path}\0${sha256hex(bytes)}\n`</code>.
+  A mismatch is rejected as tampered.</li>
+<li>Pre-trust the digest by adding it to <code>~/.tldraw/script-trust.json</code>
+  (<code>{ "trusted": ["&lt;digest&gt;"] }</code>, or <code>$TLDRAW_SCRIPT_TRUST</code>). The app skips consent
+  when <code>isScriptTrusted(digest)</code> is true.</li>
+</ul>
+<h2 id="procedure">Procedure</h2>
+<ol>
+<li>Read the current token/port from <code>server.json</code>. Find the target doc with
+   <code>api.getFocusedDoc()</code> (or <code>api.getDocs()</code>); name it explicitly if several are
+   open.</li>
+<li>For layout/generation, use <code>/exec</code>. For durable behavior, edit
+   <code>script/main.js</code> via <code>/script-workspace</code>.</li>
+<li>Make scripts idempotent: create durable shapes with <code>helpers.createShapeIfMissing</code>
+   and stable <code>createShapeId('name')</code> ids. Scripts rerun on every load.</li>
+<li>Keep script-owned writes out of the user's undo stack:
+   <code>editor.run(fn, { history: 'ignore' })</code> (or <code>helpers.translateShapes</code>, which
+   already does).</li>
+<li>For reactivity, <code>editor.store.listen(cb)</code> and tear it down on <code>signal</code> abort.
+   For interaction, <code>editor.on('event', h)</code> (hit-test <code>pointer_down</code> in page
+   coords); for animation, <code>editor.on('tick', h)</code>.</li>
+<li>For a single moving anchor + attached internals, prefer
+   <code>helpers.onShapeTranslate(anchorId, fn, { signal })</code> over a broad store
+   listener — a broad listener can turn your own writes into feedback loops.</li>
+</ol>
+<h2 id="shape-props-validated-against-tldraw-sdk-v5-schema">Shape props (validated against tldraw SDK v5 schema)</h2>
+<p><code>editor.createShape</code> / <code>createShapeIfMissing</code> accept partial props (shape utils
+fill defaults). When building <strong>raw records</strong> for a file snapshot, every prop
+below is required (run <code>scripts/validate_shapes.mjs</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Shape</th>
+<th>Required props</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>note</code></td>
+<td><code>richText</code>, <code>color</code>, <code>labelColor</code>, <code>size</code>, <code>font</code>, <code>align</code>, <code>verticalAlign</code>, <code>growY</code>, <code>fontSizeAdjustment</code>, <code>url</code>, <code>scale</code>, <code>textLastEditedBy</code></td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td><code>richText</code>, <code>color</code>, <code>size</code>, <code>font</code>, <code>textAlign</code>, <code>w</code>, <code>scale</code>, <code>autoSize</code></td>
+</tr>
+<tr>
+<td><code>frame</code></td>
+<td><code>w</code>, <code>h</code>, <code>name</code>, <code>color</code></td>
+</tr>
+<tr>
+<td><code>geo</code></td>
+<td><code>geo</code>, <code>w</code>, <code>h</code>, <code>color</code>, <code>fill</code>, <code>richText</code> (+ dash/size/etc. defaulted)</td>
+</tr>
+</tbody>
+</table>
+<p><code>richText</code> must be <code>toRichText('...')</code> — a bare string is rejected. <code>color</code> enum:
+<code>black grey light-violet violet blue light-blue yellow orange green light-green
+light-red red white</code>. <code>font</code> enum: <code>draw sans serif mono</code>.</p>
+<h2 id="pitfalls">Pitfalls</h2>
+<ul>
+<li><strong><code>store.listen</code> fires on the tick AFTER a commit, not synchronously.</strong> If you
+  write a shape and immediately read state expecting the listener to have run, it
+  hasn't. Verified live: an in-turn read shows 0 fires; after one <code>setTimeout</code>
+  tick it shows 1. Same reason the app notes <code>editor.dispatch</code> is async — await a
+  tick before verifying.</li>
+<li><strong><code>ctx</code>, not globals.</strong> The entry is <code>export default function ({ editor,
+  helpers, signal })</code>. There is no bare <code>editor</code> global in a document script.
+  <code>createShapeId</code> / <code>toRichText</code> / <code>Vec</code> come from <code>import ... from 'tldraw'</code>.</li>
+<li><strong><code>richText</code>, not <code>text</code>.</strong> Text/note/geo labels use <code>richText: toRichText(s)</code>.</li>
+<li><strong>Raw records need every prop; <code>createShape</code> does not.</strong> In-app pass only the
+  props you care about; a hand-built <code>.tldraw</code> snapshot needs the full set (table).</li>
+<li><strong>Scripts rerun on every load — be idempotent.</strong> Use <code>createShapeIfMissing</code>
+  with stable ids or you duplicate content and clobber user edits.</li>
+<li><strong>Clean up on <code>signal</code>.</strong> <code>signal.addEventListener('abort', () =&gt; stop())</code> for
+  every <code>store.listen</code> / <code>editor.on</code> / <code>setInterval</code>; the signal fires before
+  rerun and on close.</li>
+<li><strong>Keep script writes out of undo:</strong> <code>editor.run(fn, { history: 'ignore' })</code>.</li>
+<li><strong><code>editor.on('tick')</code> pauses when the window is hidden</strong> (it is a RAF loop);
+  <code>setInterval</code> keeps firing but Electron throttles it to ~1/s in the background.</li>
+<li><strong>The API needs the bearer token</strong> from <code>server.json</code>; the port can be non-default
+  (<code>server.listen(0)</code> picks one) — always read the file, don't hardcode <code>7236</code>.</li>
+<li><strong>Only <code>tldraw</code> / <code>react</code> / <code>react-dom</code> import</strong> — not a Node project.</li>
+</ul>
+<h2 id="verification">Verification</h2>
+<ul>
+<li><strong>Shape schema (offline, no app):</strong> <code>node scripts/validate_shapes.mjs</code> — builds
+  the real tldraw schema and validates note/text/frame. Passing prints <code>3/3</code>.</li>
+<li><strong>Live canvas edits:</strong> after <code>/exec</code>, read back with <code>/api/search</code> →
+  <code>api.getShapes(docId)</code> (returns <code>{ page, viewport, shapes }</code>) and
+  <code>api.getBindings(docId)</code> (array). Confirm expected shapes/bindings exist. Grab
+  <code>api.getScreenshot(docId)</code> (returns <code>{ filePath, ... }</code>) and inspect the PNG/JPEG
+  with <code>vision_analyze</code>.</li>
+<li><strong>Durable script applied:</strong> <code>GET /api/doc/:id/script-status</code>. Success is
+  <code>state: "applied"</code> (<code>currentDiskDigest === lastAppliedDigest === manifestSha256</code>,
+  <code>pendingApply === false</code>, <code>lastApplyError === null</code>). If it stays <code>"pending"</code>
+  after a short retry, report that instead of claiming success; <code>"error"</code> means
+  the apply failed — read <code>errorLogPath</code>.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/creative/creative-tldraw-offline</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#when-to-use">When to Use</a></li>
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#how-to-run">How to Run</a></li>
+<li class="lvl2"><a href="#quick-reference">Quick Reference</a></li>
+<li class="lvl2"><a href="#interactive-ui-clickable-buttons-that-drive-state">Interactive UI (clickable buttons that drive state)</a></li>
+<li class="lvl3"><a href="#shipping-a-self-running-scripted-tldraw">Shipping a self-running scripted .tldraw</a></li>
+<li class="lvl2"><a href="#procedure">Procedure</a></li>
+<li class="lvl2"><a href="#shape-props-validated-against-tldraw-sdk-v5-schema">Shape props (validated against tldraw SDK v5 schema)</a></li>
+<li class="lvl2"><a href="#pitfalls">Pitfalls</a></li>
+<li class="lvl2"><a href="#verification">Verification</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

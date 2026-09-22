@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cron Internals · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/cron-internals</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="cron-internals">Cron Internals</h1>
+<p>The cron subsystem provides scheduled task execution — from simple one-shot delays to recurring cron-expression jobs with skill injection and cross-platform delivery.</p>
+<h2 id="key-files">Key Files</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cron/jobs.py</code></td>
+<td>Job model, storage, atomic read/write to <code>jobs.json</code></td>
+</tr>
+<tr>
+<td><code>cron/scheduler.py</code></td>
+<td>Scheduler loop — due-job detection, execution, repeat tracking</td>
+</tr>
+<tr>
+<td><code>tools/cronjob_tools.py</code></td>
+<td>Model-facing <code>cronjob</code> tool registration and handler</td>
+</tr>
+<tr>
+<td><code>gateway/run.py</code></td>
+<td>Gateway integration — cron ticking in the long-running loop</td>
+</tr>
+<tr>
+<td><code>hermes_cli/cron.py</code></td>
+<td>CLI <code>hermes cron</code> subcommands</td>
+</tr>
+</tbody>
+</table>
+<h2 id="scheduling-model">Scheduling Model</h2>
+<p>Four schedule formats are supported:</p>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Example</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Relative delay</strong></td>
+<td><code>30m</code>, <code>2h</code>, <code>1d</code></td>
+<td>One-shot, fires after the specified duration</td>
+</tr>
+<tr>
+<td><strong>Interval</strong></td>
+<td><code>every 2h</code>, <code>every 30m</code></td>
+<td>Recurring, fires at regular intervals</td>
+</tr>
+<tr>
+<td><strong>Cron expression</strong></td>
+<td><code>0 9 * * *</code></td>
+<td>Standard 5-field cron syntax (minute, hour, day, month, weekday)</td>
+</tr>
+<tr>
+<td><strong>ISO timestamp</strong></td>
+<td><code>2025-01-15T09:00:00</code></td>
+<td>One-shot, fires at the exact time</td>
+</tr>
+</tbody>
+</table>
+<p>The model-facing surface is a single <code>cronjob</code> tool with action-style operations: <code>create</code>, <code>list</code>, <code>update</code>, <code>pause</code>, <code>resume</code>, <code>run</code>, <code>remove</code>.</p>
+<h2 id="job-storage">Job Storage</h2>
+<p>Jobs are stored in <code>~/.hermes/cron/jobs.json</code> with atomic write semantics (write to temp file, then rename). Each job record contains:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;a1b2c3d4e5f6&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Daily briefing&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;prompt&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Summarize today&#39;s AI news and funding rounds&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;schedule&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cron&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;expr&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0 9 * * *&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;display&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0 9 * * *&quot;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;skills&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;ai-funding-daily-report&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;deliver&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;telegram:-1001234567890&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;repeat&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;times&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;completed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;state&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scheduled&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;next_run_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2025-01-16T09:00:00Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;last_run_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2025-01-15T09:00:00Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;last_status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ok&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;created_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2025-01-01T00:00:00Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;script&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="last_status-literals"><code>last_status</code> literals</h3>
+<p><code>last_status</code> is a closed set written only by <code>cron.jobs.mark_job_run</code>. Every
+renderer (<code>hermes cron list</code>/<code>doctor</code>, the <code>cronjob</code> tool, the web dashboard
+badge, the Desktop routine inspector) maps each literal explicitly — a consumer
+must never test <code>== "ok"</code> for "the user got their result":</p>
+<table>
+<thead>
+<tr>
+<th>Literal</th>
+<th>Meaning</th>
+<th>Detail field</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ok</code></td>
+<td>Agent run succeeded and (if targeted) delivery was confirmed</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>error</code></td>
+<td>Agent run failed</td>
+<td><code>last_error</code></td>
+</tr>
+<tr>
+<td><code>delivery_failed</code></td>
+<td>Agent run succeeded, but the output never reached its target</td>
+<td><code>last_delivery_error</code> (<code>last_error</code> is <code>null</code>)</td>
+</tr>
+<tr>
+<td><code>blocked_config</code></td>
+<td>Pre-dispatch validation refused to burn a run</td>
+<td><code>last_error</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="job-lifecycle-states">Job Lifecycle States</h3>
+<table>
+<thead>
+<tr>
+<th>State</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>scheduled</code></td>
+<td>Active, will fire at next scheduled time</td>
+</tr>
+<tr>
+<td><code>paused</code></td>
+<td>Suspended — won't fire until resumed</td>
+</tr>
+<tr>
+<td><code>completed</code></td>
+<td>Repeat count exhausted or one-shot that has fired</td>
+</tr>
+<tr>
+<td><code>running</code></td>
+<td>Currently executing (transient state)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="backward-compatibility">Backward Compatibility</h3>
+<p>Older jobs may have a single <code>skill</code> field instead of the <code>skills</code> array. The scheduler normalizes this at load time — single <code>skill</code> is promoted to <code>skills: [skill]</code>.</p>
+<h2 id="scheduler-runtime">Scheduler Runtime</h2>
+<h3 id="tick-cycle">Tick Cycle</h3>
+<p>The scheduler runs on a periodic tick (default: every 60 seconds):</p>
+<div class="highlight"><pre><span></span><code>tick()
+  1. Acquire scheduler lock (prevents overlapping ticks)
+  2. Load all jobs from jobs.json
+  3. Filter to due jobs (next_run &lt;= now AND state == &quot;scheduled&quot;)
+  4. For each due job:
+     a. Set state to &quot;running&quot;
+     b. Create fresh AIAgent session (no conversation history)
+     c. Load attached skills in order (injected as user messages)
+     d. Run the job prompt through the agent
+     e. Deliver the response to the configured target
+     f. Update run_count, compute next_run
+     g. If repeat count exhausted → state = &quot;completed&quot;
+     h. Otherwise → state = &quot;scheduled&quot;
+  5. Write updated jobs back to jobs.json
+  6. Release scheduler lock
+</code></pre></div>
+
+<h3 id="missed-occurrence-contract-restart-gaps">Missed-occurrence contract (restart gaps)</h3>
+<p>Recurring jobs are <strong>at-most-once per occurrence, and every occurrence is
+accounted for</strong>: it either runs (one execution row carrying its
+<code>scheduled_instant</code>), or its skip is logged with a reason. An occurrence is never
+dropped silently. The mechanics, in the order the due scan applies them
+(<code>cron/jobs.py::_evaluate_due_job</code>):</p>
+<ol>
+<li><strong>Pre-dispatch advance is provisional.</strong> <code>tick()</code> advances <code>next_run_at</code> past
+   the due occurrence <em>before</em> dispatch so a crash mid-run cannot re-fire it on
+   every restart. Because that leaves a window — advanced, but no fire claim yet
+   (interpreter finalizing, executor refusing work, <code>SIGKILL</code>) — the due scan
+   stamps <code>pending_slot = {scheduled_at, at, by}</code> on the record in the same
+   save. <code>claim_job_for_fire</code> (the point after which side effects may exist)
+   and <code>mark_job_run</code> clear it; an explicit <code>schedule</code> / <code>next_run_at</code> /
+   <code>enabled</code> / <code>state</code> rewrite (edit, pause, resume, run-now) drops it.</li>
+<li><strong>Restore once.</strong> A later scan that finds a <code>pending_slot</code> whose owner is
+   provably gone (this process and the job is not in its running set; another
+   process past the 300 s fire-claim lease or with a dead pid) puts
+   <code>scheduled_at</code> back as <code>next_run_at</code>, drops the stamp, and logs a WARNING
+   (<code>cron/occurrences.py::unclaimed_pending_slot</code>). This happens at most once
+   per lost occurrence — the restored instant then meets the ordinary rules
+   below like any other overdue slot, so there is never a replay of N slots.</li>
+<li><strong>Already fired → never twice.</strong> <code>completed_occurrence()</code> consults the
+   executions ledger for a <code>completed</code> row with that exact <code>scheduled_instant</code>
+   before anything is due; a slot that ran before the restart advances without
+   firing. <code>failed</code> / <code>unknown</code> rows do not count as completion, and neither
+   does a <code>completed</code> row whose <code>finished_at</code> (else <code>claimed_at</code>) precedes the
+   instant it is stamped with — a run cannot prove an occurrence that had not
+   happened yet. Rows without a comparable timestamp keep counting.
+   An occurrence identity is only claimable once it is due: <code>claim_job_for_fire</code>
+   drops a <code>scheduled_instant</code> that is still in the future, so an off-tick fire
+   (dashboard trigger, webhook, lease reclaim, misfire backstop) runs
+   occurrence-free instead of consuming the next slot.</li>
+<li><strong>Late within grace → fire late.</strong> Grace = half the period clamped to
+   <code>[120 s, 2 h]</code> (<code>_compute_grace_seconds</code>); the dispatch is stamped
+   <code>last_dispatch.kind = late</code>.</li>
+<li><strong>Past grace → collapse the backlog, fire once</strong> (<code>kind = catch_up</code>), or skip
+   with a logged reason when the operator set <code>cron.catch_up_missed: false</code>
+   (planned downtime). One-shots past their 120 s grace are retired with a
+   diagnostic, never resurrected.</li>
+<li><strong>Paused / disabled / terminal jobs never fire</strong>; the due scan drops them
+   before any of the above, and pause/resume clears any pending slot. A
+   recurring occurrence that came due <em>while paused</em> is not lost, though:
+   <code>resume_job</code> keeps a past stored <code>next_run_at</code> as the due instant instead of
+   re-anchoring from now (and logs that it did), so the first tick after
+   resume applies rules 3–5 to it — one late/catch-up run, or a logged skip.
+   One-shots and future instants recompute from now on resume.</li>
+</ol>
+<p>The same store fields drive every topology: a standalone <code>hermes -p X gateway
+run</code> and a profile served by the default multiplexer (<code>_start_multiplex</code> ticks
+each home under <code>_profile_cron_scope</code>) evaluate the identical record.</p>
+<p><strong>Fire-claim lease during a run.</strong> A firing run holds <code>fire_claim = {at, by}</code> and
+a heartbeat thread refreshes <code>at</code> every 60 s (the lease is 300 s). A heartbeat
+sample that reads the claim as someone else's is re-sampled once before it
+counts: only a confirmed loss cancels the in-flight run. Even then the run's
+outcome is decided against the store at completion, not against that latch —
+a claim the store still validates records the run's real result (<code>ok</code>, or the
+real error), while a genuinely re-owned claim discards the stale result and
+never writes over the new owner. <code>Interrupted by shutdown before terminal
+completion.</code> is therefore recorded only when a real transport cancel (gateway
+drain) stops a run that still holds its claim.</p>
+<h3 id="gateway-integration">Gateway Integration</h3>
+<p>In gateway mode, the cron <strong>trigger</strong> (the part that decides <em>when</em> a due job
+fires — "Axis B") is selected through a pluggable <code>CronScheduler</code> provider. The
+gateway calls <code>resolve_cron_scheduler()</code> (<code>cron/scheduler_provider.py</code>) and runs
+the resolved provider's <code>start()</code> in a dedicated background thread, alongside a
+separate gateway-housekeeping thread.</p>
+<p>The active provider is chosen by the <code>cron.provider</code> config key:</p>
+<ul>
+<li><strong>empty (default)</strong> → the built-in <code>InProcessCronScheduler</code>, which runs the
+  historical in-process loop calling <code>scheduler.tick()</code> every 60 seconds. This
+  is byte-identical to the pre-provider behavior.</li>
+<li><strong>a named provider</strong> (e.g. <code>chronos</code>, a managed-cron provider for
+  scale-to-zero deployments) → discovered from <code>plugins/cron_providers/&lt;name&gt;/</code> or
+  <code>$HERMES_HOME/plugins/&lt;name&gt;/</code>.</li>
+</ul>
+<p>If a named provider is missing, fails to load, or reports <code>is_available() ==
+False</code>, the resolver falls back to the built-in with a warning — <strong>cron is
+never left without a trigger.</strong> The built-in provider lives in core
+(<code>cron/scheduler_provider.py</code>), not in <code>plugins/</code>, so the fallback can't be
+accidentally removed.</p>
+<p>What "firing" <em>means</em> (job execution + delivery) is unchanged and shared by all
+providers — it stays in <code>scheduler.run_job()</code> / <code>scheduler._deliver_result()</code>.
+A provider only controls the trigger, never execution.</p>
+<p>In CLI mode, cron jobs only fire when <code>hermes cron</code> commands are run or during active CLI sessions.</p>
+<h3 id="managed-cron-chronos-for-scale-to-zero">Managed cron (Chronos) for scale-to-zero</h3>
+<p>Hosted gateways can run the <strong>Chronos</strong> provider (<code>cron.provider: chronos</code>)
+instead of the built-in ticker. Chronos lets an idle gateway <strong>scale to zero</strong>
+and still fire cron jobs: rather than a 60-second in-process loop (which would
+keep the process awake), it asks Nous infrastructure to arm exactly <strong>one
+managed one-shot per job at that job's real next-fire time</strong>. At fire time Nous
+calls the gateway back over an authenticated webhook (<code>POST /api/cron/fire</code>);
+the gateway runs the job through the same <code>run_one_job</code> path as the built-in,
+then re-arms the next one-shot. Between fires the process can be fully stopped —
+it wakes only on a genuine fire, never on a periodic timer.</p>
+<p>The flow (the managed scheduler is provided by Nous; the agent holds no
+scheduler credentials):</p>
+<div class="highlight"><pre><span></span><code>create/update a cron job
+  → Chronos asks Nous to arm a one-shot at the job&#39;s next_run_at
+      (authenticated with the agent&#39;s existing Nous token)
+  → at fire time Nous calls the gateway: POST {callback_url}/api/cron/fire
+      (authenticated with a short-lived, purpose-scoped Nous-minted JWT)
+  → the gateway verifies the token, claims the job (store compare-and-set so
+    multi-replica deployments fire at-most-once), runs it, and re-arms the next
+    one-shot
+</code></pre></div>
+
+<p>Config (all non-secret; on hosted agents Nous sets these at provision time):</p>
+<table>
+<thead>
+<tr>
+<th>key</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cron.provider</code></td>
+<td><code>chronos</code> to activate (empty = built-in ticker)</td>
+</tr>
+<tr>
+<td><code>cron.chronos.portal_url</code></td>
+<td>Nous base URL (arming + the fire-token issuer)</td>
+</tr>
+<tr>
+<td><code>cron.chronos.callback_url</code></td>
+<td>the gateway's own public base URL for inbound fires</td>
+</tr>
+<tr>
+<td><code>cron.chronos.expected_audience</code></td>
+<td>this agent's fire-token audience</td>
+</tr>
+<tr>
+<td><code>cron.chronos.nas_jwks_url</code></td>
+<td>key set for verifying the inbound fire token</td>
+</tr>
+</tbody>
+</table>
+<p>If Chronos is misconfigured or the agent isn't logged into Nous,
+<code>resolve_cron_scheduler()</code> falls back to the built-in ticker (logged warning) —
+cron never loses its trigger. Recurring jobs re-arm after each fire; <code>repeat</code>-N
+jobs stop cleanly when the count is exhausted (no orphaned one-shot). The full
+agent↔Nous wire contract lives in <a href="chronos-managed-cron-contract.html">Chronos managed-cron contract</a>.</p>
+<h3 id="fresh-session-isolation">Fresh Session Isolation</h3>
+<p>Each cron job runs in a completely fresh agent session:</p>
+<ul>
+<li>No conversation history from previous runs</li>
+<li>No memory of previous cron executions (persistent memory — MEMORY.md /
+  USER.md — does load, like any other agent run, so durable preferences and
+  facts carry over; per-run conversation context does not)</li>
+<li>The prompt must be self-contained — cron jobs cannot ask clarifying questions</li>
+<li>The <code>cronjob</code> toolset is disabled (recursion guard)</li>
+</ul>
+<h2 id="skill-backed-jobs">Skill-Backed Jobs</h2>
+<p>A cron job can attach one or more skills via the <code>skills</code> field. At execution time:</p>
+<ol>
+<li>Skills are loaded in the specified order</li>
+<li>Each skill's SKILL.md content is injected as context</li>
+<li>The job's prompt is appended as the task instruction</li>
+<li>The agent processes the combined skill context + prompt</li>
+</ol>
+<p>This enables reusable, tested workflows without pasting full instructions into cron prompts. For example:</p>
+<div class="highlight"><pre><span></span><code>Create a daily funding report → attach &quot;ai-funding-daily-report&quot; skill
+</code></pre></div>
+
+<h3 id="script-backed-jobs">Script-Backed Jobs</h3>
+<p>Jobs can also attach a Python script via the <code>script</code> field. The script runs <em>before</em> each agent turn, and its stdout is injected into the prompt as context. This enables data collection and change detection patterns:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/scripts/check_competitors.py</span>
+
+<span class="c1"># Fetch competitor release notes, diff against last run</span>
+<span class="c1"># Print summary to stdout — agent analyzes and reports</span>
+</code></pre></div>
+
+<p>The script timeout defaults to 3600 seconds (1 hour). <code>_get_script_timeout()</code> resolves the limit through a three-layer chain:</p>
+<ol>
+<li><strong>Module-level override</strong> — <code>_SCRIPT_TIMEOUT</code> (for tests/monkeypatching). Only used when it differs from the default.</li>
+<li><strong>Environment variable</strong> — <code>HERMES_CRON_SCRIPT_TIMEOUT</code></li>
+<li><strong>Config</strong> — <code>cron.script_timeout_seconds</code> in <code>config.yaml</code> (read via <code>load_config()</code>)</li>
+<li><strong>Default</strong> — 3600 seconds (1 hour)</li>
+</ol>
+<p>This timeout bounds the <strong>pre-run script only</strong>, not the agent. Skill-based / LLM-driven jobs run on a separate <em>inactivity</em>-based budget (<code>HERMES_CRON_TIMEOUT</code>, default 600s of idle time, <code>0</code> = unlimited) — they can run for hours as long as they keep calling tools or streaming tokens, and are only killed after the configured idle period with no activity. Scripts are dispatched to a persistent thread pool (not held under the tick lock), so a long-running script does not block other due jobs from firing.</p>
+<p>On timeout or ownership cancellation, <code>cron.scheduler_script</code> uses the shared
+<code>agent.deadline.kill_process_tree</code> hard-kill path. On POSIX it briefly stops and
+rescans the live tree before signalling descendants and their parent, including
+children in separate sessions with no inherited output pipes. This closes the
+fork-after-snapshot race. The stop wait is bounded; discovery or permission
+failures still use best-effort group cleanup, not a sandbox guarantee. Any target
+stopped by cleanup is resumed if termination fails; already-stopped targets keep
+their original state. Explicit graceful signals do not suspend their recipients.
+Windows continues to use <code>taskkill /F /T</code>.</p>
+<h3 id="provider-recovery">Provider Recovery</h3>
+<p><code>run_job()</code> passes the user's configured fallback providers and credential pool into the <code>AIAgent</code> instance:</p>
+<ul>
+<li><strong>Fallback providers</strong> — reads <code>fallback_providers</code> (list) or <code>fallback_model</code> (legacy dict) from <code>config.yaml</code>, matching the gateway's <code>_load_fallback_model()</code> pattern. Passed as <code>fallback_model=</code> to <code>AIAgent.__init__</code>, which normalizes both formats into a fallback chain.</li>
+<li><strong>Credential pool</strong> — loads via <code>load_pool(provider)</code> from <code>agent.credential_pool</code> using the resolved runtime provider name. Only passed when the pool has credentials (<code>pool.has_credentials()</code>). Enables same-provider key rotation on 429/rate-limit errors.</li>
+</ul>
+<p>This mirrors the gateway's behavior — without it, cron agents would fail on rate limits without attempting recovery.</p>
+<h2 id="delivery-model">Delivery Model</h2>
+<p>Cron job results can be delivered to any supported platform.</p>
+<p>A bare platform name (<code>slack</code>, <code>telegram</code>, …) delivers to that platform's configured <strong>home channel</strong>. To target a <strong>specific</strong> destination instead, append a target after a colon: <code>platform:&lt;target&gt;</code>. The target is resolved at fire time (not when the job is created), so a job can name a destination on a platform that isn't connected yet and start delivering once it comes online.</p>
+<p>Most platforms also accept an optional thread/topic as a third segment: <code>platform:&lt;chat_id&gt;:&lt;thread_id&gt;</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Target</th>
+<th>Syntax</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Origin chat</td>
+<td><code>origin</code></td>
+<td>Deliver to the chat where the job was created</td>
+</tr>
+<tr>
+<td>Local file</td>
+<td><code>local</code></td>
+<td>Save to <code>~/.hermes/cron/output/</code></td>
+</tr>
+<tr>
+<td>Telegram</td>
+<td><code>telegram</code>, <code>telegram:&lt;chat_id&gt;</code>, <code>telegram:&lt;chat_id&gt;:&lt;thread_id&gt;</code>, <code>telegram:@username</code></td>
+<td><code>telegram:-1001234567890:17585</code></td>
+</tr>
+<tr>
+<td>Discord</td>
+<td><code>discord</code>, <code>discord:#channel</code>, <code>discord:&lt;channel_id&gt;</code>, <code>discord:&lt;channel_id&gt;:&lt;thread_id&gt;</code></td>
+<td><code>discord:#engineering</code></td>
+</tr>
+<tr>
+<td>Slack</td>
+<td><code>slack</code>, <code>slack:#channel</code>, <code>slack:&lt;channel_id&gt;</code>, <code>slack:&lt;channel_id&gt;:&lt;thread_ts&gt;</code></td>
+<td><code>slack:#engineering</code></td>
+</tr>
+<tr>
+<td>Matrix</td>
+<td><code>matrix</code>, <code>matrix:&lt;!room_id:server&gt;</code>, <code>matrix:&lt;@user:server&gt;</code></td>
+<td><code>matrix:!abc123:example.org</code></td>
+</tr>
+<tr>
+<td>Feishu</td>
+<td><code>feishu</code>, <code>feishu:&lt;chat_id&gt;</code>, <code>feishu:&lt;chat_id&gt;:&lt;thread_id&gt;</code></td>
+<td><code>feishu:oc_abc123def</code></td>
+</tr>
+<tr>
+<td>WhatsApp</td>
+<td><code>whatsapp</code>, <code>whatsapp:&lt;jid&gt;</code>, <code>whatsapp:+&lt;E.164&gt;</code></td>
+<td><code>whatsapp:123456@g.us</code></td>
+</tr>
+<tr>
+<td>Signal</td>
+<td><code>signal</code>, <code>signal:group:&lt;id&gt;</code>, <code>signal:+&lt;E.164&gt;</code></td>
+<td><code>signal:group:aBcD==</code></td>
+</tr>
+<tr>
+<td>SMS</td>
+<td><code>sms</code>, <code>sms:+&lt;E.164&gt;</code></td>
+<td><code>sms:+&lt;E.164 number&gt;</code></td>
+</tr>
+<tr>
+<td>Email</td>
+<td><code>email</code>, <code>email:&lt;address&gt;</code></td>
+<td><code>email:alerts@example.com</code></td>
+</tr>
+<tr>
+<td>Weixin</td>
+<td><code>weixin</code>, <code>weixin:&lt;wxid&gt;</code></td>
+<td><code>weixin:wxid_abc123</code></td>
+</tr>
+<tr>
+<td>Mattermost</td>
+<td><code>mattermost</code> or <code>mattermost:&lt;channel_id&gt;</code></td>
+<td>Bare name delivers to Mattermost home</td>
+</tr>
+<tr>
+<td>Home Assistant</td>
+<td><code>homeassistant</code> or <code>homeassistant:&lt;conversation&gt;</code></td>
+<td>Bare name delivers to HA conversation</td>
+</tr>
+<tr>
+<td>DingTalk</td>
+<td><code>dingtalk</code> or <code>dingtalk:&lt;chat_id&gt;</code></td>
+<td>Bare name delivers to DingTalk</td>
+</tr>
+<tr>
+<td>WeCom</td>
+<td><code>wecom</code> or <code>wecom:&lt;chat_id&gt;</code></td>
+<td>Bare name delivers to WeCom</td>
+</tr>
+<tr>
+<td>BlueBubbles</td>
+<td><code>bluebubbles</code> or <code>bluebubbles:&lt;chat_guid&gt;</code></td>
+<td>Bare name delivers to iMessage via BlueBubbles</td>
+</tr>
+<tr>
+<td>QQ Bot</td>
+<td><code>qqbot</code> or <code>qqbot:&lt;chat_id&gt;</code></td>
+<td>Bare name delivers to QQ (Tencent) via Official API v2</td>
+</tr>
+<tr>
+<td>Bot Chat</td>
+<td><code>bot-chat</code> or <code>bot-chat:&lt;profile&gt;</code></td>
+<td>Inject into a local profile's canonical Bot Chat (the bot responds)</td>
+</tr>
+</tbody>
+</table>
+<p>Platforms in the first group have explicit, validated target syntax — named channels (<code>#channel</code>), topics/threads, room/user IDs, group IDs, or phone numbers. The remaining platforms accept the generic <code>platform:&lt;chat_id&gt;</code> form (the value after the colon is used verbatim as the destination ID); a bare platform name always delivers to the home channel.</p>
+<p><strong>Named channels</strong> (<code>slack:#engineering</code>, <code>discord:#engineering</code>, or a friendly name like <code>slack:engineering</code>) are resolved against the channel directory the gateway builds from connected adapters, so the gateway must have discovered the channel for name resolution to succeed; raw IDs (<code>slack:C0123ABCD45</code>) always work.</p>
+<p>For <strong>Telegram topics</strong>, use <code>telegram:&lt;chat_id&gt;:&lt;thread_id&gt;</code> (e.g., <code>telegram:-1001234567890:17585</code>). For <strong>Slack threads</strong>, the third segment is the parent message's <code>thread_ts</code> (e.g., <code>slack:C0123ABCD45:1700000000.000100</code>), so it only applies when replying under an existing message.</p>
+<p><strong>Bot Chat</strong> (<code>bot-chat</code>, <code>bot-chat:&lt;profile&gt;</code>) is a machine-local pseudo-platform, not a gateway adapter. A mailbox-capable canonical live owner receives durable admission immediately (idle or busy); only that owner executes the incoming turn. <code>scheduler_delivery._deliver_to_bot_chat</code> resolves the target with <code>get_profile_dir</code> or the job's current <code>get_hermes_home</code>, derives the receipt ID from the source home, job ID, durable <code>execution_id</code>, and target home, and checks the receipt before discovering an owner. An existing receipt never permits CLI fallback. Without a mailbox owner it retains <code>hermes [-p &lt;profile&gt;] chat --in ~ -c "Bot Chat" --create-if-missing -Q --query-file &lt;tmp&gt;</code> and normal ownership fencing. Both lanes deliver a real inbound turn, not a transcript mirror. Queued/claimed receipts populate <code>last_delivery_queued</code> with receipt IDs. The delivery aggregator excludes admission notices from genuine errors and records execution <code>delivery_outcome=queued</code>; successful jobs use <code>last_status=delivery_queued</code>. Genuine errors on mixed targets take precedence as failed while retaining queued receipt metadata. The target profile’s durable receipt is authoritative for terminal completion. Queued is the historical admission outcome, not proof of delivery. Historical cron status does not automatically track later receipt completion. Bot-chat targets are excluded from <code>all</code> and credential preflight. Bot-chat-only external workers bypass the gateway delivery queue; mixed external-worker targets retain gateway handoff. <code>cron.bot_chat_delivery_timeout_seconds</code> (default 600) bounds only the legacy subprocess lane.</p>
+<h3 id="response-wrapping">Response Wrapping</h3>
+<p>By default (<code>cron.wrap_response: true</code>), cron deliveries are wrapped with:
+- A header identifying the cron job name and task
+- A footer noting the agent cannot see the delivered message in conversation</p>
+<p>The <code>[SILENT]</code> prefix in a cron response suppresses delivery entirely — useful for jobs that only need to write to files or perform side effects.</p>
+<h3 id="session-isolation">Session Isolation</h3>
+<p>Cron deliveries are NOT mirrored into gateway session conversation history. They exist only in the cron job's own session. This prevents message alternation violations in the target chat's conversation.</p>
+<h2 id="recursion-guard">Recursion Guard</h2>
+<p>Cron-run sessions have the <code>cronjob</code> toolset disabled. This prevents:
+- A scheduled job from creating new cron jobs
+- Recursive scheduling that could explode token usage
+- Accidental mutation of the job schedule from within a job</p>
+<h2 id="locking">Locking</h2>
+<p>The scheduler uses cross-process file-based locking (<code>fcntl.flock</code> on Unix, <code>msvcrt.locking</code> on Windows) to prevent overlapping ticks from executing the same due-job batch twice — even between the gateway's in-process ticker and a standalone <code>hermes cron</code> / manual <code>tick()</code> call. If the lock cannot be acquired, <code>tick()</code> returns 0 immediately.</p>
+<h2 id="cli-interface">CLI Interface</h2>
+<p>The <code>hermes cron</code> CLI provides direct job management:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>list<span class="w">                    </span><span class="c1"># Show all jobs</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w">                  </span><span class="c1"># Interactive job creation (alias: add)</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w">           </span><span class="c1"># Edit job configuration</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>pause<span class="w"> </span>&lt;job_id&gt;<span class="w">          </span><span class="c1"># Pause a running job</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>resume<span class="w"> </span>&lt;job_id&gt;<span class="w">         </span><span class="c1"># Resume a paused job</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>run<span class="w"> </span>&lt;job_id&gt;<span class="w">            </span><span class="c1"># Trigger immediate execution</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>remove<span class="w"> </span>&lt;job_id&gt;<span class="w">         </span><span class="c1"># Delete a job</span>
+</code></pre></div>
+
+<h2 id="related-docs">Related Docs</h2>
+<ul>
+<li><a href="../user-guide/features/cron.html">Cron Feature Guide</a></li>
+<li><a href="gateway-internals.html">Gateway Internals</a></li>
+<li><a href="agent-loop.html">Agent Loop Internals</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/cron-internals</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#key-files">Key Files</a></li>
+<li class="lvl2"><a href="#scheduling-model">Scheduling Model</a></li>
+<li class="lvl2"><a href="#job-storage">Job Storage</a></li>
+<li class="lvl3"><a href="#last_status-literals">last_status literals</a></li>
+<li class="lvl3"><a href="#job-lifecycle-states">Job Lifecycle States</a></li>
+<li class="lvl3"><a href="#backward-compatibility">Backward Compatibility</a></li>
+<li class="lvl2"><a href="#scheduler-runtime">Scheduler Runtime</a></li>
+<li class="lvl3"><a href="#tick-cycle">Tick Cycle</a></li>
+<li class="lvl3"><a href="#missed-occurrence-contract-restart-gaps">Missed-occurrence contract (restart gaps)</a></li>
+<li class="lvl3"><a href="#gateway-integration">Gateway Integration</a></li>
+<li class="lvl3"><a href="#managed-cron-chronos-for-scale-to-zero">Managed cron (Chronos) for scale-to-zero</a></li>
+<li class="lvl3"><a href="#fresh-session-isolation">Fresh Session Isolation</a></li>
+<li class="lvl2"><a href="#skill-backed-jobs">Skill-Backed Jobs</a></li>
+<li class="lvl3"><a href="#script-backed-jobs">Script-Backed Jobs</a></li>
+<li class="lvl3"><a href="#provider-recovery">Provider Recovery</a></li>
+<li class="lvl2"><a href="#delivery-model">Delivery Model</a></li>
+<li class="lvl3"><a href="#response-wrapping">Response Wrapping</a></li>
+<li class="lvl3"><a href="#session-isolation">Session Isolation</a></li>
+<li class="lvl2"><a href="#recursion-guard">Recursion Guard</a></li>
+<li class="lvl2"><a href="#locking">Locking</a></li>
+<li class="lvl2"><a href="#cli-interface">CLI Interface</a></li>
+<li class="lvl2"><a href="#related-docs">Related Docs</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

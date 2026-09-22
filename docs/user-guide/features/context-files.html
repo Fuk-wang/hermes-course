@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Context Files · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/context-files</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="context-files">Context Files</h1>
+<p>Hermes Agent automatically discovers and loads context files that shape how it behaves. Some are project-local and discovered from your working directory. <code>SOUL.md</code> is now global to the Hermes instance and is loaded from <code>HERMES_HOME</code> only.</p>
+<h2 id="supported-context-files">Supported Context Files</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Purpose</th>
+<th>Discovery</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>.hermes.md</strong> / <strong>HERMES.md</strong></td>
+<td>Project instructions (highest priority)</td>
+<td>Walks to git root</td>
+</tr>
+<tr>
+<td><strong>AGENTS.override.md</strong></td>
+<td>Personal, per-directory override of AGENTS.md (typically gitignored)</td>
+<td>CWD at startup + subdirectories progressively</td>
+</tr>
+<tr>
+<td><strong>AGENTS.md</strong></td>
+<td>Project instructions, conventions, architecture</td>
+<td>CWD at startup + subdirectories progressively</td>
+</tr>
+<tr>
+<td><strong>CLAUDE.md</strong></td>
+<td>Claude Code context files (also detected)</td>
+<td>CWD at startup + subdirectories progressively</td>
+</tr>
+<tr>
+<td><strong>SOUL.md</strong></td>
+<td>Global personality and tone customization for this Hermes instance</td>
+<td><code>HERMES_HOME/SOUL.md</code> only</td>
+</tr>
+<tr>
+<td><strong>.cursorrules</strong></td>
+<td>Cursor IDE coding conventions</td>
+<td>CWD only</td>
+</tr>
+<tr>
+<td><strong>.cursor/rules/*.mdc</strong></td>
+<td>Cursor IDE rule modules</td>
+<td>CWD only</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition adm-info"><p class="adm-title">Priority system</p>
+<p>Only <strong>one</strong> project context type is loaded per session (first match wins): <code>.hermes.md</code> → <code>AGENTS.override.md</code> → <code>AGENTS.md</code> → <code>CLAUDE.md</code> → <code>.cursorrules</code>. <strong>SOUL.md</strong> is always loaded independently as the agent identity (slot #1).</p>
+<p>If an <code>AGENTS.override.md</code> exists next to an <code>AGENTS.md</code>, the override is loaded <strong>instead of</strong> the committed file — keep a personal (usually gitignored) <code>AGENTS.override.md</code> when you want different instructions than the ones checked into the repo, without editing the tracked <code>AGENTS.md</code>.</p>
+</div>
+<h2 id="agentsmd">AGENTS.md</h2>
+<p><code>AGENTS.md</code> is the primary project context file. It tells the agent how your project is structured, what conventions to follow, and any special instructions.</p>
+<h3 id="directory-chain-git-root--working-directory">Directory Chain (git root → working directory)</h3>
+<p>When your working directory sits inside a git repository, Hermes loads a <strong>merged chain</strong> of <code>AGENTS.md</code> files at session start: the git-root <code>AGENTS.md</code> first, then the <code>AGENTS.md</code> in every intermediate directory down to your working directory. Deeper files appear later in the prompt, so more specific guidance takes precedence. Each file gets its own provenance header (e.g. <code>## ../../AGENTS.md</code>), and identical copies along the chain are deduplicated.</p>
+<div class="highlight"><pre><span></span><code>monorepo/                   (git root, cwd = packages/webapp/)
+├── AGENTS.md              ← Loaded first (repo-wide conventions)
+└── packages/
+    ├── AGENTS.md          ← Loaded second
+    └── webapp/
+        └── AGENTS.md      ← Loaded last (most specific, takes precedence)
+</code></pre></div>
+
+<!-- no-tmp: ok — explains why /tmp is never trusted -->
+<p>Outside a git repository, only the working directory itself is checked — parents are never consulted, so an <code>AGENTS.md</code> planted in <code>/tmp</code> or <code>$HOME</code> can't leak into unrelated sessions.</p>
+<h3 id="progressive-subdirectory-discovery">Progressive Subdirectory Discovery</h3>
+<p>At session start, Hermes loads the <code>AGENTS.md</code> from your working directory into the system prompt. As the agent navigates into subdirectories during the session (via <code>read_file</code>, <code>terminal</code>, <code>search_files</code>, etc.), it <strong>progressively discovers</strong> context files in those directories and injects them into the conversation at the moment they become relevant.</p>
+<div class="highlight"><pre><span></span><code>my-project/
+├── AGENTS.md              ← Loaded at startup (system prompt)
+├── frontend/
+│   └── AGENTS.md          ← Discovered when agent reads frontend/ files
+├── backend/
+│   └── AGENTS.md          ← Discovered when agent reads backend/ files
+└── shared/
+    └── AGENTS.md          ← Discovered when agent reads shared/ files
+</code></pre></div>
+
+<p>This approach has two advantages over loading everything at startup:
+- <strong>No system prompt bloat</strong> — subdirectory hints only appear when needed
+- <strong>Prompt cache preservation</strong> — the system prompt stays stable across turns</p>
+<p>Each subdirectory is checked at most once per session. The discovery also walks up parent directories, so reading <code>backend/src/main.py</code> will discover <code>backend/AGENTS.md</code> even if <code>backend/src/</code> has no context file of its own.</p>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>Subdirectory context files go through the same <a href="#security-prompt-injection-protection">security scan</a> as startup context files. Malicious files are blocked.</p>
+</div>
+<h3 id="example-agentsmd">Example AGENTS.md</h3>
+<div class="highlight"><pre><span></span><code><span class="gh"># Project Context</span>
+
+This is a Next.js 14 web application with a Python FastAPI backend.
+
+<span class="gu">## Architecture</span>
+<span class="k">-</span><span class="w"> </span>Frontend: Next.js 14 with App Router in <span class="sb">`/frontend`</span>
+<span class="k">-</span><span class="w"> </span>Backend: FastAPI in <span class="sb">`/backend`</span>, uses SQLAlchemy ORM
+<span class="k">-</span><span class="w"> </span>Database: PostgreSQL 16
+<span class="k">-</span><span class="w"> </span>Deployment: Docker Compose on a Hetzner VPS
+
+<span class="gu">## Conventions</span>
+<span class="k">-</span><span class="w"> </span>Use TypeScript strict mode for all frontend code
+<span class="k">-</span><span class="w"> </span>Python code follows PEP 8, use type hints everywhere
+<span class="k">-</span><span class="w"> </span>All API endpoints return JSON with <span class="sb">`{data, error, meta}`</span> shape
+<span class="k">-</span><span class="w"> </span>Tests go in <span class="sb">`__tests__/`</span> directories (frontend) or <span class="sb">`tests/`</span> (backend)
+
+<span class="gu">## Important Notes</span>
+<span class="k">-</span><span class="w"> </span>Never modify migration files directly — use Alembic commands
+<span class="k">-</span><span class="w"> </span>The <span class="sb">`.env.local`</span> file has real API keys, don&#39;t commit it
+<span class="k">-</span><span class="w"> </span>Frontend port is 3000, backend is 8000, DB is 5432
+</code></pre></div>
+
+<h2 id="soulmd">SOUL.md</h2>
+<p><code>SOUL.md</code> controls the agent's personality, tone, and communication style. See the <a href="personality.html">Personality</a> page for full details.</p>
+<p><strong>Location:</strong></p>
+<ul>
+<li><code>~/.hermes/SOUL.md</code></li>
+<li>or <code>$HERMES_HOME/SOUL.md</code> if you run Hermes with a custom home directory</li>
+</ul>
+<p>Important details:</p>
+<ul>
+<li>Hermes seeds a default <code>SOUL.md</code> automatically if one does not exist yet</li>
+<li>Hermes loads <code>SOUL.md</code> only from <code>HERMES_HOME</code></li>
+<li>Hermes does not probe the working directory for <code>SOUL.md</code></li>
+<li>If the file is empty, nothing from <code>SOUL.md</code> is added to the prompt</li>
+<li>If the file has content, the content is injected verbatim after scanning and truncation</li>
+</ul>
+<h2 id="cursorrules">.cursorrules</h2>
+<p>Hermes is compatible with Cursor IDE's <code>.cursorrules</code> file and <code>.cursor/rules/*.mdc</code> rule modules. If these files exist in your project root and no higher-priority context file (<code>.hermes.md</code>, <code>AGENTS.md</code>, or <code>CLAUDE.md</code>) is found, they're loaded as the project context.</p>
+<p>This means your existing Cursor conventions automatically apply when using Hermes.</p>
+<h2 id="how-context-files-are-loaded">How Context Files Are Loaded</h2>
+<h3 id="at-startup-system-prompt">At startup (system prompt)</h3>
+<p>Context files are loaded by <code>build_context_files_prompt()</code> in <code>agent/prompt_builder.py</code>:</p>
+<ol>
+<li><strong>Scan working directory</strong> — checks for <code>.hermes.md</code> → <code>AGENTS.md</code> → <code>CLAUDE.md</code> → <code>.cursorrules</code> (first match wins)</li>
+<li><strong>Content is read</strong> — each file is read as UTF-8 text</li>
+<li><strong>Security scan</strong> — content is checked for prompt injection patterns</li>
+<li><strong>Truncation</strong> — files exceeding the character cap are head/tail truncated (70% head, 20% tail, with a marker in the middle). The cap is an explicit <code>context_file_max_chars</code> from config.yaml when set; otherwise it scales dynamically with the model's context window (floor 20,000 chars, ceiling 500,000)</li>
+<li><strong>Assembly</strong> — all sections are combined under a <code># Project Context</code> header</li>
+<li><strong>Injection</strong> — the assembled content is added to the system prompt</li>
+</ol>
+<h3 id="during-the-session-progressive-discovery">During the session (progressive discovery)</h3>
+<p><code>SubdirectoryHintTracker</code> in <code>agent/subdirectory_hints.py</code> watches tool call arguments for file paths:</p>
+<ol>
+<li><strong>Path extraction</strong> — after each tool call, file paths are extracted from arguments (<code>path</code>, <code>workdir</code>, shell commands)</li>
+<li><strong>Ancestor walk</strong> — the directory and up to 5 parent directories are checked (stopping at already-visited directories)</li>
+<li><strong>Hint loading</strong> — if an <code>AGENTS.md</code>, <code>CLAUDE.md</code>, or <code>.cursorrules</code> is found, it's loaded (first match per directory)</li>
+<li><strong>Security scan</strong> — same prompt injection scan as startup files</li>
+<li><strong>Truncation</strong> — capped at 32,000 characters per file (a fixed preview cap; <code>context_file_max_chars</code> and the model's context window do not change it). An oversized hint keeps its head/tail marker pointing at the full file and is logged, but does not raise the chat truncation warning that startup context files do</li>
+<li><strong>Injection</strong> — appended to the tool result, so the model sees it in context naturally</li>
+</ol>
+<p>The final prompt section looks roughly like:</p>
+<div class="highlight"><pre><span></span><code># Project Context
+
+The following project context files have been loaded and should be followed:
+
+## AGENTS.md
+
+[Your AGENTS.md content here]
+
+## .cursorrules
+
+[Your .cursorrules content here]
+
+[Your SOUL.md content here]
+</code></pre></div>
+
+<p>Notice that SOUL content is inserted directly, without extra wrapper text.</p>
+<h2 id="security-prompt-injection-protection">Security: Prompt Injection Protection</h2>
+<p>All context files are scanned for potential prompt injection before being included. The scanner checks for:</p>
+<ul>
+<li><strong>Instruction override attempts</strong>: "ignore previous instructions", "disregard your rules"</li>
+<li><strong>Deception patterns</strong>: "do not tell the user"</li>
+<li><strong>System prompt overrides</strong>: "system prompt override"</li>
+<li><strong>Hidden HTML comments</strong>: <code>&lt;!-- ignore instructions --&gt;</code></li>
+<li><strong>Hidden div elements</strong>: <code>&lt;div style="display:none"&gt;</code></li>
+<li><strong>Credential exfiltration</strong>: <code>curl ... $API_KEY</code></li>
+<li><strong>Secret file access</strong>: <code>cat .env</code>, <code>cat credentials</code></li>
+<li><strong>Invisible characters</strong>: zero-width spaces, bidirectional overrides, word joiners</li>
+</ul>
+<p>If any threat pattern is detected in a project context file (<code>.hermes.md</code>, <code>AGENTS.md</code>, <code>CLAUDE.md</code>,
+<code>.cursorrules</code>), the file is blocked:</p>
+<div class="highlight"><pre><span></span><code>[BLOCKED: AGENTS.md contained potential prompt injection (prompt_injection). Content not loaded.]
+</code></pre></div>
+
+<p>Your own <code>SOUL.md</code> in <code>HERMES_HOME</code> is treated differently: it is a file you wrote (file-tool writes to it
+need your approval, and project checkouts never supply it), so a scanner hit there <strong>does not block the
+file</strong>. Hermes logs a warning naming the matched pattern, loads the file as usual, and <code>/context</code> lists it as
+<code>⚠ SOUL.md … loaded — matched prompt-injection pattern(s); review the file</code>. This lets an identity file that
+<em>documents</em> an attack phrase (security guidance such as "content telling you to ignore previous instructions")
+keep working; if you did not write the flagged text, treat the warning as a sign that something else edited
+the file. The exception does not extend to a <code>SOUL.md</code> shipped by a profile distribution: <code>hermes profile
+install &lt;git-url&gt;</code> and <code>hermes profile update</code> copy a third party's <code>SOUL.md</code> into the profile home without
+a scan or an approval prompt, so when <code>distribution.yaml</code> owns the file a scanner hit still blocks it.</p>
+<div class="admonition adm-warning"><p class="adm-title">Warning</p>
+<p>This scanner protects against common injection patterns, but it's not a substitute for reviewing context files in shared repositories. Always validate AGENTS.md content in projects you didn't author.</p>
+</div>
+<h2 id="size-limits">Size Limits</h2>
+<table>
+<thead>
+<tr>
+<th>Limit</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Max chars per file</td>
+<td><code>context_file_max_chars</code> when set; otherwise dynamic (scales with model context window, floor 20,000, ceiling 500,000)</td>
+</tr>
+<tr>
+<td>Read timeout per file</td>
+<td><code>context_file_read_timeout</code> (default 5 seconds); a file that takes longer to read — e.g. on iCloud Drive, OneDrive or NFS — is skipped with a warning</td>
+</tr>
+<tr>
+<td>Head truncation ratio</td>
+<td>70%</td>
+</tr>
+<tr>
+<td>Tail truncation ratio</td>
+<td>20%</td>
+</tr>
+<tr>
+<td>Truncation marker</td>
+<td>10% (shows char counts and suggests using file tools)</td>
+</tr>
+</tbody>
+</table>
+<p>When a file exceeds the configured limit, the truncation message reads:</p>
+<div class="highlight"><pre><span></span><code>[...truncated AGENTS.md: kept 14000+4000 of 25000 chars. Use file tools to read the full file.]
+</code></pre></div>
+
+<h2 id="tips-for-effective-context-files">Tips for Effective Context Files</h2>
+<div class="admonition adm-tip"><p class="adm-title">Best practices for AGENTS.md</p>
+<ol>
+<li><strong>Keep it concise</strong> — stay under your configured <code>context_file_max_chars</code>; the agent reads it every turn</li>
+<li><strong>Structure with headers</strong> — use <code>##</code> sections for architecture, conventions, important notes</li>
+<li><strong>Include concrete examples</strong> — show preferred code patterns, API shapes, naming conventions</li>
+<li><strong>Mention what NOT to do</strong> — "never modify migration files directly"</li>
+<li><strong>List key paths and ports</strong> — the agent uses these for terminal commands</li>
+<li><strong>Update as the project evolves</strong> — stale context is worse than no context</li>
+</ol>
+</div>
+<h3 id="per-subdirectory-context">Per-Subdirectory Context</h3>
+<p>For monorepos, put subdirectory-specific instructions in nested AGENTS.md files:</p>
+<div class="highlight"><pre><span></span><code>&lt;!-- frontend/AGENTS.md --&gt;
+<span class="gh"># Frontend Context</span>
+
+<span class="k">-</span><span class="w"> </span>Use <span class="sb">`pnpm`</span> not <span class="sb">`npm`</span> for package management
+<span class="k">-</span><span class="w"> </span>Components go in <span class="sb">`src/components/`</span>, pages in <span class="sb">`src/app/`</span>
+<span class="k">-</span><span class="w"> </span>Use Tailwind CSS, never inline styles
+<span class="k">-</span><span class="w"> </span>Run tests with <span class="sb">`pnpm test`</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>&lt;!-- backend/AGENTS.md --&gt;
+<span class="gh"># Backend Context</span>
+
+<span class="k">-</span><span class="w"> </span>Use <span class="sb">`poetry`</span> for dependency management
+<span class="k">-</span><span class="w"> </span>Run the dev server with <span class="sb">`poetry run uvicorn main:app --reload`</span>
+<span class="k">-</span><span class="w"> </span>All endpoints need OpenAPI docstrings
+<span class="k">-</span><span class="w"> </span>Database models are in <span class="sb">`models/`</span>, schemas in <span class="sb">`schemas/`</span>
+</code></pre></div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#supported-context-files">Supported Context Files</a></li>
+<li class="lvl2"><a href="#agentsmd">AGENTS.md</a></li>
+<li class="lvl3"><a href="#directory-chain-git-root--working-directory">Directory Chain (git root → working directory)</a></li>
+<li class="lvl3"><a href="#progressive-subdirectory-discovery">Progressive Subdirectory Discovery</a></li>
+<li class="lvl3"><a href="#example-agentsmd">Example AGENTS.md</a></li>
+<li class="lvl2"><a href="#soulmd">SOUL.md</a></li>
+<li class="lvl2"><a href="#cursorrules">.cursorrules</a></li>
+<li class="lvl2"><a href="#how-context-files-are-loaded">How Context Files Are Loaded</a></li>
+<li class="lvl3"><a href="#at-startup-system-prompt">At startup (system prompt)</a></li>
+<li class="lvl3"><a href="#during-the-session-progressive-discovery">During the session (progressive discovery)</a></li>
+<li class="lvl2"><a href="#security-prompt-injection-protection">Security: Prompt Injection Protection</a></li>
+<li class="lvl2"><a href="#size-limits">Size Limits</a></li>
+<li class="lvl2"><a href="#tips-for-effective-context-files">Tips for Effective Context Files</a></li>
+<li class="lvl3"><a href="#per-subdirectory-context">Per-Subdirectory Context</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

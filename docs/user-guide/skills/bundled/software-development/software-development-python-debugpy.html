@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Python Debugpy — Debug Python: pdb REPL + debugpy remote (DAP) · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/bundled/software-development/software-development-python-debugpy</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="python-debugpy">Python Debugpy</h1>
+<p>Debug Python: pdb REPL + debugpy remote (DAP).</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Bundled (installed by default)</td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>skills/software-development\python-debugpy</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>Hermes Agent</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>debugging</code>, <code>python</code>, <code>pdb</code>, <code>debugpy</code>, <code>breakpoints</code>, <code>dap</code>, <code>post-mortem</code></td>
+</tr>
+<tr>
+<td>Related skills</td>
+<td><a href="software-development-systematic-debugging.html"><code>systematic-debugging</code></a>, <a href="software-development-node-inspect-debugger.html"><code>node-inspect-debugger</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="python-debugger-pdb--debugpy">Python Debugger (pdb + debugpy)</h1>
+<h2 id="overview">Overview</h2>
+<p>Three tools, picked by situation:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>breakpoint()</code> + pdb</strong></td>
+<td>Local, interactive, simplest. Add <code>breakpoint()</code> in the source, run normally, get a REPL at that line.</td>
+</tr>
+<tr>
+<td><strong><code>python -m pdb</code></strong></td>
+<td>Launch an existing script under pdb with no source edits. Useful for quick poking.</td>
+</tr>
+<tr>
+<td><strong><code>debugpy</code></strong></td>
+<td>Remote / headless / "attach to already-running process." Talks DAP, scriptable from terminal, works for long-lived processes (gateway, daemon, PTY children).</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Start with <code>breakpoint()</code>.</strong> It's the cheapest thing that works.</p>
+<h2 id="when-to-use">When to Use</h2>
+<ul>
+<li>A test fails and the traceback doesn't reveal why a value is wrong</li>
+<li>You need to step through a function and watch a collection mutate</li>
+<li>A long-running process (hermes gateway, tui_gateway) misbehaves and you can't restart it</li>
+<li>Post-mortem: an exception fired in prod-ish code and you want to inspect locals at the crash site</li>
+<li>A subprocess / child (Python <code>_SlashWorker</code>, PTY bridge worker) is the actual bug site</li>
+</ul>
+<p><strong>Don't use for:</strong> things <code>print()</code> / <code>logging.debug</code> solve in under a minute, or things <code>pytest -vv --tb=long --showlocals</code> already reveals.</p>
+<h2 id="pdb-quick-reference">pdb Quick Reference</h2>
+<p>Inside any pdb prompt (<code>(Pdb)</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>h</code> / <code>h cmd</code></td>
+<td>help</td>
+</tr>
+<tr>
+<td><code>n</code></td>
+<td>next line (step over)</td>
+</tr>
+<tr>
+<td><code>s</code></td>
+<td>step into</td>
+</tr>
+<tr>
+<td><code>r</code></td>
+<td>return from current function</td>
+</tr>
+<tr>
+<td><code>c</code></td>
+<td>continue</td>
+</tr>
+<tr>
+<td><code>unt N</code></td>
+<td>continue until line N</td>
+</tr>
+<tr>
+<td><code>j N</code></td>
+<td>jump to line N (same function only)</td>
+</tr>
+<tr>
+<td><code>l</code> / <code>ll</code></td>
+<td>list source around current line / full function</td>
+</tr>
+<tr>
+<td><code>w</code></td>
+<td>where (stack trace)</td>
+</tr>
+<tr>
+<td><code>u</code> / <code>d</code></td>
+<td>move up / down in the stack</td>
+</tr>
+<tr>
+<td><code>a</code></td>
+<td>print args of the current function</td>
+</tr>
+<tr>
+<td><code>p expr</code> / <code>pp expr</code></td>
+<td>print / pretty-print expression</td>
+</tr>
+<tr>
+<td><code>display expr</code></td>
+<td>auto-print expr on every stop</td>
+</tr>
+<tr>
+<td><code>b file:line</code></td>
+<td>set breakpoint</td>
+</tr>
+<tr>
+<td><code>b func</code></td>
+<td>break on function entry</td>
+</tr>
+<tr>
+<td><code>b file:line, cond</code></td>
+<td>conditional breakpoint</td>
+</tr>
+<tr>
+<td><code>cl N</code></td>
+<td>clear breakpoint N</td>
+</tr>
+<tr>
+<td><code>tbreak file:line</code></td>
+<td>one-shot breakpoint</td>
+</tr>
+<tr>
+<td><code>!stmt</code></td>
+<td>execute arbitrary Python (assignments included)</td>
+</tr>
+<tr>
+<td><code>interact</code></td>
+<td>drop into full Python REPL in current scope (Ctrl+D to exit)</td>
+</tr>
+<tr>
+<td><code>q</code></td>
+<td>quit</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>interact</code> command is the most powerful — you can import anything, inspect complex objects, even call methods that mutate state. Locals are read-only by default; use <code>!x = 42</code> from the <code>(Pdb)</code> prompt to mutate.</p>
+<h2 id="recipe-1-local-breakpoint">Recipe 1: Local breakpoint</h2>
+<p>Easiest. Edit the file:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">compute</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">some_helper</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+    <span class="nb">breakpoint</span><span class="p">()</span>           <span class="c1"># &lt;-- drops into pdb here</span>
+    <span class="k">return</span> <span class="n">result</span> <span class="o">+</span> <span class="n">y</span>
+</code></pre></div>
+
+<p>Run the code normally. You land at the <code>breakpoint()</code> line with full access to locals.</p>
+<p><strong>Don't forget to remove <code>breakpoint()</code> before committing.</strong> Use <code>git diff</code> or a pre-commit grep:</p>
+<div class="highlight"><pre><span></span><code>rg<span class="w"> </span>-n<span class="w"> </span><span class="s1">&#39;breakpoint\(\)&#39;</span><span class="w"> </span>--type<span class="w"> </span>py
+</code></pre></div>
+
+<h2 id="recipe-2-launch-a-script-under-pdb-no-source-edits">Recipe 2: Launch a script under pdb (no source edits)</h2>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>pdb<span class="w"> </span>path/to/script.py<span class="w"> </span>arg1<span class="w"> </span>arg2
+<span class="c1"># Lands at first line of script</span>
+<span class="o">(</span>Pdb<span class="o">)</span><span class="w"> </span>b<span class="w"> </span>path/to/script.py:42
+<span class="o">(</span>Pdb<span class="o">)</span><span class="w"> </span>c
+</code></pre></div>
+
+<h2 id="recipe-3-debug-a-pytest-test">Recipe 3: Debug a pytest test</h2>
+<p>The hermes test runner and pytest both support this:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Drop to pdb on failure (or on any raised exception):</span>
+scripts/run_tests.sh<span class="w"> </span>tests/path/to/test_file.py::test_name<span class="w"> </span>--pdb
+
+<span class="c1"># Drop to pdb at the START of the test:</span>
+scripts/run_tests.sh<span class="w"> </span>tests/path/to/test_file.py::test_name<span class="w"> </span>--trace
+
+<span class="c1"># Show locals in tracebacks without pdb:</span>
+scripts/run_tests.sh<span class="w"> </span>tests/path/to/test_file.py<span class="w"> </span>--showlocals<span class="w"> </span>--tb<span class="o">=</span>long
+</code></pre></div>
+
+<p>Note: <code>scripts/run_tests.sh</code> runs each test file in a captured subprocess via <code>run_tests_parallel.py</code> (no xdist), so interactive pdb does NOT work under the wrapper. Run pytest directly for <code>--pdb</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/foo_test.py::test_bar<span class="w"> </span>--pdb
+</code></pre></div>
+
+<p>This bypasses the hermetic-env guarantees — fine for debugging, but re-run under the wrapper to confirm before pushing.</p>
+<h2 id="recipe-4-post-mortem-on-any-exception">Recipe 4: Post-mortem on any exception</h2>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="p">:</span>
+    <span class="n">run_the_thing</span><span class="p">()</span>
+<span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+    <span class="n">pdb</span><span class="o">.</span><span class="n">post_mortem</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">exc_info</span><span class="p">()[</span><span class="mi">2</span><span class="p">])</span>
+</code></pre></div>
+
+<p>Or wrap a whole script:</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>pdb<span class="w"> </span>-c<span class="w"> </span><span class="k">continue</span><span class="w"> </span>script.py
+<span class="c1"># When it crashes, pdb catches it and you&#39;re in the frame of the exception</span>
+</code></pre></div>
+
+<p>Or set a global hook in a repl/jupyter:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">excepthook</span><span class="p">(</span><span class="n">etype</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="n">tb</span><span class="p">):</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">pdb</span><span class="p">;</span> <span class="n">pdb</span><span class="o">.</span><span class="n">post_mortem</span><span class="p">(</span><span class="n">tb</span><span class="p">)</span>
+<span class="n">sys</span><span class="o">.</span><span class="n">excepthook</span> <span class="o">=</span> <span class="n">excepthook</span>
+</code></pre></div>
+
+<h2 id="recipe-5-remote-debug-with-debugpy-attach-to-running-process">Recipe 5: Remote debug with debugpy (attach to running process)</h2>
+<p>For long-lived processes: Hermes gateway, tui_gateway, a daemon, a process that's already misbehaving and can't be restarted clean.</p>
+<h3 id="setup">Setup</h3>
+<div class="highlight"><pre><span></span><code><span class="nb">source</span><span class="w"> </span>&lt;hermes-agent-repo&gt;/.venv/bin/activate
+pip<span class="w"> </span>install<span class="w"> </span>debugpy
+</code></pre></div>
+
+<h3 id="pattern-a-source-edit--process-waits-for-debugger-at-launch">Pattern A: Source-edit — process waits for debugger at launch</h3>
+<p>Add near the top of the entry point (or inside the function you want to debug):</p>
+<div class="highlight"><pre><span></span><code><span class="n">debugpy</span><span class="o">.</span><span class="n">listen</span><span class="p">((</span><span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span> <span class="mi">5678</span><span class="p">))</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">&quot;debugpy listening on 5678, waiting for client...&quot;</span><span class="p">,</span> <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">debugpy</span><span class="o">.</span><span class="n">wait_for_client</span><span class="p">()</span>
+<span class="n">debugpy</span><span class="o">.</span><span class="n">breakpoint</span><span class="p">()</span>       <span class="c1"># optional: pause immediately once attached</span>
+</code></pre></div>
+
+<p>Start the process; it blocks on <code>wait_for_client()</code>.</p>
+<h3 id="pattern-b-no-source-edit--launch-with--m-debugpy">Pattern B: No source edit — launch with <code>-m debugpy</code></h3>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>debugpy<span class="w"> </span>--listen<span class="w"> </span><span class="m">127</span>.0.0.1:5678<span class="w"> </span>--wait-for-client<span class="w"> </span>your_script.py<span class="w"> </span>arg1
+</code></pre></div>
+
+<p>Equivalent for module entry:</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>debugpy<span class="w"> </span>--listen<span class="w"> </span><span class="m">127</span>.0.0.1:5678<span class="w"> </span>--wait-for-client<span class="w"> </span>-m<span class="w"> </span>your.module
+</code></pre></div>
+
+<h3 id="pattern-c-attach-to-an-already-running-process">Pattern C: Attach to an already-running process</h3>
+<p>Needs the PID and debugpy preinstalled in the target's environment:</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>debugpy<span class="w"> </span>--listen<span class="w"> </span><span class="m">127</span>.0.0.1:5678<span class="w"> </span>--pid<span class="w"> </span>&lt;pid&gt;
+<span class="c1"># debugpy injects itself into the process. Then attach a client as below.</span>
+</code></pre></div>
+
+<p>Some kernels/security configs block the ptrace-based injection (<code>/proc/sys/kernel/yama/ptrace_scope</code>). Fix with:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">echo</span><span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sudo<span class="w"> </span>tee<span class="w"> </span>/proc/sys/kernel/yama/ptrace_scope
+</code></pre></div>
+
+<h3 id="connecting-a-client-from-the-terminal">Connecting a client from the terminal</h3>
+<p>The easiest terminal-side DAP client is VS Code CLI or a small script. From inside Hermes you have two practical options:</p>
+<p><strong>Option 1: <code>debugpy</code>'s own CLI REPL</strong> — not an official feature, but a tiny DAP client script:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/cache/scratch/dap_client.py</span>
+
+<span class="n">HOST</span><span class="p">,</span> <span class="n">PORT</span> <span class="o">=</span> <span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span> <span class="mi">5678</span>
+<span class="n">s</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">create_connection</span><span class="p">((</span><span class="n">HOST</span><span class="p">,</span> <span class="n">PORT</span><span class="p">))</span>
+<span class="n">seq</span> <span class="o">=</span> <span class="n">itertools</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">send</span><span class="p">(</span><span class="n">msg</span><span class="p">):</span>
+    <span class="n">msg</span><span class="p">[</span><span class="s2">&quot;seq&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span><span class="n">seq</span><span class="p">)</span>
+    <span class="n">body</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">msg</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span>
+    <span class="n">s</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Content-Length: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">body</span><span class="p">)</span><span class="si">}</span><span class="se">\r\n\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span> <span class="o">+</span> <span class="n">body</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">recv</span><span class="p">():</span>
+    <span class="n">header</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">&quot;&quot;</span>
+    <span class="k">while</span> <span class="sa">b</span><span class="s2">&quot;</span><span class="se">\r\n\r\n</span><span class="s2">&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">header</span><span class="p">:</span>
+        <span class="n">header</span> <span class="o">+=</span> <span class="n">s</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">length</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">header</span><span class="o">.</span><span class="n">decode</span><span class="p">()</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;Content-Length:&quot;</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">())</span>
+    <span class="n">body</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">&quot;&quot;</span>
+    <span class="k">while</span> <span class="nb">len</span><span class="p">(</span><span class="n">body</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">length</span><span class="p">:</span>
+        <span class="n">body</span> <span class="o">+=</span> <span class="n">s</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">length</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="n">body</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">body</span><span class="p">)</span>
+
+<span class="n">send</span><span class="p">({</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;request&quot;</span><span class="p">,</span> <span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="s2">&quot;initialize&quot;</span><span class="p">,</span> <span class="s2">&quot;arguments&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;adapterID&quot;</span><span class="p">:</span> <span class="s2">&quot;python&quot;</span><span class="p">}})</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">recv</span><span class="p">())</span>
+<span class="n">send</span><span class="p">({</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;request&quot;</span><span class="p">,</span> <span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="s2">&quot;attach&quot;</span><span class="p">,</span> <span class="s2">&quot;arguments&quot;</span><span class="p">:</span> <span class="p">{}})</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">recv</span><span class="p">())</span>
+<span class="n">send</span><span class="p">({</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;request&quot;</span><span class="p">,</span> <span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="s2">&quot;setBreakpoints&quot;</span><span class="p">,</span>
+      <span class="s2">&quot;arguments&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;source&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;path&quot;</span><span class="p">:</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]},</span>
+                    <span class="s2">&quot;breakpoints&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;line&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">2</span><span class="p">])}]}})</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">recv</span><span class="p">())</span>
+<span class="n">send</span><span class="p">({</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;request&quot;</span><span class="p">,</span> <span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="s2">&quot;configurationDone&quot;</span><span class="p">})</span>
+<span class="c1"># ... loop reading events and sending continue/stepIn/etc.</span>
+</code></pre></div>
+
+<p>This is fine for one-off automation but painful as an interactive UX.</p>
+<p><strong>Option 2: Attach from VS Code / Cursor / Zed</strong> — if the user has one open, they can add a <code>launch.json</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Attach to Hermes&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;debugpy&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;request&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;attach&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;connect&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;host&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;port&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5678</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;justMyCode&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;pathMappings&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;localRoot&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;${workspaceFolder}&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;remoteRoot&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;hermes-agent-repo&gt;&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Option 3: Ditch DAP, use <code>remote-pdb</code></strong> — usually what you actually want from a terminal agent:</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>remote-pdb
+</code></pre></div>
+
+<p>In your code:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">remote_pdb</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_trace</span>
+<span class="n">set_trace</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">4444</span><span class="p">)</span>   <span class="c1"># blocks until connection</span>
+</code></pre></div>
+
+<p>Then from the terminal:</p>
+<div class="highlight"><pre><span></span><code>nc<span class="w"> </span><span class="m">127</span>.0.0.1<span class="w"> </span><span class="m">4444</span>
+<span class="c1"># You get a (Pdb) prompt exactly as if debugging locally.</span>
+</code></pre></div>
+
+<p><code>remote-pdb</code> is the cleanest agent-friendly choice when <code>debugpy</code>'s DAP protocol is overkill. Use <code>debugpy</code> only when you actually need IDE integration.</p>
+<h2 id="debugging-hermes-specific-processes">Debugging Hermes-specific Processes</h2>
+<h3 id="tests">Tests</h3>
+<p>See Recipe 3. The wrapper captures subprocess output, so run pytest directly for interactive pdb.</p>
+<h3 id="run_agentpy--cli--one-shot"><code>run_agent.py</code> / CLI — one-shot</h3>
+<p>Easiest: add <code>breakpoint()</code> near the suspect line, then run <code>hermes</code> normally. Control returns to your terminal at the pause point.</p>
+<h3 id="tui_gateway-subprocess-spawned-by-hermes---tui"><code>tui_gateway</code> subprocess (spawned by <code>hermes --tui</code>)</h3>
+<p>The gateway runs as a child of the Node TUI. Options:</p>
+<p><strong>A. Source-edit the gateway:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># tui_gateway/server.py near the top of serve()</span>
+
+<span class="n">debugpy</span><span class="o">.</span><span class="n">listen</span><span class="p">((</span><span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span> <span class="mi">5678</span><span class="p">))</span>
+<span class="n">debugpy</span><span class="o">.</span><span class="n">wait_for_client</span><span class="p">()</span>
+</code></pre></div>
+
+<p>Start <code>hermes --tui</code>. The TUI will appear frozen (its backend is waiting). Attach a client; execution resumes when you <code>continue</code>.</p>
+<p><strong>B. Use <code>remote-pdb</code> at a specific handler:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">remote_pdb</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_trace</span>
+<span class="n">set_trace</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">4444</span><span class="p">)</span>   <span class="c1"># in the RPC handler you want to trap</span>
+</code></pre></div>
+
+<p>Trigger the matching slash command from the TUI, then <code>nc 127.0.0.1 4444</code> in another terminal.</p>
+<h3 id="_slashworker-subprocess"><code>_SlashWorker</code> subprocess</h3>
+<p>Same pattern — <code>remote-pdb</code> with <code>set_trace()</code> inside the worker's <code>exec</code> path. The worker is persistent across slash commands, so the first trigger blocks until you connect; subsequent slash commands pass through normally unless you re-arm.</p>
+<h3 id="gateway-gatewayrunpy">Gateway (<code>gateway/run.py</code>)</h3>
+<p>Long-lived. Use <code>remote-pdb</code> at a handler, or <code>debugpy</code> with <code>--wait-for-client</code> if you're restarting the gateway anyway.</p>
+<h2 id="common-pitfalls">Common Pitfalls</h2>
+<ol>
+<li>
+<p><strong>pdb under a parallel/output-capturing runner silently does nothing.</strong> You won't see the prompt, the test just hangs (true of pytest-xdist and of <code>scripts/run_tests.sh</code>'s captured per-file subprocesses). Run pytest directly on a single file for interactive debugging.</p>
+</li>
+<li>
+<p><strong><code>breakpoint()</code> in CI / non-TTY contexts hangs the process.</strong> Safe locally; never commit it. Add a pre-commit grep as a safety net.</p>
+</li>
+<li>
+<p><strong><code>PYTHONBREAKPOINT=0</code></strong> disables all <code>breakpoint()</code> calls. Check the env if your breakpoint isn't hitting:
+   <code>bash
+   echo $PYTHONBREAKPOINT</code></p>
+</li>
+<li>
+<p><strong><code>debugpy.listen</code> blocks only if you also call <code>wait_for_client()</code>.</strong> Without it, execution continues and your first breakpoint may fire before the client is attached.</p>
+</li>
+<li>
+<p><strong>Attach to PID fails on hardened kernels.</strong> <code>ptrace_scope=1</code> (Ubuntu default) allows only same-user ptrace of child processes. Workaround: <code>echo 0 &gt; /proc/sys/kernel/yama/ptrace_scope</code> (needs root) or launch under <code>debugpy</code> from the start.</p>
+</li>
+<li>
+<p><strong>Threads.</strong> <code>pdb</code> only debugs the current thread. For multithreaded code, use <code>debugpy</code> (thread-aware DAP) or set <code>threading.settrace()</code> per thread.</p>
+</li>
+<li>
+<p><strong>asyncio.</strong> <code>pdb</code> works in coroutines but <code>await</code> inside pdb requires Python 3.13+ or <code>await</code> from <code>interact</code> mode on older versions. For 3.11/3.12, use <code>asyncio.run_coroutine_threadsafe</code> tricks or <code>!stmt</code>-based awaits via <code>asyncio.ensure_future</code>.</p>
+</li>
+<li>
+<p><strong><code>scripts/run_tests.sh</code> strips credentials and sets <code>HOME=&lt;tmpdir&gt;</code>.</strong> If your bug depends on user config or real API keys, it won't reproduce under the wrapper. Debug with raw <code>pytest</code> first to repro, then re-confirm under the wrapper.</p>
+</li>
+<li>
+<p><strong>Forking / multiprocessing.</strong> pdb does not follow forks. Each child needs its own <code>breakpoint()</code> or <code>set_trace()</code>. For Hermes subagents, debug one process at a time.</p>
+</li>
+</ol>
+<h2 id="verification-checklist">Verification Checklist</h2>
+<ul>
+<li>[ ] After <code>pip install debugpy</code>, confirm: <code>python -c "import debugpy; print(debugpy.__version__)"</code></li>
+<li>[ ] For remote debug, confirm the port is actually listening: <code>ss -tlnp | grep 5678</code></li>
+<li>[ ] First breakpoint actually hits (if it doesn't, you likely have <code>PYTHONBREAKPOINT=0</code>, you're under a parallel/capturing runner, or execution finished before attach)</li>
+<li>[ ] <code>where</code> / <code>w</code> shows the expected call stack</li>
+<li>[ ] Post-debug cleanup: no stray <code>breakpoint()</code> / <code>set_trace()</code> in committed code
+  <code>bash
+  rg -n 'breakpoint\(\)|set_trace\(|debugpy\.listen' --type py</code></li>
+</ul>
+<h2 id="one-shot-recipes">One-Shot Recipes</h2>
+<p><strong>"Why is this dict missing a key?"</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># add above the KeyError site</span>
+<span class="nb">breakpoint</span><span class="p">()</span>
+<span class="c1"># then in pdb:</span>
+<span class="p">(</span><span class="n">Pdb</span><span class="p">)</span> <span class="n">pp</span> <span class="n">d</span>
+<span class="p">(</span><span class="n">Pdb</span><span class="p">)</span> <span class="n">pp</span> <span class="nb">list</span><span class="p">(</span><span class="n">d</span><span class="o">.</span><span class="n">keys</span><span class="p">())</span>
+<span class="p">(</span><span class="n">Pdb</span><span class="p">)</span> <span class="n">w</span>                <span class="c1"># how did we get here</span>
+</code></pre></div>
+
+<p><strong>"This test passes in isolation but fails in the suite."</strong></p>
+<div class="highlight"><pre><span></span><code>scripts/run_tests.sh<span class="w"> </span>tests/the_test.py<span class="w">   </span><span class="c1"># confirm it fails under the isolated runner first</span>
+<span class="c1"># For interactive debugging, or if it only fails WITH other tests:</span>
+<span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/<span class="w"> </span>-x<span class="w"> </span>--pdb
+<span class="c1"># Now it pdb-traps at the exact failing test after state accumulated.</span>
+</code></pre></div>
+
+<p><strong>"My async handler deadlocks."</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Add at handler entry</span>
+</code></pre></div>
+
+<p>Trigger the handler. <code>nc 127.0.0.1 4444</code>, then <code>w</code> to see the suspended frame, <code>!import asyncio; asyncio.all_tasks()</code> to see what else is pending.</p>
+<p><strong>"Post-mortem on a crash in an Ink child process / subprocess."</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nv">PYTHONFAULTHANDLER</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>pdb<span class="w"> </span>-c<span class="w"> </span><span class="k">continue</span><span class="w"> </span>path/to/entrypoint.py
+<span class="c1"># On crash, pdb lands at the frame of the exception with full locals</span>
+</code></pre></div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/bundled/software-development/software-development-python-debugpy</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#overview">Overview</a></li>
+<li class="lvl2"><a href="#when-to-use">When to Use</a></li>
+<li class="lvl2"><a href="#pdb-quick-reference">pdb Quick Reference</a></li>
+<li class="lvl2"><a href="#recipe-1-local-breakpoint">Recipe 1: Local breakpoint</a></li>
+<li class="lvl2"><a href="#recipe-2-launch-a-script-under-pdb-no-source-edits">Recipe 2: Launch a script under pdb (no source edits)</a></li>
+<li class="lvl2"><a href="#recipe-3-debug-a-pytest-test">Recipe 3: Debug a pytest test</a></li>
+<li class="lvl2"><a href="#recipe-4-post-mortem-on-any-exception">Recipe 4: Post-mortem on any exception</a></li>
+<li class="lvl2"><a href="#recipe-5-remote-debug-with-debugpy-attach-to-running-process">Recipe 5: Remote debug with debugpy (attach to running process)</a></li>
+<li class="lvl3"><a href="#setup">Setup</a></li>
+<li class="lvl3"><a href="#pattern-a-source-edit--process-waits-for-debugger-at-launch">Pattern A: Source-edit — process waits for debugger at launch</a></li>
+<li class="lvl3"><a href="#pattern-b-no-source-edit--launch-with--m-debugpy">Pattern B: No source edit — launch with -m debugpy</a></li>
+<li class="lvl3"><a href="#pattern-c-attach-to-an-already-running-process">Pattern C: Attach to an already-running process</a></li>
+<li class="lvl3"><a href="#connecting-a-client-from-the-terminal">Connecting a client from the terminal</a></li>
+<li class="lvl2"><a href="#debugging-hermes-specific-processes">Debugging Hermes-specific Processes</a></li>
+<li class="lvl3"><a href="#tests">Tests</a></li>
+<li class="lvl3"><a href="#run_agentpy--cli--one-shot">run_agent.py / CLI — one-shot</a></li>
+<li class="lvl3"><a href="#tui_gateway-subprocess-spawned-by-hermes---tui">tui_gateway subprocess (spawned by hermes --tui)</a></li>
+<li class="lvl3"><a href="#_slashworker-subprocess">_SlashWorker subprocess</a></li>
+<li class="lvl3"><a href="#gateway-gatewayrunpy">Gateway (gateway/run.py)</a></li>
+<li class="lvl2"><a href="#common-pitfalls">Common Pitfalls</a></li>
+<li class="lvl2"><a href="#verification-checklist">Verification Checklist</a></li>
+<li class="lvl2"><a href="#one-shot-recipes">One-Shot Recipes</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

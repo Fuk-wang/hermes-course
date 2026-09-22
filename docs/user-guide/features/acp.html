@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACP Host Integration · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/acp</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="acp-host-integration">ACP Host Integration</h1>
+<p>Hermes Agent can run as an ACP server, letting ACP-compatible hosts talk to
+Hermes over stdio. Editors can render:</p>
+<ul>
+<li>chat messages</li>
+<li>tool activity</li>
+<li>file diffs</li>
+<li>terminal commands</li>
+<li>approval prompts</li>
+<li>streamed thinking / response chunks</li>
+</ul>
+<p>Other hosts can use the same protocol to route collaboration events into
+Hermes. ACP is a good fit when you want Hermes to keep its existing identity,
+provider setup, memory, skills, and tools while another application owns the
+conversation transport.</p>
+<h2 id="what-hermes-exposes-in-acp-mode">What Hermes exposes in ACP mode</h2>
+<p>Hermes runs with a curated <code>hermes-acp</code> toolset designed for editor workflows. It includes:</p>
+<ul>
+<li>file tools: <code>read_file</code>, <code>write_file</code>, <code>patch</code>, <code>search_files</code></li>
+<li>terminal tools: <code>terminal</code>, <code>process</code></li>
+<li>web/browser tools</li>
+<li>memory, todo, session search</li>
+<li>skills</li>
+<li>execute_code and delegate_task</li>
+<li>vision</li>
+</ul>
+<p>It intentionally excludes things that do not fit typical editor UX, such as messaging delivery and cronjob management.</p>
+<h2 id="installation">Installation</h2>
+<p>Install Hermes normally, then add the ACP extra from the install checkout:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>~/.hermes/hermes-agent<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s1">&#39;.[acp]&#39;</span>
+</code></pre></div>
+
+<p>This installs the <code>agent-client-protocol</code> dependency and enables:</p>
+<ul>
+<li><code>hermes acp</code></li>
+<li><code>hermes-acp</code></li>
+<li><code>python -m acp_adapter</code></li>
+</ul>
+<h2 id="launching-the-acp-server">Launching the ACP server</h2>
+<p>Any of the following starts Hermes in ACP mode:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>acp
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>hermes-acp
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>acp_adapter
+</code></pre></div>
+
+<p>Hermes logs to stderr so stdout remains reserved for ACP JSON-RPC traffic.</p>
+<p>For non-interactive checks:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>acp<span class="w"> </span>--version
+hermes<span class="w"> </span>acp<span class="w"> </span>--check
+</code></pre></div>
+
+<h3 id="browser-tools-optional">Browser tools (optional)</h3>
+<p>Browser tools (<code>browser_navigate</code>, <code>browser_click</code>, etc.) depend on the
+<code>agent-browser</code> npm package and Chromium, which aren't part of the Python
+wheel. Install them with:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>acp<span class="w"> </span>--setup-browser<span class="w">           </span><span class="c1"># interactive (prompts before ~400 MB download)</span>
+hermes<span class="w"> </span>acp<span class="w"> </span>--setup-browser<span class="w"> </span>--yes<span class="w">     </span><span class="c1"># accept the download non-interactively</span>
+</code></pre></div>
+
+<p>This is the standalone command. The terminal-auth flow (<code>hermes acp --setup</code>) also offers the browser bootstrap as a follow-up question after model selection, so most users never need to run <code>--setup-browser</code> directly.</p>
+<p>What it does:</p>
+<ul>
+<li>Installs Node.js 26 into <code>~/.hermes/node/</code> if missing</li>
+<li><code>npm install -g agent-browser @askjo/camofox-browser</code> into that prefix (no sudo needed — <code>npm</code>'s <code>--prefix</code> points at the user-writable Hermes-managed Node)</li>
+<li>Installs Playwright Chromium, or uses a detected system Chrome/Chromium when available</li>
+</ul>
+<p>The bootstrap is idempotent — re-running it is fast and skips work that's already done.</p>
+<h2 id="host-setup">Host setup</h2>
+<h3 id="buzz-channels-relay-bridge">Buzz channels (relay bridge)</h3>
+<p><a href="https://github.com/block/buzz" class="ext" target="_blank" rel="noopener">Buzz</a> is a Nostr-based collaboration platform
+for people and agents. Its <code>buzz-acp</code> harness connects Buzz channels to any ACP
+agent over stdio:</p>
+<div class="highlight"><pre><span></span><code>Buzz relay &lt;-- WebSocket --&gt; buzz-acp &lt;-- ACP over stdio --&gt; Hermes Agent
+</code></pre></div>
+
+<p>This is a transport integration, not a second Hermes installation. The
+subprocess launched by <code>buzz-acp</code> uses the same Hermes configuration,
+credentials, memory, skills, and state as <code>hermes</code> on that host.</p>
+<p>(This is distinct from <a href="#buzz-desktop">Buzz Desktop's managed runtime</a>, which
+spawns Hermes locally as a preset harness. The relay bridge is for joining Buzz
+<em>channels</em> as an agent identity, typically on a server.)</p>
+<p>Prerequisites:</p>
+<ul>
+<li>Complete the ACP installation and <code>hermes acp --check</code> above.</li>
+<li>Build <code>buzz-acp</code> and the <code>buzz</code> CLI from the
+  <a href="https://github.com/block/buzz" class="ext" target="_blank" rel="noopener">Buzz repository</a>
+  (<code>cargo build --release -p buzz-acp</code>).</li>
+<li>Mint a dedicated Nostr keypair for Hermes (<code>buzz-admin generate-key</code>) and
+  register it as a relay member (<code>buzz-admin add-member</code>). Every agent needs
+  its own identity — do not reuse a human keypair.</li>
+<li>Add that identity to the intended Buzz channels.</li>
+</ul>
+<p>Start a bridge with:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_RELAY_URL</span><span class="o">=</span><span class="s2">&quot;wss://community.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_PRIVATE_KEY</span><span class="o">=</span><span class="s2">&quot;...&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_API_TOKEN</span><span class="o">=</span><span class="s2">&quot;...&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_ACP_AGENT_COMMAND</span><span class="o">=</span><span class="s2">&quot;hermes&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_ACP_AGENT_ARGS</span><span class="o">=</span><span class="s2">&quot;acp&quot;</span>
+
+buzz-acp
+</code></pre></div>
+
+<p><code>BUZZ_API_TOKEN</code> is needed only when the relay enforces token authentication.
+Do not commit or paste the private key or API token.</p>
+<p>For a persistent server deployment, run <code>buzz-acp</code> under a service manager as
+the same operating-system user that owns the intended Hermes home. Setup,
+key generation, channel discovery, and per-agent options are documented in the
+<a href="https://github.com/block/buzz/tree/main/crates/buzz-acp" class="ext" target="_blank" rel="noopener">buzz-acp README</a>.</p>
+<p>The bridge discovers every Buzz channel where the Hermes identity is a member
+and automatically subscribes when it is added to another channel. Buzz channel
+membership therefore remains the access boundary; Hermes does not need a
+separate channel list in its own configuration.</p>
+<p>To expose Hermes ACP activity in the owner's Buzz Desktop, add:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_ACP_RELAY_OBSERVER</span><span class="o">=</span><span class="s2">&quot;true&quot;</span>
+</code></pre></div>
+
+<p>This publishes encrypted kind <code>24200</code> observer frames addressed to the agent's
+owner (Buzz's NIP-AO). Desktop renders the live lifecycle, tool, response, and
+usage stream in the agent's <strong>Activity log</strong>. The relay treats these frames as
+ephemeral, so Desktop must be online before the turn starts; its local observer
+archive is the durable owner-side history.</p>
+<p>Headless bridges answer ACP permission requests themselves because no editor
+is present to show approval dialogs — see
+<a href="#keep-buzz-agents-owner-only">Keep Buzz agents owner-only</a>. Treat the bridge
+as privileged automation: use a dedicated operating-system account, restrict
+which Buzz users can prompt the agent (<code>buzz-acp</code> supports an owner-only
+respond gate via <code>BUZZ_ACP_AGENT_OWNER</code>), and grant membership only in channels
+where Hermes is expected to work.</p>
+<h3 id="vs-code">VS Code</h3>
+<p>Install the <a href="https://marketplace.visualstudio.com/items?itemName=formulahendry.acp-client" class="ext" target="_blank" rel="noopener">ACP Client</a> extension.</p>
+<p>To connect:</p>
+<ol>
+<li>Open the ACP Client panel from the Activity Bar.</li>
+<li>Select <strong>Hermes Agent</strong> from the built-in agent list.</li>
+<li>Connect and start chatting.</li>
+</ol>
+<p>If you want to define Hermes manually, add it through VS Code settings under <code>acp.agents</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;acp.agents&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;Hermes Agent&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;command&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;acp&quot;</span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="zed">Zed</h3>
+<p>Configure Hermes as a custom agent server in Zed settings:</p>
+<ol>
+<li>Open the Agent Panel.</li>
+<li>Add a custom agent server with the following configuration:</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;agent_servers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;hermes-agent&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;custom&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;command&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;acp&quot;</span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ol>
+<li>Start a new Hermes external-agent thread.</li>
+</ol>
+<p>Prerequisites:</p>
+<ul>
+<li>Configure Hermes provider credentials first with <code>hermes model</code>, or set them in <code>~/.hermes/.env</code> / <code>~/.hermes/config.yaml</code>.</li>
+</ul>
+<h3 id="jetbrains">JetBrains</h3>
+<p>Use an ACP-compatible plugin and point it at <code>hermes acp</code> or <code>hermes-acp</code>.</p>
+<h3 id="buzz-desktop">Buzz Desktop</h3>
+<p><a href="https://github.com/block/buzz" class="ext" target="_blank" rel="noopener">Buzz</a> ships Hermes Agent as a preset runtime.
+With Hermes installed the normal way, Buzz discovers it automatically —
+open <strong>Settings → Runtimes</strong> and Hermes appears under your runtimes.</p>
+<p>If discovery fails (older installs), make sure the ACP launcher resolves on a
+login-shell PATH:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>hermes-acp<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>hermes
+</code></pre></div>
+
+<p>Recent installs write both <code>hermes</code> and <code>hermes-acp</code> launchers into
+<code>~/.local/bin</code>; running <code>hermes update</code> adds the <code>hermes-acp</code> launcher to
+older installs. As a manual fallback, configure Buzz's agent command as
+<code>hermes</code> with args <code>["acp"]</code>.</p>
+<h4 id="model-picker">Model picker</h4>
+<p>Buzz Desktop (v0.5.1+) renders Hermes' full model menu in the agent's runtime
+settings. The list comes from Hermes itself over ACP: it shows every model
+from providers you have authenticated in Hermes (the same inventory behind
+<code>hermes model</code> and the <code>/model</code> command), so a model missing from the menu
+means its provider has no credentials configured on the Hermes side.</p>
+<p>Entry IDs take the form <code>provider:model</code> (e.g. <code>openrouter:z-ai/glm-5.1</code>), or
+<code>custom:&lt;name&gt;:&lt;model&gt;</code> for custom OpenAI-compatible endpoints defined in
+<code>config.yaml</code>. Picking a model applies to that agent's session; it does not
+change your Hermes-wide default — use <code>hermes model</code> for that.</p>
+<h4 id="keep-buzz-agents-owner-only">Keep Buzz agents owner-only</h4>
+<p>Buzz creates every agent with <strong>Who can talk to this agent</strong> set to <code>Owner only</code>.
+Leave it there when the runtime is Hermes.</p>
+<p>Two behaviors combine on this path. The <code>hermes-acp</code> toolset includes <code>terminal</code>
+and <code>execute_code</code>, and Buzz's ACP bridge answers Hermes' permission requests
+itself with <code>allow_once</code> rather than surfacing them. A Hermes agent in Buzz
+therefore runs shell commands on the host without prompting. I asked one to run
+<code>rm -rf</code> against a scratch directory and it deleted it, no prompt anywhere.</p>
+<p>Selecting <code>Anyone</code> hands that same shell access to every author who can reach
+the channel. Buzz does not warn when you pick it.</p>
+<p>Neither of the obvious mitigations works today:</p>
+<ul>
+<li><code>approvals.mode: manual</code> does make Hermes raise the permission request, but
+  Buzz auto-approves it and the command still runs.</li>
+<li><code>platform_toolsets.acp</code> does not narrow the ACP toolset, so it cannot be used
+  to drop <code>terminal</code>.</li>
+</ul>
+<p><code>!shutdown</code> from the owner stops the agent in any mode, and Buzz ignores that
+command from everyone else.</p>
+<h2 id="configuration-and-credentials">Configuration and credentials</h2>
+<p>ACP mode uses the same Hermes configuration as the CLI:</p>
+<ul>
+<li><code>~/.hermes/.env</code></li>
+<li><code>~/.hermes/config.yaml</code></li>
+<li><code>~/.hermes/skills/</code></li>
+<li><code>~/.hermes/state.db</code></li>
+</ul>
+<p>Provider resolution uses Hermes' normal runtime resolver, so ACP inherits the currently configured provider and credentials. Hermes also advertises a terminal auth method (<code>--setup</code>) for first-run ACP clients; this opens Hermes' interactive model/provider setup.</p>
+<h2 id="host-integration">Host integration</h2>
+<p>These variables are set by an <strong>ACP host process</strong> (an editor or another agent
+harness) on the Hermes subprocess it spawns. They are not user configuration —
+do not set them by hand in <code>.env</code> or <code>config.yaml</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Value</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>HERMES_ACP_SKIP_CONFIGURED_MCP</code></td>
+<td><code>1</code></td>
+<td>Skip starting the <strong>globally configured</strong> MCP servers from <code>config.yaml</code> before the ACP JSON-RPC loop begins.</td>
+</tr>
+</tbody>
+</table>
+<p>Hermes normally starts every MCP server configured in <code>config.yaml</code> before it
+enters the ACP JSON-RPC loop. A host that owns MCP itself — passing the
+session's servers explicitly through <code>session/new</code> — does not need that global
+startup, and an unrelated slow or interactive MCP server would otherwise delay
+<code>initialize</code>. Setting the marker to exactly <code>1</code> lets such a host skip it.</p>
+<p>Only the global <code>config.yaml</code> discovery is skipped. <strong>MCP servers supplied by
+the ACP session through <code>session/new</code> are still registered</strong>, so a host loses
+no capability it asked for. Any other value (unset, empty, <code>0</code>, <code>false</code>) keeps
+the default behavior, so an unrelated truthy-looking string cannot silently
+disable MCP.</p>
+<h2 id="session-behavior">Session behavior</h2>
+<p>ACP sessions are tracked by the ACP adapter's in-memory session manager while the server is running.</p>
+<p>Each session stores:</p>
+<ul>
+<li>session ID</li>
+<li>working directory</li>
+<li>selected model</li>
+<li>current conversation history</li>
+<li>cancel event</li>
+</ul>
+<p>Conversations are persisted to Hermes' session database and can be listed, loaded,
+resumed, or forked after the ACP server restarts. Opening a new session without a
+prompt keeps it in memory only: model-discovery probes do not create empty history
+rows. A nonempty fork is persisted immediately, and existing session metadata can
+still be updated even when its current history is empty.</p>
+<p>Existing empty rows from older versions are not automatically deleted. An open ACP
+row does not prove its client has disconnected. After closing the relevant editor
+sessions, inspect unwanted rows with <code>hermes sessions show &lt;id&gt;</code> and remove only
+confirmed unwanted sessions with <code>hermes sessions delete &lt;id&gt;</code>.</p>
+<h2 id="working-directory-behavior">Working directory behavior</h2>
+<p>ACP sessions bind the editor's cwd to the Hermes task ID so file and terminal tools run relative to the editor workspace, not the server process cwd.</p>
+<h2 id="approvals">Approvals</h2>
+<p>Dangerous terminal commands can be routed back to the editor as approval prompts. ACP approval options are simpler than the CLI flow:</p>
+<ul>
+<li>allow once</li>
+<li>allow always</li>
+<li>deny</li>
+</ul>
+<p>Whether you actually see a prompt is up to the host. A host is free to answer the
+request programmatically instead of showing it to you, in which case these
+options exist on the wire but never reach a human. Buzz Desktop does this, so
+treat that path as unattended execution regardless of your <code>approvals</code> setting.</p>
+<p>On timeout or error, the approval bridge denies the request. The wait is
+<code>approvals.timeout</code> from <code>config.yaml</code> (default 300 s), the same knob the CLI and
+gateway prompts use — raise it if your editor keeps approval cards open longer.</p>
+<h3 id="session-scoped-edit-auto-approval">Session-scoped edit auto-approval</h3>
+<p>ACP exposes a third tier between <em>allow once</em> and <em>allow always</em>: <strong>Allow for session</strong>. Picking it from the editor's permission prompt records the approval inside the current ACP session only — every subsequent matching command in that session goes through without prompting, but a new ACP session (or restarting the editor) resets the slate and re-prompts the first time.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Editor label</th>
+<th>Scope</th>
+<th>Persisted across restarts</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>allow_once</code></td>
+<td>Allow once</td>
+<td>This one tool call</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>allow_session</code></td>
+<td>Allow for session</td>
+<td>All matching calls in this ACP session</td>
+<td>No — cleared when the session ends</td>
+</tr>
+<tr>
+<td><code>allow_always</code></td>
+<td>Allow always</td>
+<td>All future sessions</td>
+<td>Yes (written to the Hermes permanent allowlist)</td>
+</tr>
+<tr>
+<td><code>deny</code></td>
+<td>Deny</td>
+<td>This one tool call</td>
+<td>No</td>
+</tr>
+</tbody>
+</table>
+<p><code>allow_session</code> is the right default for an editor workflow where you trust an agent for the duration of a task but don't want to grant a long-lived allowlist entry. The safety trade-off is straightforward: the broader the scope, the less the editor will interrupt you, and the more damage a misbehaving agent (or prompt injection) can do before you notice. Start with <code>allow_once</code> for unfamiliar commands; promote to <code>allow_session</code> once you've seen the agent run the same pattern correctly a few times; reserve <code>allow_always</code> for truly idempotent commands you trust forever (e.g. <code>git status</code>).</p>
+<p>The ACP bridge maps these options onto Hermes' internal approval semantics — <code>allow_always</code> writes a permanent allowlist entry the same way the CLI does, while <code>allow_session</code> only affects the in-process approval cache for the current ACP session.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="acp-agent-does-not-appear-in-the-editor">ACP agent does not appear in the editor</h3>
+<p>Check:</p>
+<ul>
+<li>For manual/local development, verify the host command points to <code>hermes acp</code>.</li>
+<li>Hermes is installed and on your PATH.</li>
+<li>The ACP extra is installed (<code>cd ~/.hermes/hermes-agent &amp;&amp; uv pip install -e '.[acp]'</code>).</li>
+</ul>
+<h3 id="acp-starts-but-immediately-errors">ACP starts but immediately errors</h3>
+<p>Try these checks:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>acp<span class="w"> </span>--version
+hermes<span class="w"> </span>acp<span class="w"> </span>--check
+hermes<span class="w"> </span>doctor
+hermes<span class="w"> </span>status
+</code></pre></div>
+
+<h3 id="missing-credentials">Missing credentials</h3>
+<p>ACP mode uses Hermes' existing provider setup. Configure credentials with:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>model
+</code></pre></div>
+
+<p>or by editing <code>~/.hermes/.env</code>. The terminal auth flow (<code>hermes acp --setup</code>) can also trigger the interactive provider/model setup.</p>
+<h2 id="see-also">See also</h2>
+<ul>
+<li><a href="https://github.com/block/buzz/tree/main/crates/buzz-acp" class="ext" target="_blank" rel="noopener">Buzz ACP harness</a></li>
+<li><a href="../../developer-guide/acp-internals.html">ACP Internals</a></li>
+<li><a href="../../developer-guide/provider-runtime.html">Provider Runtime Resolution</a></li>
+<li><a href="../../developer-guide/tools-runtime.html">Tools Runtime</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/acp</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#what-hermes-exposes-in-acp-mode">What Hermes exposes in ACP mode</a></li>
+<li class="lvl2"><a href="#installation">Installation</a></li>
+<li class="lvl2"><a href="#launching-the-acp-server">Launching the ACP server</a></li>
+<li class="lvl3"><a href="#browser-tools-optional">Browser tools (optional)</a></li>
+<li class="lvl2"><a href="#host-setup">Host setup</a></li>
+<li class="lvl3"><a href="#buzz-channels-relay-bridge">Buzz channels (relay bridge)</a></li>
+<li class="lvl3"><a href="#vs-code">VS Code</a></li>
+<li class="lvl3"><a href="#zed">Zed</a></li>
+<li class="lvl3"><a href="#jetbrains">JetBrains</a></li>
+<li class="lvl3"><a href="#buzz-desktop">Buzz Desktop</a></li>
+<li class="lvl2"><a href="#configuration-and-credentials">Configuration and credentials</a></li>
+<li class="lvl2"><a href="#host-integration">Host integration</a></li>
+<li class="lvl2"><a href="#session-behavior">Session behavior</a></li>
+<li class="lvl2"><a href="#working-directory-behavior">Working directory behavior</a></li>
+<li class="lvl2"><a href="#approvals">Approvals</a></li>
+<li class="lvl3"><a href="#session-scoped-edit-auto-approval">Session-scoped edit auto-approval</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl3"><a href="#acp-agent-does-not-appear-in-the-editor">ACP agent does not appear in the editor</a></li>
+<li class="lvl3"><a href="#acp-starts-but-immediately-errors">ACP starts but immediately errors</a></li>
+<li class="lvl3"><a href="#missing-credentials">Missing credentials</a></li>
+<li class="lvl2"><a href="#see-also">See also</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

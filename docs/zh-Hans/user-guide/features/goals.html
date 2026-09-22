@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>持久目标 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/features/goals</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="持久目标goal">持久目标（<code>/goal</code>）</h1>
+<p><code>/goal</code> 为 Hermes 设置一个跨轮次持续存在的目标。每轮结束后，一个轻量级裁判模型会检查目标是否已被助手的最新回复满足。若未满足，Hermes 会自动将一条续行 prompt（提示词）注入同一会话并继续工作——直到目标达成、你暂停或清除目标，或者轮次预算耗尽为止。</p>
+<p>这是我们对 <strong>Ralph loop</strong> 的实现，直接受 Eric Traut（OpenAI）在 <a href="https://github.com/openai/codex" class="ext" target="_blank" rel="noopener">Codex CLI 0.128.0 的 <code>/goal</code></a> 中的启发。核心思路——跨轮次保持目标存活、不达成不停止——源自他们。此处的实现是独立的，并已适配 Hermes 的架构。</p>
+<h2 id="适用场景">适用场景</h2>
+<p>当你希望 Hermes 自主迭代、无需每轮重新提示时，使用 <code>/goal</code>：</p>
+<ul>
+<li>"修复 <code>src/</code> 中的所有 lint 错误，并验证 <code>ruff check</code> 通过"</li>
+<li>"从仓库 Y 移植功能 X，包含测试，并让 CI 变绿"</li>
+<li>"调查为何会话 ID 有时在中途压缩时发生漂移，并撰写报告"</li>
+<li>"构建一个小型 CLI，按 EXIF 日期重命名文件，然后对 photos/ 文件夹进行测试"</li>
+</ul>
+<p>只需一轮即可完成的任务不需要 <code>/goal</code>。<em>否则你需要说三次"继续"</em> 的任务，才是它的用武之地。</p>
+<h2 id="快速开始">快速开始</h2>
+<div class="highlight"><pre><span></span><code>/goal Fix every failing test in tests/hermes_cli/ and make sure scripts/run_tests.sh passes for that directory
+</code></pre></div>
+
+<p>你将看到：</p>
+<ol>
+<li><strong>目标已接受</strong> — <code>⊙ Goal set (20-turn budget): &lt;your goal&gt;</code></li>
+<li><strong>第 1 轮运行</strong> — Hermes 开始工作，就像你发送了一条普通消息一样。</li>
+<li><strong>裁判运行</strong> — 轮次结束后，裁判模型判定 <code>done</code> 或 <code>continue</code>。</li>
+<li><strong>若需要则触发循环</strong> — 若为 <code>continue</code>，你将看到 <code>↻ Continuing toward goal (1/20): &lt;judge's reason&gt;</code>，Hermes 自动执行下一步。</li>
+<li><strong>终止</strong> — 最终你会看到 <code>✓ Goal achieved: &lt;reason&gt;</code> 或 <code>⏸ Goal paused — N/20 turns used</code>。</li>
+</ol>
+<h2 id="命令">命令</h2>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>功能</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/goal &lt;text&gt;</code></td>
+<td>设置（或替换）持续目标。立即启动第一轮，无需再发送单独消息。</td>
+</tr>
+<tr>
+<td><code>/goal</code> 或 <code>/goal status</code></td>
+<td>显示当前目标、状态及已用轮次。</td>
+</tr>
+<tr>
+<td><code>/goal pause</code></td>
+<td>停止自动续行循环，但不清除目标。</td>
+</tr>
+<tr>
+<td><code>/goal resume</code></td>
+<td>恢复循环（将轮次计数器重置为零）。</td>
+</tr>
+<tr>
+<td><code>/goal clear</code></td>
+<td>完全删除目标。</td>
+</tr>
+</tbody>
+</table>
+<p>在 CLI 及所有 gateway 平台（Telegram、Discord、Slack、Matrix、Signal、WhatsApp、SMS、iMessage、Webhook、API server 以及 Web 控制台）上行为完全一致。</p>
+<h2 id="目标进行中追加条件subgoal">目标进行中追加条件：<code>/subgoal</code></h2>
+<p>目标激活期间，你可以使用 <code>/subgoal &lt;text&gt;</code> 追加额外的验收条件，而不会重置循环。每次调用会向目标的子目标列表添加一个编号条目；下一轮 agent 看到的<strong>续行 prompt</strong> 包含原始目标以及一个"用户在循环中途追加的额外条件"块，<strong>裁判 prompt</strong> 也会被重写，使裁判在判定时必须考虑所有子目标——只有原始目标<strong>和</strong>所有子目标均满足时，目标才会被标记为完成。</p>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>功能</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/subgoal &lt;text&gt;</code></td>
+<td>向活跃目标追加一个新条件。需要有活跃的 <code>/goal</code>。</td>
+</tr>
+<tr>
+<td><code>/subgoal</code>（无参数）</td>
+<td>显示当前编号子目标列表。</td>
+</tr>
+<tr>
+<td><code>/subgoal remove &lt;N&gt;</code></td>
+<td>删除第 N 个子目标（从 1 开始计数）。</td>
+</tr>
+<tr>
+<td><code>/subgoal clear</code></td>
+<td>删除所有子目标，但保留原始目标。</td>
+</tr>
+</tbody>
+</table>
+<p>子目标与目标一起持久化存储在 <code>SessionDB.state_meta</code> 中，因此在 <code>/resume</code> 后依然有效。设置新的 <code>/goal &lt;text&gt;</code> 会替换目标并清空子目标列表；<code>/goal clear</code> 同样如此。</p>
+<p>当你启动一个循环（"修复失败的测试"）后，中途发现还需要"为刚修复的 bug 添加回归测试"时，使用此功能——<code>/subgoal add a regression test</code> 可在不中断运行循环的情况下收紧成功条件。</p>
+<h2 id="行为细节">行为细节</h2>
+<h3 id="裁判">裁判</h3>
+<p>每轮结束后，Hermes 会调用一个辅助模型，传入：</p>
+<ul>
+<li>持续目标文本</li>
+<li>agent 最新的最终回复（最后约 4 KB 文本）</li>
+<li>一个系统 prompt，要求裁判以严格 JSON 格式回复：<code>{"done": &lt;bool&gt;, "reason": "&lt;one-sentence rationale&gt;"}</code></li>
+</ul>
+<p>裁判刻意保守：只有当回复<strong>明确</strong>确认目标已完成、最终交付物已清晰产出，或目标不可达/被阻塞时（视为 DONE 并附带阻塞原因，以免在不可能的任务上消耗预算），才会将目标标记为 <code>done</code>。</p>
+<h3 id="失败开放语义">失败开放语义</h3>
+<p>若裁判出错（网络抖动、响应格式错误、辅助客户端不可用），Hermes 将判定视为 <code>continue</code>——损坏的裁判不会阻塞进度。<strong>轮次预算</strong>才是真正的兜底机制。</p>
+<h3 id="轮次预算">轮次预算</h3>
+<p>默认为 20 个续行轮次（<code>config.yaml</code> 中的 <code>goals.max_turns</code>）。预算耗尽时，Hermes 自动暂停并告知你如何继续：</p>
+<div class="highlight"><pre><span></span><code>⏸ Goal paused — 20/20 turns used. Use /goal resume to keep going, or /goal clear to stop.
+</code></pre></div>
+
+<p><code>/goal resume</code> 将计数器重置为零，你可以按可控的块继续推进。</p>
+<h3 id="用户消息始终优先">用户消息始终优先</h3>
+<p>目标激活期间，你发送的任何真实消息都优先于续行循环。在 CLI 上，你的消息会在队列中的续行消息之前进入 <code>_pending_input</code>；在 gateway 上，它以同样的方式通过适配器 FIFO 传递。你的轮次结束后裁判会再次运行——因此如果你的消息恰好完成了目标，裁判会捕获到并停止循环。</p>
+<h3 id="运行中安全性gateway">运行中安全性（gateway）</h3>
+<p>agent 正在运行时，<code>/goal status</code>、<code>/goal pause</code> 和 <code>/goal clear</code> 可以安全执行——它们只操作控制面状态，不会中断当前轮次。在运行中设置<strong>新</strong>目标（<code>/goal &lt;new text&gt;</code>）会被拒绝，并提示你先执行 <code>/stop</code>，以防旧续行与新目标产生竞争。</p>
+<h3 id="持久化">持久化</h3>
+<p>目标状态存储在 <code>SessionDB.state_meta</code> 中，以 <code>goal:&lt;session_id&gt;</code> 为键。这意味着 <code>/resume</code> 可以从你离开的地方继续——设置目标、合上笔记本、明天回来、执行 <code>/resume</code>，目标依然完好如初（活跃、暂停或已完成）。</p>
+<h3 id="prompt-缓存">Prompt 缓存</h3>
+<p>续行 prompt 是一条以用户角色追加到历史记录中的普通消息。它<strong>不会</strong>修改系统 prompt、切换工具集，也不会以任何使 Hermes prompt 缓存失效的方式改动对话。运行一个 20 轮目标，在缓存层面与 20 轮普通对话的开销相同。</p>
+<h2 id="配置">配置</h2>
+<p>在 <code>~/.hermes/config.yaml</code> 中添加：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">goals</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># Hermes 自动暂停并要求你执行 /goal resume 之前的最大续行轮次。</span>
+<span class="w">  </span><span class="c1"># 默认 20。若想要更紧凑的循环可降低此值；</span>
+<span class="w">  </span><span class="c1"># 长时间重构可适当提高。</span>
+<span class="w">  </span><span class="nt">max_turns</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">20</span>
+</code></pre></div>
+
+<h3 id="选择裁判模型">选择裁判模型</h3>
+<p>裁判使用 <code>goal_judge</code> 辅助任务。默认情况下，它解析为你的主模型（参见<a href="../../../user-guide/configuration.html#auxiliary-models" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">辅助模型</a>）。若想将裁判路由到廉价快速的模型以降低成本，可添加覆盖配置：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">goal_judge</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">google/gemini-3-flash-preview</span>
+</code></pre></div>
+
+<p>裁判调用量小（约 200 个输出 token），每轮运行一次，因此廉价快速的模型通常是正确选择。</p>
+<h2 id="示例演练">示例演练</h2>
+<div class="highlight"><pre><span></span><code>You: /goal Create four files /tmp/note_{1..4}.txt, one per turn, each containing its number as text
+
+  ⊙ Goal set (20-turn budget): Create four files /tmp/note_{1..4}.txt, one per turn, each containing its number as text
+
+Hermes: Creating /tmp/note_1.txt now.
+  💻 echo &quot;1&quot; &gt; /tmp/note_1.txt   (0.1s)
+  I&#39;ve created /tmp/note_1.txt with the content &quot;1&quot;. I&#39;ll continue with the remaining files on the next turn as you specified.
+
+  ↻ Continuing toward goal (1/20): Only 1 of 4 files has been created; 3 files remain.
+
+Hermes: [Continuing toward your standing goal]
+  💻 echo &quot;2&quot; &gt; /tmp/note_2.txt   (0.1s)
+  Created /tmp/note_2.txt. Two more to go.
+
+  ↻ Continuing toward goal (2/20): 2 of 4 files created; 2 remain.
+
+Hermes: [Continuing toward your standing goal]
+  💻 echo &quot;3&quot; &gt; /tmp/note_3.txt   (0.1s)
+  Created /tmp/note_3.txt.
+
+  ↻ Continuing toward goal (3/20): 3 of 4 files created; 1 remains.
+
+Hermes: [Continuing toward your standing goal]
+  💻 echo &quot;4&quot; &gt; /tmp/note_4.txt   (0.1s)
+  All four files have been created: /tmp/note_1.txt through /tmp/note_4.txt, each containing its number.
+
+  ✓ Goal achieved: All four files were created with the specified content, completing the goal.
+
+You: _
+</code></pre></div>
+
+<p>四轮，一次 <code>/goal</code> 调用，你零次"继续"提示。</p>
+<h2 id="裁判判断有误时">裁判判断有误时</h2>
+<p>没有裁判是完美的。需注意两种失败模式：</p>
+<p><strong>假阴性——目标实际已完成，裁判却说继续。</strong> 轮次预算会兜底。你会看到 <code>⏸ Goal paused</code>，可以执行 <code>/goal clear</code> 或直接发送新消息。</p>
+<p><strong>假阳性——工作尚未完成，裁判却说已完成。</strong> 你会看到 <code>✓ Goal achieved</code>，但你知道实际情况并非如此。发送后续消息继续，或更精确地重新设置目标：<code>/goal &lt;更具体的文本&gt;</code>。裁判的系统 prompt 刻意保守，以使假阳性比假阴性更少出现。</p>
+<p>如果你觉得某次裁判判定不可信，<code>↻ Continuing toward goal</code> 或 <code>✓ Goal achieved</code> 行中的原因文本会告诉你裁判看到了什么。这通常足以诊断出是目标文本存在歧义，还是模型的回复有问题。</p>
+<h2 id="致谢">致谢</h2>
+<p><code>/goal</code> 是 Hermes 对 <strong>Ralph loop</strong> 模式的实现。面向用户的设计——跨轮次保持目标存活、不达成不停止，以及创建/暂停/恢复/清除控制——由 OpenAI Codex 团队的 Eric Traut 在 <a href="https://github.com/openai/codex" class="ext" target="_blank" rel="noopener">Codex CLI 0.128.0</a> 中推广并落地。我们的实现是独立的（中央 <code>CommandDef</code> 注册表、<code>SessionDB.state_meta</code> 持久化、辅助客户端裁判、gateway 侧的适配器 FIFO 续行），但这个想法源自他们。功劳归于应得之人。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/features/goals</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#适用场景">适用场景</a></li>
+<li class="lvl2"><a href="#快速开始">快速开始</a></li>
+<li class="lvl2"><a href="#命令">命令</a></li>
+<li class="lvl2"><a href="#目标进行中追加条件subgoal">目标进行中追加条件：/subgoal</a></li>
+<li class="lvl2"><a href="#行为细节">行为细节</a></li>
+<li class="lvl3"><a href="#裁判">裁判</a></li>
+<li class="lvl3"><a href="#失败开放语义">失败开放语义</a></li>
+<li class="lvl3"><a href="#轮次预算">轮次预算</a></li>
+<li class="lvl3"><a href="#用户消息始终优先">用户消息始终优先</a></li>
+<li class="lvl3"><a href="#运行中安全性gateway">运行中安全性（gateway）</a></li>
+<li class="lvl3"><a href="#持久化">持久化</a></li>
+<li class="lvl3"><a href="#prompt-缓存">Prompt 缓存</a></li>
+<li class="lvl2"><a href="#配置">配置</a></li>
+<li class="lvl3"><a href="#选择裁判模型">选择裁判模型</a></li>
+<li class="lvl2"><a href="#示例演练">示例演练</a></li>
+<li class="lvl2"><a href="#裁判判断有误时">裁判判断有误时</a></li>
+<li class="lvl2"><a href="#致谢">致谢</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

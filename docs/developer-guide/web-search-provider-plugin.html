@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web Search Provider Plugins · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/web-search-provider-plugin</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="building-a-web-search-provider-plugin">Building a Web Search Provider Plugin</h1>
+<p>Web-search provider plugins register a backend that services <code>web_search</code>, <code>web_extract</code>, and (optionally) deep-crawl tool calls. Built-in providers — Firecrawl, SearXNG, Tavily, Perplexity, Exa, Parallel, Keenable, Brave Search (free tier), xAI, and DDGS — all ship as plugins under <code>plugins/web/&lt;name&gt;/</code>. You can add a new one, or override a bundled one, by dropping a directory next to them.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Web search is one of several <strong>backend plugins</strong> Hermes supports. The others (with their own ABCs) are <a href="image-gen-provider-plugin.html">Image Generation Provider Plugins</a>, <a href="video-gen-provider-plugin.html">Video Generation Provider Plugins</a>, <a href="memory-provider-plugin.html">Memory Provider Plugins</a>, <a href="context-engine-plugin.html">Context Engine Plugins</a>, and <a href="model-provider-plugin.html">Model Provider Plugins</a>. General tool/hook/CLI plugins live in <a href="plugins.html">Build a Hermes Plugin</a>.</p>
+</div>
+<h2 id="how-discovery-works">How discovery works</h2>
+<p>Hermes scans for web-search backends in three places:</p>
+<ol>
+<li><strong>Bundled</strong> — <code>&lt;repo&gt;/plugins/web/&lt;name&gt;/</code> (auto-loaded with <code>kind: backend</code>, always available)</li>
+<li><strong>User</strong> — <code>~/.hermes/plugins/web/&lt;name&gt;/</code> (opt-in via <code>plugins.enabled</code> or <code>hermes plugins enable &lt;name&gt;</code>)</li>
+<li><strong>Pip</strong> — packages declaring a <code>hermes_agent.plugins</code> entry point</li>
+</ol>
+<p>Each plugin's <code>register(ctx)</code> function calls <code>ctx.register_web_search_provider(...)</code> — that puts the instance into the registry in <code>agent/web_search_registry.py</code>. The active provider for each capability is picked by config:</p>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Config key</th>
+<th>Falls back to</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>web_search</code></td>
+<td><code>web.search_backend</code></td>
+<td><code>web.backend</code></td>
+</tr>
+<tr>
+<td><code>web_extract</code></td>
+<td><code>web.extract_backend</code></td>
+<td><code>web.backend</code></td>
+</tr>
+<tr>
+<td>Deep crawl modes inside <code>web_extract</code></td>
+<td><code>web.extract_backend</code></td>
+<td><code>web.backend</code></td>
+</tr>
+</tbody>
+</table>
+<p>When neither key is set, Hermes auto-detects the backend from whichever API key/URL is present in the environment. <code>hermes tools</code> walks users through selection.</p>
+<h2 id="directory-structure">Directory structure</h2>
+<div class="highlight"><pre><span></span><code>plugins/web/my-backend/
+├── __init__.py     # register() entry point
+├── provider.py     # WebSearchProvider subclass
+└── plugin.yaml     # Manifest with kind: backend and provides_web_providers
+</code></pre></div>
+
+<p><code>brave_free/</code> and <code>ddgs/</code> are the smallest in-tree references — <code>brave_free</code> for an API-key-gated search-only provider, <code>ddgs</code> for a no-key provider that lazy-installs its SDK.</p>
+<h2 id="the-websearchprovider-abc">The WebSearchProvider ABC</h2>
+<p>Subclass <code>agent.web_search_provider.WebSearchProvider</code>. The only required members are <code>name</code>, <code>is_available()</code>, and whichever of <code>search()</code> / <code>extract()</code> you implement. (Deep crawling is not a separate method — it's a mode of <code>extract()</code>.)</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/web/my-backend/provider.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.web_search_provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">WebSearchProvider</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyBackendWebSearchProvider</span><span class="p">(</span><span class="n">WebSearchProvider</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Minimal search-only provider against the My Backend HTTP API.&quot;&quot;&quot;</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="c1"># Stable id used in web.search_backend / web.extract_backend / web.backend</span>
+        <span class="c1"># config keys. Lowercase, no spaces; hyphens permitted.</span>
+        <span class="k">return</span> <span class="s2">&quot;my-backend&quot;</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">display_name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="c1"># Human label shown in `hermes tools`. Defaults to `name`.</span>
+        <span class="k">return</span> <span class="s2">&quot;My Backend&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_available</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="c1"># Cheap check — env var present, optional dep importable, etc.</span>
+        <span class="c1"># MUST NOT make network calls (runs on every `hermes tools` paint).</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_BACKEND_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">())</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">supports_search</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">True</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">supports_extract</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">search</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">query</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">limit</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">5</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="kn">import</span><span class="w"> </span><span class="nn">httpx</span>
+
+        <span class="n">api_key</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;MY_BACKEND_API_KEY&quot;</span><span class="p">]</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">resp</span> <span class="o">=</span> <span class="n">httpx</span><span class="o">.</span><span class="n">get</span><span class="p">(</span>
+                <span class="s2">&quot;https://api.example.com/search&quot;</span><span class="p">,</span>
+                <span class="n">params</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;q&quot;</span><span class="p">:</span> <span class="n">query</span><span class="p">,</span> <span class="s2">&quot;count&quot;</span><span class="p">:</span> <span class="nb">max</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="nb">min</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">limit</span><span class="p">),</span> <span class="mi">20</span><span class="p">))},</span>
+                <span class="n">headers</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;Authorization&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Bearer </span><span class="si">{</span><span class="n">api_key</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">},</span>
+                <span class="n">timeout</span><span class="o">=</span><span class="mi">15</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+            <span class="n">data</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+        <span class="k">except</span> <span class="n">httpx</span><span class="o">.</span><span class="n">HTTPError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span> <span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">exc</span><span class="p">)}</span>
+
+        <span class="c1"># Response shape is fixed — see &quot;Response shape&quot; below.</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+            <span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;web&quot;</span><span class="p">:</span> <span class="p">[</span>
+                    <span class="p">{</span>
+                        <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="n">item</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;title&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">),</span>
+                        <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="n">item</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;url&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">),</span>
+                        <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="n">item</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;snippet&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">),</span>
+                        <span class="s2">&quot;position&quot;</span><span class="p">:</span> <span class="n">idx</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span>
+                    <span class="p">}</span>
+                    <span class="k">for</span> <span class="n">idx</span><span class="p">,</span> <span class="n">item</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;results&quot;</span><span class="p">,</span> <span class="p">[]))</span>
+                <span class="p">],</span>
+            <span class="p">},</span>
+        <span class="p">}</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/web/my-backend/__init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">plugins.web.my_backend.provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">MyBackendWebSearchProvider</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Plugin entry point — called once at load time.&quot;&quot;&quot;</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_web_search_provider</span><span class="p">(</span><span class="n">MyBackendWebSearchProvider</span><span class="p">())</span>
+</code></pre></div>
+
+<h2 id="pluginyaml">plugin.yaml</h2>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">web-my-backend</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;My</span><span class="nv"> </span><span class="s">Backend</span><span class="nv"> </span><span class="s">web</span><span class="nv"> </span><span class="s">search</span><span class="nv"> </span><span class="s">—</span><span class="nv"> </span><span class="s">Bearer-auth</span><span class="nv"> </span><span class="s">REST</span><span class="nv"> </span><span class="s">API&quot;</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backend</span>
+<span class="nt">provides_web_providers</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-backend</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_BACKEND_API_KEY</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kind: backend</code></td>
+<td>Routes the plugin through the backend-loading path</td>
+</tr>
+<tr>
+<td><code>provides_web_providers</code></td>
+<td>List of provider <code>name</code>s this plugin registers — used by the loader to advertise the plugin in <code>hermes tools</code> even before <code>register()</code> runs</td>
+</tr>
+<tr>
+<td><code>requires_env</code></td>
+<td>Interactive credential prompt during <code>hermes plugins install</code> (see <a href="plugins.html#gate-on-environment-variables">Build a Hermes Plugin</a> for the rich format)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="abc-reference">ABC reference</h2>
+<p>Full contract in <code>agent/web_search_provider.py</code>. Methods you may override:</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th>Required</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>✅</td>
+<td>—</td>
+<td>Stable id used in <code>web.*_backend</code> config</td>
+</tr>
+<tr>
+<td><code>display_name</code></td>
+<td>—</td>
+<td><code>name</code></td>
+<td>Label shown in <code>hermes tools</code></td>
+</tr>
+<tr>
+<td><code>is_available()</code></td>
+<td>✅</td>
+<td>—</td>
+<td>Cheap availability gate — env vars, optional deps</td>
+</tr>
+<tr>
+<td><code>supports_search()</code></td>
+<td>—</td>
+<td><code>True</code></td>
+<td>Capability flag for <code>web_search</code> routing</td>
+</tr>
+<tr>
+<td><code>supports_extract()</code></td>
+<td>—</td>
+<td><code>False</code></td>
+<td>Capability flag for <code>web_extract</code> routing</td>
+</tr>
+<tr>
+<td><code>search(query, limit)</code></td>
+<td>conditional</td>
+<td>raises</td>
+<td>Required when <code>supports_search()</code> returns <code>True</code></td>
+</tr>
+<tr>
+<td><code>extract(urls, **kwargs)</code></td>
+<td>conditional</td>
+<td>raises</td>
+<td>Required when <code>supports_extract()</code> returns <code>True</code></td>
+</tr>
+</tbody>
+</table>
+<p>Providers can advertise multiple capabilities from a single class — Firecrawl, Tavily, Perplexity, Keenable, Exa, and Parallel all implement both search and extract. Brave Search and DDGS are search-only; SearXNG is search-only with a documented "pair me with an extract provider" workflow.</p>
+<h2 id="response-shape">Response shape</h2>
+<p>The tool wrapper expects a fixed envelope so it doesn't have to translate between backends.</p>
+<p><strong>Search success:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+    <span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;web&quot;</span><span class="p">:</span> <span class="p">[</span>
+            <span class="p">{</span><span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="s2">&quot;position&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">},</span>
+            <span class="o">...</span>
+        <span class="p">],</span>
+    <span class="p">},</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Extract success:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+    <span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="p">[</span>
+        <span class="p">{</span>
+            <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+            <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+            <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+            <span class="s2">&quot;raw_content&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+            <span class="s2">&quot;metadata&quot;</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span>    <span class="c1"># optional</span>
+            <span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>        <span class="c1"># optional, only on per-URL failure</span>
+        <span class="p">},</span>
+        <span class="o">...</span>
+    <span class="p">],</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Either capability, on failure:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span> <span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="s2">&quot;human-readable message&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>Both <code>search()</code> and <code>extract()</code> may be <code>async def</code> — the dispatcher detects coroutine functions via <code>inspect.iscoroutinefunction</code> and awaits accordingly. Sync implementations that do blocking I/O (HTTP, SDK calls) are fine for small backends; the dispatcher handles threading.</p>
+<h2 id="capability-flags">Capability flags</h2>
+<p>Hermes routes calls to the right provider based on the <code>supports_*</code> flags. A common multi-provider setup:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">search_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;brave-free&quot;</span><span class="w">     </span><span class="c1"># search-only, fast, free 2k/mo</span>
+<span class="w">  </span><span class="nt">extract_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;firecrawl&quot;</span><span class="w">     </span><span class="c1"># extract + crawl, paid quota</span>
+</code></pre></div>
+
+<p>When <code>web.search_backend</code> or <code>web.extract_backend</code> aren't set, both fall through to <code>web.backend</code>. When that's also unset, Hermes picks the first available provider that supports the requested capability based on env-var presence.</p>
+<p>If your provider only supports one capability, leave the other flags at their default (<code>False</code>) and the registry will skip it for that tool — users won't see misleading "provider X failed" errors when they're using X only for search and asking the agent to extract.</p>
+<h2 id="how-hermes-wires-it-into-the-tools">How Hermes wires it into the tools</h2>
+<p>The <code>web_search</code> and <code>web_extract</code> tools live in <code>tools/web_tools.py</code>. At call time they:</p>
+<ol>
+<li>Read the relevant config key (<code>web.search_backend</code> for <code>web_search</code>, <code>web.extract_backend</code> for <code>web_extract</code>)</li>
+<li>Ask the registry for the provider with that <code>name</code></li>
+<li>Check <code>is_available()</code> and the matching <code>supports_*()</code> flag</li>
+<li>Dispatch to <code>search()</code> / <code>extract()</code> (deep crawl runs as a mode inside <code>extract()</code>), awaiting if the method is a coroutine</li>
+<li>JSON-serialize the response envelope and hand it back to the LLM</li>
+</ol>
+<p>Errors surface as the tool result; the LLM decides how to explain them. If no provider is registered (or every available one fails the capability gate), the tool returns a helpful error pointing at <code>hermes tools</code>.</p>
+<h2 id="lazy-installing-optional-dependencies">Lazy-installing optional dependencies</h2>
+<p>If your provider wraps a third-party SDK (like DDGS does with the <code>ddgs</code> package), don't <code>import</code> it at module top level. Use <code>tools.lazy_deps.ensure(...)</code> inside <code>is_available()</code> or <code>search()</code> — Hermes will install the package on first use, gated by <code>security.allow_lazy_installs</code>. See <a href="plugins.html#lazy-install-optional-python-dependencies">Build a Hermes Plugin → Lazy-install</a> for the security model.</p>
+<h2 id="reference-implementations">Reference implementations</h2>
+<ul>
+<li><strong><code>plugins/web/brave_free/</code></strong> — small, API-key-gated, search-only HTTP provider. Good starting template.</li>
+<li><strong><code>plugins/web/ddgs/</code></strong> — no-key provider that lazy-installs its SDK. Useful pattern for backends that wrap a Python package.</li>
+<li><strong><code>plugins/web/firecrawl/</code></strong> — full multi-capability provider (search + extract + crawl) with multiple format modes.</li>
+<li><strong><code>plugins/web/searxng/</code></strong> — self-hosted, URL-configured backend with no auth.</li>
+<li><strong><code>plugins/web/xai/</code></strong> — LLM-backed search via Grok's server-side <code>web_search</code> tool. Shows how to reuse an existing OAuth/env-var credential surface (<code>tools/xai_http.py</code>) without adding new env vars, and how to write a cheap <code>is_available()</code> that honors the no-network contract.</li>
+</ul>
+<h2 id="distribute-via-pip">Distribute via pip</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># pyproject.toml</span>
+<span class="k">[project.entry-points.</span><span class="s2">&quot;hermes_agent.plugins&quot;</span><span class="k">]</span>
+<span class="n">my-backend-web</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;my_backend_web_package&quot;</span>
+</code></pre></div>
+
+<p><code>my_backend_web_package</code> must expose a top-level <code>register</code> function. See <a href="plugins.html#distribute-via-pip">Distribute via pip</a> in the general plugin guide for the full setup.</p>
+<h2 id="related-pages">Related pages</h2>
+<ul>
+<li><a href="../user-guide/features/web-search.html">Web Search</a> — user-facing feature documentation and per-backend configuration</li>
+<li><a href="../user-guide/features/plugins.html">Plugins overview</a> — all plugin types at a glance</li>
+<li><a href="plugins.html">Build a Hermes Plugin</a> — general tools/hooks/slash commands guide</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/web-search-provider-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-discovery-works">How discovery works</a></li>
+<li class="lvl2"><a href="#directory-structure">Directory structure</a></li>
+<li class="lvl2"><a href="#the-websearchprovider-abc">The WebSearchProvider ABC</a></li>
+<li class="lvl2"><a href="#pluginyaml">plugin.yaml</a></li>
+<li class="lvl2"><a href="#abc-reference">ABC reference</a></li>
+<li class="lvl2"><a href="#response-shape">Response shape</a></li>
+<li class="lvl2"><a href="#capability-flags">Capability flags</a></li>
+<li class="lvl2"><a href="#how-hermes-wires-it-into-the-tools">How Hermes wires it into the tools</a></li>
+<li class="lvl2"><a href="#lazy-installing-optional-dependencies">Lazy-installing optional dependencies</a></li>
+<li class="lvl2"><a href="#reference-implementations">Reference implementations</a></li>
+<li class="lvl2"><a href="#distribute-via-pip">Distribute via pip</a></li>
+<li class="lvl2"><a href="#related-pages">Related pages</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>X (Twitter) 搜索 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/features/x-search</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="x-twitter-搜索">X (Twitter) 搜索</h1>
+<p><code>x_search</code> 工具让 agent 可以直接搜索 X (Twitter) 的帖子、账号和话题串。其底层依托 xAI 在 Responses API（<code>https://api.x.ai/v1/responses</code>）上内置的 <code>x_search</code> 工具——Grok 在服务端执行搜索，并返回带有原始帖子引用的综合结果。</p>
+<p><strong>当你明确需要 X 上的当前讨论、反应或观点时，请使用此工具而非 <code>web_search</code>。</strong> 对于一般网页内容，继续使用 <code>web_search</code> / <code>web_extract</code>。</p>
+<h2 id="认证">认证</h2>
+<p>满足以下<strong>任一</strong> xAI 凭据路径时，<code>x_search</code> 即会注册：</p>
+<table>
+<thead>
+<tr>
+<th>凭据</th>
+<th>来源</th>
+<th>配置方式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SuperGrok / X Premium+ OAuth</strong>（推荐）</td>
+<td>在 <code>accounts.x.ai</code> 浏览器登录，自动刷新</td>
+<td><code>hermes auth add xai-oauth</code> — 参见 <a href="../../guides/xai-grok-oauth.html">xAI Grok OAuth (SuperGrok / X Premium+)</a></td>
+</tr>
+<tr>
+<td><strong><code>XAI_API_KEY</code></strong></td>
+<td>付费 xAI API 密钥</td>
+<td>在 <code>~/.hermes/.env</code> 中设置</td>
+</tr>
+</tbody>
+</table>
+<p>两者使用相同的 endpoint 和相同的请求体，区别仅在于 bearer token。<strong>当两者同时配置时，SuperGrok OAuth 优先</strong>，x_search 将消耗你的订阅配额而非付费 API 用量。</p>
+<p>工具的 <code>check_fn</code> 在每次重建模型工具列表时都会运行 xAI 凭据解析器。返回 <code>True</code> 表示 bearer token 可获取、非空，且（若已过期）已成功刷新。刷新失败的已撤销 token 会将该工具从 schema 中隐藏，模型将无法感知其存在。</p>
+<h2 id="启用工具">启用工具</h2>
+<p>当 xAI 凭据（OAuth token 或 <code>XAI_API_KEY</code>）存在时自动启用。如不需要，可通过 <code>hermes tools</code> → Search → x_search 显式禁用。</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>tools
+<span class="c1"># → 🐦 X (Twitter) Search   (press space to toggle on)</span>
+</code></pre></div>
+
+<p>选择器提供两种凭据选项：</p>
+<ol>
+<li><strong>xAI Grok OAuth (SuperGrok / Premium+)</strong> — 若尚未登录，将打开浏览器跳转至 <code>accounts.x.ai</code></li>
+<li><strong>xAI API key</strong> — 提示输入 <code>XAI_API_KEY</code></li>
+</ol>
+<p>任一选项均可满足门控条件。你可以使用已有的任意凭据，工具行为完全相同。若两者均已配置，调用时 OAuth 优先。</p>
+<h2 id="配置">配置</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">x_search</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># 用于 Responses 调用的 xAI 模型。</span>
+<span class="w">  </span><span class="c1"># grok-4.5 是推荐的默认值；任何支持</span>
+<span class="w">  </span><span class="c1"># x_search 工具访问权限的 Grok 模型均可使用。</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">grok-4.5</span>
+
+<span class="w">  </span><span class="c1"># 可选推理强度：low、medium、high 或 xhigh。省略时使用所选模型的默认值。</span>
+<span class="w">  </span><span class="c1"># xhigh 仅适用于明确支持它的模型，例如 grok-4.20-multi-agent。</span>
+<span class="w">  </span><span class="c1"># reasoning_effort: low</span>
+
+<span class="w">  </span><span class="c1"># 请求超时时间（秒）。复杂查询的 x_search 可能需要 60–120 秒，</span>
+<span class="w">  </span><span class="c1"># 默认值较为宽松。最小值：30。</span>
+<span class="w">  </span><span class="nt">timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">180</span>
+
+<span class="w">  </span><span class="c1"># 遇到 5xx / ReadTimeout / ConnectionError 时的自动重试次数。</span>
+<span class="w">  </span><span class="c1"># 每次重试按指数退避（1.5 倍尝试秒数，上限 5 秒）。</span>
+<span class="w">  </span><span class="nt">retries</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+</code></pre></div>
+
+<p><code>reasoning_effort</code> 会以 <code>reasoning: {effort: ...}</code> 的形式发送到 xAI
+Responses API。不支持可配置推理的模型应留空。无效值会在发起 API 请求前失败。</p>
+<h2 id="工具参数">工具参数</h2>
+<p>agent 调用 <code>x_search</code> 时使用以下参数：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>query</code></td>
+<td>string（必填）</td>
+<td>在 X 上要查找的内容。</td>
+</tr>
+<tr>
+<td><code>allowed_x_handles</code></td>
+<td>string 数组</td>
+<td>可选，<strong>仅</strong>包含指定账号的列表（最多 10 个）。前缀 <code>@</code> 会被自动去除。</td>
+</tr>
+<tr>
+<td><code>excluded_x_handles</code></td>
+<td>string 数组</td>
+<td>可选，要排除的账号列表（最多 10 个）。与 <code>allowed_x_handles</code> 互斥。</td>
+</tr>
+<tr>
+<td><code>from_date</code></td>
+<td>string</td>
+<td>可选，<code>YYYY-MM-DD</code> 格式的起始日期。</td>
+</tr>
+<tr>
+<td><code>to_date</code></td>
+<td>string</td>
+<td>可选，<code>YYYY-MM-DD</code> 格式的结束日期。</td>
+</tr>
+<tr>
+<td><code>enable_image_understanding</code></td>
+<td>boolean</td>
+<td>让 xAI 分析匹配帖子中附带的图片。</td>
+</tr>
+<tr>
+<td><code>enable_video_understanding</code></td>
+<td>boolean</td>
+<td>让 xAI 分析匹配帖子中附带的视频。</td>
+</tr>
+</tbody>
+</table>
+<p>工具返回的 JSON 包含：</p>
+<ul>
+<li><code>answer</code> — Grok 生成的综合文本回答</li>
+<li><code>citations</code> — Responses API 顶层字段返回的引用</li>
+<li><code>inline_citations</code> — 从消息正文中提取的 <code>url_citation</code> 注释（每条包含 <code>url</code>、<code>title</code>、<code>start_index</code>、<code>end_index</code>）</li>
+<li><code>degraded</code> — 当设置了任意缩小范围的过滤器（<code>allowed_x_handles</code>、<code>excluded_x_handles</code>、<code>from_date</code>、<code>to_date</code>）且两个引用渠道均返回空时为 <code>true</code>。此时 <code>answer</code> 是基于模型自身知识合成的，而非来自 X 索引，应视为无来源内容。否则为 <code>false</code>（包括"未设置过滤器"的情况——宽泛的无来源回答只是一个回答，而非过滤器未命中）</li>
+<li><code>degraded_reason</code> — 列出哪些过滤器处于激活状态的简短字符串，当 <code>degraded</code> 为 <code>false</code> 时为 <code>null</code></li>
+<li><code>credential_source</code> — OAuth 解析成功时为 <code>"xai-oauth"</code>，API 密钥解析成功时为 <code>"xai"</code></li>
+<li><code>model</code>、<code>query</code>、<code>provider</code>、<code>tool</code>、<code>success</code></li>
+</ul>
+<h3 id="日期验证">日期验证</h3>
+<p><code>from_date</code> / <code>to_date</code> 在发起 HTTP 调用前会在客户端进行验证：</p>
+<ul>
+<li>若提供，两者均须能解析为 <code>YYYY-MM-DD</code> 格式。</li>
+<li>当两者同时设置时，<code>from_date</code> 必须不晚于 <code>to_date</code>。</li>
+<li><code>from_date</code> 不得晚于今天（UTC）——尚未开始的时间窗口内不可能存在帖子，调用必然返回零引用。</li>
+<li><code>to_date</code> 允许为未来日期（调用方可能合理地请求"从昨天到明天"以捕获即将发布的帖子）。</li>
+</ul>
+<p>验证失败会以结构化的 <code>{"error": "..."}</code> 工具结果返回，不会向 xAI 发起 HTTP 调用。</p>
+<h2 id="示例">示例</h2>
+<p>与 agent 对话：</p>
+<blockquote>
+<p>X 上的人们对新的 Grok 图像功能有什么看法？重点关注 @xai 的回应。</p>
+</blockquote>
+<p>agent 将：</p>
+<ol>
+<li>以 <code>query="reactions to new Grok image features"</code>、<code>allowed_x_handles=["xai"]</code> 调用 <code>x_search</code></li>
+<li>获取综合回答及指向具体帖子的引用列表</li>
+<li>回复包含答案和参考来源</li>
+</ol>
+<h2 id="故障排查">故障排查</h2>
+<h3 id="no-xai-credentials-available">"No xAI credentials available"</h3>
+<p>当两种认证路径均失败时，工具会显示此错误。请在 <code>~/.hermes/.env</code> 中设置 <code>XAI_API_KEY</code>，或运行 <code>hermes auth add xai-oauth</code> 并完成浏览器登录。然后重启会话，让 agent 重新加载工具注册表。</p>
+<h3 id="x_search-is-not-enabled-for-this-model">"<code>x_search</code> is not enabled for this model"</h3>
+<p>配置的 <code>x_search.model</code> 没有访问服务端 <code>x_search</code> 工具的权限。请切换至 <code>grok-4.5</code>（默认值）或其他支持该工具的 Grok 模型。当前支持列表请查阅 <a href="https://docs.x.ai/" class="ext" target="_blank" rel="noopener">xAI 文档</a>。</p>
+<h3 id="工具未出现在-schema-中">工具未出现在 schema 中</h3>
+<p>可能有两个原因：</p>
+<ol>
+<li><strong>工具集未启用。</strong> 运行 <code>hermes tools</code>，确认 <code>🐦 X (Twitter) Search</code> 已勾选。</li>
+<li><strong>无 xAI 凭据。</strong> <code>check_fn</code> 返回 False，schema 保持隐藏。运行 <code>hermes auth status</code> 确认 xai-oauth 登录状态，并检查 <code>XAI_API_KEY</code> 是否已设置（如使用 API 密钥路径）。</li>
+</ol>
+<h3 id="degraded-true--回答无引用来源"><code>degraded: true</code> — 回答无引用来源</h3>
+<p>当你使用了 <code>allowed_x_handles</code>、<code>excluded_x_handles</code> 或日期范围，且响应返回 <code>degraded: true</code> 时，说明 xAI 的 X 索引未找到匹配帖子，但 Grok 仍基于自身训练数据生成了综合回答。该回答无来源支撑——请勿将其视为真实的 X 内容。</p>
+<p>值得排查的原因：</p>
+<ul>
+<li><strong>账号名拼写错误。</strong> 去掉 <code>@</code>，仔细核对拼写，并确认该账号存在。</li>
+<li><strong>日期范围过窄</strong>，或滑过了今日帖子；请扩大范围后重试。</li>
+<li><strong>xAI 索引缺口。</strong> 部分活跃账号即使定期发帖，也会间歇性地无法在 <code>x_search</code> 中出现。请等待几分钟后重试，或在需要精确获取某账号时间线时使用 <code>xurl</code> 技能直接调用 X API。</li>
+</ul>
+<h2 id="另请参阅">另请参阅</h2>
+<ul>
+<li><a href="../../guides/xai-grok-oauth.html">xAI Grok OAuth (SuperGrok / Premium+)</a> — OAuth 配置指南</li>
+<li><a href="web-search.html">Web 搜索与提取</a> — 用于一般（非 X）网页搜索</li>
+<li><a href="../../reference/tools-reference.html">工具参考</a> — 完整工具目录</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/features/x-search</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#认证">认证</a></li>
+<li class="lvl2"><a href="#启用工具">启用工具</a></li>
+<li class="lvl2"><a href="#配置">配置</a></li>
+<li class="lvl2"><a href="#工具参数">工具参数</a></li>
+<li class="lvl3"><a href="#日期验证">日期验证</a></li>
+<li class="lvl2"><a href="#示例">示例</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl3"><a href="#no-xai-credentials-available">&quot;No xAI credentials available&quot;</a></li>
+<li class="lvl3"><a href="#x_search-is-not-enabled-for-this-model">&quot;x_search is not enabled for this model&quot;</a></li>
+<li class="lvl3"><a href="#工具未出现在-schema-中">工具未出现在 schema 中</a></li>
+<li class="lvl3"><a href="#degraded-true--回答无引用来源">degraded: true — 回答无引用来源</a></li>
+<li class="lvl2"><a href="#另请参阅">另请参阅</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adding a Platform Adapter · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/adding-platform-adapters</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="adding-a-platform-adapter">Adding a Platform Adapter</h1>
+<p>This guide covers adding a new messaging platform to the Hermes gateway. A platform adapter connects Hermes to an external messaging service (Telegram, Discord, WeCom, etc.) so users can interact with the agent through that service.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>There are two ways to add a platform:
+- <strong>Plugin</strong> (recommended for community/third-party): Drop a plugin directory into <code>~/.hermes/plugins/</code> — zero core code changes needed. See <a href="#plugin-path-recommended">Plugin Path</a> below.
+- <strong>Built-in</strong>: Modify 20+ files across code, config, and docs. Use the <a href="#step-by-step-checklist-built-in-path">Built-in Checklist</a> below.</p>
+</div>
+<h2 id="architecture-overview">Architecture Overview</h2>
+<div class="highlight"><pre><span></span><code>User ↔ Messaging Platform ↔ Platform Adapter ↔ Gateway Runner ↔ AIAgent
+</code></pre></div>
+
+<p>Every adapter extends <code>BasePlatformAdapter</code> from <code>gateway/platforms/base.py</code> and implements:</p>
+<ul>
+<li><strong><code>connect()</code></strong> — Establish connection (WebSocket, long-poll, HTTP server, etc.) <em>(abstract)</em></li>
+<li><strong><code>disconnect()</code></strong> — Clean shutdown <em>(abstract)</em></li>
+<li><strong><code>send()</code></strong> — Send a text message to a chat <em>(abstract)</em></li>
+<li><strong><code>send_typing()</code></strong> — Show typing indicator (optional override)</li>
+<li><strong><code>get_chat_info()</code></strong> — Return chat metadata (optional override)</li>
+</ul>
+<p>Inbound messages are received by the adapter and forwarded via <code>self.handle_message(event)</code>, which the base class routes to the gateway runner.</p>
+<h2 id="plugin-path-recommended">Plugin Path (Recommended)</h2>
+<p>The plugin system lets you add a platform adapter without modifying any core Hermes code. Your plugin is a directory with two files:</p>
+<div class="highlight"><pre><span></span><code>~/.hermes/plugins/my-platform/
+  plugin.yaml      # Plugin metadata
+  adapter.py       # Adapter class + register() entry point
+</code></pre></div>
+
+<h3 id="pluginyaml">plugin.yaml</h3>
+<p>Plugin metadata. The <code>requires_env</code> and <code>optional_env</code> blocks auto-populate <code>hermes config</code> UI entries (see <a href="#surfacing-env-vars-in-hermes-config">Surfacing Env Vars</a> below).</p>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-platform</span>
+<span class="nt">label</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My Platform</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">platform</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My custom messaging platform adapter</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_TOKEN</span><span class="w">          </span><span class="c1"># bare string works</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_CHANNEL</span><span class="w">  </span><span class="c1"># or rich dict for better UX</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Channel</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">join&quot;</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Channel&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="nt">optional_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_HOME_CHANNEL</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Default</span><span class="nv"> </span><span class="s">channel</span><span class="nv"> </span><span class="s">for</span><span class="nv"> </span><span class="s">cron</span><span class="nv"> </span><span class="s">delivery&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<h4 id="outbound-client-tools-provides_tools">Outbound client tools: <code>provides_tools</code></h4>
+<p><code>kind: platform</code> plugins are <strong>deferred</strong>: the adapter module (and its SDK
+imports) only load when a gateway, cron, or <code>send_message</code> path first asks the
+platform registry for the platform. If your plugin also ships outbound <em>client
+tools</em> the agent should be able to call from any session (the bundled <code>a2a</code>
+plugin's <code>a2a_call</code> / <code>a2a_discover</code> etc.), put them in a dedicated <code>tools.py</code>
+with a <code>register_tools(ctx)</code> function and declare them in the manifest:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">provides_tools</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my_platform_call</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my_platform_list</span>
+</code></pre></div>
+
+<p>With <code>provides_tools</code> declared, Hermes imports only <code>tools.py</code> during plugin
+discovery and registers the client tools in every process — CLI and TUI
+included — while the adapter stays deferred. Keep the package <code>__init__.py</code>
+import-light and pull the adapter in from inside <code>register()</code> so the eager</p>
+<p>deferred.</p>
+<p>Users enable the toolset per platform like any other, e.g.
+<code>hermes tools enable my_platform --platform cli</code>, or by listing the toolset
+key under <code>platform_toolsets</code> in <code>config.yaml</code>. Plugin platform names are
+also valid <code>--platform</code> targets, so an inbound session on your platform can
+be granted its own outbound tools.</p>
+<h3 id="adapterpy">adapter.py</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms._shared</span><span class="w"> </span><span class="kn">import</span> <span class="n">extra_or_secret</span><span class="p">,</span> <span class="n">get_scoped_secret</span><span class="p">,</span> <span class="n">seed_extra_from_env</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BasePlatformAdapter</span><span class="p">,</span> <span class="n">SendResult</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms.event</span><span class="w"> </span><span class="kn">import</span> <span class="n">MessageEvent</span><span class="p">,</span> <span class="n">MessageType</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gateway.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">Platform</span><span class="p">,</span> <span class="n">PlatformConfig</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyPlatformAdapter</span><span class="p">(</span><span class="n">BasePlatformAdapter</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">PlatformConfig</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="n">Platform</span><span class="p">(</span><span class="s2">&quot;my_platform&quot;</span><span class="p">))</span>
+        <span class="c1"># Explicit env (profile-scoped) → this profile&#39;s config.extra (YAML) → default. Under multiplexing a</span>
+        <span class="c1"># scoped miss falls to the profile&#39;s own YAML, never to another profile&#39;s process env.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">token</span> <span class="o">=</span> <span class="n">extra_or_secret</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">extra</span><span class="p">,</span> <span class="s2">&quot;token&quot;</span><span class="p">,</span> <span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">)</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">is_reconnect</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="c1"># Connect to the platform API, start listeners</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mark_connected</span><span class="p">()</span>
+        <span class="k">return</span> <span class="kc">True</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">disconnect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mark_disconnected</span><span class="p">()</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">send</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">reply_to</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">metadata</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="c1"># Send message via platform API</span>
+        <span class="k">return</span> <span class="n">SendResult</span><span class="p">(</span><span class="n">success</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">message_id</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">)</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_chat_info</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">chat_id</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;dm&quot;</span><span class="p">}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">check_requirements</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">get_scoped_secret</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_config</span><span class="p">(</span><span class="n">config</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">extra_or_secret</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="s2">&quot;extra&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">),</span> <span class="s2">&quot;token&quot;</span><span class="p">,</span> <span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_env_enablement</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">get_scoped_secret</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">():</span>
+        <span class="k">return</span> <span class="kc">None</span>
+    <span class="k">return</span> <span class="n">seed_extra_from_env</span><span class="p">(</span>
+        <span class="p">((</span><span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">,</span> <span class="s2">&quot;token&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">),</span> <span class="p">(</span><span class="s2">&quot;MY_PLATFORM_CHANNEL&quot;</span><span class="p">,</span> <span class="s2">&quot;channel&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)),</span>
+        <span class="n">home_env</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_HOME_CHANNEL&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Plugin entry point — called by the Hermes plugin system.&quot;&quot;&quot;</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+        <span class="n">label</span><span class="o">=</span><span class="s2">&quot;My Platform&quot;</span><span class="p">,</span>
+        <span class="n">adapter_factory</span><span class="o">=</span><span class="n">MyPlatformAdapter</span><span class="p">,</span>
+        <span class="c1"># PASSIVE probe — &quot;are deps/config present right now?&quot;.  Called from</span>
+        <span class="c1"># status displays and config loading, so it must NEVER pip-install.</span>
+        <span class="n">check_fn</span><span class="o">=</span><span class="n">check_requirements</span><span class="p">,</span>
+        <span class="c1"># ACTIVE installer (optional) — only for platforms with a</span>
+        <span class="c1"># lazy-installable SDK.  create_adapter() calls it when check_fn</span>
+        <span class="c1"># returns False, right before the gateway connects the platform.</span>
+        <span class="c1"># Typically wraps tools.lazy_deps.ensure_and_bind(...).  Omit it</span>
+        <span class="c1"># and a False check_fn is a hard block.</span>
+        <span class="c1"># ensure_deps_fn=ensure_requirements,</span>
+        <span class="n">validate_config</span><span class="o">=</span><span class="n">validate_config</span><span class="p">,</span>
+        <span class="n">required_env</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">],</span>
+        <span class="n">install_hint</span><span class="o">=</span><span class="s2">&quot;pip install my-platform-sdk&quot;</span><span class="p">,</span>
+        <span class="c1"># Env-driven auto-configuration — seeds PlatformConfig.extra from</span>
+        <span class="c1"># env vars before adapter construction. See &quot;Env-Driven Auto-</span>
+        <span class="c1"># Configuration&quot; section below.</span>
+        <span class="n">env_enablement_fn</span><span class="o">=</span><span class="n">_env_enablement</span><span class="p">,</span>
+        <span class="c1"># Cron home-channel delivery support. Lets deliver=my_platform cron</span>
+        <span class="c1"># jobs route without editing cron/scheduler.py. See &quot;Cron Delivery&quot;</span>
+        <span class="c1"># section below.</span>
+        <span class="n">cron_deliver_env_var</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_HOME_CHANNEL&quot;</span><span class="p">,</span>
+        <span class="c1"># Per-platform user authorization env vars</span>
+        <span class="n">allowed_users_env</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_ALLOWED_USERS&quot;</span><span class="p">,</span>
+        <span class="n">allow_all_env</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_ALLOW_ALL_USERS&quot;</span><span class="p">,</span>
+        <span class="c1"># Message length limit for smart chunking (0 = no limit)</span>
+        <span class="n">max_message_length</span><span class="o">=</span><span class="mi">4000</span><span class="p">,</span>
+        <span class="c1"># LLM guidance injected into system prompt</span>
+        <span class="n">platform_hint</span><span class="o">=</span><span class="p">(</span>
+            <span class="s2">&quot;You are chatting via My Platform. &quot;</span>
+            <span class="s2">&quot;It supports markdown formatting.&quot;</span>
+        <span class="p">),</span>
+        <span class="c1"># Display</span>
+        <span class="n">emoji</span><span class="o">=</span><span class="s2">&quot;💬&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="c1"># Optional: register platform-specific tools</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_tool</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform_search&quot;</span><span class="p">,</span>
+        <span class="n">toolset</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+        <span class="n">schema</span><span class="o">=</span><span class="p">{</span><span class="o">...</span><span class="p">},</span>
+        <span class="n">handler</span><span class="o">=</span><span class="n">my_search_handler</span><span class="p">,</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h3 id="configuration">Configuration</h3>
+<p>Users configure the platform in <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">my_platform</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">      </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">token</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;...&quot;</span>
+<span class="w">        </span><span class="nt">channel</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#general&quot;</span>
+</code></pre></div>
+
+<p>Or via environment variables (which the adapter reads in <code>__init__</code>).</p>
+<h3 id="what-the-plugin-system-handles-automatically">What the Plugin System Handles Automatically</h3>
+<p>When you call <code>ctx.register_platform()</code>, the following integration points are handled for you — no core code changes needed:</p>
+<table>
+<thead>
+<tr>
+<th>Integration point</th>
+<th>How it works</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gateway adapter creation</td>
+<td>Registry checked before the built-in <code>_BUILTIN_ADAPTERS</code> table</td>
+</tr>
+<tr>
+<td>Config parsing</td>
+<td><code>Platform._missing_()</code> accepts any platform name</td>
+</tr>
+<tr>
+<td>Connected platform validation</td>
+<td>Registry <code>validate_config()</code> called</td>
+</tr>
+<tr>
+<td>User authorization</td>
+<td><code>allowed_users_env</code> / <code>allow_all_env</code> checked</td>
+</tr>
+<tr>
+<td>Env-only auto-enable</td>
+<td><code>env_enablement_fn</code> seeds <code>PlatformConfig.extra</code> + <code>home_channel</code></td>
+</tr>
+<tr>
+<td>YAML config bridge</td>
+<td><code>apply_yaml_config_fn</code> translates <code>config.yaml</code> keys into env vars / extras</td>
+</tr>
+<tr>
+<td>Cron delivery</td>
+<td><code>cron_deliver_env_var</code> makes <code>deliver=&lt;name&gt;</code> work</td>
+</tr>
+<tr>
+<td><code>hermes config</code> UI entries</td>
+<td><code>requires_env</code> / <code>optional_env</code> in <code>plugin.yaml</code> auto-populate</td>
+</tr>
+<tr>
+<td>send engine (<code>tools/send_message_tool.py</code>)</td>
+<td>Routes through live gateway adapter</td>
+</tr>
+<tr>
+<td>Webhook cross-platform delivery</td>
+<td>Registry checked for known platforms</td>
+</tr>
+<tr>
+<td><code>/update</code> command access</td>
+<td><code>allow_update_command</code> flag</td>
+</tr>
+<tr>
+<td>Channel directory</td>
+<td>Plugin platforms included in enumeration</td>
+</tr>
+<tr>
+<td>System prompt hints</td>
+<td><code>platform_hint</code> injected into LLM context</td>
+</tr>
+<tr>
+<td>Message chunking</td>
+<td><code>max_message_length</code> for smart splitting</td>
+</tr>
+<tr>
+<td>PII redaction</td>
+<td><code>pii_safe</code> flag</td>
+</tr>
+<tr>
+<td><code>hermes status</code></td>
+<td>Shows plugin platforms with <code>(plugin)</code> tag</td>
+</tr>
+<tr>
+<td><code>hermes gateway setup</code></td>
+<td>Plugin platforms appear in setup menu</td>
+</tr>
+<tr>
+<td><code>hermes tools</code> / <code>hermes skills</code></td>
+<td>Plugin platforms in per-platform config</td>
+</tr>
+<tr>
+<td>Token lock (multi-profile)</td>
+<td>Use <code>acquire_scoped_lock()</code> in your <code>connect()</code></td>
+</tr>
+<tr>
+<td>Orphaned config warning</td>
+<td>Descriptive log when plugin is missing</td>
+</tr>
+</tbody>
+</table>
+<h2 id="standalone-send-path-extensions">Standalone send-path extensions</h2>
+<p>A standalone platform can participate in host-driven outbound delivery through
+direct <code>hermes send --to ...</code> and cron <code>deliver=platform:...</code> by declaring send
+behavior on the same <code>PlatformEntry</code> created by <code>ctx.register_platform()</code>.
+<code>send_message</code> is intentionally not an agent-callable model tool; plugins must
+not register an equivalent model surface that lets the agent initiate outbound
+messages on its own.</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_send_request</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">,</span> <span class="n">platform_name</span><span class="p">,</span> <span class="n">pconfig</span><span class="p">):</span>
+    <span class="c1"># `args` contains the host-driven send request fields.</span>
+    <span class="n">message_id</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">send</span><span class="p">(</span>
+        <span class="n">address</span><span class="o">=</span><span class="n">chat_id</span><span class="p">,</span>
+        <span class="n">body</span><span class="o">=</span><span class="n">args</span><span class="p">[</span><span class="s2">&quot;message&quot;</span><span class="p">],</span>
+        <span class="n">subject</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;subject&quot;</span><span class="p">),</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;platform&quot;</span><span class="p">:</span> <span class="n">platform_name</span><span class="p">,</span>
+            <span class="s2">&quot;chat_id&quot;</span><span class="p">:</span> <span class="n">chat_id</span><span class="p">,</span> <span class="s2">&quot;message_id&quot;</span><span class="p">:</span> <span class="n">message_id</span><span class="p">}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_parse_address</span><span class="p">(</span><span class="n">raw</span><span class="p">):</span>
+    <span class="n">normalized</span> <span class="o">=</span> <span class="n">raw</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">normalized</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;@&quot;</span><span class="p">)</span> <span class="ow">and</span> <span class="s2">&quot;@&quot;</span> <span class="ow">in</span> <span class="n">normalized</span><span class="p">[</span><span class="mi">1</span><span class="p">:]:</span>
+        <span class="k">return</span> <span class="n">normalized</span><span class="p">,</span> <span class="kc">None</span>  <span class="c1"># (chat_id, optional thread_id)</span>
+    <span class="k">return</span> <span class="kc">None</span>                 <span class="c1"># continue to channel-directory resolution</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_validate_address</span><span class="p">(</span><span class="n">address</span><span class="p">):</span>
+    <span class="c1"># True accepts; False rejects; a string rejects with that diagnostic.</span>
+    <span class="k">return</span> <span class="kc">True</span> <span class="k">if</span> <span class="n">address</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s2">&quot;@example.com&quot;</span><span class="p">)</span> <span class="k">else</span> <span class="s2">&quot;unsupported domain&quot;</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;fmsg&quot;</span><span class="p">,</span>
+        <span class="n">label</span><span class="o">=</span><span class="s2">&quot;Fixture Message&quot;</span><span class="p">,</span>
+        <span class="n">adapter_factory</span><span class="o">=</span><span class="k">lambda</span> <span class="n">cfg</span><span class="p">:</span> <span class="n">FmsgAdapter</span><span class="p">(</span><span class="n">cfg</span><span class="p">),</span>
+        <span class="n">check_fn</span><span class="o">=</span><span class="n">check_requirements</span><span class="p">,</span>
+        <span class="n">parse_target_ref_fn</span><span class="o">=</span><span class="n">_parse_address</span><span class="p">,</span>
+        <span class="n">validate_target_ref_fn</span><span class="o">=</span><span class="n">_validate_address</span><span class="p">,</span>
+        <span class="c1"># May be a regular function or async def. Hermes awaits any awaitable</span>
+        <span class="c1"># result, including callable objects and functools.partial wrappers.</span>
+        <span class="n">send_message_handler</span><span class="o">=</span><span class="n">_send_request</span><span class="p">,</span>
+        <span class="c1"># Prefer this lower-level hook when cron must send from a process</span>
+        <span class="c1"># without the live gateway.</span>
+        <span class="n">standalone_sender_fn</span><span class="o">=</span><span class="n">_standalone_send</span><span class="p">,</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p>Target resolution is shared across all three outbound surfaces. Parser output
+is normalized first and channel-directory IDs are trusted. A plugin parser must
+explicitly accept native target syntax; unresolved strings are never passed
+through opaquely. Unknown platforms and validator failures return a diagnostic
+instead of silently attempting delivery. Plugin force-reload/profile
+transitions unregister owned entries, so parsers and handlers cannot leak into
+the next profile.</p>
+<h2 id="env-driven-auto-configuration">Env-Driven Auto-Configuration</h2>
+<p>Most users set up a platform by dropping env vars into <code>~/.hermes/.env</code> rather than editing <code>config.yaml</code>. The <code>env_enablement_fn</code> hook lets your plugin pick those env vars up <strong>before</strong> the adapter is constructed, so <code>hermes gateway status</code>, <code>get_connected_platforms()</code>, and cron delivery see the correct state without instantiating the platform SDK.</p>
+<p>Read env through <code>gateway.platforms._shared.get_scoped_secret</code> — never <code>os.getenv</code>. Under <code>gateway.multiplex_profiles</code> the process env holds the DEFAULT profile's values; a secondary profile's <code>.env</code> exists only in its secret scope, and a raw read would enable your platform for the wrong profile with the wrong credentials. <code>seed_extra_from_env</code> builds the seed dict from a <code>(ENV_VAR, extra_key, conv)</code> table through that reader.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms._shared</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_scoped_secret</span><span class="p">,</span> <span class="n">seed_extra_from_env</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_env_enablement</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Seed PlatformConfig.extra from env vars.</span>
+
+<span class="sd">    Called by the platform registry during load_gateway_config().</span>
+<span class="sd">    Return None when the platform isn&#39;t minimally configured — the</span>
+<span class="sd">    caller then skips auto-enabling. Return a dict to seed extras.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">token</span> <span class="o">=</span> <span class="n">get_scoped_secret</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="n">channel</span> <span class="o">=</span> <span class="n">get_scoped_secret</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_CHANNEL&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="p">(</span><span class="n">token</span> <span class="ow">and</span> <span class="n">channel</span><span class="p">):</span>
+        <span class="k">return</span> <span class="kc">None</span>
+    <span class="c1"># (ENV_VAR, extra_key, conv): blank values are skipped, a conv raising</span>
+    <span class="c1"># ValueError drops the key. home_env seeds the special &#39;home_channel&#39;</span>
+    <span class="c1"># dict ({chat_id, name} from MY_PLATFORM_HOME_CHANNEL[_NAME], name</span>
+    <span class="c1"># defaults to &quot;Home&quot;), which the core hook lifts into a HomeChannel.</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;token&quot;</span><span class="p">:</span> <span class="n">token</span><span class="p">,</span> <span class="s2">&quot;channel&quot;</span><span class="p">:</span> <span class="n">channel</span><span class="p">,</span> <span class="o">**</span><span class="n">seed_extra_from_env</span><span class="p">(</span>
+        <span class="p">((</span><span class="s2">&quot;MY_PLATFORM_PORT&quot;</span><span class="p">,</span> <span class="s2">&quot;port&quot;</span><span class="p">,</span> <span class="nb">int</span><span class="p">),</span> <span class="p">(</span><span class="s2">&quot;MY_PLATFORM_NICK&quot;</span><span class="p">,</span> <span class="s2">&quot;nick&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)),</span>
+        <span class="n">home_env</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_HOME_CHANNEL&quot;</span><span class="p">,</span>
+    <span class="p">)}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+        <span class="n">label</span><span class="o">=</span><span class="s2">&quot;My Platform&quot;</span><span class="p">,</span>
+        <span class="n">adapter_factory</span><span class="o">=</span><span class="n">MyPlatformAdapter</span><span class="p">,</span>
+        <span class="n">check_fn</span><span class="o">=</span><span class="n">check_requirements</span><span class="p">,</span>
+        <span class="n">validate_config</span><span class="o">=</span><span class="n">validate_config</span><span class="p">,</span>
+        <span class="n">env_enablement_fn</span><span class="o">=</span><span class="n">_env_enablement</span><span class="p">,</span>
+        <span class="c1"># ... other fields</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h2 id="yamlenv-config-bridge">YAML→env Config Bridge</h2>
+<p>Some users prefer setting <code>config.yaml</code> keys (<code>my_platform.require_mention</code>, <code>my_platform.allowed_channels</code>, etc.) over env vars. The <code>apply_yaml_config_fn</code> hook lets your plugin own this translation instead of forcing core <code>gateway/config.py</code> to know your platform's YAML schema.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms._shared</span><span class="w"> </span><span class="kn">import</span> <span class="n">apply_yaml_bridge</span>
+
+<span class="c1"># (yaml key, ENV_VAR, kind). &quot;lower&quot; bridges whenever the key is present</span>
+<span class="c1"># (booleans become &quot;true&quot;/&quot;false&quot;); &quot;str&quot; skips null/blank; &quot;csv&quot; comma-joins</span>
+<span class="c1"># lists; &quot;json&quot; dumps the value.</span>
+<span class="n">_YAML_BRIDGE</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="p">(</span><span class="s2">&quot;require_mention&quot;</span><span class="p">,</span> <span class="s2">&quot;MY_PLATFORM_REQUIRE_MENTION&quot;</span><span class="p">,</span> <span class="s2">&quot;lower&quot;</span><span class="p">),</span>
+    <span class="p">(</span><span class="s2">&quot;allowed_channels&quot;</span><span class="p">,</span> <span class="s2">&quot;MY_PLATFORM_ALLOWED_CHANNELS&quot;</span><span class="p">,</span> <span class="s2">&quot;csv&quot;</span><span class="p">),</span>
+<span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_apply_yaml_config</span><span class="p">(</span><span class="n">yaml_cfg</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="n">platform_cfg</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Translate config.yaml `my_platform:` keys into env vars / extras.</span>
+
+<span class="sd">    yaml_cfg     — the full top-level parsed config.yaml dict</span>
+<span class="sd">    platform_cfg — the platform&#39;s own sub-dict (yaml_cfg.get(&quot;my_platform&quot;, {}))</span>
+
+<span class="sd">    apply_yaml_bridge writes each env var only when it is unset (env &gt; YAML)</span>
+<span class="sd">    and NEVER while a multiplexed secondary profile&#39;s config is loading — a</span>
+<span class="sd">    write there would pin that profile&#39;s policy process-wide. It returns the</span>
+<span class="sd">    same values for PlatformConfig.extra, so read `extra` first in the adapter</span>
+<span class="sd">    and fall back to the env var (`_shared.extra_or_secret`).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="n">apply_yaml_bridge</span><span class="p">(</span><span class="n">platform_cfg</span><span class="p">,</span> <span class="n">_YAML_BRIDGE</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+        <span class="o">...</span><span class="p">,</span>
+        <span class="n">apply_yaml_config_fn</span><span class="o">=</span><span class="n">_apply_yaml_config</span><span class="p">,</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p>The hook is invoked during <code>load_gateway_config()</code> after the generic shared-key loop (which handles common keys like <code>unauthorized_dm_behavior</code>, <code>notice_delivery</code>, <code>reply_prefix</code>, <code>require_mention</code>, etc.) and before <code>_apply_env_overrides()</code>, so your plugin only needs to bridge <strong>platform-specific</strong> keys.</p>
+<p>Exceptions raised by the hook are swallowed and logged at debug level — a misbehaving plugin never aborts gateway config load.</p>
+<h2 id="cron-delivery">Cron Delivery</h2>
+<p>To let <code>deliver=my_platform</code> cron jobs route to a configured home channel, set <code>cron_deliver_env_var</code> to the env var name that holds the default chat/room/channel ID:</p>
+<div class="highlight"><pre><span></span><code><span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+    <span class="o">...</span>
+    <span class="n">cron_deliver_env_var</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_HOME_CHANNEL&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>The scheduler reads this env var when resolving the home target for <code>deliver=my_platform</code> jobs, and also treats the platform as a valid cron target in <code>_KNOWN_DELIVERY_PLATFORMS</code>-style checks. If your <code>env_enablement_fn</code> seeds a <code>home_channel</code> dict (see above), that takes precedence — <code>cron_deliver_env_var</code> is the fallback for cron jobs that run before env seeding.</p>
+<h3 id="out-of-process-cron-delivery">Out-of-process cron delivery</h3>
+<p><code>cron_deliver_env_var</code> makes your platform a recognized <code>deliver=</code> target. To make the actual send succeed when the cron job runs in a separate process from the gateway (i.e., <code>hermes cron run</code> separate from <code>hermes gateway</code>), register a <code>standalone_sender_fn</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_standalone_send</span><span class="p">(</span>
+    <span class="n">pconfig</span><span class="p">,</span>
+    <span class="n">chat_id</span><span class="p">,</span>
+    <span class="n">message</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">thread_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="n">media_files</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="n">force_document</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Open an ephemeral connection / acquire a fresh token, send, and close.&quot;&quot;&quot;</span>
+    <span class="c1"># ... open connection, send message, return result ...</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;message_id&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">}</span>
+    <span class="c1"># or {&quot;error&quot;: &quot;...&quot;}</span>
+
+<span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+    <span class="o">...</span>
+    <span class="n">cron_deliver_env_var</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_HOME_CHANNEL&quot;</span><span class="p">,</span>
+    <span class="n">standalone_sender_fn</span><span class="o">=</span><span class="n">_standalone_send</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>Why this hook is necessary: built-in platforms (Telegram, Discord, Slack, etc.) ship direct REST helpers in <code>tools/send_message_tool.py</code> so cron can deliver without holding the gateway in the same process. Plugin platforms historically depended on <code>_gateway_runner_ref()</code>, which returns <code>None</code> outside the gateway process, so without <code>standalone_sender_fn</code> the cron-side send fails with <code>No live adapter for platform '&lt;name&gt;'</code>.</p>
+<p>The function receives the same <code>pconfig</code> and <code>chat_id</code> that the live adapter would, plus optional <code>thread_id</code>, <code>media_files</code>, and <code>force_document</code> keyword arguments. Returning <code>{"success": True, "message_id": ...}</code> is treated as a successful delivery; returning <code>{"error": "..."}</code> surfaces the message in cron's <code>delivery_errors</code>. Exceptions raised inside the function are caught by the dispatcher and reported as <code>Plugin standalone send failed: &lt;reason&gt;</code>. Reference implementations live in <code>plugins/platforms/{irc,teams,google_chat}/adapter.py</code>.</p>
+<h2 id="surfacing-env-vars-in-hermes-config">Surfacing Env Vars in <code>hermes config</code></h2>
+<p><code>hermes_cli/config.py</code> scans <code>plugins/platforms/*/plugin.yaml</code> at import time and auto-populates <code>OPTIONAL_ENV_VARS</code> from <code>requires_env</code> and (optional) <code>optional_env</code> blocks. Use the rich-dict form to contribute proper descriptions, prompts, password flags, and URLs — the CLI setup UI picks them up for free.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/platforms/my_platform/plugin.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my_platform-platform</span>
+<span class="nt">label</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My Platform</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">platform</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">&gt;</span>
+<span class="w">  </span><span class="no">My Platform gateway adapter for Hermes Agent.</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_TOKEN</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Bot</span><span class="nv"> </span><span class="s">API</span><span class="nv"> </span><span class="s">token</span><span class="nv"> </span><span class="s">from</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">My</span><span class="nv"> </span><span class="s">Platform</span><span class="nv"> </span><span class="s">console&quot;</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;My</span><span class="nv"> </span><span class="s">Platform</span><span class="nv"> </span><span class="s">bot</span><span class="nv"> </span><span class="s">token&quot;</span>
+<span class="w">    </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://my-platform.example.com/bots&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_CHANNEL</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Channel</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">join</span><span class="nv"> </span><span class="s">(e.g.</span><span class="nv"> </span><span class="s">#hermes)&quot;</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Channel&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="nt">optional_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_HOME_CHANNEL</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Default</span><span class="nv"> </span><span class="s">channel</span><span class="nv"> </span><span class="s">for</span><span class="nv"> </span><span class="s">cron</span><span class="nv"> </span><span class="s">delivery</span><span class="nv"> </span><span class="s">(defaults</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">MY_PLATFORM_CHANNEL)&quot;</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Home</span><span class="nv"> </span><span class="s">channel</span><span class="nv"> </span><span class="s">(or</span><span class="nv"> </span><span class="s">empty)&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_ALLOWED_USERS</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Comma-separated</span><span class="nv"> </span><span class="s">user</span><span class="nv"> </span><span class="s">IDs</span><span class="nv"> </span><span class="s">allowed</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">talk</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">bot&quot;</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Allowed</span><span class="nv"> </span><span class="s">users</span><span class="nv"> </span><span class="s">(comma-separated)&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p><strong>Supported dict keys:</strong> <code>name</code> (required), <code>description</code>, <code>prompt</code>, <code>url</code>, <code>password</code> (bool; auto-detected from <code>*_TOKEN</code> / <code>*_SECRET</code> / <code>*_KEY</code> / <code>*_PASSWORD</code> / <code>*_JSON</code> suffix when omitted), <code>category</code> (defaults to <code>"messaging"</code>).</p>
+<p>Bare-string entries (<code>- MY_PLATFORM_TOKEN</code>) still work — they get a generic description auto-derived from the plugin's <code>label</code>. If a hardcoded entry for the same var already exists in <code>OPTIONAL_ENV_VARS</code>, it wins (back-compat); the plugin.yaml form acts as the fallback.</p>
+<h2 id="platform-specific-slow-llm-ux">Platform-Specific Slow-LLM UX</h2>
+<p>Some platforms have constraints that change how a slow LLM response should be presented:</p>
+<ul>
+<li><strong>LINE</strong> issues a single-use <em>reply token</em> that expires roughly 60 seconds after the inbound event. Replying with that token is free; falling back to the metered Push API is not. If the LLM hasn't finished by the deadline, the choice is "burn paid Push quota" or "do something cleverer with the reply token before it expires."</li>
+<li><strong>WhatsApp</strong> marks a session inactive after 24h, after which only template messages are accepted.</li>
+<li><strong>SMS</strong> has no concept of typing indicators or progressive updates — long responses just look like the bot is offline.</li>
+</ul>
+<p>These are real constraints the base <code>BasePlatformAdapter</code> can't anticipate. The plugin surface intentionally leaves the room for an adapter to layer platform-specific UX on top of the base typing loop without expanding the kwarg list.</p>
+<h3 id="pattern-subclass-_keep_typing-to-layer-mid-flight-ux">Pattern: subclass <code>_keep_typing</code> to layer mid-flight UX</h3>
+<p><code>BasePlatformAdapter._keep_typing</code> is the typing-indicator heartbeat — it runs as a background task while the LLM is generating, and is cancelled when the response is delivered. To layer a platform-specific behavior at a threshold (e.g. send a "still thinking" bubble at 45s), override <code>_keep_typing</code> in your adapter, schedule your own task alongside <code>super()._keep_typing()</code>, and tear it down in <code>finally</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">LineAdapter</span><span class="p">(</span><span class="n">BasePlatformAdapter</span><span class="p">):</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_keep_typing</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">slow_response_threshold</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">await</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">_keep_typing</span><span class="p">(</span><span class="n">chat_id</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="k">return</span>
+
+        <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_fire_at_threshold</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">await</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">slow_response_threshold</span><span class="p">)</span>
+            <span class="k">except</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">CancelledError</span><span class="p">:</span>
+                <span class="k">raise</span>
+            <span class="c1"># Platform-specific work here — for LINE, send a Template</span>
+            <span class="c1"># Buttons &quot;Get answer&quot; bubble using the cached reply token</span>
+            <span class="c1"># so the user can fetch the cached response later via a</span>
+            <span class="c1"># fresh (free) reply token from the postback callback.</span>
+            <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_send_slow_response_button</span><span class="p">(</span><span class="n">chat_id</span><span class="p">)</span>
+
+        <span class="n">side_task</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">create_task</span><span class="p">(</span><span class="n">_fire_at_threshold</span><span class="p">())</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">await</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">_keep_typing</span><span class="p">(</span><span class="n">chat_id</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="k">finally</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">side_task</span><span class="o">.</span><span class="n">done</span><span class="p">():</span>
+                <span class="n">side_task</span><span class="o">.</span><span class="n">cancel</span><span class="p">()</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="k">await</span> <span class="n">side_task</span>
+                <span class="k">except</span> <span class="p">(</span><span class="n">asyncio</span><span class="o">.</span><span class="n">CancelledError</span><span class="p">,</span> <span class="ne">Exception</span><span class="p">):</span>
+                    <span class="k">pass</span>
+</code></pre></div>
+
+<p>Key points:</p>
+<ul>
+<li><strong>Always <code>await super()._keep_typing(...)</code>.</strong> The typing heartbeat is independently useful — don't replace it, layer on top of it.</li>
+<li><strong>Tear down the side task in <code>finally</code>.</strong> When the LLM finishes (or <code>/stop</code> cancels the run), the gateway cancels the typing task. Your side task must observe that cancellation too, otherwise it lingers and may fire after the response was already delivered.</li>
+<li><strong>Pair with <code>interrupt_session_activity</code></strong> to resolve any orphan UX state when the user issues <code>/stop</code>. For LINE, this means transitioning the postback cache entry from <code>PENDING</code> to <code>ERROR</code> so the persistent "Get answer" button delivers a "Run was interrupted" message instead of looping.</li>
+</ul>
+<h3 id="pattern-subclass-send-to-route-through-a-cache-instead-of-sending-immediately">Pattern: subclass <code>send</code> to route through a cache instead of sending immediately</h3>
+<p>If your slow-response UX caches the response for later retrieval (LINE's postback flow), your <code>send</code> override needs to recognize three modes:</p>
+<ol>
+<li><strong>Pending postback active for this chat</strong> → cache the response under the request_id, don't send anything visible.</li>
+<li><strong>System busy-ack</strong> (<code>⚡ Interrupting</code>, <code>⏳ Queued</code>, <code>⏩ Steered</code>) → bypass the cache and send visibly so the user sees the gateway's response to their input.</li>
+<li><strong>Normal response</strong> → send via reply-token-or-push as usual.</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">send</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">kw</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SendResult</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">_is_system_bypass</span><span class="p">(</span><span class="n">content</span><span class="p">):</span>
+        <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_send_text_chunks</span><span class="p">(</span><span class="n">chat_id</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">force_push</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="n">pending_rid</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_buttons</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">chat_id</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">pending_rid</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_cache</span><span class="o">.</span><span class="n">set_ready</span><span class="p">(</span><span class="n">pending_rid</span><span class="p">,</span> <span class="n">content</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">SendResult</span><span class="p">(</span><span class="n">success</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">message_id</span><span class="o">=</span><span class="n">pending_rid</span><span class="p">)</span>
+    <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_send_text_chunks</span><span class="p">(</span><span class="n">chat_id</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">force_push</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</code></pre></div>
+
+<p><code>_SYSTEM_BYPASS_PREFIXES</code> are the gateway's own busy-acknowledgment prefixes (<code>⚡</code>, <code>⏳</code>, <code>⏩</code>, <code>💾</code>). Always let those through visibly, regardless of cached UX state.</p>
+<h3 id="when-this-pattern-is-appropriate">When this pattern is appropriate</h3>
+<p>Use the typing-loop override approach when:</p>
+<ul>
+<li>The platform's outbound API has a hard time-window constraint (single-use reply token, expiring sticky session, etc.) AND</li>
+<li>A <em>visible mid-flight bubble</em> is acceptable UX on that platform.</li>
+</ul>
+<p>Use the simpler <code>slow_response_threshold = 0</code> always-Push path when:</p>
+<ul>
+<li>The platform doesn't have a meaningful free vs. paid distinction, OR</li>
+<li>The user community prefers "loading… loading… DONE" silence-then-response over an interactive intermediate bubble.</li>
+</ul>
+<p>LINE supports both: the threshold defaults to 45s for free postback fetch, and <code>LINE_SLOW_RESPONSE_THRESHOLD=0</code> reverts to "always Push fallback."</p>
+<h3 id="reference-implementation">Reference Implementation</h3>
+<p>See <code>plugins/platforms/line/adapter.py</code> for the full LINE postback implementation — a <code>RequestCache</code> state machine (<code>PENDING → READY → DELIVERED</code>, plus <code>ERROR</code> for <code>/stop</code>), a <code>_keep_typing</code> override that fires the Template Buttons bubble at threshold, a <code>send</code> override that routes through the cache, and an <code>interrupt_session_activity</code> override that resolves orphan PENDING entries.</p>
+<h3 id="reference-implementations-plugin-path">Reference Implementations (Plugin Path)</h3>
+<p>See <code>plugins/platforms/irc/</code> in the repo for a complete working example — a full async IRC adapter with zero external dependencies. <code>plugins/platforms/teams/</code> covers Bot Framework / Adaptive Cards, <code>plugins/platforms/google_chat/</code> covers OAuth-based REST APIs, and <code>plugins/platforms/line/</code> covers webhook-driven Messaging APIs with platform-specific slow-LLM UX.</p>
+<hr />
+<h2 id="step-by-step-checklist-built-in-path">Step-by-Step Checklist (Built-in Path)</h2>
+<div class="admonition adm-note"><p class="adm-title">Note</p>
+<p>This checklist is for adding a platform directly to the Hermes core codebase — typically done by core contributors for officially supported platforms. Community/third-party platforms should use the <a href="#plugin-path-recommended">Plugin Path</a> above.</p>
+</div>
+<h3 id="1-platform-enum">1. Platform Enum</h3>
+<p>Add your platform to the <code>Platform</code> enum in <code>gateway/config.py</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">Platform</span><span class="p">(</span><span class="n">Enum</span><span class="p">):</span>
+    <span class="c1"># ... existing platforms ...</span>
+    <span class="n">NEWPLAT</span> <span class="o">=</span> <span class="s2">&quot;newplat&quot;</span>
+</code></pre></div>
+
+<h3 id="2-adapter-file">2. Adapter File</h3>
+<p>Create <code>plugins/platforms/newplat/adapter.py</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">gateway.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">Platform</span><span class="p">,</span> <span class="n">PlatformConfig</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms._shared</span><span class="w"> </span><span class="kn">import</span> <span class="n">extra_or_secret</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BasePlatformAdapter</span><span class="p">,</span> <span class="n">SendResult</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms.event</span><span class="w"> </span><span class="kn">import</span> <span class="n">MessageEvent</span><span class="p">,</span> <span class="n">MessageType</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">check_newplat_requirements</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return True if dependencies are available.&quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="n">SOME_SDK_AVAILABLE</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">NewPlatAdapter</span><span class="p">(</span><span class="n">BasePlatformAdapter</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">PlatformConfig</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="n">Platform</span><span class="o">.</span><span class="n">NEWPLAT</span><span class="p">)</span>
+        <span class="c1"># Read config from config.extra dict</span>
+        <span class="n">extra</span> <span class="o">=</span> <span class="n">config</span><span class="o">.</span><span class="n">extra</span> <span class="ow">or</span> <span class="p">{}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_api_key</span> <span class="o">=</span> <span class="n">extra_or_secret</span><span class="p">(</span><span class="n">extra</span><span class="p">,</span> <span class="s2">&quot;api_key&quot;</span><span class="p">,</span> <span class="s2">&quot;NEWPLAT_API_KEY&quot;</span><span class="p">)</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">is_reconnect</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="c1"># Set up connection, start polling/webhook</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mark_connected</span><span class="p">()</span>
+        <span class="k">return</span> <span class="kc">True</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">disconnect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_running</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mark_disconnected</span><span class="p">()</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">send</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">reply_to</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">metadata</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="c1"># Send message via platform API</span>
+        <span class="k">return</span> <span class="n">SendResult</span><span class="p">(</span><span class="n">success</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">message_id</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">)</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_chat_info</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">chat_id</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;dm&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>For inbound messages, build a <code>MessageEvent</code> and call <code>self.handle_message(event)</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="n">source</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">build_source</span><span class="p">(</span>
+    <span class="n">chat_id</span><span class="o">=</span><span class="n">chat_id</span><span class="p">,</span>
+    <span class="n">chat_name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span>
+    <span class="n">chat_type</span><span class="o">=</span><span class="s2">&quot;dm&quot;</span><span class="p">,</span>  <span class="c1"># or &quot;group&quot;</span>
+    <span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span>
+    <span class="n">user_name</span><span class="o">=</span><span class="n">user_name</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">event</span> <span class="o">=</span> <span class="n">MessageEvent</span><span class="p">(</span>
+    <span class="n">text</span><span class="o">=</span><span class="n">content</span><span class="p">,</span>
+    <span class="n">message_type</span><span class="o">=</span><span class="n">MessageType</span><span class="o">.</span><span class="n">TEXT</span><span class="p">,</span>
+    <span class="n">source</span><span class="o">=</span><span class="n">source</span><span class="p">,</span>
+    <span class="n">message_id</span><span class="o">=</span><span class="n">msg_id</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">handle_message</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="3-gateway-config-gatewayconfigpy">3. Gateway Config (<code>gateway/config.py</code>)</h3>
+<p>Three touchpoints:</p>
+<ol>
+<li><strong><code>get_connected_platforms()</code></strong> — Add a check for your platform's required credentials</li>
+<li><strong><code>load_gateway_config()</code></strong> — Add token env map entry: <code>Platform.NEWPLAT: "NEWPLAT_TOKEN"</code></li>
+<li><strong><code>_apply_env_overrides()</code></strong> — Map all <code>NEWPLAT_*</code> env vars to config</li>
+</ol>
+<h3 id="4-gateway-runner-gatewayrunpy--gatewayrun_py-siblings">4. Gateway Runner (<code>gateway/run.py</code> + <code>gateway/run_*.py</code> siblings)</h3>
+<p>Six touchpoints:</p>
+<ol>
+<li><strong><code>_BUILTIN_ADAPTERS</code> table</strong> (<code>gateway/run.py</code>) — Add a <code>Platform.NEWPLAT: (module, class, check_fn, error_msg)</code> entry; <code>_instantiate_adapter()</code> (<code>gateway/run_adapters.py</code>) consults the plugin registry, then this table — there is no <code>elif</code> chain to extend. The <code>_create_adapter()</code> wrapper binds every successful adapter to its gateway runner.</li>
+<li><strong><code>_is_user_authorized()</code> allowed_users map</strong> — <code>Platform.NEWPLAT: "NEWPLAT_ALLOWED_USERS"</code></li>
+<li><strong><code>_is_user_authorized()</code> allow_all map</strong> — <code>Platform.NEWPLAT: "NEWPLAT_ALLOW_ALL_USERS"</code></li>
+<li><strong>Startup access-policy check</strong> (<code>gateway/run_startup.py</code>) — Add <code>"NEWPLAT"</code> to <code>_ALLOWLIST_ENV_PLATFORMS</code> (derives both <code>NEWPLAT_ALLOWED_USERS</code> and <code>NEWPLAT_ALLOW_ALL_USERS</code>)</li>
+<li><strong>Startup <code>_BUILTIN_ALLOW_ALL_VARS</code></strong> (<code>gateway/run_startup.py</code>) — derived from the same <code>_ALLOWLIST_ENV_PLATFORMS</code> tuple; nothing extra to add</li>
+<li><strong><code>_UPDATE_ALLOWED_PLATFORMS</code> frozenset</strong> — Add <code>Platform.NEWPLAT</code></li>
+</ol>
+<h3 id="5-cross-platform-delivery">5. Cross-Platform Delivery</h3>
+<ol>
+<li><strong><code>gateway/platforms/webhook.py</code></strong> — Add <code>"newplat"</code> to the delivery type tuple</li>
+<li><strong><code>cron/scheduler_delivery.py</code></strong> — Add to <code>_KNOWN_DELIVERY_PLATFORMS</code> frozenset and <code>_deliver_result()</code> platform map</li>
+</ol>
+<h3 id="6-cli-integration">6. CLI Integration</h3>
+<ol>
+<li><strong><code>hermes_cli/config.py</code></strong> — Add all <code>NEWPLAT_*</code> vars to <code>_EXTRA_ENV_KEYS</code></li>
+<li><strong><code>hermes_cli/gateway.py</code></strong> — Add entry to <code>_PLATFORMS</code> list with key, label, emoji, token_var, setup_instructions, and vars</li>
+<li><strong><code>hermes_cli/platforms.py</code></strong> — Add <code>PlatformInfo</code> entry with label and default_toolset (used by <code>skills_config</code> and <code>tools_config</code> TUIs)</li>
+<li><strong><code>hermes_cli/setup.py</code></strong> — Add <code>_setup_newplat()</code> function (can delegate to <code>gateway.py</code>) and add tuple to the messaging platforms list</li>
+<li><strong><code>hermes_cli/status.py</code></strong> — Add platform detection entry: <code>"NewPlat": ("NEWPLAT_TOKEN", "NEWPLAT_HOME_CHANNEL")</code></li>
+<li><strong><code>hermes_cli/dump.py</code></strong> — Add <code>"newplat": "NEWPLAT_TOKEN"</code> to platform detection dict</li>
+</ol>
+<h3 id="7-tools">7. Tools</h3>
+<ol>
+<li><strong><code>tools/send_message_tool.py</code></strong> — Add <code>"newplat": Platform.NEWPLAT</code> to platform map</li>
+<li><strong><code>tools/cronjob_tools.py</code></strong> — Add <code>newplat</code> to the delivery target description string</li>
+</ol>
+<h3 id="8-toolsets">8. Toolsets</h3>
+<ol>
+<li><strong><code>toolsets.py</code></strong> — Add <code>"hermes-newplat"</code> toolset definition with <code>_HERMES_CORE_TOOLS</code></li>
+<li><strong><code>toolsets.py</code></strong> — Add <code>"hermes-newplat"</code> to the <code>"hermes-gateway"</code> includes list</li>
+</ol>
+<h3 id="9-optional-platform-hints">9. Optional: Platform Hints</h3>
+<p><strong><code>agent/prompt_builder.py</code></strong> — If your platform has specific rendering limitations (no markdown, message length limits, etc.), add an entry to the <code>PLATFORM_HINTS</code> dict. This injects platform-specific guidance into the system prompt:</p>
+<div class="highlight"><pre><span></span><code><span class="n">PLATFORM_HINTS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="c1"># ...</span>
+    <span class="s2">&quot;newplat&quot;</span><span class="p">:</span> <span class="p">(</span>
+        <span class="s2">&quot;You are chatting via NewPlat. It supports markdown formatting &quot;</span>
+        <span class="s2">&quot;but has a 4000-character message limit.&quot;</span>
+    <span class="p">),</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Not all platforms need hints — only add one if the agent's behavior should differ.</p>
+<h3 id="10-tests">10. Tests</h3>
+<p>Create <code>tests/gateway/test_newplat.py</code> covering:</p>
+<ul>
+<li>Adapter construction from config</li>
+<li>Message event building</li>
+<li>Send method (mock the external API)</li>
+<li>Platform-specific features (encryption, routing, etc.)</li>
+</ul>
+<h3 id="11-documentation">11. Documentation</h3>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>What to add</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>website/docs/user-guide/messaging/newplat.md</code></td>
+<td>Full platform setup page</td>
+</tr>
+<tr>
+<td><code>website/docs/user-guide/messaging/index.md</code></td>
+<td>Platform comparison table, architecture diagram, toolsets table, security section, next-steps link</td>
+</tr>
+<tr>
+<td><code>website/docs/reference/environment-variables.md</code></td>
+<td>All NEWPLAT_* env vars</td>
+</tr>
+<tr>
+<td><code>website/docs/reference/toolsets-reference.md</code></td>
+<td>hermes-newplat toolset</td>
+</tr>
+<tr>
+<td><code>website/docs/integrations/index.md</code></td>
+<td>Platform link</td>
+</tr>
+<tr>
+<td><code>website/sidebars.ts</code></td>
+<td>Sidebar entry for the docs page</td>
+</tr>
+<tr>
+<td><code>website/docs/developer-guide/architecture.md</code></td>
+<td>Adapter count + listing</td>
+</tr>
+<tr>
+<td><code>website/docs/developer-guide/gateway-internals.md</code></td>
+<td>Adapter file listing</td>
+</tr>
+</tbody>
+</table>
+<h2 id="parity-audit">Parity Audit</h2>
+<p>Before marking a new platform PR as complete, run a parity audit against an established platform:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Find every .py file mentioning the reference platform</span>
+search_files<span class="w"> </span><span class="s2">&quot;bluebubbles&quot;</span><span class="w"> </span><span class="nv">output_mode</span><span class="o">=</span><span class="s2">&quot;files_only&quot;</span><span class="w"> </span><span class="nv">file_glob</span><span class="o">=</span><span class="s2">&quot;*.py&quot;</span>
+
+<span class="c1"># Find every .py file mentioning the new platform</span>
+search_files<span class="w"> </span><span class="s2">&quot;newplat&quot;</span><span class="w"> </span><span class="nv">output_mode</span><span class="o">=</span><span class="s2">&quot;files_only&quot;</span><span class="w"> </span><span class="nv">file_glob</span><span class="o">=</span><span class="s2">&quot;*.py&quot;</span>
+
+<span class="c1"># Any file in the first set but not the second is a potential gap</span>
+</code></pre></div>
+
+<p>Repeat for <code>.md</code> and <code>.ts</code> files. Investigate each gap — is it a platform enumeration (needs updating) or a platform-specific reference (skip)?</p>
+<h2 id="common-patterns">Common Patterns</h2>
+<h3 id="long-poll-adapters">Long-Poll Adapters</h3>
+<p>If your adapter uses long-polling (like Telegram or Weixin), use a polling loop task:</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_poll_task</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">create_task</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_poll_loop</span><span class="p">())</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_mark_connected</span><span class="p">()</span>
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_poll_loop</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">_running</span><span class="p">:</span>
+        <span class="n">messages</span> <span class="o">=</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fetch_updates</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">msg</span> <span class="ow">in</span> <span class="n">messages</span><span class="p">:</span>
+            <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">handle_message</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_build_event</span><span class="p">(</span><span class="n">msg</span><span class="p">))</span>
+</code></pre></div>
+
+<h3 id="callbackwebhook-adapters">Callback/Webhook Adapters</h3>
+<p>If the platform pushes messages to your endpoint (like WeCom Callback), run an HTTP server:</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_app</span> <span class="o">=</span> <span class="n">web</span><span class="o">.</span><span class="n">Application</span><span class="p">()</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_app</span><span class="o">.</span><span class="n">router</span><span class="o">.</span><span class="n">add_post</span><span class="p">(</span><span class="s2">&quot;/callback&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_handle_callback</span><span class="p">)</span>
+    <span class="c1"># ... start aiohttp server</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_mark_connected</span><span class="p">()</span>
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_handle_callback</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">):</span>
+    <span class="n">event</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_build_event</span><span class="p">(</span><span class="k">await</span> <span class="n">request</span><span class="o">.</span><span class="n">text</span><span class="p">())</span>
+    <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_message_queue</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">web</span><span class="o">.</span><span class="n">Response</span><span class="p">(</span><span class="n">text</span><span class="o">=</span><span class="s2">&quot;success&quot;</span><span class="p">)</span>  <span class="c1"># Acknowledge immediately</span>
+</code></pre></div>
+
+<p>For platforms with tight response deadlines (e.g., WeCom's 5-second limit), always acknowledge immediately and deliver the agent's reply proactively via API later. Agent sessions run 3–30 minutes — inline replies within a callback response window are not feasible.</p>
+<h3 id="token-locks">Token Locks</h3>
+<p>If the adapter holds a persistent connection with a unique credential, add a scoped lock to prevent two profiles from using the same credential:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">gateway.status</span><span class="w"> </span><span class="kn">import</span> <span class="n">acquire_scoped_lock</span><span class="p">,</span> <span class="n">release_scoped_lock</span>
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">is_reconnect</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">):</span>
+    <span class="n">acquired</span><span class="p">,</span> <span class="n">_existing</span> <span class="o">=</span> <span class="n">acquire_scoped_lock</span><span class="p">(</span><span class="s2">&quot;newplat&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_token</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">acquired</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s2">&quot;Token already in use by another profile&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="c1"># ... connect</span>
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">disconnect</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="n">release_scoped_lock</span><span class="p">(</span><span class="s2">&quot;newplat&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_token</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="reference-implementations">Reference Implementations</h2>
+<table>
+<thead>
+<tr>
+<th>Adapter</th>
+<th>Pattern</th>
+<th>Complexity</th>
+<th>Good reference for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bluebubbles.py</code></td>
+<td>REST + webhook</td>
+<td>Medium</td>
+<td>Simple REST API integration</td>
+</tr>
+<tr>
+<td><code>weixin.py</code></td>
+<td>Long-poll + CDN</td>
+<td>High</td>
+<td>Media handling, encryption</td>
+</tr>
+<tr>
+<td><code>plugins/platforms/wecom/callback_adapter.py</code></td>
+<td>Callback/webhook</td>
+<td>Medium</td>
+<td>HTTP server, AES crypto, multi-app</td>
+</tr>
+<tr>
+<td><code>plugins/platforms/irc/adapter.py</code></td>
+<td>Long-poll + IRC protocol</td>
+<td>High</td>
+<td>Full-featured plugin adapter with scoped token lock</td>
+</tr>
+</tbody>
+</table>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/adding-platform-adapters</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#architecture-overview">Architecture Overview</a></li>
+<li class="lvl2"><a href="#plugin-path-recommended">Plugin Path (Recommended)</a></li>
+<li class="lvl3"><a href="#pluginyaml">plugin.yaml</a></li>
+<li class="lvl3"><a href="#adapterpy">adapter.py</a></li>
+<li class="lvl3"><a href="#configuration">Configuration</a></li>
+<li class="lvl3"><a href="#what-the-plugin-system-handles-automatically">What the Plugin System Handles Automatically</a></li>
+<li class="lvl2"><a href="#standalone-send-path-extensions">Standalone send-path extensions</a></li>
+<li class="lvl2"><a href="#env-driven-auto-configuration">Env-Driven Auto-Configuration</a></li>
+<li class="lvl2"><a href="#yamlenv-config-bridge">YAML→env Config Bridge</a></li>
+<li class="lvl2"><a href="#cron-delivery">Cron Delivery</a></li>
+<li class="lvl3"><a href="#out-of-process-cron-delivery">Out-of-process cron delivery</a></li>
+<li class="lvl2"><a href="#surfacing-env-vars-in-hermes-config">Surfacing Env Vars in hermes config</a></li>
+<li class="lvl2"><a href="#platform-specific-slow-llm-ux">Platform-Specific Slow-LLM UX</a></li>
+<li class="lvl3"><a href="#pattern-subclass-_keep_typing-to-layer-mid-flight-ux">Pattern: subclass _keep_typing to layer mid-flight UX</a></li>
+<li class="lvl3"><a href="#pattern-subclass-send-to-route-through-a-cache-instead-of-sending-immediately">Pattern: subclass send to route through a cache instead of sending immediately</a></li>
+<li class="lvl3"><a href="#when-this-pattern-is-appropriate">When this pattern is appropriate</a></li>
+<li class="lvl3"><a href="#reference-implementation">Reference Implementation</a></li>
+<li class="lvl3"><a href="#reference-implementations-plugin-path">Reference Implementations (Plugin Path)</a></li>
+<li class="lvl2"><a href="#step-by-step-checklist-built-in-path">Step-by-Step Checklist (Built-in Path)</a></li>
+<li class="lvl3"><a href="#1-platform-enum">1. Platform Enum</a></li>
+<li class="lvl3"><a href="#2-adapter-file">2. Adapter File</a></li>
+<li class="lvl3"><a href="#3-gateway-config-gatewayconfigpy">3. Gateway Config (gateway/config.py)</a></li>
+<li class="lvl3"><a href="#4-gateway-runner-gatewayrunpy--gatewayrun_py-siblings">4. Gateway Runner (gateway/run.py + gateway/run_*.py siblings)</a></li>
+<li class="lvl3"><a href="#5-cross-platform-delivery">5. Cross-Platform Delivery</a></li>
+<li class="lvl3"><a href="#6-cli-integration">6. CLI Integration</a></li>
+<li class="lvl3"><a href="#7-tools">7. Tools</a></li>
+<li class="lvl3"><a href="#8-toolsets">8. Toolsets</a></li>
+<li class="lvl3"><a href="#9-optional-platform-hints">9. Optional: Platform Hints</a></li>
+<li class="lvl3"><a href="#10-tests">10. Tests</a></li>
+<li class="lvl3"><a href="#11-documentation">11. Documentation</a></li>
+<li class="lvl2"><a href="#parity-audit">Parity Audit</a></li>
+<li class="lvl2"><a href="#common-patterns">Common Patterns</a></li>
+<li class="lvl3"><a href="#long-poll-adapters">Long-Poll Adapters</a></li>
+<li class="lvl3"><a href="#callbackwebhook-adapters">Callback/Webhook Adapters</a></li>
+<li class="lvl3"><a href="#token-locks">Token Locks</a></li>
+<li class="lvl2"><a href="#reference-implementations">Reference Implementations</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

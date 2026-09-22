@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recurring Loops · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/loops</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="recurring-loops-loop">Recurring Loops (<code>/loop</code>)</h1>
+<p><code>/loop</code> re-runs a prompt (or a slash command) on a recurring cadence <strong>inside your current session</strong>. Each wakeup is a real agent turn: Hermes reads the current state fresh — the latest CI result, the newest queue depth, the file as it is now — does the work, reports back, and goes quiet until the next tick.</p>
+<p>It's Hermes' take on <strong>Claude Code's <code>/loop</code></strong> (and its <code>/proactive</code> alias, which works here too). Where <a href="goals.html"><code>/goal</code></a> is judge-driven — "keep working until this objective is achieved" — <code>/loop</code> is timer-driven: "do this again every N minutes (or whenever it makes sense) until something says stop."</p>
+<h2 id="when-to-use-it">When to use it</h2>
+<ul>
+<li><strong>Polling external state.</strong> "Watch the deploy / the CI run / the queue and tell me when it changes." The canonical use case.</li>
+<li><strong>Iterate-until-green.</strong> "Run the tests, fix what fails, repeat until they pass."</li>
+<li><strong>Monitoring during a work session.</strong> Keep an eye on error rates or a long job's progress while you do something else in the same conversation.</li>
+<li><strong>Periodic housekeeping.</strong> Re-run a lint pass or a status summary every N minutes during a long session.</li>
+</ul>
+<p>When the work should run <strong>unattended</strong> — overnight, on a real schedule, surviving restarts of your terminal — use a <a href="cron.html">cron job</a> instead. <code>/loop</code> lives inside a session; cron lives outside all of them. And when the task is a single objective with a definition of done, <a href="goals.html"><code>/goal</code></a> is usually the better fit.</p>
+<h2 id="quick-start">Quick start</h2>
+<div class="highlight"><pre><span></span><code>/loop 5m check the deploy status and tell me if it&#39;s live yet
+</code></pre></div>
+
+<p>What you'll see:</p>
+<ol>
+<li><strong>Loop accepted</strong> — <code>↻ Loop set (every 5m): check the deploy status…</code></li>
+<li><strong>First wakeup fires right away</strong> — on the next idle poll (gateway: the next 15s watcher scan), Hermes injects the wakeup and runs a normal turn against current state.</li>
+<li><strong>Repeat</strong> — every 5 minutes after that, until a stop condition fires or you stop it.</li>
+</ol>
+<p>Loop a slash command just as easily:</p>
+<div class="highlight"><pre><span></span><code>/loop 10m /recap
+</code></pre></div>
+
+<h2 id="the-two-cadence-modes">The two cadence modes</h2>
+<p><strong>Fixed interval — you set the clock.</strong> Give an interval (<code>30s</code>, <code>5m</code>, <code>2h</code>, <code>1h30m</code>) and the loop fires on that schedule. Use it when the thing you're watching changes on its own timeline:</p>
+<div class="highlight"><pre><span></span><code>/loop 2m poll the build at ci.example.com/job/42 and ping me the moment it finishes
+</code></pre></div>
+
+<p><strong>Self-paced — Hermes sets the clock.</strong> Omit the interval and the loop paces itself: it starts at the floor (1 minute by default), and while the agent's replies stop changing it backs off exponentially — 2m, 4m, 8m, up to the ceiling (15 minutes by default). The moment a reply differs from the last one, cadence snaps back to the floor. Change detection is a local digest comparison (timestamps are ignored), so idle waits cost nothing extra:</p>
+<div class="highlight"><pre><span></span><code>/loop keep an eye on the migration and summarize progress
+</code></pre></div>
+
+<p>The rule of thumb: <strong>fixed interval when an external clock drives the work; self-paced when the work drives the rhythm.</strong></p>
+<h2 id="stop-conditions">Stop conditions</h2>
+<p>A loop ends when any of these fires:</p>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>How</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>The agent decides it's done</td>
+<td>The wakeup prompt teaches the agent to end its reply with <code>LOOP_COMPLETE</code> on its own line when the task is finished or moot.</td>
+</tr>
+<tr>
+<td>A run cap</td>
+<td><code>--times N</code> — stop after N wakeups.</td>
+</tr>
+<tr>
+<td>An evidence-based condition</td>
+<td><code>--until &lt;condition&gt;</code> — after each wakeup, the same auxiliary judge that powers <code>/goal</code> checks the reply against your condition. If the judge rules the condition unachievable, the loop <strong>pauses</strong> with the reason instead of re-firing until the tick budget (fail-open: a broken judge never wedges the loop).</td>
+</tr>
+<tr>
+<td>You</td>
+<td><code>/loop stop</code> (or <code>/loop pause</code> to keep it around).</td>
+</tr>
+<tr>
+<td>The backstop budget</td>
+<td><code>loops.max_ticks</code> (default 100) pauses the loop so an unattended session can't burn tokens forever. <code>0</code> = unlimited.</td>
+</tr>
+</tbody>
+</table>
+<p>Examples:</p>
+<div class="highlight"><pre><span></span><code>/loop 2m poll CI --times 30
+/loop 5m watch the queue --until queue depth reaches zero
+</code></pre></div>
+
+<h2 id="commands">Commands</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/loop [interval] &lt;prompt&gt; [--times N] [--until &lt;cond&gt;]</code></td>
+<td>Start (or replace) the loop for this session. The first wakeup fires immediately; later ones follow the cadence.</td>
+</tr>
+<tr>
+<td><code>/loop</code> or <code>/loop status</code></td>
+<td>Show cadence, ticks fired, and time to the next wakeup.</td>
+</tr>
+<tr>
+<td><code>/loop pause</code></td>
+<td>Stop firing without losing the loop.</td>
+</tr>
+<tr>
+<td><code>/loop resume</code></td>
+<td>Pick it back up.</td>
+</tr>
+<tr>
+<td><code>/loop stop</code></td>
+<td>End the loop.</td>
+</tr>
+<tr>
+<td><code>/proactive …</code></td>
+<td>Alias for <code>/loop</code> (Claude Code parity).</td>
+</tr>
+</tbody>
+</table>
+<p>Works on the CLI, the TUI (<code>hermes --tui</code>), the web dashboard chat, the desktop app, and every gateway platform (Telegram, Discord, Slack, WhatsApp, …). On messaging platforms the gateway fires wakeups even between your messages — the loop belongs to the chat's session, and its results arrive as ordinary replies — also when that session is open in the TUI / Desktop app, which leaves the routed wakeup to the gateway.</p>
+<h2 id="mixing-with-goal">Mixing with <code>/goal</code></h2>
+<p>Both features inject synthetic turns at idle boundaries, so they follow one rule: <strong>an active goal owns the session.</strong> While a <code>/goal</code> is actively driving (judge saying "continue"), loop wakeups defer. The loop resumes using idle time as soon as the goal finishes, pauses, or parks itself on a wait barrier (<code>/goal wait</code>, or the judge's automatic WAIT verdict). A parked goal plus a <code>/loop</code> is a natural combo: the goal waits on the big async thing while the loop keeps a heartbeat on something else.</p>
+<p>A real user message always wins over both — wakeups only fire while the session is idle and nothing of yours is queued.</p>
+<h2 id="behavior-details">Behavior details</h2>
+<ul>
+<li><strong>A wakeup is a normal user-role turn.</strong> No system-prompt mutation, no toolset swap — prompt caching stays intact. In the messaging gateway a wakeup is not a reply to the message that set the loop, so its output is posted to the chat/topic without quoting that message.</li>
+<li><strong>Survives <code>/resume</code> and compression.</strong> Loop state persists per session and migrates across context-compression boundaries, same as <code>/goal</code>.</li>
+<li><strong>One loop per session.</strong> Setting a new <code>/loop</code> replaces the old one. Run several loops by running several sessions (or use cron for a fleet of schedules).</li>
+<li><strong>Interrupting a wakeup turn (Ctrl+C) pauses the loop</strong> — recoverable with <code>/loop resume</code>, so cancel actually means cancel.</li>
+<li><strong>Token cost scales with cadence.</strong> Every tick is a full agent turn. Match the interval to how often the state actually changes; prefer self-pacing for idle waits.</li>
+</ul>
+<h2 id="configuration">Configuration</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">loops</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">min_interval_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span><span class="w">       </span><span class="c1"># floor for fixed intervals</span>
+<span class="w">  </span><span class="nt">max_ticks</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100</span><span class="w">                 </span><span class="c1"># backstop budget (0 = unlimited)</span>
+<span class="w">  </span><span class="nt">self_paced_floor_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60</span><span class="w">   </span><span class="c1"># self-paced starting cadence</span>
+<span class="w">  </span><span class="nt">self_paced_ceiling_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">900</span><span class="w">  </span><span class="c1"># self-paced max backoff</span>
+</code></pre></div>
+
+<p>The <code>--until</code> judge routes through the <code>goal_judge</code> auxiliary task, so <code>auxiliary.goal_judge.*</code> routing overrides (provider, model) apply to loop conditions too.</p>
+<h2 id="loop-vs-goal-vs-cron"><code>/loop</code> vs <code>/goal</code> vs cron</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>/loop</code></th>
+<th><code>/goal</code></th>
+<th>cron</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Trigger</strong></td>
+<td>Timer (or self-paced)</td>
+<td>Judge verdict after each turn</td>
+<td>Schedule, outside any session</td>
+</tr>
+<tr>
+<td><strong>Lives in</strong></td>
+<td>Your current session</td>
+<td>Your current session</td>
+<td>Its own session per run</td>
+</tr>
+<tr>
+<td><strong>Ends when</strong></td>
+<td>Stop condition / caps / you</td>
+<td>Goal achieved / budget / you</td>
+<td>You remove the job</td>
+</tr>
+<tr>
+<td><strong>Best for</strong></td>
+<td>Polling, monitoring, periodic re-runs</td>
+<td>One objective, iterate until done</td>
+<td>Unattended, long-horizon schedules</td>
+</tr>
+</tbody>
+</table>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/loops</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#when-to-use-it">When to use it</a></li>
+<li class="lvl2"><a href="#quick-start">Quick start</a></li>
+<li class="lvl2"><a href="#the-two-cadence-modes">The two cadence modes</a></li>
+<li class="lvl2"><a href="#stop-conditions">Stop conditions</a></li>
+<li class="lvl2"><a href="#commands">Commands</a></li>
+<li class="lvl2"><a href="#mixing-with-goal">Mixing with /goal</a></li>
+<li class="lvl2"><a href="#behavior-details">Behavior details</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl2"><a href="#loop-vs-goal-vs-cron">/loop vs /goal vs cron</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

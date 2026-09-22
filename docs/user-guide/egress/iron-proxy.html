@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Egress credential-injection proxy (iron-proxy) · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/egress/iron-proxy</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="egress-credential-injection-proxy-iron-proxy">Egress credential-injection proxy (iron-proxy)</h1>
+<p>When Hermes runs your agent inside a Docker terminal sandbox, that sandbox normally holds your real upstream API keys (<code>OPENROUTER_API_KEY</code>, <code>OPENAI_API_KEY</code>, etc.). A prompt-injected agent in that sandbox can <code>cat ~/.config/openrouter/auth.json</code> or <code>printenv | grep -i key</code> and exfiltrate them.</p>
+<p>The egress proxy fixes this: the sandbox holds opaque <strong>proxy tokens</strong>, never the real keys. All outbound traffic from the sandbox routes through a local <a href="https://github.com/ironsh/iron-proxy" class="ext" target="_blank" rel="noopener">iron-proxy</a> daemon (Apache-2.0, Go) on the host, which terminates TLS and swaps the proxy token for the real credential before forwarding the request upstream. Compromise the sandbox and the attacker walks away with tokens that only work behind the <strong>configured trusted proxy boundary</strong> — the CA private key and the proxy endpoint integrity are part of that boundary. If traffic can be redirected to attacker-controlled proxy infrastructure (e.g. a stolen CA private key or a hijacked proxy endpoint), the token guarantee no longer holds.</p>
+<p>This release wires the egress proxy into the Docker backend only. Modal, Daytona, SSH, and Singularity do <strong>not</strong> receive proxy env vars or CA mounts yet.</p>
+<h2 id="what-it-is">What it is</h2>
+<ul>
+<li>A managed <code>iron-proxy</code> subprocess on the host, lazy-installed into <code>~/.hermes/bin/iron-proxy</code></li>
+<li>A local CA at <code>~/.hermes/proxy/ca.crt</code> that the sandbox trusts so iron-proxy can MITM TLS and rewrite headers</li>
+<li>A <code>proxy.yaml</code> config at <code>~/.hermes/proxy/proxy.yaml</code> listing the upstream hosts you allow and the secrets-transform mapping</li>
+<li>A <code>mappings.json</code> recording which proxy token corresponds to which real env var</li>
+</ul>
+<p>The sandbox gets <code>HTTPS_PROXY=http://host.docker.internal:9090</code>, <code>HTTP_PROXY=http://host.docker.internal:9091</code>, and standard provider env vars such as <code>OPENROUTER_API_KEY</code> set to opaque proxy tokens. Matching <code>HERMES_PROXY_TOKEN_&lt;ENV_NAME&gt;</code> aliases are also exported for diagnostics. Existing provider SDKs read the usual env names, send the proxy token in <code>Authorization</code>, and iron-proxy's <code>secrets</code> transform substitutes the real value sourced from the host-side daemon environment.</p>
+<h2 id="what-it-is-not">What it is not</h2>
+<ul>
+<li>It is <strong>not</strong> the inbound <code>hermes proxy</code> command, which is an OAuth aggregator reverse proxy. Different command (<code>hermes egress</code>), different direction.</li>
+<li>It does <strong>not</strong> sit between your local terminal and providers — only between the sandbox and providers.</li>
+<li>It does <strong>not</strong> rewrite credentials for in-process LLM calls the host process makes. Those continue to use your <code>.env</code> keys directly. The threat model is the <em>sandbox</em>, not the host.</li>
+</ul>
+<h2 id="quick-start">Quick start</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. Install the iron-proxy binary (pinned version, SHA-256 verified)</span>
+hermes<span class="w"> </span>egress<span class="w"> </span>install
+
+<span class="c1"># 2. Run the wizard: generates CA, mints proxy tokens for every provider key</span>
+<span class="c1">#    in your env, writes proxy.yaml.</span>
+hermes<span class="w"> </span>egress<span class="w"> </span>setup
+
+<span class="c1"># 3. Start the proxy daemon</span>
+hermes<span class="w"> </span>egress<span class="w"> </span>start
+
+<span class="c1"># 4. Check status</span>
+hermes<span class="w"> </span>egress<span class="w"> </span>status
+</code></pre></div>
+
+<p><code>hermes egress setup</code> discovers provider keys from your environment. If your keys live only in <code>~/.hermes/.env</code> (not exported into your shell), setup reads that file automatically — you don't have to <code>export</code> them first.</p>
+<p>When you re-run <code>setup</code> later (new allowlist host, rotated tokens, switched credential source), it stops the running daemon because its config is held in memory, then <strong>offers to restart it for you</strong> so the change takes effect immediately. On a tty it asks; pass <code>--restart</code> to always restart or <code>--no-restart</code> to leave it down. To apply changes any other time, <code>hermes egress restart</code> is the one-command stop-then-start.</p>
+<p>Once running, the Docker terminal backend automatically:</p>
+<ul>
+<li>Mounts <code>~/.hermes/proxy/ca.crt</code> into the sandbox at <code>/etc/ssl/certs/hermes-egress-ca.crt</code></li>
+<li>Sets <code>HTTPS_PROXY</code>, <code>HTTP_PROXY</code>, <code>REQUESTS_CA_BUNDLE</code>, <code>SSL_CERT_FILE</code>, <code>CURL_CA_BUNDLE</code>, <code>NODE_EXTRA_CA_CERTS</code> to make every common HTTP runtime route through the proxy and trust the CA</li>
+<li>Sets <code>NODE_OPTIONS=--use-openssl-ca</code> (appended to whatever you already have in <code>docker_env.NODE_OPTIONS</code>) so Node.js routes through the OpenSSL store the other CA-bundle vars control — see <a href="#nodejs-asymmetric-ca-caveat">Node.js asymmetric CA caveat</a> below for the residual gap</li>
+<li>Adds <code>--add-host=host.docker.internal:host-gateway</code> so the sandbox can reach the host-side proxy on Linux (Docker Desktop handles this automatically on macOS/Windows)</li>
+<li>Exports the proxy token under the standard provider env name (for example <code>OPENROUTER_API_KEY</code>) plus one <code>HERMES_PROXY_TOKEN_&lt;ENV_NAME&gt;</code> diagnostic alias per minted mapping</li>
+</ul>
+<h2 id="configuration">Configuration</h2>
+<p>The full config lives in <code>~/.hermes/config.yaml</code> under the <code>proxy:</code> section. Defaults are documented inline; everything is optional.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">proxy</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># Master switch. When false the feature is a complete no-op — no</span>
+<span class="w">  </span><span class="c1"># binaries downloaded, no docker mounts added, no subprocess started.</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+
+<span class="w">  </span><span class="c1"># Tunnel listener port. Sandboxes hit http://host.docker.internal:&lt;port&gt;.</span>
+<span class="w">  </span><span class="nt">tunnel_port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">9090</span>
+
+<span class="w">  </span><span class="c1"># Auto-download the pinned iron-proxy binary on first use.</span>
+<span class="w">  </span><span class="nt">auto_install</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+
+<span class="w">  </span><span class="c1"># Where iron-proxy looks up the real upstream secrets at egress time.</span>
+<span class="w">  </span><span class="c1">#   env       — process env (default). Whatever is in your ~/.hermes/.env</span>
+<span class="w">  </span><span class="c1">#               at proxy-start time is the source of truth.</span>
+<span class="w">  </span><span class="c1">#   bitwarden — refetch from Bitwarden Secrets Manager on each proxy</span>
+<span class="w">  </span><span class="c1">#               restart. Rotation in the BW web app propagates without</span>
+<span class="w">  </span><span class="c1">#               touching .env. Requires `secrets.bitwarden.enabled: true`.</span>
+<span class="w">  </span><span class="nt">credential_source</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">env</span>
+
+<span class="w">  </span><span class="c1"># When true (default), the Docker backend refuses to start a sandbox if</span>
+<span class="w">  </span><span class="c1"># the proxy is enabled but not running. Set to false to fall back to the</span>
+<span class="w">  </span><span class="c1"># legacy &quot;real credentials inside the sandbox&quot; posture when the proxy</span>
+<span class="w">  </span><span class="c1"># is unavailable.</span>
+<span class="w">  </span><span class="nt">enforce_on_docker</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+
+<span class="w">  </span><span class="c1"># When `credential_source: bitwarden` but the BWS access token /</span>
+<span class="w">  </span><span class="c1"># project_id is missing OR the bws fetch returns no values for mapped</span>
+<span class="w">  </span><span class="c1"># providers, the daemon raises by default (matches the spirit of &quot;I</span>
+<span class="w">  </span><span class="c1"># asked for rotation — don&#39;t silently use stale env values&quot;).  Set</span>
+<span class="w">  </span><span class="c1"># to true to opt back into the legacy host-env fallback — useful for</span>
+<span class="w">  </span><span class="c1"># migrations where you want to start switching to BW mode but haven&#39;t</span>
+<span class="w">  </span><span class="c1"># wired every secret yet.</span>
+<span class="w">  </span><span class="nt">allow_env_fallback</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+
+<span class="w">  </span><span class="c1"># SSRF deny list applied to outbound traffic.  Omit / leave null to</span>
+<span class="w">  </span><span class="c1"># use the safe default: loopback (v4 + v6), link-local (incl. cloud</span>
+<span class="w">  </span><span class="c1"># metadata IPs at 169.254.169.254), RFC1918, IPv6 ULA, IPv4-mapped-v6,</span>
+<span class="w">  </span><span class="c1"># CGNAT, and the RFC2544 benchmark range.  Set to an explicit `[]`</span>
+<span class="w">  </span><span class="c1"># to opt out entirely (only sensible in hermetic tests).</span>
+<span class="w">  </span><span class="nt">upstream_deny_cidrs</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">null</span>
+
+<span class="w">  </span><span class="c1"># Extra allowed upstream hosts beyond the bundled defaults.</span>
+<span class="w">  </span><span class="c1"># Wildcards (`*.foo.com`) are supported. The defaults cover OpenRouter,</span>
+<span class="w">  </span><span class="c1"># OpenAI, Anthropic, Google, xAI, Mistral, Groq, Together, DeepSeek,</span>
+<span class="w">  </span><span class="c1"># and Nous Research.</span>
+<span class="w">  </span><span class="nt">extra_allowed_hosts</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span>
+</code></pre></div>
+
+<h3 id="default-allowed-upstream-hosts">Default allowed upstream hosts</h3>
+<div class="highlight"><pre><span></span><code>openrouter.ai           *.openrouter.ai
+api.openai.com          api.anthropic.com
+generativelanguage.googleapis.com
+api.x.ai                api.mistral.ai
+api.groq.com            api.together.xyz
+api.deepseek.com        inference.nousresearch.com
+</code></pre></div>
+
+<p>If your agent needs an upstream that isn't on the list — a self-hosted inference endpoint, an extra cloud LLM, an MCP server — add it to <code>proxy.extra_allowed_hosts</code>. Wildcards are matched against the full hostname (<code>*.example.com</code> matches <code>api.example.com</code> and <code>staging.example.com</code> but not <code>example.com</code> itself).</p>
+<h3 id="default-ssrf-deny-cidrs">Default SSRF deny CIDRs</h3>
+<p>Applied regardless of allowlist. These ranges are refused by iron-proxy at the network boundary, so a DNS rebinding attack via an allowlisted hostname can't reach IMDS or your internal network:</p>
+<table>
+<thead>
+<tr>
+<th>CIDR</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>127.0.0.0/8</code>, <code>::1/128</code></td>
+<td>Loopback (v4 + v6)</td>
+</tr>
+<tr>
+<td><code>169.254.0.0/16</code>, <code>fe80::/10</code></td>
+<td>Link-local — <strong>incl. AWS / GCP / Azure IMDS at <code>169.254.169.254</code></strong></td>
+</tr>
+<tr>
+<td><code>10.0.0.0/8</code>, <code>172.16.0.0/12</code>, <code>192.168.0.0/16</code></td>
+<td>RFC1918</td>
+</tr>
+<tr>
+<td><code>fc00::/7</code></td>
+<td>IPv6 ULA</td>
+</tr>
+<tr>
+<td><code>::ffff:0:0/96</code></td>
+<td>IPv4-mapped IPv6 — closes the dual-stack IMDS bypass</td>
+</tr>
+<tr>
+<td><code>100.64.0.0/10</code></td>
+<td>RFC6598 CGNAT (used by AWS VPC, K8s pod networks)</td>
+</tr>
+<tr>
+<td><code>198.18.0.0/15</code></td>
+<td>RFC2544 benchmark range</td>
+</tr>
+</tbody>
+</table>
+<p>To override: set <code>proxy.upstream_deny_cidrs</code> to your own list. To opt out entirely (e.g. for a hermetic test that needs to reach a loopback upstream): set it to an empty list <code>[]</code>.</p>
+<h3 id="bind-policy">Bind policy</h3>
+<p>The proxy never binds <code>0.0.0.0</code>. The default bind is platform-specific because iron-proxy v0.39 supports only a <strong>single bind per daemon process</strong>:</p>
+<ul>
+<li><strong>Linux:</strong> the docker bridge gateway (<code>172.17.0.1:&lt;tunnel_port&gt;</code> by default). Containers reach the proxy via <code>host.docker.internal</code>, which <code>--add-host=host.docker.internal:host-gateway</code> resolves to exactly this bridge gateway IP — a loopback-only bind would be unreachable from inside sandboxes. The bridge IP is an address on the host's <code>docker0</code> interface, so it is not exposed to the LAN; it IS reachable by other containers on the default bridge network, but requests still require a minted proxy token and an allowlisted upstream. If no docker bridge is detected (docker not installed/running), the bind falls back to loopback with a warning.</li>
+<li><strong>macOS / Windows Docker Desktop:</strong> loopback (<code>127.0.0.1:&lt;tunnel_port&gt;</code>). Desktop's VPNkit routes <code>host.docker.internal</code> to the host, so loopback is reachable from containers and is the least-exposed choice.</li>
+</ul>
+<p>A LAN peer with a leaked proxy token cannot use the proxy — neither bind is reachable from the external network.</p>
+<p>We also pin <code>metrics.listen: 127.0.0.1:0</code> so the daemon's built-in metrics server gets an ephemeral loopback port instead of its default <code>:9090</code> — otherwise it would fight <code>tunnel_port: 9090</code> for the same socket and the daemon would refuse to start with "address already in use". Note the <code>:0</code> ephemeral port is random per start and not surfaced anywhere, so metrics are effectively disabled at this pin.</p>
+<p>If a hostile <code>ip</code> shim earlier on PATH had been able to inject a non-private IPv4 as the bridge address (<code>0.0.0.0</code>, a public address, multicast, link-local, etc.) the loopback fallback still applies — we never bind anything we couldn't validate via <code>ipaddress.IPv4Address</code> + <code>is_*</code> checks.</p>
+<h2 id="covered-auth-schemes">Covered auth schemes</h2>
+<p>The <code>secrets</code> transform swaps the proxy token wherever it appears in a matched location — and it matches more than <code>Authorization: Bearer</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Env var</th>
+<th>Swapped in</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>OpenRouter, OpenAI, Groq, Together, DeepSeek, Mistral, xAI, Nous</td>
+<td><code>*_API_KEY</code></td>
+<td><code>Authorization</code> header</td>
+</tr>
+<tr>
+<td>Anthropic native</td>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td><code>x-api-key</code> + <code>Authorization</code></td>
+</tr>
+<tr>
+<td>Azure OpenAI</td>
+<td><code>AZURE_OPENAI_API_KEY</code></td>
+<td><code>api-key</code> + <code>Authorization</code> (<code>*.openai.azure.com</code>, <code>*.cognitiveservices.azure.com</code>, <code>*.services.ai.azure.com</code>)</td>
+</tr>
+<tr>
+<td>Google AI Studio (Gemini)</td>
+<td><code>GEMINI_API_KEY</code> / <code>GOOGLE_API_KEY</code></td>
+<td><code>x-goog-api-key</code> header or <code>?key=</code> query param</td>
+</tr>
+</tbody>
+</table>
+<p><code>GEMINI_API_KEY</code> and <code>GOOGLE_API_KEY</code> are treated as one credential: a single proxy token is minted and injected into the sandbox under <strong>both</strong> names, and either name in your host env satisfies discovery.</p>
+<h2 id="uncovered-providers">Uncovered providers</h2>
+<p>Auth schemes that involve request signing or SDK-minted OAuth cannot be swapped by a static header replacement — if their env vars are present, the sandbox holds <strong>real credentials</strong> for those providers and the egress isolation guarantee is incomplete for them:</p>
+<table>
+<thead>
+<tr>
+<th>Env var</th>
+<th>Provider</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code></td>
+<td>AWS Bedrock / SageMaker</td>
+<td>SigV4-signed requests</td>
+</tr>
+<tr>
+<td><code>GOOGLE_APPLICATION_CREDENTIALS</code></td>
+<td>GCP Vertex AI</td>
+<td>OAuth minted from a service-account file</td>
+</tr>
+</tbody>
+</table>
+<p>These env vars are present on most developer laptops for unrelated tooling (terraform, gcloud, aws CLI, ECR push). They surface as warnings in the wizard and <code>hermes egress status</code> but never block the proxy from starting. If you don't use those providers from sandboxes, <code>unset</code> the vars to clear the warning.</p>
+<h2 id="bitwarden-integration">Bitwarden integration</h2>
+<p>If you already use Bitwarden Secrets Manager via <a href="../secrets/bitwarden.html"><code>hermes secrets bitwarden setup</code></a>, the egress proxy can pull real credentials from there instead of <code>os.environ</code>:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>egress<span class="w"> </span>setup<span class="w"> </span>--from-bitwarden
+</code></pre></div>
+
+<p>This sets <code>proxy.credential_source: bitwarden</code> and discovers provider env names from your BW project.</p>
+<h3 id="rotation-semantics">Rotation semantics</h3>
+<p>When <code>credential_source: bitwarden</code>, the iron-proxy daemon refetches secrets from BWS via <code>bws secret list &lt;project_id&gt;</code> <strong>every time it starts</strong>. So the rotation flow is:</p>
+<ol>
+<li>Rotate a key in the Bitwarden web app.</li>
+<li><code>hermes egress stop &amp;&amp; hermes egress start</code> on the host.</li>
+<li>Sandboxes started after that point swap proxy tokens for the new value.</li>
+</ol>
+<p>No <code>.env</code> edits. No Hermes restart on the host. The proxy daemon is the only thing that touches the new value — your host process and <code>os.environ</code> are untouched.</p>
+<h3 id="fail-loud-at-start">Fail-loud at start</h3>
+<p>When <code>credential_source: bitwarden</code>, <code>hermes egress start</code> pre-checks at the wizard layer AND <code>_build_proxy_subprocess_env</code> re-checks at the daemon layer:</p>
+<ul>
+<li>BWS access token env var is unset → refuse to start with a hint to <code>unset</code> and re-run, or <code>hermes egress setup --no-bitwarden</code> to switch back to env mode</li>
+<li><code>secrets.bitwarden.project_id</code> is empty → refuse to start with a hint to run <code>hermes secrets bitwarden setup</code></li>
+<li><code>bws secret list</code> returns no values for one or more mapped providers → refuse to start, listing the missing names</li>
+</ul>
+<p>This is intentional. Falling back to host env in BW mode reintroduces exactly the staleness bug the BW path is meant to defeat (operator picked BW for the rotation guarantee; silent fallback breaks that guarantee).</p>
+<p>The <code>proxy.allow_env_fallback: true</code> config flag opts back in to the legacy "silently fall back to host env if BWS is unreachable" behavior for migration scenarios. Use it when you're moving secrets into BW one at a time and want the daemon to start with whichever values are available.</p>
+<h3 id="switching-credential-source">Switching credential source</h3>
+<table>
+<thead>
+<tr>
+<th>From</th>
+<th>To</th>
+<th>Command</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>env</td>
+<td>bitwarden</td>
+<td><code>hermes egress setup --from-bitwarden</code></td>
+</tr>
+<tr>
+<td>bitwarden</td>
+<td>env</td>
+<td><code>hermes egress setup --no-bitwarden</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Re-running <code>hermes egress setup</code> WITHOUT either flag preserves the existing <code>credential_source</code></strong> — the wizard refuses to silently downgrade you back to env. This matters because once you've configured bitwarden mode, the rotation guarantee is what you signed up for; you have to explicitly say "I want env again" to change it.</p>
+<h2 id="slash-commands">Slash commands</h2>
+<p>The CLI subcommand tree:</p>
+<div class="highlight"><pre><span></span><code>hermes egress install                  # download the pinned iron-proxy binary
+hermes egress install --force          # re-download even if a managed copy exists
+
+hermes egress setup                    # interactive wizard
+hermes egress setup --tunnel-port N    # override the tunnel listener port
+hermes egress setup --from-bitwarden   # use BWS as credential source (fail-loud)
+hermes egress setup --no-bitwarden     # explicitly switch back to env mode
+hermes egress setup --rotate-tokens    # mint fresh tokens for every provider
+                                       #   (default preserves existing)
+
+hermes egress start                    # spawn the managed proxy daemon
+hermes egress stop                     # SIGTERM (then SIGKILL after 5s grace)
+hermes egress restart                  # stop (if running) then start — needed when
+                                       #   upstream SECRETS change (rotation, new provider)
+hermes egress reload                   # hot-reload the ruleset from proxy.yaml via the
+                                       #   management API — no restart, no dropped
+                                       #   connections (allowlist / mapping edits)
+
+hermes egress status                   # binary + config + pid + listening state + mappings
+hermes egress status --show-tokens     # print proxy tokens in full
+                                       #   (default: redacted prefix + suffix only)
+
+hermes egress disable                  # flip proxy.enabled = false
+                                       #   (does not stop a running proxy)
+
+hermes egress config                   # print the path to proxy.yaml for debugging
+</code></pre></div>
+
+<h3 id="token-rotation">Token rotation</h3>
+<p>By default, <code>hermes egress setup</code> <strong>preserves</strong> proxy tokens for providers that already have them. Adding a new provider mints a fresh token only for the new one; existing tokens are unchanged. This avoids 401-ing running sandboxes when you re-run the wizard.</p>
+<p><code>--rotate-tokens</code> rolls every token:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>egress<span class="w"> </span>setup<span class="w"> </span>--rotate-tokens
+</code></pre></div>
+
+<p>When there are existing tokens AND stdin is a tty, the wizard prompts for confirmation:</p>
+<div class="highlight"><pre><span></span><code>⚠  --rotate-tokens will invalidate proxy tokens in every running
+   Hermes sandbox.  They will start 401-ing against upstreams until restarted.
+Type &#39;rotate&#39; to confirm:
+</code></pre></div>
+
+<p>Non-tty invocations (CI, scripts) skip the prompt — the flag is treated as deliberate. Before any overwrite the current <code>mappings.json</code> is copied to a timestamped sibling so manual recovery is possible:</p>
+<div class="highlight"><pre><span></span><code>backup: ~/.hermes/proxy/mappings.json.rotated-20260524T143012
+</code></pre></div>
+
+<p><code>hermes egress setup</code> stops a running daemon when it rewrites config or token mappings, because the daemon keeps the old YAML in memory. After <code>--rotate-tokens</code>:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>egress<span class="w"> </span>start
+</code></pre></div>
+
+<p>Containers already running hold the old tokens and will need to be restarted to pick up the new ones. New persistent Docker containers include an egress-posture label, so Hermes will not reuse a pre-egress or pre-rotation container for new sessions.</p>
+<h2 id="state-directory-layout">State directory layout</h2>
+<p>Everything iron-proxy maintains lives in <code>~/.hermes/proxy/</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Mode</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>~/.hermes/proxy/</code> (dir)</td>
+<td><code>0o700</code></td>
+<td>Owned + traversable by you only</td>
+</tr>
+<tr>
+<td><code>ca.crt</code></td>
+<td><code>0o644</code></td>
+<td>Public CA cert distributed into sandboxes</td>
+</tr>
+<tr>
+<td><code>ca.key</code></td>
+<td><code>0o600</code></td>
+<td>CA signing key — never leaves the host</td>
+</tr>
+<tr>
+<td><code>proxy.yaml</code></td>
+<td><code>0o600</code></td>
+<td>iron-proxy config; rewritten every <code>setup</code></td>
+</tr>
+<tr>
+<td><code>mappings.json</code></td>
+<td><code>0o600</code></td>
+<td>Sandbox proxy token → upstream env var</td>
+</tr>
+<tr>
+<td><code>mappings.json.rotated-*</code></td>
+<td><code>0o600</code></td>
+<td>Backups created by <code>--rotate-tokens</code></td>
+</tr>
+<tr>
+<td><code>iron-proxy.pid</code></td>
+<td><code>0o600</code></td>
+<td>PID of the running daemon</td>
+</tr>
+<tr>
+<td><code>iron-proxy.nonce</code></td>
+<td><code>0o600</code></td>
+<td>Per-start nonce for PID-recycle defense</td>
+</tr>
+<tr>
+<td><code>iron-proxy.log</code></td>
+<td><code>0o600</code></td>
+<td>Daemon stdout/stderr — <strong>includes per-request records on v0.39</strong></td>
+</tr>
+<tr>
+<td><code>audit.log</code></td>
+<td><code>0o600</code></td>
+<td>Reserved for the dedicated per-request audit stream on future binary versions; pre-created so the privacy contract holds when upstream wires it in</td>
+</tr>
+</tbody>
+</table>
+<p>The CA private key is the most sensitive file. It's created with <code>0o600</code> from the first byte (no umask-window TOCTOU) and <code>O_NOFOLLOW</code> so a same-uid attacker can't redirect it via a planted symlink. The pidfile, nonce file, daemon log, and audit log get the same treatment.</p>
+<h3 id="logging-on-iron-proxy-v039">Logging on iron-proxy v0.39</h3>
+<p>On the currently pinned binary version (<strong>v0.39.0</strong>) iron-proxy writes ALL output — daemon-level diagnostics AND per-request records — to <strong><code>~/.hermes/proxy/iron-proxy.log</code></strong>. v0.39's <code>config.Log</code> struct doesn't have a separate <code>audit_path</code> field, so we can't route per-request records to a dedicated stream there.</p>
+<p>We still pre-create <code>~/.hermes/proxy/audit.log</code> at <code>0o600</code> with <code>O_NOFOLLOW</code> because:</p>
+<ol>
+<li>It reserves the path for the future version bump: when the pinned version moves to one that supports <code>log.audit_path</code>, per-request records will start flowing there without operator-side reconfiguration. <strong>Until then the file stays at 0 bytes — do not point monitoring, alerting, or forensics tooling at it yet.</strong> Use <code>iron-proxy.log</code> for everything today.</li>
+<li>The 0o600-from-first-byte guarantee defends against the upstream-fix-day where v0.40+ creates the file under its default umask if it doesn't already exist.</li>
+</ol>
+<p>Until that version bump lands, treat <code>iron-proxy.log</code> as the source of truth for both audiences:</p>
+<ul>
+<li>Daemon-level events (startup banner, bind errors, shutdown reason, transform errors). Operations + troubleshooting.</li>
+<li>Per-request records (CONNECT to allowlisted upstream, secret swap fired, allowlist denial). Forensics + compliance.</li>
+</ul>
+<p>Both files are appended to across restarts. Rotate them with logrotate if you care about disk usage on long-lived hosts.</p>
+<h2 id="how-it-works">How it works</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────┐                ┌──────────────┐                ┌─────────────┐
+│ Docker       │ CONNECT /     │ iron-proxy    │ HTTPS w/       │ OpenRouter  │
+│ sandbox      ├──────────────▶│ (host:9090)   ├───────────────▶│ / OpenAI /  │
+│              │ HTTP forward  │               │ real API key   │ Anthropic …  │
+│ has:         │ w/ proxy tok  │ mints leaf    │                │             │
+│ - proxy tok  │ in Auth hdr   │ cert from CA  │                │             │
+│ - CA cert    │               │ matches token │                │             │
+│ - HTTPS_PROXY│               │ swaps secret  │                │             │
+└──────────────┘               └──────────────┘                └─────────────┘
+                                       │
+                                       │ daemon + per-request log (combined on v0.39)
+                                       ▼
+                              ~/.hermes/proxy/iron-proxy.log
+                              (~/.hermes/proxy/audit.log reserved for v0.40+ split stream)
+</code></pre></div>
+
+<ol>
+<li>Sandbox makes an HTTPS request, e.g. <code>POST https://openrouter.ai/v1/chat/completions</code> with <code>Authorization: Bearer hermes-proxy-openrouter-…</code> (the proxy token, not the real key).</li>
+<li>Because <code>HTTPS_PROXY</code> is set, the request goes to iron-proxy as a CONNECT tunnel.</li>
+<li>iron-proxy checks the allowlist. <code>openrouter.ai</code> is allowed.</li>
+<li>iron-proxy mints a leaf cert signed by our CA for <code>openrouter.ai</code>, terminates the TLS connection, inspects the request.</li>
+<li>The <code>secrets</code> transform matches the proxy-token string in the <code>Authorization</code> header and substitutes the real <code>OPENROUTER_API_KEY</code> value, sourced from iron-proxy's own environment.</li>
+<li>Request is re-encrypted and forwarded to OpenRouter.</li>
+<li>The request is logged to <code>~/.hermes/proxy/iron-proxy.log</code> on v0.39. When the pinned binary version supports the split stream (v0.40+), per-request records will flow to <code>~/.hermes/proxy/audit.log</code> and daemon-level diagnostics will stay in <code>iron-proxy.log</code>. See <a href="#logging-on-iron-proxy-v039">Logging on iron-proxy v0.39</a>.</li>
+</ol>
+<p>A request to a non-allowlisted host (e.g. <code>https://attacker.example.com/leak?key=...</code>) is rejected with HTTP 403 before any bytes leave the host. The denial is recorded in <code>iron-proxy.log</code> with the upstream host and the source sandbox.</p>
+<h3 id="ca-distribution-into-the-sandbox">CA distribution into the sandbox</h3>
+<p>When the Docker backend starts a container with <code>proxy.enabled: true</code> and the daemon is listening, it adds these arguments to <code>docker run</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Arg</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-v ~/.hermes/proxy/ca.crt:/etc/ssl/certs/hermes-egress-ca.crt:ro</code></td>
+<td>Read-only mount of the CA</td>
+</tr>
+<tr>
+<td><code>-e HTTPS_PROXY=http://host.docker.internal:9090</code></td>
+<td>Python httpx / curl / go default transport / Node fetch</td>
+</tr>
+<tr>
+<td><code>-e HTTP_PROXY=http://host.docker.internal:9091</code></td>
+<td>curl + wget for plain HTTP — the plain-HTTP forward listener lives on <code>tunnel_port + 1</code></td>
+</tr>
+<tr>
+<td><code>-e NO_PROXY=127.0.0.1,localhost,::1</code></td>
+<td>Loopback dev servers inside the sandbox bypass the proxy</td>
+</tr>
+<tr>
+<td><code>-e REQUESTS_CA_BUNDLE=…ca.crt</code></td>
+<td>Python <code>requests</code></td>
+</tr>
+<tr>
+<td><code>-e SSL_CERT_FILE=…ca.crt</code></td>
+<td>Python <code>ssl</code> module / OpenSSL — <strong>replaces</strong> the system store</td>
+</tr>
+<tr>
+<td><code>-e CURL_CA_BUNDLE=…ca.crt</code></td>
+<td>curl — <strong>replaces</strong> the system store</td>
+</tr>
+<tr>
+<td><code>-e NODE_EXTRA_CA_CERTS=…ca.crt</code></td>
+<td>Node.js — <strong>adds</strong> to the system store</td>
+</tr>
+<tr>
+<td><code>-e NODE_OPTIONS="&lt;your value&gt; --use-openssl-ca"</code></td>
+<td>Node.js — route through OpenSSL store (appended; your <code>--max-old-space-size</code> etc. are preserved)</td>
+</tr>
+<tr>
+<td><code>-e HERMES_EGRESS_PROXY=1</code></td>
+<td>Sentinel the agent can read to know it's proxy-aware</td>
+</tr>
+<tr>
+<td><code>-e OPENROUTER_API_KEY=&lt;proxy-token&gt;</code></td>
+<td>Standard provider env names receive proxy tokens so existing SDKs keep working</td>
+</tr>
+<tr>
+<td><code>-e HERMES_PROXY_TOKEN_&lt;NAME&gt;=…</code></td>
+<td>Diagnostic alias for each mapping; same value as the standard provider env var</td>
+</tr>
+<tr>
+<td><code>--add-host=host.docker.internal:host-gateway</code></td>
+<td>Linux-only; Docker Desktop maps it automatically</td>
+</tr>
+</tbody>
+</table>
+<h4 id="nodejs-asymmetric-ca-caveat">Node.js asymmetric CA caveat</h4>
+<p><code>REQUESTS_CA_BUNDLE</code> / <code>SSL_CERT_FILE</code> / <code>CURL_CA_BUNDLE</code> <strong>replace</strong> the system CA store inside the sandbox. <code>NODE_EXTRA_CA_CERTS</code> <strong>adds</strong> to it. A Node.js process inside the sandbox could in principle bypass the proxy by opening a raw <code>net.Socket</code> and starting its own TLS handshake — the system CA store would still trust real upstream certs, so the request would succeed where Python / curl would fail validation.</p>
+<p><code>NODE_OPTIONS=--use-openssl-ca</code> is appended to whatever you already have in <code>docker_env.NODE_OPTIONS</code>. This forces Node through the OpenSSL store that <code>SSL_CERT_FILE</code> controls, narrowing the asymmetry. It does NOT cover code that explicitly passes its own <code>ca</code> option to <code>tls.connect()</code> or <code>https.request()</code>, but it closes the easy case.</p>
+<p>This is a known v1 limitation. Track <a href="https://github.com/ironsh/iron-proxy/issues" class="ext" target="_blank" rel="noopener">github.com/ironsh/iron-proxy/issues</a> for an upstream resolution; in the meantime, do not run untrusted Node code that opens raw sockets in a sandbox you're depending on egress isolation for.</p>
+<h3 id="docker_env-collisions">docker_env collisions</h3>
+<p>If you set proxy-controlling env vars in your <code>docker_env:</code> config block (rare but possible), Hermes refuses to start the sandbox when <code>enforce_on_docker: true</code> is set. This includes both:</p>
+<ul>
+<li>Egress-control vars: <code>HTTPS_PROXY</code>, <code>HTTP_PROXY</code>, <code>NO_PROXY</code>, <code>REQUESTS_CA_BUNDLE</code>, <code>SSL_CERT_FILE</code>, <code>CURL_CA_BUNDLE</code>, <code>NODE_EXTRA_CA_CERTS</code></li>
+<li>Real provider env vars: every name in <code>mappings.json</code> (e.g. <code>OPENROUTER_API_KEY</code>, <code>OPENAI_API_KEY</code>)</li>
+</ul>
+<p>Example error:</p>
+<div class="highlight"><pre><span></span><code>docker_env in config.yaml overrides egress-proxy variables
+[&#39;HTTPS_PROXY&#39;, &#39;OPENROUTER_API_KEY&#39;]; enforce_on_docker is enabled.
+Remove these keys from docker_env or disable enforce_on_docker to
+opt out of egress isolation.
+</code></pre></div>
+
+<p>With <code>enforce_on_docker: false</code> the same situation surfaces as a warning and your <code>docker_env</code> values win — useful for migrations or testing, but you're explicitly opting OUT of the isolation guarantee.</p>
+<h2 id="pid-and-nonce-defense">PID and nonce defense</h2>
+<p>The daemon's pidfile is written with <code>O_EXCL</code> + <code>O_NOFOLLOW</code> + ownership check. Concurrent <code>hermes egress start</code> calls produce one of two outcomes:</p>
+<ul>
+<li>The existing pidfile points at a live iron-proxy → second start refuses with "another start in progress" + a hint to run <code>hermes egress stop</code></li>
+<li>The existing pidfile is stale (crashed daemon) → second start unlinks it and retries once</li>
+</ul>
+<p>Beyond that, every <code>start_proxy</code> plants a fresh random nonce in two places:</p>
+<ul>
+<li><code>HERMES_IRON_PROXY_NONCE=&lt;nonce&gt;</code> in the daemon's env</li>
+<li><code>~/.hermes/proxy/iron-proxy.nonce</code> (0o600 sibling of the pidfile)</li>
+</ul>
+<p>When <code>hermes egress stop</code> (or any other <code>_pid_alive</code> check) wants to confirm a PID still refers to <em>our</em> daemon — not an unrelated process that was assigned the same PID after iron-proxy crashed — it reads <code>/proc/&lt;pid&gt;/environ</code> and looks for the nonce. The on-disk copy is what makes this work across CLI invocations (the in-memory <code>_proxy_nonce</code> is per-process and resets on every <code>hermes</code> invocation).</p>
+<p>If the nonce check fails, the code falls back to matching <code>argv[0]</code> basename against <code>iron-proxy</code>. <code>stop_proxy</code> additionally captures <code>/proc/&lt;pid&gt;/stat</code> starttime before SIGTERM and re-verifies after the 5s grace window — if starttime drifted, the PID was recycled mid-wait and SIGKILL is suppressed with a warning.</p>
+<h2 id="security-model">Security model</h2>
+<p><strong>What this protects against:</strong></p>
+<ul>
+<li>Prompt-injected agent in a Docker sandbox reading <code>printenv</code> / credential files and exfiltrating real keys.</li>
+<li>Compromised dependency in the sandbox phoning home to an arbitrary host — default-deny allowlist blocks unknown destinations.</li>
+<li>Agent dialing cloud metadata endpoints (<code>169.254.169.254</code>) — iron-proxy denies these by default via <code>upstream_deny_cidrs</code>, including the IPv4-mapped-v6 form <code>::ffff:169.254.169.254</code>.</li>
+<li>DNS rebinding through an allowlisted hostname to a private IP — the deny CIDRs are checked at connect time, not at allowlist time.</li>
+<li>Same-uid local processes reading the iron-proxy daemon's env to scrape secrets — only the env var names referenced by mappings are forwarded, not the full host env.</li>
+<li>A LAN peer with a leaked sandbox proxy token spending your API quota — the proxy binds the docker bridge gateway (Linux) or loopback (Docker Desktop), never <code>0.0.0.0</code>, so it is unreachable from the external network.</li>
+</ul>
+<p><strong>What it does NOT protect against:</strong></p>
+<ul>
+<li>A compromised host process. If the agent process itself is compromised, real keys in the host's <code>~/.hermes/.env</code> are exposed regardless. This is a defense-in-depth feature for <em>sandbox</em> compromise, not host compromise.</li>
+<li><strong>Loss of the trusted-proxy boundary itself.</strong> The token-swap guarantee assumes the sandbox trusts the mounted CA cert (<code>/etc/ssl/certs/hermes-egress-ca.crt</code>) and that traffic actually reaches <em>our</em> iron-proxy. If the CA private key is stolen, or sandbox egress is redirected to attacker-controlled proxy infrastructure, an adversary-in-the-middle can present a valid leaf cert and the proxy tokens are no longer a meaningful boundary (cf. <a href="https://attack.mitre.org/techniques/T1588/004/" class="ext" target="_blank" rel="noopener">MITRE ATT&amp;CK T1588.004</a> — obtained TLS certificate material enabling AiTM). Protect the CA key (it's <code>0600</code>, host-only) and the proxy endpoint accordingly.</li>
+<li>Sandbox processes that bypass <code>HTTPS_PROXY</code> by using a raw socket. The proxy can't intercept what doesn't route to it. Node.js is partially mitigated via <code>NODE_OPTIONS=--use-openssl-ca</code> (see caveat above).</li>
+<li>Credential files explicitly mounted into Docker (<code>terminal.credential_files</code> or skill-registered mounts). Egress protects provider env vars; it does not inspect arbitrary mounted files. Do not mount real provider credentials into an enforced egress sandbox.</li>
+<li>Allowlisted-host data exfiltration. If <code>api.openai.com</code> is allowed, an agent could embed exfil data in a request body to that host. The daemon log captures the request happened but doesn't prevent it.</li>
+<li>Uncovered providers (AWS Bedrock SigV4, GCP Vertex service-account OAuth). Their env vars stay in the sandbox; if you enable them, those credentials bypass the proxy entirely. See <a href="#uncovered-providers">Uncovered providers</a>.</li>
+<li>iron-proxy in-memory secret zeroisation. The Go binary holds swapped-in real credentials in process memory; a core-dump or <code>/proc/&lt;pid&gt;/mem</code> read from a same-uid attacker would expose them. Out of scope for this layer.</li>
+</ul>
+<h2 id="failure-modes">Failure modes</h2>
+<ul>
+<li><strong>Binary not installed, <code>auto_install: true</code></strong> — first <code>hermes egress setup</code> or <code>hermes egress start</code> downloads it. SHA-256 verified against the upstream <code>checksums.txt</code>.</li>
+<li><strong>Binary not installed, <code>auto_install: false</code></strong> — <code>start</code> fails with a clear message pointing to manual install.</li>
+<li><strong><code>enabled: true</code> but proxy not running</strong> — with <code>enforce_on_docker: true</code> (default), Docker sandbox creation refuses to start with an explanatory error. With <code>enforce_on_docker: false</code>, it falls back to direct outbound with real creds and logs a warning.</li>
+<li><strong>Port collision</strong> — iron-proxy exits immediately; <code>hermes egress start</code> reports the last 20 log lines and fails with non-zero exit.</li>
+<li><strong>Upstream-host denied</strong> — sandbox gets HTTP 403 from the proxy with a body explaining which host wasn't allowed. The agent sees the error and reports it.</li>
+<li><strong>Cloud metadata IP (169.254.169.254) requested</strong> — refused by <code>upstream_deny_cidrs</code> regardless of allowlist.</li>
+<li><strong><code>docker_env</code> collides with a proxy-controlling var (enforce on)</strong> — sandbox creation refuses with the names of the colliding keys.</li>
+<li><strong><code>docker_forward_env</code> tries to forward a protected provider key (enforce on)</strong> — sandbox creation refuses; remove the key from <code>docker_forward_env</code> or opt out with <code>proxy.enforce_on_docker: false</code>.</li>
+<li><strong><code>docker_extra_args</code> overrides proxy env/network controls (enforce on)</strong> — sandbox creation refuses; user-supplied <code>-e HTTPS_PROXY=...</code>, <code>--env-file</code>, or <code>--network</code> args run after Hermes' generated args and can bypass egress.</li>
+<li><strong>BWS access token missing in <code>credential_source: bitwarden</code></strong> — <code>hermes egress start</code> refuses with <code>--no-bitwarden</code> as the recovery hint.</li>
+<li><strong>iron-proxy doesn't bind within 5 seconds</strong> — process is killed, pidfile unlinked, error names the port + tail of <code>iron-proxy.log</code>.</li>
+<li><strong>Concurrent <code>hermes egress start</code> calls</strong> — second call refuses with "another start in progress" if the first's daemon is up; otherwise the second unlinks the stale pidfile and proceeds.</li>
+</ul>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="refusing-to-start-bws_access_token-is-not-set">"Refusing to start: BWS_ACCESS_TOKEN is not set"</h3>
+<p>You enabled <code>credential_source: bitwarden</code> but the access-token env var isn't in your shell. Either:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">BWS_ACCESS_TOKEN</span><span class="o">=</span>…<span class="w">   </span><span class="c1"># one-shot</span>
+hermes<span class="w"> </span>egress<span class="w"> </span>start
+</code></pre></div>
+
+<p>Or move it into <code>~/.hermes/.env</code>. Or switch back to env mode:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>egress<span class="w"> </span>setup<span class="w"> </span>--no-bitwarden
+</code></pre></div>
+
+<h3 id="iron-proxy-exited-immediately">"iron-proxy exited immediately"</h3>
+<p>Look at the last 20 lines of <code>~/.hermes/proxy/iron-proxy.log</code>. Common causes:</p>
+<ul>
+<li>Port already in use → change <code>proxy.tunnel_port</code> or kill whatever else owns 9090</li>
+<li>Invalid <code>proxy.yaml</code> → run <code>hermes egress setup</code> to regenerate</li>
+<li>CA cert / key permissions wrong → <code>chmod 0o600 ~/.hermes/proxy/ca.key</code></li>
+</ul>
+<h3 id="iron-proxy-did-not-bind-bind-host9090-within-5s">"iron-proxy did not bind \&lt;bind-host&gt;:9090 within 5s"</h3>
+<p>The daemon started but never bound the listener. Usually means the binary is wedged or doing something expensive at startup. Check <code>~/.hermes/proxy/iron-proxy.log</code>. The orphan process is killed automatically and the pidfile cleaned up so you can just retry <code>hermes egress start</code>.</p>
+<h3 id="sandbox-times-out-connecting-to-the-proxy-linux">Sandbox times out connecting to the proxy (Linux)</h3>
+<p>The container resolves <code>host.docker.internal</code> to the docker bridge gateway and the proxy is bound there, but a host firewall (commonly <code>ufw</code> with default-deny INPUT) drops container→host traffic on <code>docker0</code>. Verify from a container:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>--add-host<span class="w"> </span>host.docker.internal:host-gateway<span class="w"> </span>busybox<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nc<span class="w"> </span>-zv<span class="w"> </span>-w<span class="w"> </span><span class="m">3</span><span class="w"> </span>host.docker.internal<span class="w"> </span><span class="m">9090</span>
+</code></pre></div>
+
+<p>If that times out while <code>hermes egress status</code> shows <code>listening</code>, allow the bridge subnet in your firewall, e.g. for ufw:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>ufw<span class="w"> </span>allow<span class="w"> </span><span class="k">in</span><span class="w"> </span>on<span class="w"> </span>docker0<span class="w"> </span>to<span class="w"> </span>any<span class="w"> </span>port<span class="w"> </span><span class="m">9090</span><span class="w"> </span>proto<span class="w"> </span>tcp
+sudo<span class="w"> </span>ufw<span class="w"> </span>allow<span class="w"> </span><span class="k">in</span><span class="w"> </span>on<span class="w"> </span>docker0<span class="w"> </span>to<span class="w"> </span>any<span class="w"> </span>port<span class="w"> </span><span class="m">9091</span><span class="w"> </span>proto<span class="w"> </span>tcp
+</code></pre></div>
+
+<p>(9091 = the plain-HTTP forward listener on <code>tunnel_port + 1</code>.)</p>
+<h3 id="sandbox-sees-http-403-from-the-proxy">Sandbox sees <code>HTTP 403</code> from the proxy</h3>
+<p>The agent inside the sandbox tried to hit a host that isn't in <code>proxy.extra_allowed_hosts</code>. The 403 body explains which host. If you want to allow it, add to your config:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">proxy</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">extra_allowed_hosts</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">api.example.com</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;*.staging.example.com&quot;</span>
+</code></pre></div>
+
+<p>Then <code>hermes egress setup</code> (to regenerate <code>proxy.yaml</code>) and <code>hermes egress stop &amp;&amp; hermes egress start</code>.</p>
+<h3 id="sandbox-sees-ssl-verification-errors">Sandbox sees SSL verification errors</h3>
+<p>Either the CA isn't mounted in the sandbox (rare; the docker backend does this automatically when <code>proxy.enabled: true</code>), or your image's HTTP client is reading from a non-standard env var.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Inside the sandbox:</span>
+cat<span class="w"> </span>/etc/ssl/certs/hermes-egress-ca.crt<span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-1
+<span class="c1"># Should print: -----BEGIN CERTIFICATE-----</span>
+env<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s2">&quot;^(REQUESTS|CURL|SSL|NODE).*CA&quot;</span>
+<span class="c1"># Should list all four CA-bundle env vars pointing at /etc/ssl/certs/hermes-egress-ca.crt</span>
+</code></pre></div>
+
+<p>If the cert isn't there, check that <code>proxy.enabled: true</code> AND <code>hermes egress status</code> shows <code>Listening yes</code>. If the env vars are missing, the sandbox image might be running an entrypoint that strips them — check your <code>docker_env</code> config.</p>
+<h3 id="sandbox-sees-http-401-from-upstreams">Sandbox sees <code>HTTP 401</code> from upstreams</h3>
+<p>Two common causes:</p>
+<ol>
+<li><strong>Token-clobber on re-setup.</strong> You ran <code>hermes egress setup --rotate-tokens</code> (or rotated tokens some other way) and the running sandboxes still hold the old tokens. Restart the sandboxes.</li>
+<li><strong>Bitwarden refresh failed silently.</strong> Should not happen with the new fail-loud behavior, but if you have <code>proxy.allow_env_fallback: true</code> set, the daemon may have started with stale env values. Check the daemon's environment (<code>/proc/&lt;iron-proxy-pid&gt;/environ</code>) for the expected <code>OPENROUTER_API_KEY</code> etc.</li>
+</ol>
+<h3 id="address-in-use-after-the-parent-process-died">"Address in use" after the parent process died</h3>
+<p>The parent Hermes process died during <code>hermes egress start</code> (Ctrl-C during the listening probe, OOM, panic). The new fix-up logic writes the pidfile immediately after <code>Popen</code> so the orphan is recoverable:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>egress<span class="w"> </span>stop<span class="w">   </span><span class="c1"># finds the orphan via the pidfile, kills it</span>
+hermes<span class="w"> </span>egress<span class="w"> </span>start
+</code></pre></div>
+
+<p>If <code>hermes egress stop</code> says "iron-proxy was not running" but you can still see the daemon in <code>ps</code>, the pidfile got out of sync. Manual recovery:</p>
+<div class="highlight"><pre><span></span><code>pkill<span class="w"> </span>-TERM<span class="w"> </span>iron-proxy
+rm<span class="w"> </span>-f<span class="w"> </span>~/.hermes/proxy/iron-proxy.pid<span class="w"> </span>~/.hermes/proxy/iron-proxy.nonce
+hermes<span class="w"> </span>egress<span class="w"> </span>start
+</code></pre></div>
+
+<h3 id="inspecting-per-request-behavior">Inspecting per-request behavior</h3>
+<p>On the pinned binary version (<strong>v0.39</strong>) both daemon-level events and per-request records land in <code>~/.hermes/proxy/iron-proxy.log</code>. The format is line-delimited JSON. Grep for a specific upstream:</p>
+<div class="highlight"><pre><span></span><code>grep<span class="w"> </span><span class="s1">&#39;&quot;upstream&quot;:&quot;openrouter.ai&quot;&#39;</span><span class="w"> </span>~/.hermes/proxy/iron-proxy.log<span class="w"> </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-20
+</code></pre></div>
+
+<p>Or watch in real-time:</p>
+<div class="highlight"><pre><span></span><code>tail<span class="w"> </span>-f<span class="w"> </span>~/.hermes/proxy/iron-proxy.log<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>When the pinned version moves to v0.40+ (which adds <code>log.audit_path</code>), per-request records will move to <code>~/.hermes/proxy/audit.log</code> and <code>iron-proxy.log</code> will hold only daemon-level events. Until that bump, <code>audit.log</code> is an empty placeholder (pre-created at <code>0o600</code> so the future daemon inherits tight permissions) — wire your logrotate / monitoring tooling to <code>iron-proxy.log</code> today and plan to add <code>audit.log</code> after the version bump.</p>
+<h2 id="limitations-v1">Limitations (v1)</h2>
+<ul>
+<li>Docker backend only. Modal, Daytona, and SSH wiring will follow in separate PRs.</li>
+<li>Providers with signature-based auth (AWS SigV4, GCP service-account OAuth) bypass the proxy entirely — see <a href="#uncovered-providers">Uncovered providers</a>. Header-token providers (bearer, <code>x-api-key</code>, <code>api-key</code>, <code>x-goog-api-key</code>) are all covered.</li>
+<li>No native Windows binary upstream. Run on Linux / macOS / WSL.</li>
+<li>The CA is a 10-year self-signed cert on first generation. Rotation requires <code>openssl genrsa ...</code> by hand (or wait for a follow-up that adds <code>hermes egress rotate-ca</code>).</li>
+<li>Re-running setup stops a running daemon after rewriting config or mappings; restart (or <code>hermes egress reload</code> for ruleset-only changes) and restart already-running sandboxes after token rotation.</li>
+<li>iron-proxy in-memory secret zeroisation is upstream-controlled. Same-uid attackers with <code>/proc/&lt;pid&gt;/mem</code> read access can read swapped-in secrets from the daemon's memory.</li>
+<li>iron-proxy v0.39 only supports a <strong>single bind per daemon</strong> (we bind the docker bridge gateway on Linux, loopback on Docker Desktop) and combines daemon + per-request records into a single log stream. When upstream adds <code>proxy.http_listens</code> (plural) and <code>log.audit_path</code>, a version bump can wire in multi-bind and the dedicated audit stream.</li>
+</ul>
+<h2 id="see-also">See also</h2>
+<ul>
+<li>Upstream project: <a href="https://github.com/ironsh/iron-proxy" class="ext" target="_blank" rel="noopener">github.com/ironsh/iron-proxy</a></li>
+<li>Upstream docs: <a href="https://docs.iron.sh/" class="ext" target="_blank" rel="noopener">docs.iron.sh</a></li>
+<li>Bitwarden integration: <a href="../secrets/bitwarden.html"><code>hermes secrets bitwarden</code></a></li>
+<li>Hermes Docker terminal backend: <a href="../docker.html">Docker</a></li>
+<li>Developer / contributor reference: <a href="../../developer-guide/egress-internals.html">Egress proxy internals</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/egress/iron-proxy</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#what-it-is">What it is</a></li>
+<li class="lvl2"><a href="#what-it-is-not">What it is not</a></li>
+<li class="lvl2"><a href="#quick-start">Quick start</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl3"><a href="#default-allowed-upstream-hosts">Default allowed upstream hosts</a></li>
+<li class="lvl3"><a href="#default-ssrf-deny-cidrs">Default SSRF deny CIDRs</a></li>
+<li class="lvl3"><a href="#bind-policy">Bind policy</a></li>
+<li class="lvl2"><a href="#covered-auth-schemes">Covered auth schemes</a></li>
+<li class="lvl2"><a href="#uncovered-providers">Uncovered providers</a></li>
+<li class="lvl2"><a href="#bitwarden-integration">Bitwarden integration</a></li>
+<li class="lvl3"><a href="#rotation-semantics">Rotation semantics</a></li>
+<li class="lvl3"><a href="#fail-loud-at-start">Fail-loud at start</a></li>
+<li class="lvl3"><a href="#switching-credential-source">Switching credential source</a></li>
+<li class="lvl2"><a href="#slash-commands">Slash commands</a></li>
+<li class="lvl3"><a href="#token-rotation">Token rotation</a></li>
+<li class="lvl2"><a href="#state-directory-layout">State directory layout</a></li>
+<li class="lvl3"><a href="#logging-on-iron-proxy-v039">Logging on iron-proxy v0.39</a></li>
+<li class="lvl2"><a href="#how-it-works">How it works</a></li>
+<li class="lvl3"><a href="#ca-distribution-into-the-sandbox">CA distribution into the sandbox</a></li>
+<li class="lvl3"><a href="#docker_env-collisions">docker_env collisions</a></li>
+<li class="lvl2"><a href="#pid-and-nonce-defense">PID and nonce defense</a></li>
+<li class="lvl2"><a href="#security-model">Security model</a></li>
+<li class="lvl2"><a href="#failure-modes">Failure modes</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl3"><a href="#refusing-to-start-bws_access_token-is-not-set">&quot;Refusing to start: BWS_ACCESS_TOKEN is not set&quot;</a></li>
+<li class="lvl3"><a href="#iron-proxy-exited-immediately">&quot;iron-proxy exited immediately&quot;</a></li>
+<li class="lvl3"><a href="#iron-proxy-did-not-bind-bind-host9090-within-5s">&quot;iron-proxy did not bind \&amp;lt;bind-host&gt;:9090 within 5s&quot;</a></li>
+<li class="lvl3"><a href="#sandbox-times-out-connecting-to-the-proxy-linux">Sandbox times out connecting to the proxy (Linux)</a></li>
+<li class="lvl3"><a href="#sandbox-sees-http-403-from-the-proxy">Sandbox sees HTTP 403 from the proxy</a></li>
+<li class="lvl3"><a href="#sandbox-sees-ssl-verification-errors">Sandbox sees SSL verification errors</a></li>
+<li class="lvl3"><a href="#sandbox-sees-http-401-from-upstreams">Sandbox sees HTTP 401 from upstreams</a></li>
+<li class="lvl3"><a href="#address-in-use-after-the-parent-process-died">&quot;Address in use&quot; after the parent process died</a></li>
+<li class="lvl3"><a href="#inspecting-per-request-behavior">Inspecting per-request behavior</a></li>
+<li class="lvl2"><a href="#limitations-v1">Limitations (v1)</a></li>
+<li class="lvl2"><a href="#see-also">See also</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

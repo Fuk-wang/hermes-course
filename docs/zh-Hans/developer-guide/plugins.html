@@ -1,0 +1,1239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>构建 Hermes 插件 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/plugins</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="构建-hermes-插件">构建 Hermes 插件</h1>
+<p>本指南从零开始构建一个完整的 Hermes 插件。完成后，你将拥有一个包含多个工具、生命周期钩子（hook）、随附数据文件和捆绑技能的可用插件——涵盖插件系统支持的所有功能。</p>
+<div class="admonition adm-info"><p class="adm-title">不确定需要哪份指南？</p>
+<p>Hermes 有多种不同的可插拔接口——有些使用 Python <code>register_*</code> API，另一些是配置驱动或放入指定目录即可生效。请先查阅下表：</p>
+<table>
+<thead>
+<tr>
+<th>如果你想添加…</th>
+<th>请阅读</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>自定义工具、钩子、斜杠命令、技能或 CLI 子命令</td>
+<td><strong>本指南</strong>（通用插件接口）</td>
+</tr>
+<tr>
+<td><strong>LLM / 推理后端</strong>（新提供商）</td>
+<td><a href="model-provider-plugin.html">模型提供商插件</a></td>
+</tr>
+<tr>
+<td><strong>网关频道</strong>（Discord/Telegram/IRC/Teams 等）</td>
+<td><a href="adding-platform-adapters.html">添加平台适配器</a></td>
+</tr>
+<tr>
+<td><strong>记忆后端</strong>（Honcho/Mem0/Supermemory 等）</td>
+<td><a href="memory-provider-plugin.html">记忆提供商插件</a></td>
+</tr>
+<tr>
+<td><strong>上下文压缩引擎</strong></td>
+<td><a href="context-engine-plugin.html">上下文引擎插件</a></td>
+</tr>
+<tr>
+<td><strong>图像生成后端</strong></td>
+<td><a href="image-gen-provider-plugin.html">图像生成提供商插件</a></td>
+</tr>
+<tr>
+<td><strong>视频生成后端</strong></td>
+<td><a href="video-gen-provider-plugin.html">视频生成提供商插件</a></td>
+</tr>
+<tr>
+<td><strong>网页搜索/提取后端</strong></td>
+<td><a href="web-search-provider-plugin.html">网页搜索提供商插件</a></td>
+</tr>
+<tr>
+<td><strong>云浏览器后端</strong>（Browserbase 类 CDP 会话提供商）</td>
+<td><a href="../../developer-guide/browser-provider-plugin.html">浏览器提供商插件</a></td>
+</tr>
+<tr>
+<td><strong>密钥管理器后端</strong>（保险库 / 密码管理器 / 系统钥匙串）</td>
+<td><a href="../../developer-guide/secret-source-plugin.html">密钥源插件</a></td>
+</tr>
+<tr>
+<td><strong>仪表盘 OIDC/认证提供商</strong></td>
+<td><a href="../../user-guide/features/web-dashboard.html#custom-providers" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">Web 仪表盘 — 自定义提供商</a> — <code>ctx.register_dashboard_auth_provider()</code></td>
+</tr>
+<tr>
+<td><strong>TTS 后端</strong>（任意 CLI——Piper、VoxCPM、Kokoro、声音克隆等）</td>
+<td><a href="../../user-guide/features/tts.html#custom-command-providers" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">TTS 自定义命令提供商</a>——配置驱动，无需 Python</td>
+</tr>
+<tr>
+<td><strong>STT 后端</strong>（自定义 whisper / ASR CLI）</td>
+<td><a href="../../user-guide/features/tts.html#voice-message-transcription-stt" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">语音消息转录</a>——将 <code>HERMES_LOCAL_STT_COMMAND</code> 设置为 shell 模板</td>
+</tr>
+<tr>
+<td><strong>通过 MCP 接入外部工具</strong>（文件系统、GitHub、Linear、任意 MCP 服务器）</td>
+<td><a href="../user-guide/features/mcp.html">MCP</a>——在 <code>config.yaml</code> 中声明 <code>mcp_servers.&lt;name&gt;</code></td>
+</tr>
+<tr>
+<td><strong>网关事件钩子</strong>（在启动、会话事件、命令时触发）</td>
+<td><a href="../user-guide/features/hooks.html#gateway-event-hooks">事件钩子</a>——将 <code>HOOK.yaml</code> + <code>handler.py</code> 放入 <code>~/.hermes/hooks/&lt;name&gt;/</code></td>
+</tr>
+<tr>
+<td><strong>Shell 钩子</strong>（在事件发生时运行 shell 命令）</td>
+<td><a href="../user-guide/features/hooks.html#shell-hooks">Shell 钩子</a>——在 <code>config.yaml</code> 的 <code>hooks:</code> 下声明</td>
+</tr>
+<tr>
+<td><strong>额外技能来源</strong>（自定义 GitHub 仓库、私有技能索引）</td>
+<td><a href="../user-guide/features/skills.html">技能</a>——<code>hermes skills tap add &lt;repo&gt;</code> · <a href="../../user-guide/features/skills.html#publishing-a-custom-skill-tap" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">发布 tap</a></td>
+</tr>
+<tr>
+<td>一流的<strong>核心</strong>推理提供商（非插件）</td>
+<td><a href="adding-providers.html">添加提供商</a></td>
+</tr>
+</tbody>
+</table>
+<p>查看完整的<a href="../../user-guide/features/plugins.html#pluggable-interfaces--where-to-go-for-each" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">可插拔接口表</a>，获取每种扩展接口的汇总视图，包括配置驱动（TTS、STT、MCP、shell 钩子）和放入目录（网关钩子）两种方式。</p>
+</div>
+<h2 id="你将构建什么">你将构建什么</h2>
+<p>一个<strong>计算器</strong>插件，包含两个工具：
+- <code>calculate</code>——计算数学表达式（<code>2**16</code>、<code>sqrt(144)</code>、<code>pi * 5**2</code>）
+- <code>unit_convert</code>——在单位之间转换（<code>100 F → 37.78 C</code>、<code>5 km → 3.11 mi</code>）</p>
+<p>另外还有一个记录每次工具调用的钩子，以及一个捆绑的技能文件。</p>
+<h2 id="第一步创建插件目录">第一步：创建插件目录</h2>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.hermes/plugins/calculator
+<span class="nb">cd</span><span class="w"> </span>~/.hermes/plugins/calculator
+</code></pre></div>
+
+<h2 id="第二步编写清单文件">第二步：编写清单文件</h2>
+<p>创建 <code>plugin.yaml</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">calculator</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Math calculator — evaluate expressions and convert units</span>
+<span class="nt">provides_tools</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">calculate</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unit_convert</span>
+<span class="nt">provides_hooks</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">post_tool_call</span>
+</code></pre></div>
+
+<p>这告诉 Hermes："我是一个名为 calculator 的插件，我提供工具和钩子。" <code>provides_tools</code> 和 <code>provides_hooks</code> 字段是插件注册内容的列表。</p>
+<p>可选字段示例：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+<span class="nt">requires_env</span><span class="p">:</span><span class="w">          </span><span class="c1"># 根据环境变量决定是否加载；安装时会提示用户</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SOME_API_KEY</span><span class="w">       </span><span class="c1"># 简单格式——缺失时插件禁用</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">OTHER_KEY</span><span class="w">    </span><span class="c1"># 富格式——安装时显示描述/URL</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Key</span><span class="nv"> </span><span class="s">for</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">Other</span><span class="nv"> </span><span class="s">service&quot;</span>
+<span class="w">    </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://other.com/keys&quot;</span>
+<span class="w">    </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<h2 id="第三步编写工具-schema">第三步：编写工具 schema</h2>
+<p>创建 <code>schemas.py</code>——这是 LLM 读取以决定何时调用你的工具的内容：</p>
+<div class="highlight"><pre><span></span><code><span class="sd">&quot;&quot;&quot;Tool schemas — what the LLM sees.&quot;&quot;&quot;</span>
+
+<span class="n">CALCULATE</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;calculate&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="p">(</span>
+        <span class="s2">&quot;Evaluate a mathematical expression and return the result. &quot;</span>
+        <span class="s2">&quot;Supports arithmetic (+, -, *, /, **), functions (sqrt, sin, cos, &quot;</span>
+        <span class="s2">&quot;log, abs, round, floor, ceil), and constants (pi, e). &quot;</span>
+        <span class="s2">&quot;Use this for any math the user asks about.&quot;</span>
+    <span class="p">),</span>
+    <span class="s2">&quot;parameters&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;object&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;properties&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">&quot;expression&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;string&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Math expression to evaluate (e.g., &#39;2**10&#39;, &#39;sqrt(144)&#39;)&quot;</span><span class="p">,</span>
+            <span class="p">},</span>
+        <span class="p">},</span>
+        <span class="s2">&quot;required&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;expression&quot;</span><span class="p">],</span>
+    <span class="p">},</span>
+<span class="p">}</span>
+
+<span class="n">UNIT_CONVERT</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;unit_convert&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="p">(</span>
+        <span class="s2">&quot;Convert a value between units. Supports length (m, km, mi, ft, in), &quot;</span>
+        <span class="s2">&quot;weight (kg, lb, oz, g), temperature (C, F, K), data (B, KB, MB, GB, TB), &quot;</span>
+        <span class="s2">&quot;and time (s, min, hr, day).&quot;</span>
+    <span class="p">),</span>
+    <span class="s2">&quot;parameters&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;object&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;properties&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">&quot;value&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;number&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;The numeric value to convert&quot;</span><span class="p">,</span>
+            <span class="p">},</span>
+            <span class="s2">&quot;from_unit&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;string&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Source unit (e.g., &#39;km&#39;, &#39;lb&#39;, &#39;F&#39;, &#39;GB&#39;)&quot;</span><span class="p">,</span>
+            <span class="p">},</span>
+            <span class="s2">&quot;to_unit&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;string&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Target unit (e.g., &#39;mi&#39;, &#39;kg&#39;, &#39;C&#39;, &#39;MB&#39;)&quot;</span><span class="p">,</span>
+            <span class="p">},</span>
+        <span class="p">},</span>
+        <span class="s2">&quot;required&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;value&quot;</span><span class="p">,</span> <span class="s2">&quot;from_unit&quot;</span><span class="p">,</span> <span class="s2">&quot;to_unit&quot;</span><span class="p">],</span>
+    <span class="p">},</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>schema 为何重要：</strong> <code>description</code> 字段决定了 LLM 何时使用你的工具。请明确说明工具的功能和使用时机。<code>parameters</code> 定义了 LLM 传入的参数。</p>
+<h2 id="第四步编写工具处理器">第四步：编写工具处理器</h2>
+<p>创建 <code>tools.py</code>——这是 LLM 调用工具时实际执行的代码：</p>
+<div class="highlight"><pre><span></span><code><span class="sd">&quot;&quot;&quot;Tool handlers — the code that runs when the LLM calls each tool.&quot;&quot;&quot;</span>
+
+
+
+<span class="c1"># Safe globals for expression evaluation — no file/network access</span>
+<span class="n">_SAFE_MATH</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;abs&quot;</span><span class="p">:</span> <span class="nb">abs</span><span class="p">,</span> <span class="s2">&quot;round&quot;</span><span class="p">:</span> <span class="nb">round</span><span class="p">,</span> <span class="s2">&quot;min&quot;</span><span class="p">:</span> <span class="nb">min</span><span class="p">,</span> <span class="s2">&quot;max&quot;</span><span class="p">:</span> <span class="nb">max</span><span class="p">,</span>
+    <span class="s2">&quot;pow&quot;</span><span class="p">:</span> <span class="nb">pow</span><span class="p">,</span> <span class="s2">&quot;sqrt&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">sqrt</span><span class="p">,</span> <span class="s2">&quot;sin&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">sin</span><span class="p">,</span> <span class="s2">&quot;cos&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">cos</span><span class="p">,</span>
+    <span class="s2">&quot;tan&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">tan</span><span class="p">,</span> <span class="s2">&quot;log&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">,</span> <span class="s2">&quot;log2&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">log2</span><span class="p">,</span> <span class="s2">&quot;log10&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">log10</span><span class="p">,</span>
+    <span class="s2">&quot;floor&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">floor</span><span class="p">,</span> <span class="s2">&quot;ceil&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">,</span>
+    <span class="s2">&quot;pi&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">pi</span><span class="p">,</span> <span class="s2">&quot;e&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">e</span><span class="p">,</span>
+    <span class="s2">&quot;factorial&quot;</span><span class="p">:</span> <span class="n">math</span><span class="o">.</span><span class="n">factorial</span><span class="p">,</span>
+<span class="p">}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">calculate</span><span class="p">(</span><span class="n">args</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Evaluate a math expression safely.</span>
+
+<span class="sd">    Rules for handlers:</span>
+<span class="sd">    1. Receive args (dict) — the parameters the LLM passed</span>
+<span class="sd">    2. Do the work</span>
+<span class="sd">    3. Return a JSON string — ALWAYS, even on error</span>
+<span class="sd">    4. Accept **kwargs for forward compatibility</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">expression</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;expression&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">expression</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="s2">&quot;No expression provided&quot;</span><span class="p">})</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="nb">eval</span><span class="p">(</span><span class="n">expression</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;__builtins__&quot;</span><span class="p">:</span> <span class="p">{}},</span> <span class="n">_SAFE_MATH</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;expression&quot;</span><span class="p">:</span> <span class="n">expression</span><span class="p">,</span> <span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="n">result</span><span class="p">})</span>
+    <span class="k">except</span> <span class="ne">ZeroDivisionError</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;expression&quot;</span><span class="p">:</span> <span class="n">expression</span><span class="p">,</span> <span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="s2">&quot;Division by zero&quot;</span><span class="p">})</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;expression&quot;</span><span class="p">:</span> <span class="n">expression</span><span class="p">,</span> <span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Invalid: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">})</span>
+
+
+<span class="c1"># Conversion tables — values are in base units</span>
+<span class="n">_LENGTH</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;m&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;km&quot;</span><span class="p">:</span> <span class="mi">1000</span><span class="p">,</span> <span class="s2">&quot;mi&quot;</span><span class="p">:</span> <span class="mf">1609.34</span><span class="p">,</span> <span class="s2">&quot;ft&quot;</span><span class="p">:</span> <span class="mf">0.3048</span><span class="p">,</span> <span class="s2">&quot;in&quot;</span><span class="p">:</span> <span class="mf">0.0254</span><span class="p">,</span> <span class="s2">&quot;cm&quot;</span><span class="p">:</span> <span class="mf">0.01</span><span class="p">}</span>
+<span class="n">_WEIGHT</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;kg&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;g&quot;</span><span class="p">:</span> <span class="mf">0.001</span><span class="p">,</span> <span class="s2">&quot;lb&quot;</span><span class="p">:</span> <span class="mf">0.453592</span><span class="p">,</span> <span class="s2">&quot;oz&quot;</span><span class="p">:</span> <span class="mf">0.0283495</span><span class="p">}</span>
+<span class="n">_DATA</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;B&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;KB&quot;</span><span class="p">:</span> <span class="mi">1024</span><span class="p">,</span> <span class="s2">&quot;MB&quot;</span><span class="p">:</span> <span class="mi">1024</span><span class="o">**</span><span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;GB&quot;</span><span class="p">:</span> <span class="mi">1024</span><span class="o">**</span><span class="mi">3</span><span class="p">,</span> <span class="s2">&quot;TB&quot;</span><span class="p">:</span> <span class="mi">1024</span><span class="o">**</span><span class="mi">4</span><span class="p">}</span>
+<span class="n">_TIME</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;s&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;ms&quot;</span><span class="p">:</span> <span class="mf">0.001</span><span class="p">,</span> <span class="s2">&quot;min&quot;</span><span class="p">:</span> <span class="mi">60</span><span class="p">,</span> <span class="s2">&quot;hr&quot;</span><span class="p">:</span> <span class="mi">3600</span><span class="p">,</span> <span class="s2">&quot;day&quot;</span><span class="p">:</span> <span class="mi">86400</span><span class="p">}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_convert_temp</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">from_u</span><span class="p">,</span> <span class="n">to_u</span><span class="p">):</span>
+    <span class="c1"># Normalize to Celsius</span>
+    <span class="n">c</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;F&quot;</span><span class="p">:</span> <span class="p">(</span><span class="n">value</span> <span class="o">-</span> <span class="mi">32</span><span class="p">)</span> <span class="o">*</span> <span class="mi">5</span><span class="o">/</span><span class="mi">9</span><span class="p">,</span> <span class="s2">&quot;K&quot;</span><span class="p">:</span> <span class="n">value</span> <span class="o">-</span> <span class="mf">273.15</span><span class="p">}</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">from_u</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+    <span class="c1"># Convert to target</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;F&quot;</span><span class="p">:</span> <span class="n">c</span> <span class="o">*</span> <span class="mi">9</span><span class="o">/</span><span class="mi">5</span> <span class="o">+</span> <span class="mi">32</span><span class="p">,</span> <span class="s2">&quot;K&quot;</span><span class="p">:</span> <span class="n">c</span> <span class="o">+</span> <span class="mf">273.15</span><span class="p">}</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">to_u</span><span class="p">,</span> <span class="n">c</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">unit_convert</span><span class="p">(</span><span class="n">args</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Convert between units.&quot;&quot;&quot;</span>
+    <span class="n">value</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;value&quot;</span><span class="p">)</span>
+    <span class="n">from_unit</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;from_unit&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="n">to_unit</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;to_unit&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+
+    <span class="k">if</span> <span class="n">value</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">from_unit</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">to_unit</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="s2">&quot;Need value, from_unit, and to_unit&quot;</span><span class="p">})</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="c1"># Temperature</span>
+        <span class="k">if</span> <span class="n">from_unit</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;C&quot;</span><span class="p">,</span><span class="s2">&quot;F&quot;</span><span class="p">,</span><span class="s2">&quot;K&quot;</span><span class="p">}</span> <span class="ow">and</span> <span class="n">to_unit</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;C&quot;</span><span class="p">,</span><span class="s2">&quot;F&quot;</span><span class="p">,</span><span class="s2">&quot;K&quot;</span><span class="p">}:</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">_convert_temp</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">value</span><span class="p">),</span> <span class="n">from_unit</span><span class="o">.</span><span class="n">upper</span><span class="p">(),</span> <span class="n">to_unit</span><span class="o">.</span><span class="n">upper</span><span class="p">())</span>
+            <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;input&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">value</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">from_unit</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="nb">round</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">4</span><span class="p">),</span>
+                             <span class="s2">&quot;output&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="nb">round</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="p">)</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">to_unit</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">})</span>
+
+        <span class="c1"># Ratio-based conversions</span>
+        <span class="k">for</span> <span class="n">table</span> <span class="ow">in</span> <span class="p">(</span><span class="n">_LENGTH</span><span class="p">,</span> <span class="n">_WEIGHT</span><span class="p">,</span> <span class="n">_DATA</span><span class="p">,</span> <span class="n">_TIME</span><span class="p">):</span>
+            <span class="n">lc</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="o">.</span><span class="n">lower</span><span class="p">():</span> <span class="n">v</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">table</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+            <span class="k">if</span> <span class="n">from_unit</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="ow">in</span> <span class="n">lc</span> <span class="ow">and</span> <span class="n">to_unit</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="ow">in</span> <span class="n">lc</span><span class="p">:</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="o">*</span> <span class="n">lc</span><span class="p">[</span><span class="n">from_unit</span><span class="o">.</span><span class="n">lower</span><span class="p">()]</span> <span class="o">/</span> <span class="n">lc</span><span class="p">[</span><span class="n">to_unit</span><span class="o">.</span><span class="n">lower</span><span class="p">()]</span>
+                <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;input&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">value</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">from_unit</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+                                 <span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="nb">round</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">6</span><span class="p">),</span>
+                                 <span class="s2">&quot;output&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="nb">round</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="mi">6</span><span class="p">)</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">to_unit</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">})</span>
+
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Cannot convert </span><span class="si">{</span><span class="n">from_unit</span><span class="si">}</span><span class="s2"> → </span><span class="si">{</span><span class="n">to_unit</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">})</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Conversion failed: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">})</span>
+</code></pre></div>
+
+<p><strong>处理器的关键规则：</strong>
+1. <strong>签名：</strong> <code>def my_handler(args: dict, **kwargs) -&gt; str</code>
+2. <strong>返回值：</strong> 始终返回 JSON 字符串。成功和错误均如此。
+3. <strong>不要抛出异常：</strong> 捕获所有异常，改为返回错误 JSON。
+4. <strong>接受 <code>**kwargs</code>：</strong> Hermes 未来可能传入额外上下文。</p>
+<h2 id="第五步编写注册代码">第五步：编写注册代码</h2>
+<p>创建 <code>__init__.py</code>——将 schema 与处理器连接起来：</p>
+<div class="highlight"><pre><span></span><code><span class="sd">&quot;&quot;&quot;Calculator plugin — registration.&quot;&quot;&quot;</span>
+
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">.</span><span class="w"> </span><span class="kn">import</span> <span class="n">schemas</span><span class="p">,</span> <span class="n">tools</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+<span class="c1"># Track tool usage via hooks</span>
+<span class="n">_call_log</span> <span class="o">=</span> <span class="p">[]</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_on_post_tool_call</span><span class="p">(</span><span class="n">tool_name</span><span class="p">,</span> <span class="n">args</span><span class="p">,</span> <span class="n">result</span><span class="p">,</span> <span class="n">task_id</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Hook: runs after every tool call (not just ours).&quot;&quot;&quot;</span>
+    <span class="n">_call_log</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;tool&quot;</span><span class="p">:</span> <span class="n">tool_name</span><span class="p">,</span> <span class="s2">&quot;session&quot;</span><span class="p">:</span> <span class="n">task_id</span><span class="p">})</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">_call_log</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">100</span><span class="p">:</span>
+        <span class="n">_call_log</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="s2">&quot;Tool called: </span><span class="si">%s</span><span class="s2"> (session </span><span class="si">%s</span><span class="s2">)&quot;</span><span class="p">,</span> <span class="n">tool_name</span><span class="p">,</span> <span class="n">task_id</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Wire schemas to handlers and register hooks.&quot;&quot;&quot;</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_tool</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;calculate&quot;</span><span class="p">,</span>    <span class="n">toolset</span><span class="o">=</span><span class="s2">&quot;calculator&quot;</span><span class="p">,</span>
+                      <span class="n">schema</span><span class="o">=</span><span class="n">schemas</span><span class="o">.</span><span class="n">CALCULATE</span><span class="p">,</span>    <span class="n">handler</span><span class="o">=</span><span class="n">tools</span><span class="o">.</span><span class="n">calculate</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_tool</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;unit_convert&quot;</span><span class="p">,</span> <span class="n">toolset</span><span class="o">=</span><span class="s2">&quot;calculator&quot;</span><span class="p">,</span>
+                      <span class="n">schema</span><span class="o">=</span><span class="n">schemas</span><span class="o">.</span><span class="n">UNIT_CONVERT</span><span class="p">,</span> <span class="n">handler</span><span class="o">=</span><span class="n">tools</span><span class="o">.</span><span class="n">unit_convert</span><span class="p">)</span>
+
+    <span class="c1"># This hook fires for ALL tool calls, not just ours</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;post_tool_call&quot;</span><span class="p">,</span> <span class="n">_on_post_tool_call</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong><code>register()</code> 的作用：</strong>
+- 在启动时恰好调用一次
+- <code>ctx.register_tool()</code> 将你的工具放入注册表——模型立即可见
+- <code>ctx.register_hook()</code> 订阅生命周期事件
+- <code>ctx.register_cli_command()</code> 注册 CLI 子命令（例如 <code>hermes my-plugin &lt;subcommand&gt;</code>）
+- <code>ctx.register_command()</code> 注册会话内斜杠命令（例如在 CLI / 网关聊天中输入 <code>/myplugin &lt;args&gt;</code>）——详见下方<a href="../../developer-guide/plugins.html#register-slash-commands" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">注册斜杠命令</a>
+- <code>ctx.dispatch_tool(name, arguments)</code> ——以父代理的上下文（审批、凭证、task_id 自动连接）调用任意其他工具（内置或来自其他插件）。适用于需要直接调用 <code>terminal</code>、<code>read_file</code> 或其他工具的斜杠命令处理器，效果等同于模型直接调用。
+- 如果此函数崩溃，插件将被禁用，但 Hermes 继续正常运行</p>
+<p><strong><code>dispatch_tool</code> 示例——执行工具的斜杠命令：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">handle_scan</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">argstr</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Implement /scan by invoking the terminal tool through the registry.&quot;&quot;&quot;</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">ctx</span><span class="o">.</span><span class="n">dispatch_tool</span><span class="p">(</span><span class="s2">&quot;terminal&quot;</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;find . -name &#39;</span><span class="si">{</span><span class="n">argstr</span><span class="si">}</span><span class="s2">&#39;&quot;</span><span class="p">})</span>
+    <span class="k">return</span> <span class="n">result</span>  <span class="c1"># returned to the caller&#39;s chat UI</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_command</span><span class="p">(</span><span class="s2">&quot;scan&quot;</span><span class="p">,</span> <span class="n">handle_scan</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Find files matching a glob&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>被分发的工具会经过正常的审批、脱敏和预算流程——这是真实的工具调用，而非绕过这些流程的捷径。</p>
+<h2 id="第六步测试">第六步：测试</h2>
+<p>启动 Hermes：</p>
+<div class="highlight"><pre><span></span><code>hermes
+</code></pre></div>
+
+<p>你应该在启动横幅的工具列表中看到 <code>calculator: calculate, unit_convert</code>。</p>
+<p>尝试以下提示词（prompt）：</p>
+<div class="highlight"><pre><span></span><code>What&#39;s 2 to the power of 16?
+Convert 100 fahrenheit to celsius
+What&#39;s the square root of 2 times pi?
+How many gigabytes is 1.5 terabytes?
+</code></pre></div>
+
+<p>检查插件状态：</p>
+<div class="highlight"><pre><span></span><code>/plugins
+</code></pre></div>
+
+<p>输出：</p>
+<div class="highlight"><pre><span></span><code>Plugins (1):
+  ✓ calculator v1.0.0 (2 tools, 1 hooks)
+</code></pre></div>
+
+<h3 id="调试插件发现问题">调试插件发现问题</h3>
+<p>如果你的插件没有出现，或出现了但未加载——设置 <code>HERMES_PLUGINS_DEBUG=1</code> 可在 stderr 获取详细的发现日志：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">HERMES_PLUGINS_DEBUG</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>hermes<span class="w"> </span>plugins<span class="w"> </span>list
+</code></pre></div>
+
+<p>你将看到每个插件来源（内置、用户、项目、entry-points）的以下信息：</p>
+<ul>
+<li>扫描了哪些目录，每个目录产出了多少个清单</li>
+<li>每个清单：解析后的键、名称、类型、来源、磁盘路径</li>
+<li>跳过原因：<code>disabled via config</code>、<code>not enabled in config</code>、<code>exclusive plugin</code>、<code>no plugin.yaml, depth cap reached</code></li>
+<li>加载时：正在导入的插件，以及 <code>register(ctx)</code> 注册内容的单行摘要（工具、钩子、斜杠命令、CLI 命令）</li>
+<li>解析失败时：异常的完整堆栈跟踪（YAML 扫描器错误等）</li>
+<li><code>register()</code> 失败时：指向 <code>__init__.py</code> 中抛出异常的行的完整堆栈跟踪</li>
+</ul>
+<p>同样的日志始终写入 <code>~/.hermes/logs/agent.log</code>，失败时为 WARNING 级别，设置环境变量时为 DEBUG 级别（全部内容）。如果无法使用环境变量运行（例如从网关内部），可以改为追踪日志文件：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>logs<span class="w"> </span>--level<span class="w"> </span>WARNING<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-i<span class="w"> </span>plugin
+</code></pre></div>
+
+<p>插件未出现的常见原因：</p>
+<ul>
+<li><strong>未在配置中启用</strong>——插件需要手动启用。运行 <code>hermes plugins enable &lt;name&gt;</code>（名称来自 <code>plugins list</code> 输出，嵌套布局下可能是 <code>&lt;category&gt;/&lt;plugin&gt;</code>）。</li>
+<li><strong>目录结构错误</strong>——必须是 <code>~/.hermes/plugins/&lt;plugin-name&gt;/plugin.yaml</code>（扁平）或 <code>~/.hermes/plugins/&lt;category&gt;/&lt;plugin-name&gt;/plugin.yaml</code>（一级分类嵌套，最多）。更深层的目录会被忽略。</li>
+<li><strong>缺少 <code>__init__.py</code></strong>——插件目录需要同时包含 <code>plugin.yaml</code> 和带有 <code>register(ctx)</code> 函数的 <code>__init__.py</code>。</li>
+<li><strong><code>kind</code> 错误</strong>——网关适配器需要在清单中设置 <code>kind: platform</code>。记忆提供商会被自动检测为 <code>kind: exclusive</code>，并通过 <code>memory.provider</code> 配置路由，而非 <code>plugins.enabled</code>。</li>
+</ul>
+<h2 id="插件的最终结构">插件的最终结构</h2>
+<div class="highlight"><pre><span></span><code>~/.hermes/plugins/calculator/
+├── plugin.yaml      # &quot;我是 calculator，我提供工具和钩子&quot;
+├── __init__.py      # 连接：schema → 处理器，注册钩子
+├── schemas.py       # LLM 读取的内容（描述 + 参数规格）
+└── tools.py         # 实际运行的代码（calculate、unit_convert 函数）
+</code></pre></div>
+
+<p>四个文件，职责清晰：
+- <strong>清单</strong>声明插件是什么
+- <strong>Schema</strong> 向 LLM 描述工具
+- <strong>处理器</strong>实现实际逻辑
+- <strong>注册</strong>将一切连接起来</p>
+<h2 id="插件还能做什么">插件还能做什么？</h2>
+<h3 id="随附数据文件">随附数据文件</h3>
+<p>将任意文件放入插件目录，并在导入时读取：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># In tools.py or __init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+<span class="n">_PLUGIN_DIR</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span><span class="o">.</span><span class="n">parent</span>
+<span class="n">_DATA_FILE</span> <span class="o">=</span> <span class="n">_PLUGIN_DIR</span> <span class="o">/</span> <span class="s2">&quot;data&quot;</span> <span class="o">/</span> <span class="s2">&quot;languages.yaml&quot;</span>
+
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">_DATA_FILE</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">_DATA</span> <span class="o">=</span> <span class="n">yaml</span><span class="o">.</span><span class="n">safe_load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="捆绑技能">捆绑技能</h3>
+<p>插件可以随附技能文件，代理通过 <code>skill_view("plugin:skill")</code> 加载。在 <code>__init__.py</code> 中注册：</p>
+<div class="highlight"><pre><span></span><code>~/.hermes/plugins/my-plugin/
+├── __init__.py
+├── plugin.yaml
+└── skills/
+    ├── my-workflow/
+    │   └── SKILL.md
+    └── my-checklist/
+        └── SKILL.md
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">skills_dir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span><span class="o">.</span><span class="n">parent</span> <span class="o">/</span> <span class="s2">&quot;skills&quot;</span>
+    <span class="k">for</span> <span class="n">child</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">skills_dir</span><span class="o">.</span><span class="n">iterdir</span><span class="p">()):</span>
+        <span class="n">skill_md</span> <span class="o">=</span> <span class="n">child</span> <span class="o">/</span> <span class="s2">&quot;SKILL.md&quot;</span>
+        <span class="k">if</span> <span class="n">child</span><span class="o">.</span><span class="n">is_dir</span><span class="p">()</span> <span class="ow">and</span> <span class="n">skill_md</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+            <span class="n">ctx</span><span class="o">.</span><span class="n">register_skill</span><span class="p">(</span><span class="n">child</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">skill_md</span><span class="p">)</span>
+</code></pre></div>
+
+<p>代理现在可以通过命名空间名称加载你的技能：</p>
+<div class="highlight"><pre><span></span><code><span class="n">skill_view</span><span class="p">(</span><span class="s2">&quot;my-plugin:my-workflow&quot;</span><span class="p">)</span>   <span class="c1"># → 插件版本</span>
+<span class="n">skill_view</span><span class="p">(</span><span class="s2">&quot;my-workflow&quot;</span><span class="p">)</span>              <span class="c1"># → 内置版本（不受影响）</span>
+</code></pre></div>
+
+<p><strong>关键特性：</strong>
+- 插件技能是<strong>只读</strong>的——它们不会进入 <code>~/.hermes/skills/</code>，也无法通过 <code>skill_manage</code> 编辑。
+- 插件技能<strong>不会</strong>列在系统提示词的 <code>&lt;available_skills&gt;</code> 索引中——需要显式加载。
+- 裸技能名称不受影响——命名空间防止与内置技能冲突。
+- 代理加载插件技能时，会在前面添加一个捆绑上下文横幅，列出同一插件的兄弟技能。</p>
+<div class="admonition adm-tip"><p class="adm-title">旧版模式</p>
+<p>旧的 <code>shutil.copy2</code> 模式（将技能复制到 <code>~/.hermes/skills/</code>）仍然有效，但存在与内置技能名称冲突的风险。新插件请优先使用 <code>ctx.register_skill()</code>。</p>
+</div>
+<h3 id="根据环境变量决定是否启用">根据环境变量决定是否启用</h3>
+<p>如果你的插件需要 API 密钥：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugin.yaml — 简单格式（向后兼容）</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">WEATHER_API_KEY</span>
+</code></pre></div>
+
+<p>如果 <code>WEATHER_API_KEY</code> 未设置，插件将被禁用并显示清晰的提示信息。不会崩溃，代理中也不会报错——只会显示"Plugin weather disabled (missing: WEATHER_API_KEY)"。</p>
+<p>用户运行 <code>hermes plugins install</code> 时，会<strong>交互式提示</strong>输入任何缺失的 <code>requires_env</code> 变量。值会自动保存到 <code>.env</code>。</p>
+<p>为了获得更好的安装体验，使用带有描述和注册 URL 的富格式：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugin.yaml — 富格式</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">WEATHER_API_KEY</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;API</span><span class="nv"> </span><span class="s">key</span><span class="nv"> </span><span class="s">for</span><span class="nv"> </span><span class="s">OpenWeather&quot;</span>
+<span class="w">    </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://openweathermap.org/api&quot;</span>
+<span class="w">    </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>必填</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>是</td>
+<td>环境变量名称</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>否</td>
+<td>安装提示时显示给用户</td>
+</tr>
+<tr>
+<td><code>url</code></td>
+<td>否</td>
+<td>获取凭证的地址</td>
+</tr>
+<tr>
+<td><code>secret</code></td>
+<td>否</td>
+<td>若为 <code>true</code>，输入时隐藏（类似密码字段）</td>
+</tr>
+</tbody>
+</table>
+<p>两种格式可在同一列表中混用。已设置的变量会被静默跳过。</p>
+<h3 id="懒加载可选-python-依赖">懒加载可选 Python 依赖</h3>
+<p>如果你的插件封装了一个并非所有用户都会安装的 SDK（供应商 SDK、重型 ML 库、平台特定包），不要在模块顶部 <code>import</code> 它。在工具处理器内部使用 <code>tools.lazy_deps.ensure(...)</code> 辅助函数——Hermes 会在首次使用时安装该包，并受用户 <code>security.allow_lazy_installs</code> 配置的控制。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># tools.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">tools.lazy_deps</span><span class="w"> </span><span class="kn">import</span> <span class="n">ensure</span><span class="p">,</span> <span class="n">FeatureUnavailable</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">my_tool_handler</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">ensure</span><span class="p">(</span><span class="s2">&quot;my-plugin.my-backend&quot;</span><span class="p">)</span>   <span class="c1"># key must be in LAZY_DEPS</span>
+    <span class="k">except</span> <span class="n">FeatureUnavailable</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">exc</span><span class="p">)}</span>
+
+    <span class="kn">import</span><span class="w"> </span><span class="nn">my_backend_sdk</span>   <span class="c1"># safe now</span>
+    <span class="o">...</span>
+</code></pre></div>
+
+<p>来自 <code>tools/lazy_deps.py</code> 安全模型的两条规则：</p>
+<table>
+<thead>
+<tr>
+<th>规则</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>你的功能键必须出现在内置的 <code>LAZY_DEPS</code> 允许列表中</td>
+<td>防止恶意配置诱使 Hermes 安装任意包——只有 Hermes 自身随附的规格才符合条件</td>
+</tr>
+<tr>
+<td>规格仅限 PyPI 包名</td>
+<td>不允许 <code>--index-url</code>、<code>git+https://</code> 或 <code>file:</code> 路径。在允许列表条目中使用 PEP 440 固定版本（<code>"my-sdk&gt;=1.2,&lt;2"</code>）</td>
+</tr>
+</tbody>
+</table>
+<p>对于通过 pip 分发的第三方插件，在你自己的 <code>pyproject.toml</code> 中将可选依赖声明为 <code>[project.optional-dependencies]</code> extras，并告知用户执行 <code>pip install your-plugin[backend]</code>——该路径不经过 <code>lazy_deps</code>。懒加载安装最适合<strong>内置</strong>插件，因为对每次安装都强制依赖会增加 Hermes 基础安装的体积。</p>
+<p>当全局设置 <code>security.allow_lazy_installs: false</code> 时，<code>ensure()</code> 会立即抛出 <code>FeatureUnavailable</code> 并附带修复提示——你的插件应捕获该异常并优雅降级（返回错误结果，而非让工具循环崩溃）。</p>
+<h3 id="条件工具可用性">条件工具可用性</h3>
+<p>对于依赖可选库的工具：</p>
+<div class="highlight"><pre><span></span><code><span class="n">ctx</span><span class="o">.</span><span class="n">register_tool</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_tool&quot;</span><span class="p">,</span>
+    <span class="n">schema</span><span class="o">=</span><span class="p">{</span><span class="o">...</span><span class="p">},</span>
+    <span class="n">handler</span><span class="o">=</span><span class="n">my_handler</span><span class="p">,</span>
+    <span class="n">check_fn</span><span class="o">=</span><span class="k">lambda</span><span class="p">:</span> <span class="n">_has_optional_lib</span><span class="p">(),</span>  <span class="c1"># False = 工具对模型隐藏</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="覆盖内置工具">覆盖内置工具</h3>
+<p>要用你自己的实现替换内置工具（例如将默认浏览器工具替换为有头 Chrome CDP 后端，或将 <code>web_search</code> 替换为自定义企业索引），传入 <code>override=True</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_tool</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;browser_navigate&quot;</span><span class="p">,</span>             <span class="c1"># 与内置工具同名</span>
+        <span class="n">toolset</span><span class="o">=</span><span class="s2">&quot;plugin_my_browser&quot;</span><span class="p">,</span>         <span class="c1"># 你自己的 toolset 命名空间</span>
+        <span class="n">schema</span><span class="o">=</span><span class="p">{</span><span class="o">...</span><span class="p">},</span>
+        <span class="n">handler</span><span class="o">=</span><span class="n">my_custom_navigate</span><span class="p">,</span>
+        <span class="n">override</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>                       <span class="c1"># 显式启用覆盖</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p>不加 <code>override=True</code> 时，注册表会拒绝任何会遮蔽来自不同 toolset 的已有工具的注册——这防止了意外覆盖。覆盖操作会以 INFO 级别记录日志，可在 <code>~/.hermes/logs/agent.log</code> 中审计。插件在内置工具之后加载，因此注册顺序是正确的：你的处理器会替换内置处理器。</p>
+<h3 id="注册多个钩子">注册多个钩子</h3>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;pre_tool_call&quot;</span><span class="p">,</span> <span class="n">before_any_tool</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;post_tool_call&quot;</span><span class="p">,</span> <span class="n">after_any_tool</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;pre_llm_call&quot;</span><span class="p">,</span> <span class="n">inject_memory</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;on_session_start&quot;</span><span class="p">,</span> <span class="n">on_new_session</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;on_session_end&quot;</span><span class="p">,</span> <span class="n">on_session_end</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="钩子参考">钩子参考</h3>
+<p>每个钩子的完整文档见<strong><a href="../user-guide/features/hooks.html#plugin-hooks">事件钩子参考</a></strong>——回调签名、参数表、触发时机和示例。以下是摘要：</p>
+<table>
+<thead>
+<tr>
+<th>钩子</th>
+<th>触发时机</th>
+<th>回调签名</th>
+<th>返回值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="../user-guide/features/hooks.html#pre_tool_call"><code>pre_tool_call</code></a></td>
+<td>任意工具执行前</td>
+<td><code>tool_name: str, args: dict, task_id: str</code></td>
+<td>忽略</td>
+</tr>
+<tr>
+<td><a href="../user-guide/features/hooks.html#post_tool_call"><code>post_tool_call</code></a></td>
+<td>任意工具返回后</td>
+<td><code>tool_name: str, args: dict, result: str, task_id: str, duration_ms: int</code></td>
+<td>忽略</td>
+</tr>
+<tr>
+<td><a href="../user-guide/features/hooks.html#pre_llm_call"><code>pre_llm_call</code></a></td>
+<td>每轮一次，工具调用循环前</td>
+<td><code>session_id: str, user_message: str, conversation_history: list, is_first_turn: bool, model: str, platform: str</code></td>
+<td><a href="../../developer-guide/plugins.html#pre_llm_call-context-injection" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">上下文注入</a></td>
+</tr>
+<tr>
+<td><a href="../user-guide/features/hooks.html#post_llm_call"><code>post_llm_call</code></a></td>
+<td>每轮一次，工具调用循环后（仅成功轮次）</td>
+<td><code>session_id: str, user_message: str, assistant_response: str, conversation_history: list, model: str, platform: str</code></td>
+<td>忽略</td>
+</tr>
+<tr>
+<td><a href="../user-guide/features/hooks.html#on_session_start"><code>on_session_start</code></a></td>
+<td>新会话创建（仅第一轮）</td>
+<td><code>session_id: str, model: str, platform: str</code></td>
+<td>忽略</td>
+</tr>
+<tr>
+<td><a href="../user-guide/features/hooks.html#on_session_end"><code>on_session_end</code></a></td>
+<td>每次 <code>run_conversation</code> 调用结束 + CLI 退出</td>
+<td><code>session_id: str, completed: bool, interrupted: bool, model: str, platform: str</code></td>
+<td>忽略</td>
+</tr>
+<tr>
+<td><a href="../user-guide/features/hooks.html#on_session_finalize"><code>on_session_finalize</code></a></td>
+<td>CLI/网关销毁活跃会话</td>
+<td><code>session_id: str \| None, platform: str</code></td>
+<td>忽略</td>
+</tr>
+<tr>
+<td><a href="../user-guide/features/hooks.html#on_session_reset"><code>on_session_reset</code></a></td>
+<td>网关切换新会话键（<code>/new</code>、<code>/reset</code>）</td>
+<td><code>session_id: str, platform: str</code></td>
+<td>忽略</td>
+</tr>
+</tbody>
+</table>
+<p>大多数钩子是即发即忘的观察者——其返回值被忽略。例外是 <code>pre_llm_call</code>，它可以向对话中注入上下文。</p>
+<p>所有回调都应接受 <code>**kwargs</code> 以保持向前兼容性。如果钩子回调崩溃，会被记录日志并跳过。其他钩子和代理继续正常运行。</p>
+<h3 id="pre_llm_call-上下文注入"><code>pre_llm_call</code> 上下文注入</h3>
+<p>这是唯一一个返回值有意义的钩子。当 <code>pre_llm_call</code> 回调返回包含 <code>"context"</code> 键的字典（或纯字符串）时，Hermes 会将该文本注入<strong>当前轮次的用户消息</strong>中。这是记忆插件、RAG 集成、护栏以及任何需要向模型提供额外上下文的插件所使用的机制。</p>
+<h4 id="返回格式">返回格式</h4>
+<div class="highlight"><pre><span></span><code><span class="c1"># 包含 context 键的字典</span>
+<span class="k">return</span> <span class="p">{</span><span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Recalled memories:</span><span class="se">\n</span><span class="s2">- User prefers dark mode</span><span class="se">\n</span><span class="s2">- Last project: hermes-agent&quot;</span><span class="p">}</span>
+
+<span class="c1"># 纯字符串（等同于上面的字典形式）</span>
+<span class="k">return</span> <span class="s2">&quot;Recalled memories:</span><span class="se">\n</span><span class="s2">- User prefers dark mode&quot;</span>
+
+<span class="c1"># 返回 None 或不返回 → 不注入（仅观察）</span>
+<span class="k">return</span> <span class="kc">None</span>
+</code></pre></div>
+
+<p>任何非 None、非空的返回值，只要包含 <code>"context"</code> 键（或为非空纯字符串），都会被收集并追加到当前轮次的用户消息中。</p>
+<h4 id="注入的工作原理">注入的工作原理</h4>
+<p>注入的上下文追加到<strong>用户消息</strong>，而非系统提示词（system prompt）。这是有意为之的设计：</p>
+<ul>
+<li><strong>保留提示词缓存</strong>——系统提示词在各轮次之间保持不变。Anthropic 和 OpenRouter 会缓存系统提示词前缀，保持其稳定可在多轮对话中节省 75% 以上的输入 token。如果插件修改系统提示词，每轮都会缓存未命中。</li>
+<li><strong>临时性</strong>——注入仅在 API 调用时发生。会话历史中的原始用户消息不会被修改，也不会持久化到会话数据库。</li>
+<li><strong>系统提示词是 Hermes 的领地</strong>——它包含模型特定的指导、工具执行规则、个性指令和缓存的技能内容。插件在用户输入旁边贡献上下文，而非修改代理的核心指令。</li>
+</ul>
+<h4 id="示例记忆召回插件">示例：记忆召回插件</h4>
+<div class="highlight"><pre><span></span><code><span class="sd">&quot;&quot;&quot;Memory plugin — recalls relevant context from a vector store.&quot;&quot;&quot;</span>
+
+
+<span class="n">MEMORY_API</span> <span class="o">=</span> <span class="s2">&quot;https://your-memory-api.example.com&quot;</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">recall_context</span><span class="p">(</span><span class="n">session_id</span><span class="p">,</span> <span class="n">user_message</span><span class="p">,</span> <span class="n">is_first_turn</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Called before each LLM turn. Returns recalled memories.&quot;&quot;&quot;</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">resp</span> <span class="o">=</span> <span class="n">httpx</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">MEMORY_API</span><span class="si">}</span><span class="s2">/recall&quot;</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="p">{</span>
+            <span class="s2">&quot;session_id&quot;</span><span class="p">:</span> <span class="n">session_id</span><span class="p">,</span>
+            <span class="s2">&quot;query&quot;</span><span class="p">:</span> <span class="n">user_message</span><span class="p">,</span>
+        <span class="p">},</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+        <span class="n">memories</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;results&quot;</span><span class="p">,</span> <span class="p">[])</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">memories</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>  <span class="c1"># nothing to inject</span>
+
+        <span class="n">text</span> <span class="o">=</span> <span class="s2">&quot;Recalled context from previous sessions:</span><span class="se">\n</span><span class="s2">&quot;</span>
+        <span class="n">text</span> <span class="o">+=</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;- </span><span class="si">{</span><span class="n">m</span><span class="p">[</span><span class="s1">&#39;text&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">m</span> <span class="ow">in</span> <span class="n">memories</span><span class="p">)</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="n">text</span><span class="p">}</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">None</span>  <span class="c1"># fail silently, don&#39;t break the agent</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;pre_llm_call&quot;</span><span class="p">,</span> <span class="n">recall_context</span><span class="p">)</span>
+</code></pre></div>
+
+<h4 id="示例护栏插件">示例：护栏插件</h4>
+<div class="highlight"><pre><span></span><code><span class="sd">&quot;&quot;&quot;Guardrails plugin — enforces content policies.&quot;&quot;&quot;</span>
+
+<span class="n">POLICY</span> <span class="o">=</span> <span class="s2">&quot;&quot;&quot;You MUST follow these content policies for this session:</span>
+<span class="s2">- Never generate code that accesses the filesystem outside the working directory</span>
+<span class="s2">- Always warn before executing destructive operations</span>
+<span class="s2">- Refuse requests involving personal data extraction&quot;&quot;&quot;</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">inject_guardrails</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Injects policy text into every turn.&quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="n">POLICY</span><span class="p">}</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;pre_llm_call&quot;</span><span class="p">,</span> <span class="n">inject_guardrails</span><span class="p">)</span>
+</code></pre></div>
+
+<h4 id="示例仅观察钩子不注入">示例：仅观察钩子（不注入）</h4>
+<div class="highlight"><pre><span></span><code><span class="sd">&quot;&quot;&quot;Analytics plugin — tracks turn metadata without injecting context.&quot;&quot;&quot;</span>
+
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">log_turn</span><span class="p">(</span><span class="n">session_id</span><span class="p">,</span> <span class="n">user_message</span><span class="p">,</span> <span class="n">model</span><span class="p">,</span> <span class="n">is_first_turn</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Fires before each LLM call. Returns None — no context injected.&quot;&quot;&quot;</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;Turn: session=</span><span class="si">%s</span><span class="s2"> model=</span><span class="si">%s</span><span class="s2"> first=</span><span class="si">%s</span><span class="s2"> msg_len=</span><span class="si">%d</span><span class="s2">&quot;</span><span class="p">,</span>
+                <span class="n">session_id</span><span class="p">,</span> <span class="n">model</span><span class="p">,</span> <span class="n">is_first_turn</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">user_message</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">))</span>
+    <span class="c1"># No return → no injection</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;pre_llm_call&quot;</span><span class="p">,</span> <span class="n">log_turn</span><span class="p">)</span>
+</code></pre></div>
+
+<h4 id="多个插件返回上下文">多个插件返回上下文</h4>
+<p>当多个插件从 <code>pre_llm_call</code> 返回上下文时，它们的输出以双换行符连接，一起追加到用户消息中。顺序遵循插件发现顺序（按插件目录名称字母排序）。</p>
+<h3 id="注册-cli-命令">注册 CLI 命令</h3>
+<p>插件可以添加自己的 <code>hermes &lt;plugin&gt;</code> 子命令树：</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">_my_command</span><span class="p">(</span><span class="n">args</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Handler for hermes my-plugin &lt;subcommand&gt;.&quot;&quot;&quot;</span>
+    <span class="n">sub</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="s2">&quot;my_command&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">sub</span> <span class="o">==</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;All good!&quot;</span><span class="p">)</span>
+    <span class="k">elif</span> <span class="n">sub</span> <span class="o">==</span> <span class="s2">&quot;config&quot;</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Current config: ...&quot;</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Usage: hermes my-plugin &lt;status|config&gt;&quot;</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_setup_argparse</span><span class="p">(</span><span class="n">subparser</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Build the argparse tree for hermes my-plugin.&quot;&quot;&quot;</span>
+    <span class="n">subs</span> <span class="o">=</span> <span class="n">subparser</span><span class="o">.</span><span class="n">add_subparsers</span><span class="p">(</span><span class="n">dest</span><span class="o">=</span><span class="s2">&quot;my_command&quot;</span><span class="p">)</span>
+    <span class="n">subs</span><span class="o">.</span><span class="n">add_parser</span><span class="p">(</span><span class="s2">&quot;status&quot;</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Show plugin status&quot;</span><span class="p">)</span>
+    <span class="n">subs</span><span class="o">.</span><span class="n">add_parser</span><span class="p">(</span><span class="s2">&quot;config&quot;</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Show plugin config&quot;</span><span class="p">)</span>
+    <span class="n">subparser</span><span class="o">.</span><span class="n">set_defaults</span><span class="p">(</span><span class="n">func</span><span class="o">=</span><span class="n">_my_command</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_tool</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_cli_command</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my-plugin&quot;</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Manage my plugin&quot;</span><span class="p">,</span>
+        <span class="n">setup_fn</span><span class="o">=</span><span class="n">_setup_argparse</span><span class="p">,</span>
+        <span class="n">handler_fn</span><span class="o">=</span><span class="n">_my_command</span><span class="p">,</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p>注册后，用户可以运行 <code>hermes my-plugin status</code>、<code>hermes my-plugin config</code> 等命令。</p>
+<p><strong>记忆提供商插件</strong>使用基于约定的方式：在插件的 <code>cli.py</code> 文件中添加 <code>register_cli(subparser)</code> 函数。记忆插件发现系统会自动找到它——无需调用 <code>ctx.register_cli_command()</code>。详见<a href="../../developer-guide/memory-provider-plugin.html#adding-cli-commands" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">记忆提供商插件指南</a>。</p>
+<p><strong>活跃提供商限制：</strong> 记忆插件 CLI 命令仅在其提供商是配置中活跃的 <code>memory.provider</code> 时才会出现。如果用户尚未设置你的提供商，你的 CLI 命令不会出现在帮助输出中。</p>
+<h3 id="注册斜杠命令">注册斜杠命令</h3>
+<p>插件可以注册会话内斜杠命令——用户在对话中输入的命令（如 <code>/lcm status</code> 或 <code>/ping</code>）。这些命令在 CLI 和网关（Telegram、Discord 等）中均可使用。</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">_handle_status</span><span class="p">(</span><span class="n">raw_args</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Handler for /mystatus — called with everything after the command name.&quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">raw_args</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="o">==</span> <span class="s2">&quot;help&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;Usage: /mystatus [help|check]&quot;</span>
+    <span class="k">return</span> <span class="s2">&quot;Plugin status: all systems nominal&quot;</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_command</span><span class="p">(</span>
+        <span class="s2">&quot;mystatus&quot;</span><span class="p">,</span>
+        <span class="n">handler</span><span class="o">=</span><span class="n">_handle_status</span><span class="p">,</span>
+        <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Show plugin status&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p>注册后，用户可以在任意会话中输入 <code>/mystatus</code>。该命令会出现在自动补全、<code>/help</code> 输出和 Telegram 机器人菜单中。</p>
+<p><strong>签名：</strong> <code>ctx.register_command(name: str, handler: Callable, description: str = "")</code></p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>类型</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td>不含前导斜杠的命令名称（例如 <code>"lcm"</code>、<code>"mystatus"</code>）</td>
+</tr>
+<tr>
+<td><code>handler</code></td>
+<td><code>Callable[[str], str \| None]</code></td>
+<td>以原始参数字符串调用。也可以是 <code>async</code>。</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td><code>str</code></td>
+<td>显示在 <code>/help</code>、自动补全和 Telegram 机器人菜单中</td>
+</tr>
+</tbody>
+</table>
+<p><strong>与 <code>register_cli_command()</code> 的主要区别：</strong></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>register_command()</code></th>
+<th><code>register_cli_command()</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>调用方式</td>
+<td>会话中的 <code>/name</code></td>
+<td>终端中的 <code>hermes name</code></td>
+</tr>
+<tr>
+<td>适用范围</td>
+<td>CLI 会话、Telegram、Discord 等</td>
+<td>仅终端</td>
+</tr>
+<tr>
+<td>处理器接收</td>
+<td>原始参数字符串</td>
+<td>argparse <code>Namespace</code></td>
+</tr>
+<tr>
+<td>使用场景</td>
+<td>诊断、状态查询、快速操作</td>
+<td>复杂子命令树、设置向导</td>
+</tr>
+</tbody>
+</table>
+<p><strong>冲突保护：</strong> 如果插件尝试注册与内置命令（<code>help</code>、<code>model</code>、<code>new</code> 等）冲突的名称，注册会被静默拒绝并记录警告日志。内置命令始终优先。</p>
+<p><strong>异步处理器：</strong> 网关分发会自动检测并 await 异步处理器，因此可以使用同步或异步函数：</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_handle_check</span><span class="p">(</span><span class="n">raw_args</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">some_async_operation</span><span class="p">()</span>
+    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;Check result: </span><span class="si">{</span><span class="n">result</span><span class="si">}</span><span class="s2">&quot;</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_command</span><span class="p">(</span><span class="s2">&quot;check&quot;</span><span class="p">,</span> <span class="n">handler</span><span class="o">=</span><span class="n">_handle_check</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Run async check&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="从斜杠命令分发工具">从斜杠命令分发工具</h3>
+<p>需要编排工具的斜杠命令处理器（生成子代理 <code>delegate_task</code>、调用 <code>file_edit</code> 等）应使用 <code>ctx.dispatch_tool()</code>，而非深入框架内部。父代理上下文（工作区提示、spinner、模型继承）会自动连接。</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_handle_deliver</span><span class="p">(</span><span class="n">raw_args</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">ctx</span><span class="o">.</span><span class="n">dispatch_tool</span><span class="p">(</span>
+            <span class="s2">&quot;delegate_task&quot;</span><span class="p">,</span>
+            <span class="p">{</span>
+                <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="n">raw_args</span><span class="p">,</span>
+                <span class="s2">&quot;toolsets&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;terminal&quot;</span><span class="p">,</span> <span class="s2">&quot;file&quot;</span><span class="p">,</span> <span class="s2">&quot;web&quot;</span><span class="p">],</span>
+            <span class="p">},</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">result</span>
+
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_command</span><span class="p">(</span>
+        <span class="s2">&quot;deliver&quot;</span><span class="p">,</span>
+        <span class="n">handler</span><span class="o">=</span><span class="n">_handle_deliver</span><span class="p">,</span>
+        <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Delegate a goal to a subagent&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p><strong>签名：</strong> <code>ctx.dispatch_tool(name: str, args: dict, *, parent_agent=None) -&gt; str</code></p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>类型</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td>工具注册表中的工具名称（例如 <code>"delegate_task"</code>、<code>"file_edit"</code>）</td>
+</tr>
+<tr>
+<td><code>args</code></td>
+<td><code>dict</code></td>
+<td>工具参数，与模型发送的格式相同</td>
+</tr>
+<tr>
+<td><code>parent_agent</code></td>
+<td><code>Agent \| None</code></td>
+<td>可选覆盖。省略时从当前 CLI 代理解析（网关模式下优雅降级）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>运行时行为：</strong></p>
+<ul>
+<li><strong>CLI 模式：</strong> <code>parent_agent</code> 从活跃的 CLI 代理解析，工作区提示、spinner 和模型选择按预期继承。</li>
+<li><strong>网关模式：</strong> 没有 CLI 代理，工具优雅降级——工作区从 <code>TERMINAL_CWD</code> 读取，不显示 spinner。</li>
+<li><strong>显式覆盖：</strong> 如果调用者显式传入 <code>parent_agent=</code>，则尊重该值，不会被覆盖。</li>
+</ul>
+<p>这是从插件命令分发工具的公开稳定接口。插件不应访问 <code>ctx._cli_ref.agent</code> 或类似的私有状态。</p>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>本指南涵盖<strong>通用插件</strong>（工具、钩子、斜杠命令、CLI 命令）。以下各节简要介绍每种专用插件类型的编写模式；每节均链接到其完整指南以获取字段参考和示例。</p>
+</div>
+<h2 id="专用插件类型">专用插件类型</h2>
+<p>Hermes 在通用接口之外还有五种专用插件类型。每种都以目录形式存放在 <code>plugins/&lt;category&gt;/&lt;name&gt;/</code>（内置）或 <code>~/.hermes/plugins/&lt;category&gt;/&lt;name&gt;/</code>（用户）下。各类别的约定不同——选择你需要的类型，然后阅读其完整指南。</p>
+<h3 id="模型提供商插件添加-llm-后端">模型提供商插件——添加 LLM 后端</h3>
+<p>在 <code>plugins/model-providers/&lt;name&gt;/</code> 下放置一个配置文件：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/model-providers/acme/__init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers</span><span class="w"> </span><span class="kn">import</span> <span class="n">register_provider</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ProviderProfile</span>
+
+<span class="n">register_provider</span><span class="p">(</span><span class="n">ProviderProfile</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;acme&quot;</span><span class="p">,</span>
+    <span class="n">aliases</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;acme-inference&quot;</span><span class="p">,),</span>
+    <span class="n">display_name</span><span class="o">=</span><span class="s2">&quot;Acme Inference&quot;</span><span class="p">,</span>
+    <span class="n">env_vars</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;ACME_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;ACME_BASE_URL&quot;</span><span class="p">),</span>
+    <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;https://api.acme.example.com/v1&quot;</span><span class="p">,</span>
+    <span class="n">auth_type</span><span class="o">=</span><span class="s2">&quot;api_key&quot;</span><span class="p">,</span>
+    <span class="n">default_aux_model</span><span class="o">=</span><span class="s2">&quot;acme-small-fast&quot;</span><span class="p">,</span>
+    <span class="n">fallback_models</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;acme-large-v3&quot;</span><span class="p">,</span> <span class="s2">&quot;acme-medium-v3&quot;</span><span class="p">),</span>
+<span class="p">))</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/model-providers/acme/plugin.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">acme-provider</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">model-provider</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Acme Inference — OpenAI-compatible direct API</span>
+</code></pre></div>
+
+<p>在任何调用 <code>get_provider_profile()</code> 或 <code>list_providers()</code> 的地方首次使用时懒加载发现——<code>auth.py</code>、<code>config.py</code>、<code>doctor.py</code>、<code>models.py</code>、<code>runtime_provider.py</code> 和 chat_completions 传输层会自动连接。用户插件按名称覆盖内置插件。</p>
+<p><strong>完整指南：</strong> <a href="model-provider-plugin.html">模型提供商插件</a>——字段参考、可覆盖钩子（<code>prepare_messages</code>、<code>build_extra_body</code>、<code>build_api_kwargs_extras</code>、<code>fetch_models</code>）、api_mode 选择、认证类型、测试。</p>
+<h3 id="平台插件添加网关频道">平台插件——添加网关频道</h3>
+<p>在 <code>plugins/platforms/&lt;name&gt;/</code> 下放置适配器：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/platforms/myplatform/adapter.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BasePlatformAdapter</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyPlatformAdapter</span><span class="p">(</span><span class="n">BasePlatformAdapter</span><span class="p">):</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">send</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">,</span> <span class="n">text</span><span class="p">):</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">disconnect</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span> <span class="o">...</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">check_requirements</span><span class="p">():</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+    <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MYPLATFORM_TOKEN&quot;</span><span class="p">))</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_env_enablement</span><span class="p">():</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+    <span class="n">tok</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MYPLATFORM_TOKEN&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">tok</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">None</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;token&quot;</span><span class="p">:</span> <span class="n">tok</span><span class="p">}</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;myplatform&quot;</span><span class="p">,</span>
+        <span class="n">label</span><span class="o">=</span><span class="s2">&quot;MyPlatform&quot;</span><span class="p">,</span>
+        <span class="n">adapter_factory</span><span class="o">=</span><span class="k">lambda</span> <span class="n">cfg</span><span class="p">:</span> <span class="n">MyPlatformAdapter</span><span class="p">(</span><span class="n">cfg</span><span class="p">),</span>
+        <span class="n">check_fn</span><span class="o">=</span><span class="n">check_requirements</span><span class="p">,</span>
+        <span class="n">required_env</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;MYPLATFORM_TOKEN&quot;</span><span class="p">],</span>
+        <span class="c1"># 从环境变量自动填充 PlatformConfig.extra，使仅环境变量的设置</span>
+        <span class="c1"># 在 `hermes gateway status` 中显示，无需 SDK 实例化。</span>
+        <span class="n">env_enablement_fn</span><span class="o">=</span><span class="n">_env_enablement</span><span class="p">,</span>
+        <span class="c1"># 启用 cron 投递：`deliver=myplatform` 路由到此变量。</span>
+        <span class="n">cron_deliver_env_var</span><span class="o">=</span><span class="s2">&quot;MYPLATFORM_HOME_CHANNEL&quot;</span><span class="p">,</span>
+        <span class="n">emoji</span><span class="o">=</span><span class="s2">&quot;💬&quot;</span><span class="p">,</span>
+        <span class="n">platform_hint</span><span class="o">=</span><span class="s2">&quot;You are chatting via MyPlatform. Keep responses concise.&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/platforms/myplatform/plugin.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">myplatform-platform</span>
+<span class="nt">label</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MyPlatform</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">platform</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MyPlatform gateway adapter</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MYPLATFORM_TOKEN</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Bot</span><span class="nv"> </span><span class="s">token</span><span class="nv"> </span><span class="s">from</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">MyPlatform</span><span class="nv"> </span><span class="s">console&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="nt">optional_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MYPLATFORM_HOME_CHANNEL</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Default</span><span class="nv"> </span><span class="s">channel</span><span class="nv"> </span><span class="s">for</span><span class="nv"> </span><span class="s">cron</span><span class="nv"> </span><span class="s">delivery&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p><strong>完整指南：</strong> <a href="adding-platform-adapters.html">添加平台适配器</a>——完整的 <code>BasePlatformAdapter</code> 约定、消息路由、认证限制、设置向导集成。参考 <code>plugins/platforms/irc/</code> 获取仅使用标准库的可用示例。</p>
+<h3 id="记忆提供商插件添加跨会话知识后端">记忆提供商插件——添加跨会话知识后端</h3>
+<p>在 <code>plugins/memory/&lt;name&gt;/</code> 下实现 <code>MemoryProvider</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/memory/my-memory/__init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.memory_provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">MemoryProvider</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyMemoryProvider</span><span class="p">(</span><span class="n">MemoryProvider</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;my-memory&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_available</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MY_MEMORY_API_KEY&quot;</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">initialize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">session_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_session_id</span> <span class="o">=</span> <span class="n">session_id</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">sync_turn</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">user_message</span><span class="p">,</span> <span class="n">assistant_response</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="o">...</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">prefetch</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">query</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="o">...</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_memory_provider</span><span class="p">(</span><span class="n">MyMemoryProvider</span><span class="p">())</span>
+</code></pre></div>
+
+<p>记忆提供商是单选的——同一时间只有一个处于活跃状态，通过 <code>config.yaml</code> 中的 <code>memory.provider</code> 选择。</p>
+<p><strong>完整指南：</strong> <a href="memory-provider-plugin.html">记忆提供商插件</a>——完整的 <code>MemoryProvider</code> ABC、线程约定、配置文件隔离、通过 <code>cli.py</code> 注册 CLI 命令。</p>
+<h3 id="上下文引擎插件替换上下文压缩器">上下文引擎插件——替换上下文压缩器</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/context_engine/my-engine/__init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.context_engine</span><span class="w"> </span><span class="kn">import</span> <span class="n">ContextEngine</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyContextEngine</span><span class="p">(</span><span class="n">ContextEngine</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;my-engine&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">should_compress</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">messages</span><span class="p">,</span> <span class="n">model</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">compress</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">messages</span><span class="p">,</span> <span class="n">model</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">]:</span> <span class="o">...</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_context_engine</span><span class="p">(</span><span class="n">MyContextEngine</span><span class="p">())</span>
+</code></pre></div>
+
+<p>上下文引擎是单选的——通过 <code>config.yaml</code> 中的 <code>context.engine</code> 选择。</p>
+<p><strong>完整指南：</strong> <a href="context-engine-plugin.html">上下文引擎插件</a>。</p>
+<h3 id="图像生成后端">图像生成后端</h3>
+<p>在 <code>plugins/image_gen/&lt;name&gt;/</code> 下放置提供商：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/image_gen/my-imggen/__init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.image_gen_provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">ImageGenProvider</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyImageGenProvider</span><span class="p">(</span><span class="n">ImageGenProvider</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;my-imggen&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_available</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">generate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">prompt</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span> <span class="o">...</span>   <span class="c1"># returns image path</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_image_gen_provider</span><span class="p">(</span><span class="n">MyImageGenProvider</span><span class="p">())</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/image_gen/my-imggen/plugin.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-imggen</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backend</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Custom image generation backend</span>
+</code></pre></div>
+
+<p><strong>完整指南：</strong> <a href="image-gen-provider-plugin.html">图像生成提供商插件</a>——完整的 <code>ImageGenProvider</code> ABC、<code>list_models()</code> / <code>get_setup_schema()</code> 元数据、<code>success_response()</code>/<code>error_response()</code> 辅助函数、base64 与 URL 输出、用户覆盖、pip 分发。</p>
+<p><strong>参考示例：</strong> <code>plugins/image_gen/openai/</code>（DALL-E / GPT-Image via OpenAI SDK）、<code>plugins/image_gen/openai-codex/</code>、<code>plugins/image_gen/xai/</code>（Grok 图像生成）。</p>
+<h2 id="非-python-扩展接口">非 Python 扩展接口</h2>
+<p>Hermes 也接受完全不是 Python 插件的扩展。这些在<a href="../../user-guide/features/plugins.html#pluggable-interfaces--where-to-go-for-each" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">可插拔接口表</a>中有所展示；以下各节简要介绍每种编写方式。</p>
+<h3 id="mcp-服务器注册外部工具">MCP 服务器——注册外部工具</h3>
+<p>Model Context Protocol（MCP）服务器无需任何 Python 插件即可将自己的工具注册到 Hermes。在 <code>~/.hermes/config.yaml</code> 中声明：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">filesystem</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;npx&quot;</span>
+<span class="w">    </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;-y&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;@modelcontextprotocol/server-filesystem&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;/home/user/projects&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">120</span>
+
+<span class="w">  </span><span class="nt">linear</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://mcp.linear.app/sse&quot;</span>
+<span class="w">    </span><span class="nt">auth</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;oauth&quot;</span>
+</code></pre></div>
+
+<p>Hermes 在启动时连接到每个服务器，列出其工具，并与内置工具一起注册。LLM 看到它们的方式与其他工具完全相同。<strong>完整指南：</strong> <a href="../user-guide/features/mcp.html">MCP</a>。</p>
+<h3 id="网关事件钩子在生命周期事件时触发">网关事件钩子——在生命周期事件时触发</h3>
+<p>将清单和处理器放入 <code>~/.hermes/hooks/&lt;name&gt;/</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/hooks/long-task-alert/HOOK.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">long-task-alert</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Send a push notification when a long task finishes</span>
+<span class="nt">events</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">agent:end</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/hooks/long-task-alert/handler.py</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">handle</span><span class="p">(</span><span class="n">event_type</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">context</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">context</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;duration_seconds&quot;</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">120</span><span class="p">:</span>
+        <span class="c1"># send notification …</span>
+        <span class="k">pass</span>
+</code></pre></div>
+
+<p>事件包括 <code>gateway:startup</code>、<code>session:start</code>、<code>session:end</code>、<code>session:reset</code>、<code>agent:start</code>、<code>agent:step</code>、<code>agent:end</code> 以及通配符 <code>command:*</code>。钩子中的错误会被捕获并记录日志——它们不会阻塞主流程。</p>
+<p><strong>完整指南：</strong> <a href="../user-guide/features/hooks.html#gateway-event-hooks">网关事件钩子</a>。</p>
+<h3 id="shell-钩子在工具调用时运行-shell-命令">Shell 钩子——在工具调用时运行 shell 命令</h3>
+<p>如果你只想在工具触发时运行脚本（通知、审计日志、桌面提醒、自动格式化），在 <code>config.yaml</code> 中使用 shell 钩子——无需 Python：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">hooks</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">event</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">post_tool_call</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;notify-send</span><span class="nv"> </span><span class="s">&#39;Tool</span><span class="nv"> </span><span class="s">ran:</span><span class="nv"> </span><span class="s">{tool_name}&#39;&quot;</span>
+<span class="w">    </span><span class="nt">when</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">tools</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">terminal</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">patch</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">write_file</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<p>支持与 Python 插件钩子相同的所有事件（<code>pre_tool_call</code>、<code>post_tool_call</code>、<code>pre_llm_call</code>、<code>post_llm_call</code>、<code>on_session_start</code>、<code>on_session_end</code>、<code>pre_gateway_dispatch</code>），以及用于 <code>pre_tool_call</code> 阻断决策的结构化 JSON 输出。</p>
+<p><strong>完整指南：</strong> <a href="../user-guide/features/hooks.html#shell-hooks">Shell 钩子</a>。</p>
+<h3 id="技能来源添加自定义技能注册表">技能来源——添加自定义技能注册表</h3>
+<p>如果你维护了一个技能 GitHub 仓库（或想从内置来源之外的社区索引拉取），将其添加为 <strong>tap</strong>：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>add<span class="w"> </span>myorg/skills-repo
+hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>my-workflow<span class="w"> </span>--source<span class="w"> </span>myorg/skills-repo
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>myorg/skills-repo/my-workflow
+</code></pre></div>
+
+<p>发布你自己的 tap 只需一个包含 <code>skills/&lt;skill-name&gt;/SKILL.md</code> 目录的 GitHub 仓库——无需服务器或注册表注册。</p>
+<p><strong>完整指南：</strong> <a href="../user-guide/features/skills.html#skills-hub">技能中心</a> · <a href="../../user-guide/features/skills.html#publishing-a-custom-skill-tap" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">发布自定义 tap</a>（仓库结构、最小示例、非默认路径、信任级别）。</p>
+<h3 id="通过命令模板接入-tts--stt">通过命令模板接入 TTS / STT</h3>
+<p>任何读写音频或文本的 CLI 都可以通过 <code>config.yaml</code> 接入——无需 Python 代码：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">tts</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">voxcpm</span>
+<span class="w">  </span><span class="nt">providers</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">voxcpm</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">command</span>
+<span class="w">      </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;voxcpm</span><span class="nv"> </span><span class="s">--ref</span><span class="nv"> </span><span class="s">~/voice.wav</span><span class="nv"> </span><span class="s">--text-file</span><span class="nv"> </span><span class="s">{input_path}</span><span class="nv"> </span><span class="s">--out</span><span class="nv"> </span><span class="s">{output_path}&quot;</span>
+<span class="w">      </span><span class="nt">output_format</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">mp3</span>
+<span class="w">      </span><span class="nt">voice_compatible</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>对于 STT，将 <code>HERMES_LOCAL_STT_COMMAND</code> 指向一个 shell 模板。支持的占位符：<code>{input_path}</code>、<code>{output_path}</code>、<code>{format}</code>、<code>{voice}</code>、<code>{model}</code>、<code>{speed}</code>（TTS）；<code>{input_path}</code>、<code>{output_dir}</code>、<code>{language}</code>、<code>{model}</code>（STT）。任何与路径交互的 CLI 都自动成为插件。</p>
+<p><strong>完整指南：</strong> <a href="../../user-guide/features/tts.html#custom-command-providers" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">TTS 自定义命令提供商</a> · <a href="../../user-guide/features/tts.html#voice-message-transcription-stt" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">STT</a>。</p>
+<h2 id="通过-pip-分发">通过 pip 分发</h2>
+<p>如需公开分享插件，在你的 Python 包中添加 entry point：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># pyproject.toml</span>
+<span class="k">[project.entry-points.</span><span class="s2">&quot;hermes_agent.plugins&quot;</span><span class="k">]</span>
+<span class="n">my-plugin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;my_plugin_package&quot;</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>hermes-plugin-calculator
+<span class="c1"># 下次 hermes 启动时自动发现插件</span>
+</code></pre></div>
+
+<h2 id="为-nixos-分发">为 NixOS 分发</h2>
+<p>如果你提供了带有 entry points 的 <code>pyproject.toml</code>，NixOS 用户可以声明式安装你的插件：</p>
+<p><strong>Entry-point 插件</strong>（推荐用于分发）：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># User&#39;s configuration.nix</span>
+services<span class="o">.</span>hermes-agent<span class="o">.</span><span class="ss">extraPythonPackages</span> <span class="o">=</span> <span class="p">[</span>
+  <span class="p">(</span>pkgs<span class="o">.</span>python312Packages<span class="o">.</span>buildPythonPackage <span class="p">{</span>
+    <span class="ss">pname</span> <span class="o">=</span> <span class="s2">&quot;my-plugin&quot;</span><span class="p">;</span>
+    <span class="ss">version</span> <span class="o">=</span> <span class="s2">&quot;1.0.0&quot;</span><span class="p">;</span>
+    <span class="ss">src</span> <span class="o">=</span> pkgs<span class="o">.</span>fetchFromGitHub <span class="p">{</span>
+      <span class="ss">owner</span> <span class="o">=</span> <span class="s2">&quot;you&quot;</span><span class="p">;</span>
+      <span class="ss">repo</span> <span class="o">=</span> <span class="s2">&quot;hermes-my-plugin&quot;</span><span class="p">;</span>
+      <span class="ss">rev</span> <span class="o">=</span> <span class="s2">&quot;v1.0.0&quot;</span><span class="p">;</span>
+      <span class="ss">hash</span> <span class="o">=</span> <span class="s2">&quot;sha256-...&quot;</span><span class="p">;</span>  <span class="c1"># nix-prefetch-url --unpack</span>
+    <span class="p">};</span>
+    <span class="ss">format</span> <span class="o">=</span> <span class="s2">&quot;pyproject&quot;</span><span class="p">;</span>
+    <span class="ss">build-system</span> <span class="o">=</span> <span class="p">[</span> pkgs<span class="o">.</span>python312Packages<span class="o">.</span>setuptools <span class="p">];</span>
+  <span class="p">})</span>
+<span class="p">];</span>
+</code></pre></div>
+
+<p><strong>目录插件</strong>（无需 <code>pyproject.toml</code>）：</p>
+<div class="highlight"><pre><span></span><code>services<span class="o">.</span>hermes-agent<span class="o">.</span><span class="ss">extraPlugins</span> <span class="o">=</span> <span class="p">[</span>
+  <span class="p">(</span>pkgs<span class="o">.</span>fetchFromGitHub <span class="p">{</span>
+    <span class="ss">owner</span> <span class="o">=</span> <span class="s2">&quot;you&quot;</span><span class="p">;</span>
+    <span class="ss">repo</span> <span class="o">=</span> <span class="s2">&quot;hermes-my-plugin&quot;</span><span class="p">;</span>
+    <span class="ss">rev</span> <span class="o">=</span> <span class="s2">&quot;v1.0.0&quot;</span><span class="p">;</span>
+    <span class="ss">hash</span> <span class="o">=</span> <span class="s2">&quot;sha256-...&quot;</span><span class="p">;</span>
+  <span class="p">})</span>
+<span class="p">];</span>
+</code></pre></div>
+
+<p>完整文档（包括 overlay 用法和冲突检查）见 <a href="../../getting-started/nix-setup.html#plugins" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">Nix 设置指南</a>。</p>
+<h2 id="常见错误">常见错误</h2>
+<p><strong>处理器未返回 JSON 字符串：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 错误——返回了字典</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">handler</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="mi">42</span><span class="p">}</span>
+
+<span class="c1"># 正确——返回 JSON 字符串</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">handler</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="mi">42</span><span class="p">})</span>
+</code></pre></div>
+
+<p><strong>处理器签名缺少 <code>**kwargs</code>：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 错误——Hermes 传入额外上下文时会报错</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">handler</span><span class="p">(</span><span class="n">args</span><span class="p">):</span>
+    <span class="o">...</span>
+
+<span class="c1"># 正确</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">handler</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="o">...</span>
+</code></pre></div>
+
+<p><strong>处理器抛出异常：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 错误——异常传播，工具调用失败</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">handler</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">/</span> <span class="nb">int</span><span class="p">(</span><span class="n">args</span><span class="p">[</span><span class="s2">&quot;value&quot;</span><span class="p">])</span>  <span class="c1"># ZeroDivisionError!</span>
+    <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="n">result</span><span class="p">})</span>
+
+<span class="c1"># 正确——捕获异常并返回错误 JSON</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">handler</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">/</span> <span class="nb">int</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;value&quot;</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="n">result</span><span class="p">})</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">e</span><span class="p">)})</span>
+</code></pre></div>
+
+<p><strong>Schema 描述过于模糊：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 差——模型不知道何时使用</span>
+<span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Does stuff&quot;</span>
+
+<span class="c1"># 好——模型清楚地知道何时以及如何使用</span>
+<span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Evaluate a mathematical expression. Use for arithmetic, trig, logarithms. Supports: +, -, *, /, **, sqrt, sin, cos, log, pi, e.&quot;</span>
+</code></pre></div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/plugins</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#你将构建什么">你将构建什么</a></li>
+<li class="lvl2"><a href="#第一步创建插件目录">第一步：创建插件目录</a></li>
+<li class="lvl2"><a href="#第二步编写清单文件">第二步：编写清单文件</a></li>
+<li class="lvl2"><a href="#第三步编写工具-schema">第三步：编写工具 schema</a></li>
+<li class="lvl2"><a href="#第四步编写工具处理器">第四步：编写工具处理器</a></li>
+<li class="lvl2"><a href="#第五步编写注册代码">第五步：编写注册代码</a></li>
+<li class="lvl2"><a href="#第六步测试">第六步：测试</a></li>
+<li class="lvl3"><a href="#调试插件发现问题">调试插件发现问题</a></li>
+<li class="lvl2"><a href="#插件的最终结构">插件的最终结构</a></li>
+<li class="lvl2"><a href="#插件还能做什么">插件还能做什么？</a></li>
+<li class="lvl3"><a href="#随附数据文件">随附数据文件</a></li>
+<li class="lvl3"><a href="#捆绑技能">捆绑技能</a></li>
+<li class="lvl3"><a href="#根据环境变量决定是否启用">根据环境变量决定是否启用</a></li>
+<li class="lvl3"><a href="#懒加载可选-python-依赖">懒加载可选 Python 依赖</a></li>
+<li class="lvl3"><a href="#条件工具可用性">条件工具可用性</a></li>
+<li class="lvl3"><a href="#覆盖内置工具">覆盖内置工具</a></li>
+<li class="lvl3"><a href="#注册多个钩子">注册多个钩子</a></li>
+<li class="lvl3"><a href="#钩子参考">钩子参考</a></li>
+<li class="lvl3"><a href="#pre_llm_call-上下文注入">pre_llm_call 上下文注入</a></li>
+<li class="lvl3"><a href="#注册-cli-命令">注册 CLI 命令</a></li>
+<li class="lvl3"><a href="#注册斜杠命令">注册斜杠命令</a></li>
+<li class="lvl3"><a href="#从斜杠命令分发工具">从斜杠命令分发工具</a></li>
+<li class="lvl2"><a href="#专用插件类型">专用插件类型</a></li>
+<li class="lvl3"><a href="#模型提供商插件添加-llm-后端">模型提供商插件——添加 LLM 后端</a></li>
+<li class="lvl3"><a href="#平台插件添加网关频道">平台插件——添加网关频道</a></li>
+<li class="lvl3"><a href="#记忆提供商插件添加跨会话知识后端">记忆提供商插件——添加跨会话知识后端</a></li>
+<li class="lvl3"><a href="#上下文引擎插件替换上下文压缩器">上下文引擎插件——替换上下文压缩器</a></li>
+<li class="lvl3"><a href="#图像生成后端">图像生成后端</a></li>
+<li class="lvl2"><a href="#非-python-扩展接口">非 Python 扩展接口</a></li>
+<li class="lvl3"><a href="#mcp-服务器注册外部工具">MCP 服务器——注册外部工具</a></li>
+<li class="lvl3"><a href="#网关事件钩子在生命周期事件时触发">网关事件钩子——在生命周期事件时触发</a></li>
+<li class="lvl3"><a href="#shell-钩子在工具调用时运行-shell-命令">Shell 钩子——在工具调用时运行 shell 命令</a></li>
+<li class="lvl3"><a href="#技能来源添加自定义技能注册表">技能来源——添加自定义技能注册表</a></li>
+<li class="lvl3"><a href="#通过命令模板接入-tts--stt">通过命令模板接入 TTS / STT</a></li>
+<li class="lvl2"><a href="#通过-pip-分发">通过 pip 分发</a></li>
+<li class="lvl2"><a href="#为-nixos-分发">为 NixOS 分发</a></li>
+<li class="lvl2"><a href="#常见错误">常见错误</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

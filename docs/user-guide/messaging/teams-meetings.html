@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teams Meetings · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/messaging/teams-meetings</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="microsoft-teams-meetings">Microsoft Teams Meetings</h1>
+<p>Use the Teams meeting pipeline when you want Hermes to ingest Microsoft Graph meeting events, fetch transcripts first, fall back to recordings plus STT when needed, and deliver a structured summary to downstream sinks.</p>
+<p>Prerequisites: see <a href="teams.html">Microsoft Teams</a> for the underlying bot/credential setup.</p>
+<blockquote>
+<p>Run <code>hermes gateway setup</code> and pick <strong>Teams Meetings</strong> for a guided walk-through.</p>
+</blockquote>
+<p>This page focuses on setup and enablement:
+- Graph credentials
+- webhook listener configuration
+- Teams delivery modes
+- pipeline config shape</p>
+<p>For day-2 operations, go-live checks, and the operator worksheet, use the dedicated guide: <a href="../../guides/operate-teams-meeting-pipeline.html">Operate the Teams Meeting Pipeline</a>.</p>
+<h2 id="what-this-feature-does">What This Feature Does</h2>
+<p>The pipeline:
+1. receives Microsoft Graph webhook events
+2. resolves the meeting and prefers transcript artifacts first
+3. falls back to recording download plus STT when no usable transcript is available
+4. stores durable job state and sink records locally
+5. can write summaries to Notion, Linear, and Microsoft Teams</p>
+<p>Operator actions stay in the CLI (the <code>teams-pipeline</code> subcommand is registered by the <code>teams_pipeline</code> plugin — enable it via <code>hermes plugins enable teams_pipeline</code> or set <code>plugins.enabled: [teams_pipeline]</code> in <code>config.yaml</code>):</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>validate
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>list
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>maintain-subscriptions
+</code></pre></div>
+
+<h2 id="prerequisites">Prerequisites</h2>
+<p>Before enabling the meetings pipeline, make sure you have:</p>
+<ul>
+<li>a working Hermes install</li>
+<li>the existing <a href="teams.html">Microsoft Teams bot setup</a> if you want Teams outbound delivery</li>
+<li>Microsoft Graph application credentials with the permissions required for the meeting resources you plan to subscribe to</li>
+<li>a public HTTPS URL that Microsoft Graph can call for webhook delivery</li>
+<li><code>ffmpeg</code> installed if you want recording-plus-STT fallback</li>
+</ul>
+<h2 id="step-1-add-microsoft-graph-credentials">Step 1: Add Microsoft Graph Credentials</h2>
+<p>Add Graph app-only credentials to <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MSGRAPH_TENANT_ID</span><span class="o">=</span>&lt;tenant-id&gt;
+<span class="nv">MSGRAPH_CLIENT_ID</span><span class="o">=</span>&lt;client-id&gt;
+<span class="nv">MSGRAPH_CLIENT_SECRET</span><span class="o">=</span>&lt;client-secret&gt;
+</code></pre></div>
+
+<p>These credentials are used by:
+- the Graph client foundation
+- subscription maintenance commands
+- meeting resolution and artifact fetches
+- Graph-based Teams outbound delivery when you do not provide a dedicated Teams access token</p>
+<h2 id="step-2-enable-the-graph-webhook-listener">Step 2: Enable the Graph Webhook Listener</h2>
+<p>The webhook listener is a gateway platform named <code>msgraph_webhook</code>. At minimum, enable it and set a client state value:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MSGRAPH_WEBHOOK_ENABLED</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">MSGRAPH_WEBHOOK_PORT</span><span class="o">=</span><span class="m">8646</span>
+<span class="nv">MSGRAPH_WEBHOOK_CLIENT_STATE</span><span class="o">=</span>&lt;random-shared-secret&gt;
+<span class="nv">MSGRAPH_WEBHOOK_ACCEPTED_RESOURCES</span><span class="o">=</span>communications/onlineMeetings
+</code></pre></div>
+
+<p>The bind host is read from the platform's <code>extra.host</code> in <code>config.yaml</code> (there is no <code>MSGRAPH_WEBHOOK_HOST</code> env var — see the <a href="msgraph-webhook.html">webhook listener reference</a>).</p>
+<p>The listener exposes:
+- <code>/msgraph/webhook</code> for Graph notifications
+- <code>/health</code> for a simple health check</p>
+<p>You need to route your public HTTPS endpoint to that listener. For example, if your public domain is <code>https://ops.example.com</code>, your Graph notification URL would typically be:</p>
+<div class="highlight"><pre><span></span><code>https://ops.example.com/msgraph/webhook
+</code></pre></div>
+
+<h2 id="step-3-configure-teams-delivery-and-pipeline-behavior">Step 3: Configure Teams Delivery and Pipeline Behavior</h2>
+<p>The meeting pipeline reads its runtime config from the existing <code>teams</code> platform entry. Pipeline-specific knobs live under <code>teams.extra.meeting_pipeline</code>. Teams outbound delivery stays on the normal Teams platform config surface.</p>
+<p>Example <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">msgraph_webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">127.0.0.1</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8646</span>
+<span class="w">      </span><span class="nt">client_state</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;replace-me&quot;</span>
+<span class="w">      </span><span class="nt">accepted_resources</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;communications/onlineMeetings&quot;</span>
+
+<span class="w">  </span><span class="nt">teams</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">client_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-teams-client-id&quot;</span>
+<span class="w">      </span><span class="nt">client_secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-teams-client-secret&quot;</span>
+<span class="w">      </span><span class="nt">tenant_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-teams-tenant-id&quot;</span>
+
+<span class="w">      </span><span class="c1"># outbound summary delivery</span>
+<span class="w">      </span><span class="nt">delivery_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;graph&quot;</span><span class="w"> </span><span class="c1"># or incoming_webhook</span>
+<span class="w">      </span><span class="nt">team_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;team-id&quot;</span>
+<span class="w">      </span><span class="nt">channel_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;channel-id&quot;</span>
+<span class="w">      </span><span class="c1"># incoming_webhook_url: &quot;https://...&quot;</span>
+
+<span class="w">      </span><span class="nt">meeting_pipeline</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">transcript_min_chars</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">80</span>
+<span class="w">        </span><span class="nt">transcript_required</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">        </span><span class="nt">transcription_fallback</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">        </span><span class="nt">ffmpeg_extract_audio</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">        </span><span class="nt">notion</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">        </span><span class="nt">linear</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>If you bind the listener to a non-loopback host such as <code>0.0.0.0</code>, you must also set <code>allowed_source_cidrs</code> to Microsoft's webhook egress ranges. Loopback binds (<code>127.0.0.1</code> / <code>::1</code>) are the intended dev-tunnel and local reverse-proxy setup.</p>
+<h2 id="teams-delivery-modes">Teams Delivery Modes</h2>
+<p>The pipeline supports two Teams summary-delivery modes inside the existing Teams plugin.</p>
+<h3 id="incoming_webhook"><code>incoming_webhook</code></h3>
+<p>Use this when you want a simple webhook post into Teams without channel-message creation through Graph.</p>
+<p>Required config:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">teams</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">delivery_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;incoming_webhook&quot;</span>
+<span class="w">      </span><span class="nt">incoming_webhook_url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://...&quot;</span>
+</code></pre></div>
+
+<h3 id="graph"><code>graph</code></h3>
+<p>Use this when you want Hermes to post the summary through Microsoft Graph into a Teams chat or channel.</p>
+<p>Supported targets:
+- <code>chat_id</code>
+- <code>team_id</code> + <code>channel_id</code>
+- <code>team_id</code> + <code>home_channel</code> fallback for the existing Teams platform</p>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">teams</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">delivery_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;graph&quot;</span>
+<span class="w">      </span><span class="nt">team_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;team-id&quot;</span>
+<span class="w">      </span><span class="nt">channel_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;channel-id&quot;</span>
+</code></pre></div>
+
+<h2 id="step-4-start-the-gateway">Step 4: Start the Gateway</h2>
+<p>Start Hermes normally after updating config:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<p>Or, if you run Hermes in Docker, start the gateway the same way you already do for your deployment.</p>
+<p>Check the listener:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8646/health
+</code></pre></div>
+
+<h2 id="step-5-create-graph-subscriptions">Step 5: Create Graph Subscriptions</h2>
+<p>Use the plugin CLI to create and inspect subscriptions.</p>
+<p>Examples:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>subscribe<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--resource<span class="w"> </span>communications/onlineMeetings/getAllTranscripts<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--notification-url<span class="w"> </span>https://ops.example.com/msgraph/webhook<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--client-state<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$MSGRAPH_WEBHOOK_CLIENT_STATE</span><span class="s2">&quot;</span>
+
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>subscribe<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--resource<span class="w"> </span>communications/onlineMeetings/getAllRecordings<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--notification-url<span class="w"> </span>https://ops.example.com/msgraph/webhook<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--client-state<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$MSGRAPH_WEBHOOK_CLIENT_STATE</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<div class="admonition adm-warning"><p class="adm-title">Graph subscriptions expire in 72 hours</p>
+<p>Microsoft Graph caps webhook subscriptions at 72 hours and will not auto-renew them. You MUST schedule <code>hermes teams-pipeline maintain-subscriptions</code> before going live, or notifications will silently stop three days after any manual subscription creation. See <a href="../../guides/operate-teams-meeting-pipeline.html#automating-subscription-renewal-required-for-production">Automating subscription renewal</a> in the operator runbook — three options (Hermes cron, systemd timer, plain crontab).</p>
+</div>
+<p>For subscription maintenance and day-2 operator flows, continue with the guide: <a href="../../guides/operate-teams-meeting-pipeline.html">Operate the Teams Meeting Pipeline</a>.</p>
+<h2 id="validation">Validation</h2>
+<p>Run the built-in validation snapshot:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>validate
+</code></pre></div>
+
+<p>Useful companion checks:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>token-health
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>subscriptions
+</code></pre></div>
+
+<h2 id="troubleshooting">Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Problem</th>
+<th>What to check</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Graph webhook validation fails</td>
+<td>Confirm the public URL is correct and reachable, and that Graph is calling the exact <code>/msgraph/webhook</code> path</td>
+</tr>
+<tr>
+<td>Jobs do not appear in <code>hermes teams-pipeline list</code></td>
+<td>Confirm <code>msgraph_webhook</code> is enabled and that subscriptions point at the right notification URL</td>
+</tr>
+<tr>
+<td>Transcript-first never succeeds</td>
+<td>Check Graph permissions for transcript resources and whether the transcript artifact exists for that meeting</td>
+</tr>
+<tr>
+<td>Recording fallback fails</td>
+<td>Confirm <code>ffmpeg</code> is installed and the Graph app can access recording artifacts</td>
+</tr>
+<tr>
+<td>Teams summary delivery fails</td>
+<td>Re-check <code>delivery_mode</code>, target IDs, and Teams auth config</td>
+</tr>
+</tbody>
+</table>
+<h2 id="related-docs">Related Docs</h2>
+<ul>
+<li><a href="teams.html">Microsoft Teams bot setup</a></li>
+<li><a href="../../guides/operate-teams-meeting-pipeline.html">Operate the Teams Meeting Pipeline</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/messaging/teams-meetings</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#what-this-feature-does">What This Feature Does</a></li>
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#step-1-add-microsoft-graph-credentials">Step 1: Add Microsoft Graph Credentials</a></li>
+<li class="lvl2"><a href="#step-2-enable-the-graph-webhook-listener">Step 2: Enable the Graph Webhook Listener</a></li>
+<li class="lvl2"><a href="#step-3-configure-teams-delivery-and-pipeline-behavior">Step 3: Configure Teams Delivery and Pipeline Behavior</a></li>
+<li class="lvl2"><a href="#teams-delivery-modes">Teams Delivery Modes</a></li>
+<li class="lvl3"><a href="#incoming_webhook">incoming_webhook</a></li>
+<li class="lvl3"><a href="#graph">graph</a></li>
+<li class="lvl2"><a href="#step-4-start-the-gateway">Step 4: Start the Gateway</a></li>
+<li class="lvl2"><a href="#step-5-create-graph-subscriptions">Step 5: Create Graph Subscriptions</a></li>
+<li class="lvl2"><a href="#validation">Validation</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl2"><a href="#related-docs">Related Docs</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

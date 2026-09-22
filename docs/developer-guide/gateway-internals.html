@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gateway Internals · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/gateway-internals</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="gateway-internals">Gateway Internals</h1>
+<p>The messaging gateway is the long-running process that connects Hermes to 20+ external messaging platforms through a unified architecture.</p>
+<h2 id="key-files">Key Files</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gateway/run.py</code></td>
+<td><code>GatewayRunner</code> facade — composes the <code>gateway/run_*.py</code> sibling mixins (startup, adapters, inbound, turn, busy, goals, notifications, shutdown, …) and <code>gateway/slash_commands_*.py</code> handlers</td>
+</tr>
+<tr>
+<td><code>gateway/session.py</code></td>
+<td><code>SessionStore</code> — conversation persistence and session key construction</td>
+</tr>
+<tr>
+<td><code>gateway/delivery.py</code></td>
+<td>Outbound message delivery to target platforms/channels</td>
+</tr>
+<tr>
+<td><code>gateway/pairing.py</code></td>
+<td>DM pairing flow for user authorization</td>
+</tr>
+<tr>
+<td><code>gateway/channel_directory.py</code></td>
+<td>Maps chat IDs to human-readable names for cron delivery</td>
+</tr>
+<tr>
+<td><code>gateway/hooks.py</code></td>
+<td>Hook discovery, loading, and lifecycle event dispatch</td>
+</tr>
+<tr>
+<td><code>gateway/mirror.py</code></td>
+<td>Cross-session message mirroring for <code>send_message</code></td>
+</tr>
+<tr>
+<td><code>gateway/status.py</code></td>
+<td>Token lock management for profile-scoped gateway instances</td>
+</tr>
+<tr>
+<td><code>gateway/builtin_hooks/</code></td>
+<td>Extension point for always-registered hooks (none shipped)</td>
+</tr>
+<tr>
+<td><code>gateway/platform_registry.py</code></td>
+<td>Adapter registry, factories, and deferred (lazy) loaders for bundled platform plugins</td>
+</tr>
+<tr>
+<td><code>plugins/platforms/&lt;name&gt;/</code></td>
+<td>Bundled messaging adapters (most platforms: <code>adapter.py</code> + <code>plugin.yaml</code>)</td>
+</tr>
+<tr>
+<td><code>gateway/platforms/</code></td>
+<td>Shared <code>base.py</code> plus legacy/direct adapters (Signal, API server, webhooks, …)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="architecture-overview">Architecture Overview</h2>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────┐
+│                  GatewayRunner                  │
+│                                                 │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+│  │ Telegram │  │ Discord  │  │  Slack   │       │
+│  │ Adapter  │  │ Adapter  │  │ Adapter  │       │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘       │
+│       │             │             │             │
+│       └─────────────┼─────────────┘             │
+│                     ▼                           │
+│              _handle_message()                  │
+│                     │                           │
+│         ┌───────────┼───────────┐               │
+│         ▼           ▼           ▼               │
+│  Slash command   AIAgent    Queue/BG            │
+│    dispatch      creation   sessions            │
+│                     │                           │
+│                     ▼                           │
+│                 SessionStore                    │
+│              (SQLite persistence)               │
+└───────┴─────────────┴─────────────┴─────────────┘
+</code></pre></div>
+
+<h2 id="message-flow">Message Flow</h2>
+<p>When a message arrives from any platform:</p>
+<ol>
+<li><strong>Platform adapter</strong> receives raw event, normalizes it into a <code>MessageEvent</code></li>
+<li><strong>Base adapter</strong> checks active session guard:</li>
+<li>If agent is running for this session → queue message, set interrupt event</li>
+<li>If <code>/approve</code>, <code>/deny</code>, <code>/stop</code> → bypass guard (dispatched inline)</li>
+<li><strong>GatewayRunner._handle_message()</strong> receives the event:</li>
+<li>Resolve session key via <code>_session_key_for_source()</code> (format: <code>agent:{namespace}:{platform}:{chat_type}:{chat_id}</code>; the namespace is <code>main</code> for the default profile, <code>&lt;profile&gt;</code> under multiplexing — see <a href="#multiplexed-profiles">Multiplexed profiles</a>)</li>
+<li>Check authorization (see Authorization below)</li>
+<li>Check if it's a slash command → dispatch to command handler</li>
+<li>Check if agent is already running → intercept commands like <code>/stop</code>, <code>/status</code></li>
+<li>Otherwise → create <code>AIAgent</code> instance and run conversation</li>
+<li><strong>Response</strong> is sent back through the platform adapter</li>
+</ol>
+<h3 id="session-key-format">Session Key Format</h3>
+<p>Session keys encode the full routing context:</p>
+<div class="highlight"><pre><span></span><code>agent:{namespace}:{platform}:{chat_type}:{chat_id}
+</code></pre></div>
+
+<p>For example: <code>agent:main:telegram:private:123456789</code> for the default profile, or
+<code>agent:work:telegram:private:123456789</code> when the multiplexer routes that chat to profile <code>work</code>
+(<code>gateway/session.py::_session_key_namespace</code>; a profile literally named <code>main</code> is marked <code>main~</code>).</p>
+<p>Thread-aware platforms (Telegram forum topics, Discord threads, Slack threads) may include thread IDs in the chat_id portion. <strong>Never construct session keys manually</strong> — always use <code>build_session_key()</code> from <code>gateway/session.py</code>.</p>
+<h3 id="two-level-message-guard">Two-Level Message Guard</h3>
+<p>When an agent is actively running, incoming messages pass through two sequential guards:</p>
+<ol>
+<li>
+<p><strong>Level 1 — Base adapter</strong> (<code>gateway/platforms/base.py</code>): Checks <code>_active_sessions</code>. If the session is active, queues the message in <code>_pending_messages</code> and sets an interrupt event. This catches messages <em>before</em> they reach the gateway runner.</p>
+</li>
+<li>
+<p><strong>Level 2 — Gateway runner</strong> (<code>gateway/run_inbound.py</code>): Checks <code>_running_agents</code>. Intercepts specific commands (<code>/stop</code>, <code>/new</code>, <code>/queue</code>, <code>/status</code>, <code>/approve</code>, <code>/deny</code>) and routes them appropriately. Everything else triggers <code>running_agent.interrupt()</code>.</p>
+</li>
+</ol>
+<p>Commands that must reach the runner while the agent is blocked (like <code>/approve</code>) are dispatched <strong>inline</strong> via <code>await self._message_handler(event)</code> — they bypass the background task system to avoid race conditions.</p>
+<h2 id="authorization">Authorization</h2>
+<p>The gateway uses a multi-layer authorization check, evaluated in order:</p>
+<ol>
+<li><strong>Per-platform allow-all flag</strong> (e.g., <code>TELEGRAM_ALLOW_ALL_USERS</code>) — if set, all users on that platform are authorized</li>
+<li><strong>Platform allowlist</strong> (e.g., <code>TELEGRAM_ALLOWED_USERS</code>) — comma-separated user IDs</li>
+<li><strong>DM pairing</strong> — authenticated users can pair new users via a pairing code</li>
+<li><strong>Global allow-all</strong> (<code>GATEWAY_ALLOW_ALL_USERS</code>, or <code>gateway.allow_all_users</code> in <code>config.yaml</code>, bridged to the env var by <code>gateway/config_loader.py::bridge_core_env_settings</code>) — if set, all users across all platforms are authorized</li>
+<li><strong>Default: deny</strong> — unauthorized users are rejected</li>
+</ol>
+<h3 id="dm-pairing-flow">DM Pairing Flow</h3>
+<div class="highlight"><pre><span></span><code>Admin: /pair
+Gateway: &quot;Pairing code: ABC123. Share with the user.&quot;
+New user: ABC123
+Gateway: &quot;Paired! You&#39;re now authorized.&quot;
+</code></pre></div>
+
+<p>Pairing state is persisted in <code>gateway/pairing.py</code> and survives restarts.</p>
+<h2 id="slash-command-dispatch">Slash Command Dispatch</h2>
+<p>All slash commands in the gateway flow through the same resolution pipeline:</p>
+<ol>
+<li><code>resolve_command()</code> from <code>hermes_cli/commands.py</code> maps input to canonical name (handles aliases, prefix matching)</li>
+<li>The canonical name is checked against <code>GATEWAY_KNOWN_COMMANDS</code></li>
+<li><code>_handle_message()</code> (<code>gateway/run_inbound.py</code>) looks the handler up by name — <code>_handle_&lt;name&gt;_command</code> on the <code>gateway/slash_commands_*.py</code> mixins — via <code>_command_handler_table</code> over <code>_IDLE_COMMANDS</code> / <code>_PLAIN_COMMANDS</code> in <code>gateway/run_busy.py</code>; there is no <code>if canonical == ...</code> chain</li>
+<li>Some commands are gated on config (<code>gateway_config_gate</code> on <code>CommandDef</code>)</li>
+</ol>
+<h3 id="running-agent-guard">Running-Agent Guard</h3>
+<p>Commands that must NOT execute while the agent is processing are rejected early:</p>
+<p>While <code>_quick_key in self._running_agents</code>, <code>_dispatch_busy_slash_command()</code> in <code>gateway/run_busy.py</code> routes each recognized command by its <code>CommandDef.busy_policy</code> / <code>busy_handler</code>: a mid-run variant (<code>_busy_&lt;key&gt;_command</code>) if one exists, otherwise the normal handler when <code>busy_policy</code> allows it, otherwise a reject message ("⏳ Agent is running — <code>/model</code> can't run mid-turn…").</p>
+<p>Bypass commands (<code>/stop</code>, <code>/new</code>, <code>/approve</code>, <code>/deny</code>, <code>/queue</code>, <code>/status</code>) have mid-run handlers and are dispatched inline.</p>
+<h2 id="config-sources">Config Sources</h2>
+<p>The gateway reads configuration from multiple sources:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>What it provides</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>~/.hermes/.env</code></td>
+<td>API keys, bot tokens, platform credentials</td>
+</tr>
+<tr>
+<td><code>~/.hermes/config.yaml</code></td>
+<td>Model settings, tool configuration, display options</td>
+</tr>
+<tr>
+<td>Environment variables</td>
+<td>Override any of the above</td>
+</tr>
+</tbody>
+</table>
+<p>Unlike the CLI (which uses <code>load_cli_config()</code> with hardcoded defaults), the gateway reads <code>config.yaml</code> directly via YAML loader. This means config keys that exist in the CLI's defaults dict but not in the user's config file may behave differently between CLI and gateway.</p>
+<h2 id="platform-adapters">Platform Adapters</h2>
+<p>Most messaging platforms ship as plugin adapters under <code>plugins/platforms/&lt;name&gt;/adapter.py</code>; a few legacy adapters still live directly in <code>gateway/platforms/</code>. All extend <code>BasePlatformAdapter</code> from <code>gateway/platforms/base.py</code>:</p>
+<div class="highlight"><pre><span></span><code>plugins/platforms/                  # plugin-packaged adapters (one dir each)
+├── telegram/adapter.py     # Telegram Bot API (long polling or webhook)
+├── discord/adapter.py      # Discord bot via discord.py
+├── slack/adapter.py        # Slack Socket Mode
+├── whatsapp/adapter.py     # WhatsApp Business Cloud API
+├── matrix/adapter.py       # Matrix via mautrix (optional E2EE)
+├── mattermost/adapter.py   # Mattermost WebSocket API
+├── email/adapter.py        # Email via IMAP/SMTP
+├── sms/adapter.py          # SMS via Twilio
+├── dingtalk/adapter.py     # DingTalk WebSocket
+├── feishu/adapter.py       # Feishu/Lark WebSocket or webhook
+├── wecom/adapter.py        # WeCom (WeChat Work) callback
+├── line/adapter.py         # LINE Messaging API
+├── teams/adapter.py        # Microsoft Teams
+├── irc/adapter.py          # IRC (canonical scoped-lock example)
+├── homeassistant/adapter.py # Home Assistant conversation integration
+└── …                       # google_chat, ntfy, photon, raft, simplex, …
+
+gateway/platforms/                  # core base + legacy direct adapters
+├── base.py              # BasePlatformAdapter — shared logic for all platforms
+├── signal.py            # Signal via signal-cli REST API
+├── weixin.py            # Weixin (personal WeChat) via iLink Bot API
+├── bluebubbles.py       # Apple iMessage via BlueBubbles macOS server
+├── qqbot/               # QQ Bot (Tencent QQ) via Official API v2 (sub-package)
+├── yuanbao.py           # Yuanbao (Tencent) DM/group adapter
+├── msgraph_webhook.py   # Microsoft Graph change-notification webhook (Teams, Outlook, etc.)
+├── webhook.py           # Inbound/outbound webhook adapter
+└── api_server.py        # REST API server adapter
+</code></pre></div>
+
+<p><strong>Deferred loading:</strong> Bundled <code>kind: platform</code> plugins register cheap <code>register_deferred</code> loaders in <code>gateway/platform_registry.py</code> (via <code>hermes_cli/plugins.py</code>) so platform SDKs import only when the gateway starts, delivers, or runs setup/status — not on plain <code>hermes chat</code>. Resolution loads one adapter on lookup; full enumeration runs pending loaders only on paths that need every platform.</p>
+<p>Experimental connector-backed platforms use the generic relay adapter in <code>gateway/relay/</code> instead of a direct platform module. When <code>GATEWAY_RELAY_URL</code> or <code>gateway.relay_url</code> is configured, the gateway registers the <code>relay</code> platform, dials the connector over an outbound WebSocket, and receives <code>descriptor</code>, <code>inbound</code>, and <code>interrupt_inbound</code> frames on that same socket. The connector advertises a <code>CapabilityDescriptor</code>; Hermes can send normal outbound replies, token-less <code>follow_up</code> operations, and interrupt frames back through the relay. The source-grounded wire contract lives in <a href="relay-connector-contract.html">Relay ↔ Connector contract</a>.</p>
+<p>Adapters implement a common interface:
+- <code>connect()</code> / <code>disconnect()</code> — lifecycle management
+- <code>send()</code> — outbound message delivery
+- inbound events are normalized into a <code>MessageEvent</code> and forwarded via <code>handle_message()</code></p>
+<p>Internal push wakes use <code>gateway.wake.admit_internal_event</code>: the public
+<code>handle_message()</code> still returns <code>None</code>, but the event's process-local
+<code>_gateway_accepted</code> receipt is set only after scheduling or queue insertion.
+A missing handler, mismatched explicit session key, or queue-cap drop is not
+acceptance. Custom adapters overriding ingress should delegate internal events to
+<code>BasePlatformAdapter.handle_message()</code> (or explicitly record actual admission),
+not equate a consumed/dropped callback with acceptance. This receipt is separate
+from heartbeat execution accounting and does not bypass authorization, emergency
+stop, or later turn-preparation gates.</p>
+<h3 id="token-locks">Token Locks</h3>
+<p>Adapters that connect with unique credentials call <code>acquire_scoped_lock()</code> in <code>connect()</code> and <code>release_scoped_lock()</code> in <code>disconnect()</code>. This prevents two profiles from using the same bot token simultaneously.</p>
+<p>A lock conflict is emitted as <code>{scope}_lock</code> with <code>retryable=True</code> so a <strong>mid-run</strong> reconnect can recover once the other holder exits. At <strong>startup</strong>, though, a live foreign holder is a configuration conflict: <code>gateway/restart.py::is_global_startup_conflict()</code> recognizes the <code>*_lock</code> / <code>lock_conflict</code> code families and the startup router parks the platform <code>fatal</code> instead of retry-queueing it. With nothing else connected the gateway exits <code>78</code> (<code>EX_CONFIG</code>, <code>gateway_state=startup_failed</code>) so the supervisor stops restarting it: systemd via <code>RestartPreventExitStatus=78</code>, s6 via finish→125, launchd via <code>KeepAlive.SuccessfulExit=false</code> after the stderr wrapper maps 78→0. Alongside a genuinely transient peer failure the gateway stays alive and only the peer retries.</p>
+<h2 id="delivery-path">Delivery Path</h2>
+<p>Outgoing deliveries (<code>gateway/delivery.py</code>) handle:</p>
+<ul>
+<li><strong>Direct reply</strong> — send response back to the originating chat</li>
+<li><strong>Home channel delivery</strong> — route cron job outputs and background results to a configured home channel</li>
+<li><strong>Explicit target delivery</strong> — the send engine specifying <code>telegram:-1001234567890</code>, exposed via the <a href="../guides/pipe-script-output.html"><code>hermes send</code> CLI</a> for shell scripts and via cron <code>deliver:</code> targets</li>
+<li><strong>Cross-platform delivery</strong> — deliver to a different platform than the originating message</li>
+</ul>
+<p>Cron job deliveries are NOT mirrored into gateway session history — they live in their own cron session only. This is a deliberate design choice to avoid message alternation violations.</p>
+<h2 id="hooks">Hooks</h2>
+<p>Gateway hooks are Python modules that respond to lifecycle events:</p>
+<h3 id="gateway-hook-events">Gateway Hook Events</h3>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>When fired</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gateway:startup</code></td>
+<td>Gateway process starts</td>
+</tr>
+<tr>
+<td><code>session:start</code></td>
+<td>New conversation session begins</td>
+</tr>
+<tr>
+<td><code>session:end</code></td>
+<td>Session completes or times out</td>
+</tr>
+<tr>
+<td><code>session:reset</code></td>
+<td>User resets session with <code>/new</code></td>
+</tr>
+<tr>
+<td><code>agent:start</code></td>
+<td>Agent begins processing a message</td>
+</tr>
+<tr>
+<td><code>agent:step</code></td>
+<td>Agent completes one tool-calling iteration</td>
+</tr>
+<tr>
+<td><code>agent:end</code></td>
+<td>Agent finishes and returns response</td>
+</tr>
+<tr>
+<td><code>command:*</code></td>
+<td>Any slash command is executed</td>
+</tr>
+</tbody>
+</table>
+<p>Hooks are discovered from <code>gateway/builtin_hooks/</code> (an extension point — currently empty in the shipped distribution; <code>_register_builtin_hooks()</code> is a no-op stub) and <code>&lt;profile home&gt;/hooks/</code> (user-installed; <code>~/.hermes/hooks/</code> for the default profile, one directory per served profile under multiplexing — paths resolve at call time, never at import). Each hook is a directory with a <code>HOOK.yaml</code> manifest and <code>handler.py</code>.</p>
+<h2 id="memory-provider-integration">Memory Provider Integration</h2>
+<p>When a memory provider plugin (e.g., Honcho) is enabled:</p>
+<ol>
+<li>Gateway creates an <code>AIAgent</code> per message with the session ID</li>
+<li>The <code>MemoryManager</code> initializes the provider with the session context</li>
+<li>Provider tools (e.g., <code>honcho_profile</code>, <code>viking_search</code>) are routed through:</li>
+</ol>
+<div class="highlight"><pre><span></span><code>AIAgent._invoke_tool()
+  → self._memory_manager.handle_tool_call(name, args)
+    → provider.handle_tool_call(name, args)
+</code></pre></div>
+
+<ol>
+<li>On session end/reset, <code>on_session_end()</code> fires for cleanup and final data flush</li>
+</ol>
+<h3 id="memory-flush-lifecycle">Memory Flush Lifecycle</h3>
+<p>Explicit conversation boundaries (such as <code>/new</code>, <code>/reset</code>, or <code>/resume</code>) flush and finalize the outgoing session. Idle time and daily boundaries never finalize it.</p>
+<p>Resource-only TTL, LRU, and memory-pressure eviction commits the cached transcript to configured memory providers before releasing the agent's clients. It does not close the durable conversation: the next turn reloads the same transcript and identity.</p>
+<h2 id="background-maintenance">Background Maintenance</h2>
+<p>The gateway runs periodic maintenance alongside message handling:</p>
+<ul>
+<li><strong>Cron ticking</strong> — checks job schedules and fires due jobs</li>
+<li><strong>Session housekeeping</strong> — reclaims cached resources without ending transcripts</li>
+<li><strong>Memory flush</strong> — commits memory before soft cache eviction</li>
+<li><strong>Cache refresh</strong> — refreshes model lists and provider status</li>
+</ul>
+<h2 id="process-management">Process Management</h2>
+<p>The gateway runs as a long-lived process, managed via:</p>
+<ul>
+<li><code>hermes gateway start</code> / <code>hermes gateway stop</code> — manual control</li>
+<li><code>systemctl</code> (Linux) or <code>launchctl</code> (macOS) — service management</li>
+<li>PID file at <code>~/.hermes/gateway.pid</code> — profile-scoped process tracking</li>
+</ul>
+<p><strong>Profile-scoped vs global</strong>: <code>start_gateway()</code> uses profile-scoped PID files. Standalone (one gateway per profile), <code>hermes -p x gateway stop</code> stops only that profile's gateway. Under multiplexing there is ONE gateway process, owned by the default profile: <code>hermes gateway stop</code> on the default takes every served profile down, and <code>hermes -p x gateway stop</code> for a served secondary refuses with exit 78 (it has no gateway of its own). <code>hermes gateway stop --all</code> uses global <code>ps aux</code> scanning to kill all gateway processes (used during updates). Liveness is decided by <code>gateway.status.live_gateway_pid_for_home</code> (PID + start-time fingerprint), never bare PID existence.</p>
+<h2 id="multiplexed-profiles">Multiplexed profiles</h2>
+<p>With <code>gateway.multiplex_profiles: true</code> one process serves the default profile plus every live directory under <code>profiles/</code> (<code>hermes_cli/profiles.py::profiles_to_serve(multiplex=True)</code>). <code>os.environ</code> and module globals hold the <strong>launch</strong> profile's values, so every activity for a secondary binds its scope explicitly — a profile is home + secret scope + terminal scope together:</p>
+<table>
+<thead>
+<tr>
+<th>Activity</th>
+<th>Binding</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Routed turn</td>
+<td><code>gateway/run.py::_profile_runtime_scope(home)</code> via <code>run_turn.py::_profile_scope_for_source</code></td>
+</tr>
+<tr>
+<td>Agent release / eviction (TTL, LRU, memory pressure)</td>
+<td><code>gateway/run_agent_cache.py::_run_release_in_profile_scope</code></td>
+</tr>
+<tr>
+<td>Shutdown</td>
+<td><code>gateway/run_shutdown.py::_finalize_session</code></td>
+</tr>
+<tr>
+<td>Post-turn media delivery</td>
+<td><code>gateway/platforms/base.py::_media_delivery_scope</code></td>
+</tr>
+<tr>
+<td>Cron tick</td>
+<td><code>cron/scheduler_provider.py::_profile_cron_scope(home)</code> (one ticker, profiles in sequence)</td>
+</tr>
+<tr>
+<td>Child processes (<code>hermes -p X</code> workers, relay turns, browser drivers)</td>
+<td><code>tools/environments/local.py::served_profile_child_env</code></td>
+</tr>
+<tr>
+<td>Background threads</td>
+<td><code>agent/memory_provider.py::spawn_context_thread</code></td>
+</tr>
+</tbody>
+</table>
+<p>Secret reads fail closed (<code>agent.secret_scope.get_secret</code> raises <code>UnscopedSecretError</code>) only after <code>set_multiplex_active(True)</code>, which the gateway, cron, <code>gateway migrate</code> and the Desktop/dashboard <code>serve</code> backend set. Adapter YAML never reaches <code>os.environ</code> under multiplex: <code>gateway/platforms/_shared.py::apply_yaml_bridge</code> seeds <code>PlatformConfig.extra</code> and skips the environ write under a secondary's scope; gates read through <code>platform_gate_env</code>. Shared-ingress platforms (WhatsApp bridge, Relay) run on the default profile only; a secondary that enables one is logged once and stamped into runtime status (<code>run_adapters.py::_note_unserved_secondary_platform</code>). Per-profile isolation as the user sees it: <a href="../user-guide/multi-profile-gateways.html#what-is-isolated-per-profile">Multi-profile gateways § What is isolated per profile</a>.</p>
+<h2 id="related-docs">Related Docs</h2>
+<ul>
+<li><a href="session-storage.html">Session Storage</a></li>
+<li><a href="cron-internals.html">Cron Internals</a></li>
+<li><a href="acp-internals.html">ACP Internals</a></li>
+<li><a href="agent-loop.html">Agent Loop Internals</a></li>
+<li><a href="../user-guide/messaging.html">Messaging Gateway (User Guide)</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-internals</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#key-files">Key Files</a></li>
+<li class="lvl2"><a href="#architecture-overview">Architecture Overview</a></li>
+<li class="lvl2"><a href="#message-flow">Message Flow</a></li>
+<li class="lvl3"><a href="#session-key-format">Session Key Format</a></li>
+<li class="lvl3"><a href="#two-level-message-guard">Two-Level Message Guard</a></li>
+<li class="lvl2"><a href="#authorization">Authorization</a></li>
+<li class="lvl3"><a href="#dm-pairing-flow">DM Pairing Flow</a></li>
+<li class="lvl2"><a href="#slash-command-dispatch">Slash Command Dispatch</a></li>
+<li class="lvl3"><a href="#running-agent-guard">Running-Agent Guard</a></li>
+<li class="lvl2"><a href="#config-sources">Config Sources</a></li>
+<li class="lvl2"><a href="#platform-adapters">Platform Adapters</a></li>
+<li class="lvl3"><a href="#token-locks">Token Locks</a></li>
+<li class="lvl2"><a href="#delivery-path">Delivery Path</a></li>
+<li class="lvl2"><a href="#hooks">Hooks</a></li>
+<li class="lvl3"><a href="#gateway-hook-events">Gateway Hook Events</a></li>
+<li class="lvl2"><a href="#memory-provider-integration">Memory Provider Integration</a></li>
+<li class="lvl3"><a href="#memory-flush-lifecycle">Memory Flush Lifecycle</a></li>
+<li class="lvl2"><a href="#background-maintenance">Background Maintenance</a></li>
+<li class="lvl2"><a href="#process-management">Process Management</a></li>
+<li class="lvl2"><a href="#multiplexed-profiles">Multiplexed profiles</a></li>
+<li class="lvl2"><a href="#related-docs">Related Docs</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

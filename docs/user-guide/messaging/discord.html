@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Discord · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/messaging/discord</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="discord-setup">Discord Setup</h1>
+<p>Hermes Agent integrates with Discord as a bot, letting you chat with your AI assistant through direct messages or server channels. The bot receives your messages, processes them through the Hermes Agent pipeline (including tool use, memory, and reasoning), and responds in real time. It supports text, voice messages, file attachments, and slash commands.</p>
+<p>Before setup, here's the part most people want to know: how Hermes behaves once it's in your server.</p>
+<h2 id="how-hermes-behaves">How Hermes Behaves</h2>
+<table>
+<thead>
+<tr>
+<th>Context</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>DMs</strong></td>
+<td>Hermes responds to every message. No <code>@mention</code> needed. Each DM has its own session.</td>
+</tr>
+<tr>
+<td><strong>Server channels</strong></td>
+<td>By default, Hermes only responds when you <code>@mention</code> it. If you post in a channel without mentioning it, Hermes ignores the message.</td>
+</tr>
+<tr>
+<td><strong>Free-response channels</strong></td>
+<td>You can make specific channels mention-free with <code>DISCORD_FREE_RESPONSE_CHANNELS</code>, or disable mentions globally with <code>DISCORD_REQUIRE_MENTION=false</code>. Messages in these channels are answered inline by default — auto-threading is skipped so the channel stays a lightweight chat. Set <code>discord.free_response_auto_thread: true</code> to get both mention-free replies and a thread per top-level message.</td>
+</tr>
+<tr>
+<td><strong>Threads</strong></td>
+<td>Hermes replies in the same thread. Mention rules still apply unless that thread or its parent channel is configured as free-response. Threads stay isolated from the parent channel for session history.</td>
+</tr>
+<tr>
+<td><strong>Shared channels with multiple users</strong></td>
+<td>By default, Hermes isolates session history per user inside the channel for safety and clarity. Two people talking in the same channel do not share one transcript unless you explicitly disable that.</td>
+</tr>
+<tr>
+<td><strong>Messages mentioning other users</strong></td>
+<td>When <code>DISCORD_IGNORE_NO_MENTION</code> is <code>true</code> (the default), Hermes stays silent if a message @mentions other users but does <strong>not</strong> mention the bot. This prevents the bot from jumping into conversations directed at other people. Set to <code>false</code> if you want the bot to respond to all messages regardless of who is mentioned. This only applies in server channels, not DMs.</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>If you want a normal bot-help channel where people can talk to Hermes without tagging it every time, add that channel to <code>DISCORD_FREE_RESPONSE_CHANNELS</code>.</p>
+</div>
+<h3 id="discord-gateway-model">Discord Gateway Model</h3>
+<p>Hermes on Discord is not a webhook that replies statelessly. It runs through the full messaging gateway, which means each incoming message goes through:</p>
+<ol>
+<li>authorization (<code>DISCORD_ALLOWED_USERS</code>)</li>
+<li>mention / free-response checks</li>
+<li>session lookup</li>
+<li>session transcript loading</li>
+<li>normal Hermes agent execution, including tools, memory, and slash commands</li>
+<li>response delivery back to Discord</li>
+</ol>
+<p>That matters because behavior in a busy server depends on both Discord routing and Hermes session policy.</p>
+<h3 id="session-model-in-discord">Session Model in Discord</h3>
+<p>By default:</p>
+<ul>
+<li>each DM gets its own session</li>
+<li>each server thread gets its own session namespace</li>
+<li>each user in a shared channel gets their own session inside that channel</li>
+</ul>
+<p>So if Alice and Bob both talk to Hermes in <code>#research</code>, Hermes treats those as separate conversations by default even though they are using the same visible Discord channel.</p>
+<p>This is controlled by <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>Set it to <code>false</code> only if you explicitly want one shared conversation for the entire room:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>Shared sessions can be useful for a collaborative room, but they also mean:</p>
+<ul>
+<li>users share context growth and token costs</li>
+<li>one person's long tool-heavy task can bloat everyone else's context</li>
+<li>one person's in-flight run can interrupt another person's follow-up in the same room</li>
+</ul>
+<h3 id="interrupts-and-concurrency">Interrupts and Concurrency</h3>
+<p>Hermes tracks running agents by session key.</p>
+<p>With the default <code>group_sessions_per_user: true</code>:</p>
+<ul>
+<li>Alice interrupting her own in-flight request only affects Alice's session in that channel</li>
+<li>Bob can keep talking in the same channel without inheriting Alice's history or interrupting Alice's run</li>
+</ul>
+<p>With <code>group_sessions_per_user: false</code>:</p>
+<ul>
+<li>the whole room shares one running-agent slot for that channel/thread</li>
+<li>follow-up messages from different people can interrupt or queue behind each other</li>
+</ul>
+<p>This guide walks you through the full setup process — from creating your bot on Discord's Developer Portal to sending your first message.</p>
+<h3 id="gateway-websocket-health">Gateway WebSocket health</h3>
+<p>Discord REST and the Gateway WebSocket are separate transports. A successful REST response (including <code>fetch_user()</code> returning HTTP 200) does not prove that the bot can still receive Gateway events. Hermes therefore combines the ready state, client/socket closure state, socket openness, heartbeat ACK age, finite heartbeat latency, and — since the dispatch-side dimension — how long it has been since the last parsed Gateway event.</p>
+<p>After the configured number of consecutive unhealthy samples, the adapter emits one retryable fatal event. The existing gateway reconnect watcher creates a fresh adapter; the Discord adapter does not start a second unbounded reconnect loop.</p>
+<p>Configure the non-secret thresholds in <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">websocket_liveness_interval_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">15</span>
+<span class="w">  </span><span class="nt">websocket_liveness_failure_threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+<span class="w">  </span><span class="nt">websocket_heartbeat_ack_max_age_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60</span>
+<span class="w">  </span><span class="nt">websocket_max_latency_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span>
+<span class="w">  </span><span class="nt">websocket_event_max_silence_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">14400</span>
+</code></pre></div>
+
+<p>The old <code>liveness_interval_seconds</code> and <code>liveness_failure_threshold</code> names remain compatibility aliases only; they no longer mean REST probing.</p>
+<p>Any knob at <code>0</code> disables the whole WebSocket liveness probe. Values that fail to parse as a positive number (e.g. <code>15s</code>, <code>nan</code>, <code>true</code>, <code>-1</code>) also disable it, and log a warning each time the adapter starts — check <code>gateway.log</code> if the probe seems inactive.</p>
+<p><code>websocket_event_max_silence_seconds</code> is the exception: it guards a single dimension (event dispatch), so <code>0</code> opts out of <strong>that check only</strong> — ready/ACK/latency keep guarding. A socket can stay ESTABLISHED and keep ACKing heartbeats while delivering zero Gateway events; heartbeat ACKs are frames without an event type, so no transport-side check can see that state. The default (4 hours) matches the outage window operators have observed in the field; a quiet guild can legitimately go hours without a single Gateway event, so keep this bound generous unless you know your traffic.</p>
+<h2 id="step-1-create-a-discord-application">Step 1: Create a Discord Application</h2>
+<ol>
+<li>Go to the <a href="https://discord.com/developers/applications" class="ext" target="_blank" rel="noopener">Discord Developer Portal</a> and sign in with your Discord account.</li>
+<li>Click <strong>New Application</strong> in the top-right corner.</li>
+<li>Enter a name for your application (e.g., "Hermes Agent") and accept the Developer Terms of Service.</li>
+<li>Click <strong>Create</strong>.</li>
+</ol>
+<p>You'll land on the <strong>General Information</strong> page. Note the <strong>Application ID</strong> — you'll need it later to build the invite URL.</p>
+<h2 id="step-2-create-the-bot">Step 2: Create the Bot</h2>
+<ol>
+<li>In the left sidebar, click <strong>Bot</strong>.</li>
+<li>Discord automatically creates a bot user for your application. You'll see the bot's username, which you can customize.</li>
+<li>Under <strong>Authorization Flow</strong>:</li>
+<li>Set <strong>Public Bot</strong> to <strong>ON</strong> — required to use the Discord-provided invite link (recommended). This allows the Installation tab to generate a default authorization URL.</li>
+<li>Leave <strong>Require OAuth2 Code Grant</strong> set to <strong>OFF</strong>.</li>
+</ol>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>You can set a custom avatar and banner for your bot on this page. This is what users will see in Discord.</p>
+</div>
+<div class="admonition adm-info"><p class="adm-title">Private Bot Alternative</p>
+<p>If you prefer to keep your bot private (Public Bot = OFF), you <strong>must</strong> use the <strong>Manual URL</strong> method in Step 5 instead of the Installation tab. The Discord-provided link requires Public Bot to be enabled.</p>
+</div>
+<h2 id="step-3-enable-privileged-gateway-intents">Step 3: Enable Privileged Gateway Intents</h2>
+<p>This is the most critical step in the entire setup. Without the correct intents enabled, your bot will connect to Discord but <strong>will not be able to read message content</strong>.</p>
+<p>On the <strong>Bot</strong> page, scroll down to <strong>Privileged Gateway Intents</strong>. You'll see three toggles:</p>
+<table>
+<thead>
+<tr>
+<th>Intent</th>
+<th>Purpose</th>
+<th>Required?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Presence Intent</strong></td>
+<td>See user online/offline status</td>
+<td>Optional</td>
+</tr>
+<tr>
+<td><strong>Server Members Intent</strong></td>
+<td>Access the member list, resolve usernames</td>
+<td><strong>Required</strong></td>
+</tr>
+<tr>
+<td><strong>Message Content Intent</strong></td>
+<td>Read the text content of messages</td>
+<td><strong>Required</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Enable both Server Members Intent and Message Content Intent</strong> by toggling them <strong>ON</strong>.</p>
+<ul>
+<li>Without <strong>Message Content Intent</strong>, your bot receives message events but the message text is empty — the bot literally cannot see what you typed.</li>
+<li>Without <strong>Server Members Intent</strong>, the bot cannot resolve usernames for the allowed users list and may fail to identify who is messaging it.</li>
+</ul>
+<div class="admonition adm-warning"><p class="adm-title">This is the #1 reason Discord bots don&#x27;t work</p>
+<p>If your bot is online but never responds to messages, the <strong>Message Content Intent</strong> is almost certainly disabled. Go back to the <a href="https://discord.com/developers/applications" class="ext" target="_blank" rel="noopener">Developer Portal</a>, select your application → Bot → Privileged Gateway Intents, and make sure <strong>Message Content Intent</strong> is toggled ON. Click <strong>Save Changes</strong>.</p>
+</div>
+<p><strong>Regarding server count:</strong>
+- If your bot is in <strong>fewer than 100 servers</strong>, you can simply toggle intents on and off freely.
+- If your bot is in <strong>100 or more servers</strong>, Discord requires you to submit a verification application to use privileged intents. For personal use, this is not a concern.</p>
+<p>Click <strong>Save Changes</strong> at the bottom of the page.</p>
+<h2 id="step-4-get-the-bot-token">Step 4: Get the Bot Token</h2>
+<p>The bot token is the credential Hermes Agent uses to log in as your bot. Still on the <strong>Bot</strong> page:</p>
+<ol>
+<li>Under the <strong>Token</strong> section, click <strong>Reset Token</strong>.</li>
+<li>If you have two-factor authentication enabled on your Discord account, enter your 2FA code.</li>
+<li>Discord will display your new token. <strong>Copy it immediately.</strong></li>
+</ol>
+<div class="admonition adm-warning"><p class="adm-title">Token shown only once</p>
+<p>The token is only displayed once. If you lose it, you'll need to reset it and generate a new one. Never share your token publicly or commit it to Git — anyone with this token has full control of your bot.</p>
+</div>
+<p>Store the token somewhere safe (a password manager, for example). You'll need it in Step 8.</p>
+<h2 id="step-5-generate-the-invite-url">Step 5: Generate the Invite URL</h2>
+<p>You need an OAuth2 URL to invite the bot to your server. There are two ways to do this:</p>
+<h3 id="option-a-using-the-installation-tab-recommended">Option A: Using the Installation Tab (Recommended)</h3>
+<div class="admonition adm-note"><p class="adm-title">Requires Public Bot</p>
+<p>This method requires <strong>Public Bot</strong> to be set to <strong>ON</strong> in Step 2. If you set Public Bot to OFF, use the Manual URL method below instead.</p>
+</div>
+<ol>
+<li>In the left sidebar, click <strong>Installation</strong>.</li>
+<li>Under <strong>Installation Contexts</strong>, enable <strong>Guild Install</strong>.</li>
+<li>For <strong>Install Link</strong>, select <strong>Discord Provided Link</strong>.</li>
+<li>Under <strong>Default Install Settings</strong> for Guild Install:</li>
+<li><strong>Scopes</strong>: select <code>bot</code> and <code>applications.commands</code></li>
+<li><strong>Permissions</strong>: select the permissions listed below.</li>
+</ol>
+<h3 id="option-b-manual-url">Option B: Manual URL</h3>
+<p>You can construct the invite URL directly using this format:</p>
+<div class="highlight"><pre><span></span><code>https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&amp;scope=bot+applications.commands&amp;permissions=274878286912
+</code></pre></div>
+
+<p>Replace <code>YOUR_APP_ID</code> with the Application ID from Step 1.</p>
+<h3 id="required-permissions">Required Permissions</h3>
+<p>These are the minimum permissions your bot needs:</p>
+<ul>
+<li><strong>View Channels</strong> — see the channels it has access to</li>
+<li><strong>Send Messages</strong> — respond to your messages</li>
+<li><strong>Embed Links</strong> — format rich responses</li>
+<li><strong>Attach Files</strong> — send images, audio, and file outputs</li>
+<li><strong>Read Message History</strong> — maintain conversation context</li>
+</ul>
+<h3 id="recommended-additional-permissions">Recommended Additional Permissions</h3>
+<ul>
+<li><strong>Send Messages in Threads</strong> — respond in thread conversations</li>
+<li><strong>Add Reactions</strong> — react to messages for acknowledgment</li>
+</ul>
+<h3 id="permission-integers">Permission Integers</h3>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>Permissions Integer</th>
+<th>What's Included</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Minimal</td>
+<td><code>117760</code></td>
+<td>View Channels, Send Messages, Read Message History, Attach Files</td>
+</tr>
+<tr>
+<td>Recommended</td>
+<td><code>274878286912</code></td>
+<td>All of the above plus Embed Links, Send Messages in Threads, Add Reactions</td>
+</tr>
+</tbody>
+</table>
+<h2 id="step-6-invite-to-your-server">Step 6: Invite to Your Server</h2>
+<ol>
+<li>Open the invite URL in your browser (from the Installation tab or the manual URL you constructed).</li>
+<li>In the <strong>Add to Server</strong> dropdown, select your server.</li>
+<li>Click <strong>Continue</strong>, then <strong>Authorize</strong>.</li>
+<li>Complete the CAPTCHA if prompted.</li>
+</ol>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>You need the <strong>Manage Server</strong> permission on the Discord server to invite a bot. If you don't see your server in the dropdown, ask a server admin to use the invite link instead.</p>
+</div>
+<p>After authorizing, the bot will appear in your server's member list (it will show as offline until you start the Hermes gateway).</p>
+<h2 id="step-7-find-your-discord-user-id">Step 7: Find Your Discord User ID</h2>
+<p>Hermes Agent uses your Discord User ID to control who can interact with the bot. To find it:</p>
+<ol>
+<li>Open Discord (desktop or web app).</li>
+<li>Go to <strong>Settings</strong> → <strong>Advanced</strong> → toggle <strong>Developer Mode</strong> to <strong>ON</strong>.</li>
+<li>Close settings.</li>
+<li>Right-click your own username (in a message, the member list, or your profile) → <strong>Copy User ID</strong>.</li>
+</ol>
+<p>Your User ID is a long number like <code>284102345871466496</code>.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Developer Mode also lets you copy <strong>Channel IDs</strong> and <strong>Server IDs</strong> the same way — right-click the channel or server name and select Copy ID. You'll need a Channel ID if you want to set a home channel manually.</p>
+</div>
+<h2 id="step-8-configure-hermes-agent">Step 8: Configure Hermes Agent</h2>
+<h3 id="option-a-interactive-setup-recommended">Option A: Interactive Setup (Recommended)</h3>
+<p>Run the guided setup command:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>setup
+</code></pre></div>
+
+<p>Select <strong>Discord</strong> when prompted, then paste your bot token and user ID when asked.</p>
+<h3 id="option-b-manual-configuration">Option B: Manual Configuration</h3>
+<p>Add the following to your <code>~/.hermes/.env</code> file:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Required</span>
+<span class="nv">DISCORD_BOT_TOKEN</span><span class="o">=</span>your-bot-token
+<span class="nv">DISCORD_ALLOWED_USERS</span><span class="o">=</span><span class="m">284102345871466496</span>
+
+<span class="c1"># Multiple allowed users (comma-separated)</span>
+<span class="c1"># DISCORD_ALLOWED_USERS=284102345871466496,198765432109876543</span>
+</code></pre></div>
+
+<p>Then start the gateway:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>The bot should come online in Discord within a few seconds. Send it a message — either a DM or in a channel it can see — to test.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>You can run <code>hermes gateway</code> in the background or as a systemd service for persistent operation. See the deployment docs for details.</p>
+</div>
+<h2 id="configuration-reference">Configuration Reference</h2>
+<p>Discord behavior is controlled through two files: <strong><code>~/.hermes/.env</code></strong> for credentials and env-level toggles, and <strong><code>~/.hermes/config.yaml</code></strong> for structured settings. Environment variables always take precedence over config.yaml values when both are set.</p>
+<h3 id="environment-variables-env">Environment Variables (<code>.env</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DISCORD_BOT_TOKEN</code></td>
+<td><strong>Yes</strong></td>
+<td>—</td>
+<td>Bot token from the <a href="https://discord.com/developers/applications" class="ext" target="_blank" rel="noopener">Discord Developer Portal</a>.</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOWED_USERS</code></td>
+<td>Conditional</td>
+<td>—</td>
+<td>Comma-separated Discord user IDs allowed to interact with the bot. Without this <strong>or</strong> <code>DISCORD_ALLOWED_ROLES</code>, the gateway denies all users unless <code>DISCORD_ALLOW_ALL_USERS=true</code>, <code>GATEWAY_ALLOW_ALL_USERS=true</code>, or <code>DISCORD_ALLOWED_CHANNELS</code> explicitly scopes guild access.</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOWED_ROLES</code></td>
+<td>No</td>
+<td>—</td>
+<td>Comma-separated Discord role IDs. Any member with one of these roles is authorized — OR semantics with <code>DISCORD_ALLOWED_USERS</code>. Auto-enables the <strong>Server Members Intent</strong> on connect. Useful when moderation teams churn: new mods get access as soon as the role is granted, no config push needed.</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_ALL_USERS</code></td>
+<td>No</td>
+<td><code>false</code></td>
+<td>Explicit opt-in to allow every Discord user who can reach the bot. This restores the pre-0.18 open behavior for Discord only; use only for trusted/private guilds or development.</td>
+</tr>
+<tr>
+<td><code>GATEWAY_ALLOW_ALL_USERS</code></td>
+<td>No</td>
+<td><code>false</code></td>
+<td>Global allow-all opt-in for every gateway platform. Prefer the platform-specific <code>DISCORD_ALLOW_ALL_USERS</code> unless you intentionally want all connected platforms open.</td>
+</tr>
+<tr>
+<td><code>DISCORD_HOME_CHANNEL</code></td>
+<td>No</td>
+<td>—</td>
+<td>Channel ID where the bot sends proactive messages (cron output, reminders, notifications).</td>
+</tr>
+<tr>
+<td><code>DISCORD_HOME_CHANNEL_NAME</code></td>
+<td>No</td>
+<td><code>"Home"</code></td>
+<td>Display name for the home channel in logs and status output.</td>
+</tr>
+<tr>
+<td><code>DISCORD_COMMAND_SYNC_POLICY</code></td>
+<td>No</td>
+<td><code>"safe"</code></td>
+<td>Controls native slash-command startup sync. <code>"safe"</code> diffs existing global commands and only updates what changed, recreating commands when Discord metadata changes cannot be applied via patch. <code>"bulk"</code> preserves the old <code>tree.sync()</code> behavior. <code>"off"</code> skips startup sync entirely.</td>
+</tr>
+<tr>
+<td><code>DISCORD_REQUIRE_MENTION</code></td>
+<td>No</td>
+<td><code>true</code></td>
+<td>When <code>true</code>, the bot only responds in server channels when <code>@mentioned</code>. Set to <code>false</code> to respond to all messages in every channel.</td>
+</tr>
+<tr>
+<td><code>DISCORD_THREAD_REQUIRE_MENTION</code></td>
+<td>No</td>
+<td><code>false</code></td>
+<td>When <code>true</code>, the in-thread mention shortcut is disabled — threads are gated the same as channels, requiring <code>@mention</code> even after the bot has already participated. Use this when multiple bots share a thread and you want each to fire only on explicit <code>@mention</code>.</td>
+</tr>
+<tr>
+<td><code>DISCORD_FREE_RESPONSE_CHANNELS</code></td>
+<td>No</td>
+<td>—</td>
+<td>Comma-separated channel IDs where the bot responds without requiring an <code>@mention</code>, even when <code>DISCORD_REQUIRE_MENTION</code> is <code>true</code>.</td>
+</tr>
+<tr>
+<td><code>DISCORD_IGNORE_NO_MENTION</code></td>
+<td>No</td>
+<td><code>true</code></td>
+<td>When <code>true</code>, the bot stays silent if a message <code>@mentions</code> other users but does <strong>not</strong> mention the bot. Prevents the bot from jumping into conversations directed at other people. Only applies in server channels, not DMs.</td>
+</tr>
+<tr>
+<td><code>DISCORD_AUTO_THREAD</code></td>
+<td>No</td>
+<td><code>true</code></td>
+<td>When <code>true</code>, automatically creates a new thread for every <code>@mention</code> in a text channel, so each conversation is isolated (similar to Slack behavior). Messages already inside threads or DMs are unaffected.</td>
+</tr>
+<tr>
+<td><code>DISCORD_FREE_RESPONSE_AUTO_THREAD</code></td>
+<td>No</td>
+<td><code>false</code></td>
+<td>When <code>true</code>, free-response channels (listed in <code>DISCORD_FREE_RESPONSE_CHANNELS</code>) also auto-create a thread for each top-level message, while staying mention-free. Default <code>false</code> preserves the lightweight inline-chat behavior. Requires <code>DISCORD_AUTO_THREAD=true</code>; <code>DISCORD_NO_THREAD_CHANNELS</code> still wins, and voice-linked channels always ignore it.</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_BOTS</code></td>
+<td>No</td>
+<td><code>"none"</code></td>
+<td>Controls how the bot handles messages from other Discord bots. <code>"none"</code> — ignore all other bots. <code>"mentions"</code> — only accept bot messages that <code>@mention</code> Hermes. <code>"all"</code> — accept all bot messages. By default, either enabled mode still requires a literal inline mention; see the next setting.</td>
+</tr>
+<tr>
+<td><code>DISCORD_BOTS_REQUIRE_INLINE_MENTION</code></td>
+<td>No</td>
+<td><code>true</code></td>
+<td>Require a literal <code>&lt;@BOT_ID&gt;</code> / <code>&lt;@!BOT_ID&gt;</code> token to start a bot handoff. Reply metadata alone does not start one. Brief same-sender/channel continuations are admitted as described below. Set to <code>false</code> only for trusted relays needing legacy admission. Human messages are unaffected.</td>
+</tr>
+<tr>
+<td><code>DISCORD_REACTIONS</code></td>
+<td>No</td>
+<td><code>true</code></td>
+<td>When <code>true</code>, the bot adds emoji reactions to messages during processing (👀 when starting, ✅ on success, ❌ on error). Set to <code>false</code> to disable reactions entirely.</td>
+</tr>
+<tr>
+<td><code>DISCORD_IGNORED_CHANNELS</code></td>
+<td>No</td>
+<td>—</td>
+<td>Comma-separated channel IDs where the bot <strong>never</strong> responds, even when <code>@mentioned</code>. Takes priority over all other channel settings.</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOWED_CHANNELS</code></td>
+<td>No</td>
+<td>—</td>
+<td>Comma-separated channel IDs. When set, the bot <strong>only</strong> responds in these channels (plus DMs if allowed). Overrides <code>config.yaml</code> <code>discord.allowed_channels</code>. Combine with <code>DISCORD_IGNORED_CHANNELS</code> to express allow/deny rules.</td>
+</tr>
+<tr>
+<td><code>DISCORD_NO_THREAD_CHANNELS</code></td>
+<td>No</td>
+<td>—</td>
+<td>Comma-separated channel IDs where the bot responds directly in the channel instead of creating a thread. Only relevant when <code>DISCORD_AUTO_THREAD</code> is <code>true</code>.</td>
+</tr>
+<tr>
+<td><code>DISCORD_HISTORY_BACKFILL</code></td>
+<td>No</td>
+<td><code>true</code></td>
+<td>When <code>true</code>, prepend recent channel scrollback (since the bot's last response) to the user message when the bot is mentioned. Recovers context the bot would otherwise miss with <code>require_mention</code>. Skipped in DMs and free-response channels. Set to <code>false</code> to disable.</td>
+</tr>
+<tr>
+<td><code>DISCORD_HISTORY_BACKFILL_LIMIT</code></td>
+<td>No</td>
+<td><code>50</code></td>
+<td>Maximum number of messages to scan backwards when assembling the backfill block. In practice the scan usually stops earlier — at the bot's own last message in the channel.</td>
+</tr>
+<tr>
+<td><code>DISCORD_REPLY_TO_MODE</code></td>
+<td>No</td>
+<td><code>"first"</code></td>
+<td>Controls reply-reference behavior: <code>"off"</code> — never reply to the original message, <code>"first"</code> — reply-reference on the first message chunk only (default), <code>"all"</code> — reply-reference on every chunk.</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_MENTION_EVERYONE</code></td>
+<td>No</td>
+<td><code>false</code></td>
+<td>When <code>false</code> (default), the bot cannot ping <code>@everyone</code> or <code>@here</code> even if its response contains those tokens. Set to <code>true</code> to opt back in. See <a href="#mention-control">Mention Control</a> below.</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_MENTION_ROLES</code></td>
+<td>No</td>
+<td><code>false</code></td>
+<td>When <code>false</code> (default), the bot cannot ping <code>@role</code> mentions. Set to <code>true</code> to allow.</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_MENTION_USERS</code></td>
+<td>No</td>
+<td><code>true</code></td>
+<td>When <code>true</code> (default), the bot can ping individual users by ID.</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_MENTION_REPLIED_USER</code></td>
+<td>No</td>
+<td><code>true</code></td>
+<td>When <code>true</code> (default), replying to a message pings the original author.</td>
+</tr>
+<tr>
+<td><code>DISCORD_PROXY</code></td>
+<td>No</td>
+<td>—</td>
+<td>Proxy URL for Discord connections (HTTP, WebSocket, REST). Overrides <code>HTTPS_PROXY</code>/<code>ALL_PROXY</code>. Supports <code>http://</code>, <code>https://</code>, and <code>socks5://</code> schemes.</td>
+</tr>
+<tr>
+<td><code>DISCORD_ALLOW_ANY_ATTACHMENT</code></td>
+<td>No</td>
+<td><code>false</code></td>
+<td>When <code>true</code>, the bot accepts attachments of any file type (not just the built-in PDF/text/zip/office allowlist). Unknown types are cached to disk and surfaced to the agent as a local path with <code>application/octet-stream</code> MIME so it can inspect them with <code>terminal</code> / <code>read_file</code> / <code>ffprobe</code> / etc.</td>
+</tr>
+<tr>
+<td><code>DISCORD_MAX_ATTACHMENT_BYTES</code></td>
+<td>No</td>
+<td><code>33554432</code></td>
+<td>Maximum bytes per attachment the gateway will download and cache. Default 32 MiB. Set to <code>0</code> for no cap (attachments are held in memory while being written, so unlimited carries a real memory cost).</td>
+</tr>
+<tr>
+<td><code>HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS</code></td>
+<td>No</td>
+<td><code>0.6</code></td>
+<td>Grace window the adapter waits before flushing a queued text chunk. Useful for smoothing streamed output.</td>
+</tr>
+<tr>
+<td><code>HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS</code></td>
+<td>No</td>
+<td><code>2.0</code></td>
+<td>Longer quiet period for near-limit Discord splits and continuation chunks from a recently tagged bot in the same channel.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="bot-to-bot-handoffs-tag-once-collect-the-burst">Bot-to-bot handoffs: tag once, collect the burst</h3>
+<p>Bot input remains opt-in (<code>DISCORD_ALLOW_BOTS=none</code> by default). When enabled with <code>mentions</code> or <code>all</code>, <strong>starting a bot handoff requires a literal <code>&lt;@BOT_ID&gt;</code> / <code>&lt;@!BOT_ID&gt;</code> in the message content by default</strong>. Discord's automatic reply ping alone does not start a handoff. Human-authored messages retain their existing mention behavior.</p>
+<p>After an admitted bot mention, Hermes briefly accepts unmentioned follow-ups from <strong>that same bot in that same channel or thread</strong>. Text follow-ups enter the existing text batcher, so a rapidly split response can reach the agent together without repeating the tag on every part. No special sender protocol or part markers are required.</p>
+<p>For example, bot A sends <code>&lt;@BOT_B_ID&gt; Here is the review …</code>, followed immediately by two untagged text chunks in the same thread. Bot B admits those chunks during the continuation window and batches them with the tagged text. After the window expires, an untagged message or reply ping cannot start another handoff under the default policy. Explicit reciprocal tags remain supported; this prevents accidental reply-metadata loops, not intentionally continued conversations.</p>
+<h4 id="timing-and-limits">Timing and limits</h4>
+<p>The admission window lasts <code>max(HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS, HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS)</code> after the admitted mention (2 seconds with the defaults), and each admitted continuation re-arms it, so a long handoff paced at Discord's send rate arrives whole. Separately, each queued text chunk restarts the batch's quiet timer; a tagged bot batch uses the split quiet period even when its first chunk is short. These settings control receiver batching, not sender pacing. Disabling text batching (<code>HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS=0</code>) also disables continuation admission.</p>
+<p>This is a short-burst heuristic, not guaranteed multipart delivery. A delayed chunk outside the window needs its own mention under the default policy. Unrelated messages from the same bot and channel inside the window can also be admitted. The exception is not restricted to text: attachments and commands may pass admission, but only text enters this batcher; other message types follow their normal handling. Existing channel restrictions and <code>DISCORD_ALLOW_BOTS=none</code> still apply. History/backfill behavior is unchanged. The gateway's bot loop guard remains as a backstop: after 20 bot-authored messages in one channel inside 5 minutes, further bot messages there are dropped for 10 minutes (tunable under <code>gateway.bot_loop_guard</code> in <code>config.yaml</code>; human messages are never counted).</p>
+<h4 id="compatibility-with-trusted-relays">Compatibility with trusted relays</h4>
+<p>The inline-mention requirement now defaults to <strong>true</strong> (previously false), including when <code>DISCORD_ALLOW_BOTS=all</code>. If an existing relay intentionally relies on reply pings or unmentioned bot messages, retain the old admission behavior explicitly:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">bots_require_inline_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>The existing <code>DISCORD_BOTS_REQUIRE_INLINE_MENTION=false</code> environment override is also supported when the YAML option is unset. With this opt-out, <code>mentions</code> accepts Discord's resolved mentions, including reply pings, and <code>all</code> removes the bot-specific mention requirement; other channel mention rules still apply. An admitted reply ping can also open the continuation window in this compatibility mode. Use it only for trusted relays because it restores the accidental reply-loop risk.</p>
+<h3 id="config-file-configyaml">Config File (<code>config.yaml</code>)</h3>
+<p>The <code>discord</code> section in <code>~/.hermes/config.yaml</code> mirrors the env vars above. Config.yaml settings are applied as defaults — if the equivalent env var is already set, the env var wins.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Discord-specific settings</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">           </span><span class="c1"># Require @mention in server channels</span>
+<span class="w">  </span><span class="nt">thread_require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># If true, require @mention in threads too (multi-bot threads)</span>
+<span class="w">  </span><span class="nt">bots_require_inline_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">  </span><span class="c1"># Bot authors must type a literal @mention (default: true)</span>
+<span class="w">  </span><span class="nt">free_response_channels</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">      </span><span class="c1"># Comma-separated channel IDs (or YAML list)</span>
+<span class="w">  </span><span class="nt">auto_thread</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">               </span><span class="c1"># Auto-create threads on @mention</span>
+<span class="w">  </span><span class="nt">free_response_auto_thread</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w"> </span><span class="c1"># If true, free_response_channels also auto-thread (default: inline)</span>
+<span class="w">  </span><span class="nt">reactions</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">                 </span><span class="c1"># Add emoji reactions during processing</span>
+<span class="w">  </span><span class="nt">ignored_channels</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">            </span><span class="c1"># Channel IDs where bot never responds</span>
+<span class="w">  </span><span class="nt">no_thread_channels</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">          </span><span class="c1"># Channel IDs where bot responds without threading</span>
+<span class="w">  </span><span class="nt">history_backfill</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">          </span><span class="c1"># Prepend recent channel scrollback on mention (default: true)</span>
+<span class="w">  </span><span class="nt">history_backfill_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">50</span><span class="w">      </span><span class="c1"># Max messages to scan backwards (default: 50)</span>
+<span class="w">  </span><span class="nt">missed_message_backfill</span><span class="p">:</span><span class="w">        </span><span class="c1"># Replay messages missed while disconnected (opt-in)</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">    </span><span class="nt">channels</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">                  </span><span class="c1"># Empty uses free_response_channels</span>
+<span class="w">    </span><span class="nt">window_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">21600</span><span class="w">         </span><span class="c1"># Look back at most 6 hours</span>
+<span class="w">    </span><span class="nt">limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100</span><span class="w">                    </span><span class="c1"># Global scan cap per reconnect</span>
+<span class="w">    </span><span class="nt">max_dispatches</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span><span class="w">            </span><span class="c1"># Recovery dispatch cap per reconnect</span>
+<span class="w">    </span><span class="nt">max_attempts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span><span class="w">               </span><span class="c1"># Lifetime re-dispatch cap per message</span>
+<span class="w">  </span><span class="nt">channel_prompts</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span><span class="w">             </span><span class="c1"># Per-channel ephemeral system prompts</span>
+<span class="w">  </span><span class="nt">voice_channel_inactivity_timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span><span class="w">  </span><span class="c1"># Set 0 to stay in VC until explicit /voice leave</span>
+<span class="w">  </span><span class="nt">voice_playback_timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">120</span><span class="w">             </span><span class="c1"># Minimum playback watchdog; long clips get duration+padding</span>
+<span class="w">  </span><span class="nt">allow_mentions</span><span class="p">:</span><span class="w">                 </span><span class="c1"># What the bot is allowed to ping (safe defaults)</span>
+<span class="w">    </span><span class="nt">everyone</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">               </span><span class="c1"># @everyone / @here pings (default: false)</span>
+<span class="w">    </span><span class="nt">roles</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">                  </span><span class="c1"># @role pings (default: false)</span>
+<span class="w">    </span><span class="nt">users</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">                   </span><span class="c1"># @user pings (default: true)</span>
+<span class="w">    </span><span class="nt">replied_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">            </span><span class="c1"># reply-reference pings the author (default: true)</span>
+
+<span class="c1"># Session isolation (applies to all gateway platforms, not just Discord)</span>
+<span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">     </span><span class="c1"># Isolate sessions per user in shared channels</span>
+</code></pre></div>
+
+<h4 id="discordrequire_mention"><code>discord.require_mention</code></h4>
+<p><strong>Type:</strong> boolean — <strong>Default:</strong> <code>true</code></p>
+<p>When enabled, the bot only responds in server channels when directly <code>@mentioned</code>. DMs always get a response regardless of this setting.</p>
+<h4 id="discordthread_require_mention"><code>discord.thread_require_mention</code></h4>
+<p><strong>Type:</strong> boolean — <strong>Default:</strong> <code>false</code></p>
+<p>By default, once the bot has participated in a thread (auto-created on <code>@mention</code> or replied in once), it keeps responding to every subsequent message in that thread without needing to be <code>@mentioned</code> again. That's the right default for one-on-one conversations.</p>
+<p>In <strong>multi-bot threads</strong> where users address one bot per turn, this default becomes a footgun — every other bot in the thread also fires on every message, burning credits and spamming the channel. Set <code>thread_require_mention: true</code> to disable the in-thread shortcut and gate threads the same way channels are gated. Explicit <code>@mentions</code> still work as before.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">thread_require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">    </span><span class="c1"># multi-bot setup</span>
+</code></pre></div>
+
+<h4 id="discordfree_response_channels"><code>discord.free_response_channels</code></h4>
+<p><strong>Type:</strong> string or list — <strong>Default:</strong> <code>""</code></p>
+<p>Channel IDs where the bot responds to all messages without needing an <code>@mention</code>. Accepts either a comma-separated string or a YAML list:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># String format</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">free_response_channels</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;1234567890,9876543210&quot;</span>
+
+<span class="c1"># List format</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">free_response_channels</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1234567890</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">9876543210</span>
+</code></pre></div>
+
+<p>If a thread's parent channel is in this list, the thread also becomes mention-free.</p>
+<p>Free-response channels also <strong>skip auto-threading</strong> by default — the bot replies inline rather than spinning off a new thread per message. This keeps the channel usable as a lightweight chat surface.</p>
+<p>To opt in to threading for free-response channels, set <code>discord.free_response_auto_thread: true</code> (or <code>DISCORD_FREE_RESPONSE_AUTO_THREAD=true</code>). In that mode each new top-level message in a free channel still gets its own thread, but the channel remains @mention-free. Requires <code>discord.auto_thread: true</code>.</p>
+<h4 id="discordfree_response_auto_thread"><code>discord.free_response_auto_thread</code></h4>
+<p><strong>Type:</strong> boolean — <strong>Default:</strong> <code>false</code></p>
+<p>When <code>true</code>, channels listed in <code>discord.free_response_channels</code> also auto-create a thread for each top-level message, instead of answering inline. The channel stays mention-free; it only changes where the conversation lives.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">free_response_channels</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1234567890</span>
+<span class="w">  </span><span class="nt">auto_thread</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">                </span><span class="c1"># required — this flag refines it</span>
+<span class="w">  </span><span class="nt">free_response_auto_thread</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">  </span><span class="c1"># thread every top-level message there</span>
+</code></pre></div>
+
+<p>Requires <code>discord.auto_thread: true</code> (with it off, nothing threads anywhere). <a href="#discordno_thread_channels"><code>discord.no_thread_channels</code></a> still wins, voice-linked text channels always reply inline, and reply-type messages are never auto-threaded.</p>
+<p><code>DISCORD_FREE_RESPONSE_AUTO_THREAD</code> wins over the <code>config.yaml</code> key when both are set — the YAML value only seeds the env var when it isn't already set, like every other <code>discord.*</code> bridge.</p>
+<h4 id="discordauto_thread"><code>discord.auto_thread</code></h4>
+<p><strong>Type:</strong> boolean — <strong>Default:</strong> <code>true</code></p>
+<p>When enabled, every <code>@mention</code> in a regular text channel automatically creates a new thread for the conversation. This keeps the main channel clean and gives each conversation its own isolated session history. Once a thread is created, subsequent messages in that thread don't require <code>@mention</code> — the bot knows it's already participating. Set <a href="#discordthread_require_mention"><code>thread_require_mention</code></a> to <code>true</code> to disable this in-thread shortcut for multi-bot setups.</p>
+<p>Messages sent in existing threads or DMs are unaffected by this setting. Channels listed in <code>discord.no_thread_channels</code>, and channels listed in <code>discord.free_response_channels</code> unless <a href="#discordfree_response_auto_thread"><code>discord.free_response_auto_thread</code></a> is <code>true</code>, also bypass auto-threading and get inline replies instead.</p>
+<h4 id="discordreactions"><code>discord.reactions</code></h4>
+<p><strong>Type:</strong> boolean — <strong>Default:</strong> <code>true</code></p>
+<p>Controls whether the bot adds emoji reactions to messages as visual feedback:
+- 👀 added when the bot starts processing your message
+- ✅ added when the response is delivered successfully
+- ❌ added if an error occurs during processing</p>
+<p>Disable this if you find the reactions distracting or if the bot's role doesn't have the <strong>Add Reactions</strong> permission.</p>
+<h4 id="discordignored_channels"><code>discord.ignored_channels</code></h4>
+<p><strong>Type:</strong> string or list — <strong>Default:</strong> <code>[]</code></p>
+<p>Channel IDs where the bot <strong>never</strong> responds, even when directly <code>@mentioned</code>. This takes the highest priority — if a channel is in this list, the bot silently ignores all messages there, regardless of <code>require_mention</code>, <code>free_response_channels</code>, or any other setting.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># String format</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">ignored_channels</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;1234567890,9876543210&quot;</span>
+
+<span class="c1"># List format</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">ignored_channels</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1234567890</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">9876543210</span>
+</code></pre></div>
+
+<p>If a thread's parent channel is in this list, messages in that thread are also ignored.</p>
+<h4 id="discordno_thread_channels"><code>discord.no_thread_channels</code></h4>
+<p><strong>Type:</strong> string or list — <strong>Default:</strong> <code>[]</code></p>
+<p>Channel IDs where the bot responds directly in the channel instead of auto-creating a thread. This only has an effect when <code>auto_thread</code> is <code>true</code> (the default). In these channels, the bot responds inline like a normal message rather than spawning a new thread.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">no_thread_channels</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1234567890</span><span class="w">  </span><span class="c1"># Bot responds inline here</span>
+</code></pre></div>
+
+<p>Useful for channels dedicated to bot interaction where threads would add unnecessary noise.</p>
+<h4 id="discordchannel_prompts"><code>discord.channel_prompts</code></h4>
+<p><strong>Type:</strong> mapping — <strong>Default:</strong> <code>{}</code></p>
+<p>Per-channel ephemeral system prompts that are injected on every turn in the matching Discord channel or thread without being persisted to transcript history.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">channel_prompts</span><span class="p">:</span>
+<span class="w">    </span><span class="s">&quot;1234567890&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">      </span><span class="no">This channel is for research tasks. Prefer deep comparisons,</span>
+<span class="w">      </span><span class="no">citations, and concise synthesis.</span>
+<span class="w">    </span><span class="s">&quot;9876543210&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">      </span><span class="no">This forum is for therapy-style support. Be warm, grounded,</span>
+<span class="w">      </span><span class="no">and non-judgmental.</span>
+</code></pre></div>
+
+<p>Behavior:
+- Exact thread/channel ID matches win.
+- If a message arrives inside a thread or forum post and that thread has no explicit entry, Hermes falls back to the parent channel/forum ID.
+- Prompts are applied ephemerally at runtime, so changing them affects future turns immediately without rewriting past session history.</p>
+<h4 id="discordhistory_backfill"><code>discord.history_backfill</code></h4>
+<p><strong>Type:</strong> boolean — <strong>Default:</strong> <code>true</code></p>
+<p>When enabled, the bot recovers missed channel messages on each <code>@mention</code>. With <code>require_mention: true</code>, the bot only processes messages that tag it directly — everything else in the channel is invisible to the session transcript. History backfill scans backwards through recent channel history when triggered, collecting messages between the bot's last response and the current mention, and includes them as context.</p>
+<p>Behavior by surface:</p>
+<ul>
+<li><strong>Server channels</strong> (with <code>require_mention: true</code>): backfill scans the channel since the bot's last response. Useful when other participants posted while the bot wasn't addressed.</li>
+<li><strong>Threads</strong>: backfill scans the thread only — Discord's <code>channel.history()</code> on a thread returns only that thread's messages, not the parent channel. This is the right scope because threads are usually self-contained conversations.</li>
+<li><strong>DMs</strong>: skipped. Every DM message triggers the bot, so the session transcript is already complete — there's no mention gap to fill.</li>
+<li><strong>Free-response channels</strong> and <strong>bot's own auto-created threads</strong>: skipped for the same reason — no mention gating means no gap.</li>
+</ul>
+<p>Per-user sessions (<code>group_sessions_per_user: true</code>, the default) also benefit: a user's session is missing the context posted by other channel participants and the user's own messages from before they tagged the bot. Backfill fills both gaps.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">history_backfill</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># default</span>
+</code></pre></div>
+
+<p>To turn it off:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">history_backfill</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>Note:</strong> Messages that arrive <em>while</em> the bot is processing (between a trigger and its response) are not captured. This is an accepted simplification — the user can re-send or tag again.</p>
+</blockquote>
+<h4 id="discordhistory_backfill_limit"><code>discord.history_backfill_limit</code></h4>
+<p><strong>Type:</strong> integer — <strong>Default:</strong> <code>50</code></p>
+<p>Maximum number of messages to scan backwards when recovering channel context. In practice the scan usually stops much earlier — at the bot's own last message in the channel, which is the natural boundary between turns. This limit is a safety cap for cold starts and long gaps where no prior bot message exists in recent history.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">history_backfill</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">history_backfill_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">50</span>
+</code></pre></div>
+
+<h4 id="discordmissed_message_backfill"><code>discord.missed_message_backfill</code></h4>
+<p><strong>Type:</strong> object — <strong>Default:</strong> disabled</p>
+<p>Discord's WebSocket resume window can expire during a restart or network outage. Messages sent during that gap are not delivered as live gateway events. When this option is enabled, Hermes scans a bounded set of configured channel and thread histories after Discord reconnects, then sends still-unhandled messages through the same authorization, mention, channel, deduplication, and dispatch path as live events.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">missed_message_backfill</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">channels</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;123456789012345678&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">window_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3600</span>
+<span class="w">    </span><span class="nt">limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100</span>
+<span class="w">    </span><span class="nt">max_dispatches</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span>
+<span class="w">    </span><span class="nt">max_attempts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+</code></pre></div>
+
+<p>If <code>channels</code> is empty, Hermes uses <code>discord.free_response_channels</code>. Set it to <code>"*"</code> only when the bot should inspect every reachable server text channel. The recovery ledger is stored per profile under <code>gateway/discord_message_recovery.db</code>, preventing a successfully answered message from being replayed again after a later restart. A message counts as answered once its turn delivered a final reply, whether or not that reply carried a Discord reply reference (<code>reply_to_mode: "off"</code>, streamed replies and media-only replies included).</p>
+<p><code>max_dispatches</code> caps one scan; <code>max_attempts</code> (default 3) caps how many times a single message can ever be re-dispatched, so a message whose turn keeps failing is not re-run on every reconnect. <code>window_seconds</code> is always honoured: the per-channel scan cursor can narrow a scan but never reaches further back than the window.</p>
+<h4 id="group_sessions_per_user"><code>group_sessions_per_user</code></h4>
+<p><strong>Type:</strong> boolean — <strong>Default:</strong> <code>true</code></p>
+<p>This is a global gateway setting (not Discord-specific) that controls whether users in the same channel get isolated session histories.</p>
+<p>When <code>true</code>: Alice and Bob talking in <code>#research</code> each have their own separate conversation with Hermes. When <code>false</code>: the entire channel shares one conversation transcript and one running-agent slot.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>See the <a href="#session-model-in-discord">Session Model</a> section above for the full implications of each mode.</p>
+<h4 id="displaytool_progress"><code>display.tool_progress</code></h4>
+<p><strong>Type:</strong> string — <strong>Default:</strong> <code>"all"</code> — <strong>Values:</strong> <code>off</code>, <code>new</code>, <code>all</code>, <code>verbose</code></p>
+<p>Controls whether the bot sends progress messages in the chat while processing (e.g., "Reading file...", "Running terminal command..."). This is a global gateway setting that applies to all platforms.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">display</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">tool_progress</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;all&quot;</span><span class="w">    </span><span class="c1"># off | new | all | verbose</span>
+</code></pre></div>
+
+<ul>
+<li><code>off</code> — no progress messages</li>
+<li><code>new</code> — only show the first tool call per turn</li>
+<li><code>all</code> — show all tool calls (truncated to 40 characters in gateway messages)</li>
+<li><code>verbose</code> — show full tool call details (can produce long messages)</li>
+</ul>
+<h4 id="displaytool_progress_command"><code>display.tool_progress_command</code></h4>
+<p><strong>Type:</strong> boolean — <strong>Default:</strong> <code>false</code></p>
+<p>When enabled, makes the <code>/verbose</code> slash command available in the gateway, letting you cycle through tool progress modes (<code>off → new → all → verbose → off</code>) without editing config.yaml.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">display</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">tool_progress_command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<h4 id="displayreasoning_style"><code>display.reasoning_style</code></h4>
+<p><strong>Type:</strong> string — <strong>Default (Discord):</strong> <code>"subtext"</code> — <strong>Values:</strong> <code>code</code>, <code>blockquote</code>, <code>subtext</code></p>
+<p>Controls how the model's reasoning block is rendered when reasoning display is enabled. Discord defaults to <code>subtext</code>, which uses Discord's native <code>-#</code> small grey metadata text so reasoning stays visually secondary to the answer. <code>blockquote</code> renders it as a <code>&gt;</code> quote, and <code>code</code> (the default on other platforms) uses a fenced code block. Long reasoning is collapsed to the first 15 lines.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">display</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">discord</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">reasoning_style</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">subtext</span><span class="w">   </span><span class="c1"># code | blockquote | subtext</span>
+</code></pre></div>
+
+<h2 id="slash-command-access-control">Slash Command Access Control</h2>
+<p>By default, every allowed user can run every slash command. To split your allowlist into <strong>admins</strong> (full slash command access) and <strong>regular users</strong> (only commands you explicitly enable), add <code>allow_admin_from</code> and <code>user_allowed_commands</code> to the Discord platform's <code>extra</code> block:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">discord</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">        </span><span class="c1"># Existing user allowlist (unchanged)</span>
+<span class="w">        </span><span class="nt">allow_from</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;123456789012345678&quot;</span><span class="w">  </span><span class="c1"># admin user ID</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;999888777666555444&quot;</span><span class="w">  </span><span class="c1"># regular user ID</span>
+
+<span class="w">        </span><span class="c1"># NEW — admins get all slash commands (built-in + plugin)</span>
+<span class="w">        </span><span class="nt">allow_admin_from</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;123456789012345678&quot;</span>
+
+<span class="w">        </span><span class="c1"># NEW — non-admin allowed users can only run these slash commands.</span>
+<span class="w">        </span><span class="c1"># /help and /whoami are always allowed so users can see their access.</span>
+<span class="w">        </span><span class="nt">user_allowed_commands</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">status</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">model</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">history</span>
+
+<span class="w">        </span><span class="c1"># Optional: separate admin / command lists for server channels</span>
+<span class="w">        </span><span class="nt">group_allow_admin_from</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;123456789012345678&quot;</span>
+<span class="w">        </span><span class="nt">group_user_allowed_commands</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">status</span>
+</code></pre></div>
+
+<p><strong>Behavior:</strong></p>
+<ul>
+<li>A user in <code>allow_admin_from</code> for a scope (DM or server channel) can run <strong>every</strong> registered slash command — built-in AND plugin-registered — through the live command registry.</li>
+<li>A user not in <code>allow_admin_from</code> can only run commands listed in <code>user_allowed_commands</code>, plus the always-allowed floor: <code>/help</code> and <code>/whoami</code>.</li>
+<li>Plain chat (non-slash messages) is unaffected. Non-admin users can still talk to the agent normally; they just can't trigger arbitrary commands.</li>
+<li><strong>Backward compat:</strong> if <code>allow_admin_from</code> is not set for a scope, slash command gating is disabled for that scope. Existing installs keep working with no changes.</li>
+<li>DM admin status does not imply server-channel admin status. Each scope has its own admin list.</li>
+</ul>
+<p>Use <code>/whoami</code> to see the active scope, your tier (admin / user / unrestricted), and which slash commands you can run.</p>
+<h2 id="interactive-model-picker">Interactive Model Picker</h2>
+<p>Send <code>/model</code> with no arguments in a Discord channel to open a dropdown-based model picker:</p>
+<ol>
+<li><strong>Provider selection</strong> — a Select dropdown showing available providers (up to 25).</li>
+<li><strong>Model selection</strong> — a second dropdown with models for the chosen provider (up to 25).</li>
+</ol>
+<p>The picker times out after 120 seconds. Only authorized users (those in <code>DISCORD_ALLOWED_USERS</code>) can interact with it. If you know the model name, type <code>/model &lt;name&gt;</code> directly.</p>
+<h2 id="native-slash-commands-for-skills">Native Slash Commands for Skills</h2>
+<p>Hermes automatically registers installed skills as <strong>native Discord Application Commands</strong>. This means skills appear in Discord's autocomplete <code>/</code> menu alongside built-in commands.</p>
+<ul>
+<li>Each skill becomes a Discord slash command (e.g., <code>/code-review</code>, <code>/ascii-art</code>)</li>
+<li>Skills accept an optional <code>args</code> string parameter</li>
+<li>Discord has a limit of 100 application commands per bot — if you have more skills than available slots, extra skills are skipped with a warning in the logs</li>
+<li>Skills are registered during bot startup alongside built-in commands like <code>/model</code>, <code>/reset</code>, and <code>/bg</code></li>
+</ul>
+<p>No extra configuration is needed — any skill installed via <code>hermes skills install</code> is automatically registered as a Discord slash command on the next gateway restart.</p>
+<h3 id="disabling-slash-command-registration">Disabling Slash Command Registration</h3>
+<p>If you run multiple Hermes gateways against the same Discord application (e.g. staging + production), only one of them should own the global slash-command registration — otherwise the last startup wins and the registrations flap. Turn slash registration off on the "follower" gateway:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">discord</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">slash_commands</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># default: true</span>
+</code></pre></div>
+
+<p>Leaving this at <code>true</code> on the "primary" gateway keeps the normal behavior — global <code>/</code>-menu commands for built-ins and installed skills.</p>
+<h2 id="sending-media-inline-media-tags">Sending Media (inline <code>MEDIA:</code> tags)</h2>
+<p>The Discord adapter supports native file uploads for every common media type via inline <code>MEDIA:/path/to/file</code> tags emitted in the agent's response — the adapter strips the tag and auto-uploads the file:</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>How it's delivered</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Images (PNG/JPG/WebP)</td>
+<td>Native Discord image attachment with inline preview</td>
+</tr>
+<tr>
+<td>Animated GIFs</td>
+<td><code>send_animation</code> uploads as <code>animation.gif</code> so Discord plays it inline (not as a static thumbnail)</td>
+</tr>
+<tr>
+<td>Video (MP4/MOV)</td>
+<td><code>send_video</code> — native video player</td>
+</tr>
+<tr>
+<td>Audio / Voice</td>
+<td><code>send_voice</code> — native voice message when possible, file attachment otherwise</td>
+</tr>
+<tr>
+<td>Documents (PDF/ZIP/docx/etc.)</td>
+<td><code>send_document</code> — native attachment with download button</td>
+</tr>
+</tbody>
+</table>
+<p>Discord's per-upload size limit depends on the server's boost tier (25 MB free, up to 500 MB). If Hermes gets an HTTP 413, the adapter falls back to a link pointing at the local cache path rather than failing silently.</p>
+<h2 id="receiving-arbitrary-file-types">Receiving Arbitrary File Types</h2>
+<p>Any file type a user uploads is accepted. Authorization to message the agent is the gate — not the file extension. Every upload is downloaded, cached under <code>~/.hermes/cache/documents/</code>, and surfaced to the agent as a <code>DOCUMENT</code>-typed message event so it can inspect the file with <code>terminal</code> (<code>ffprobe</code>, <code>unzip</code>, <code>file</code>, <code>strings</code>, etc.) or <code>read_file</code>.</p>
+<ul>
+<li>Known types (PDF, docx/xlsx/pptx, zip, images/audio/video, etc.) keep their precise MIME.</li>
+<li>Unknown types fall back to the upload's reported content type, or <code>application/octet-stream</code> when none is given.</li>
+<li>Small UTF-8-decodable files (text, code, config, HTML, CSS, JSON, YAML, ...) have their contents auto-injected into the prompt up to 100 KiB. Binary files that can't be decoded are surfaced as a path-pointing context note only (auto-translated for Docker/Modal sandboxed terminals via <code>to_agent_visible_cache_path</code>), so they don't blow up the context window.</li>
+</ul>
+<p>The only inbound limit is the per-file size cap (default 32 MiB):</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># Optional — raise/disable the per-file size cap. Default is 32 MiB.</span>
+<span class="w">  </span><span class="c1"># The whole file is held in memory while being cached, so unlimited</span>
+<span class="w">  </span><span class="c1"># uploads carry a real memory cost.</span>
+<span class="w">  </span><span class="nt">max_attachment_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">33554432</span><span class="w">   </span><span class="c1"># bytes; 0 = unlimited</span>
+</code></pre></div>
+
+<p>Equivalent env var: <code>DISCORD_MAX_ATTACHMENT_BYTES=33554432</code> (or <code>0</code> for no cap).</p>
+<p>The legacy <code>discord.allow_any_attachment</code> flag is now a no-op — any file type is always accepted — and is kept only so existing configs don't error.</p>
+<div class="admonition adm-warning"><p class="adm-title">Memory cost of unlimited</p>
+<p>Disabling the size cap (<code>max_attachment_bytes: 0</code>) means a user can drop a multi-GB file on the bot and the gateway will dutifully buffer it through memory while caching to disk. Only set this in trusted single-user installs. For shared bots, keep the default 32 MiB or raise it conservatively.</p>
+</div>
+<h2 id="interactive-prompts-clarify">Interactive Prompts (clarify)</h2>
+<p>When the agent calls the <code>clarify</code> tool — to ask which approach you prefer, get post-task feedback, or check before a non-trivial decision — Discord renders the question with <strong>one button per choice</strong>:</p>
+<blockquote>
+<p>Which framework should I use for the dashboard?</p>
+<p>[1. Next.js] [2. Remix] [3. Astro] [Other (type answer)]</p>
+</blockquote>
+<p>Click a numbered button to answer, or click <strong>Other</strong> to type a free-form response (the next message you send in that channel becomes the answer). Open-ended <code>clarify</code> calls (no preset choices) skip the buttons and just capture your next message.</p>
+<p>The buttons disable themselves once a choice is made so duplicate clicks don't double-resolve the prompt. Configure the response timeout via <code>agent.clarify_timeout</code> in <code>~/.hermes/config.yaml</code> (default <code>3600</code> seconds; <code>0</code> or less = unlimited). If you don't respond within the timeout, the agent unblocks with a sentinel message and adapts rather than hanging.</p>
+<h3 id="prompt-layout">Prompt layout</h3>
+<p>Interactive prompts (command approvals, <code>clarify</code> questions, and slash-command confirmations) share one layout: the <strong>plain message</strong> carries the full payload — the command and why it was flagged plus the approval deadline, or the question and reply hint — the <strong>embed card</strong> underneath is a header only, and the buttons sit below the card. Everything you need to decide is in the plain text, so the prompt reads correctly on clients that hide or detach embeds, and nothing is shown twice on clients that render them.</p>
+<h2 id="home-channel">Home Channel</h2>
+<p>You can designate a "home channel" where the bot sends proactive messages (such as cron job output, reminders, and notifications). There are two ways to set it:</p>
+<h3 id="using-the-slash-command">Using the Slash Command</h3>
+<p>Type <code>/sethome</code> in any Discord channel where the bot is present. That channel becomes the home channel.</p>
+<h3 id="manual-configuration">Manual Configuration</h3>
+<p>Add these to your <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">DISCORD_HOME_CHANNEL</span><span class="o">=</span><span class="m">123456789012345678</span>
+<span class="nv">DISCORD_HOME_CHANNEL_NAME</span><span class="o">=</span><span class="s2">&quot;#bot-updates&quot;</span>
+</code></pre></div>
+
+<p>Replace the ID with the actual channel ID (right-click → Copy Channel ID with Developer Mode on).</p>
+<h2 id="voice-messages">Voice Messages</h2>
+<p>Hermes Agent supports Discord voice messages:</p>
+<ul>
+<li><strong>Incoming voice messages</strong> are automatically transcribed using the configured STT provider: local <code>faster-whisper</code> (no key), Groq Whisper (<code>GROQ_API_KEY</code>), or OpenAI Whisper (<code>VOICE_TOOLS_OPENAI_KEY</code>).</li>
+<li><strong>Text-to-speech</strong>: Use <code>/voice tts</code> to have the bot send spoken audio responses alongside text replies.</li>
+<li><strong>Discord voice channels</strong>: Hermes can also join a voice channel, listen to users speaking, and talk back in the channel.</li>
+</ul>
+<p>For the full setup and operational guide, see:
+- <a href="../features/voice-mode.html">Voice Mode</a>
+- <a href="../../guides/use-voice-mode-with-hermes.html">Use Voice Mode with Hermes</a></p>
+<h3 id="voice-channel-audio-effects-ambient--verbal-acks">Voice Channel Audio Effects (ambient + verbal acks)</h3>
+<p>When the bot is in a voice channel, you can give it a more conversational feel: a short verbal acknowledgement ("let me look into that") before it starts working, and a subtle ambient "thinking" bed that plays underneath while tools run — the speech ducks the ambient down and swells it back when finished, similar to Grok voice mode.</p>
+<p>discord.py plays only one audio stream per connection, so Hermes installs a software mixer on the outgoing stream that sums an ambient loop, acknowledgements, and TTS replies into that single stream — they overlap instead of cutting each other off.</p>
+<p>This is <strong>off by default</strong>. Enable it in <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">voice_fx</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">          </span><span class="c1"># master switch</span>
+<span class="w">    </span><span class="nt">ambient_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">  </span><span class="c1"># idle &quot;thinking&quot; bed while tools run</span>
+<span class="w">    </span><span class="nt">ambient_path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">       </span><span class="c1"># custom loop file (any audio format); &quot;&quot; = built-in synthesised pad</span>
+<span class="w">    </span><span class="nt">ambient_gain</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.18</span><span class="w">     </span><span class="c1"># idle bed loudness (0.0–1.0)</span>
+<span class="w">    </span><span class="nt">duck_gain</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.06</span><span class="w">        </span><span class="c1"># ambient loudness while the bot is speaking</span>
+<span class="w">    </span><span class="nt">speech_gain</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0</span><span class="w">       </span><span class="c1"># TTS / acknowledgement loudness</span>
+<span class="w">    </span><span class="nt">ack_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">      </span><span class="c1"># speak a short phrase before the first tool call of a turn</span>
+<span class="w">    </span><span class="nt">ack_phrases</span><span class="p">:</span><span class="w">           </span><span class="c1"># picked at random; set to [] to disable the spoken ack</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;Let</span><span class="nv"> </span><span class="s">me</span><span class="nv"> </span><span class="s">look</span><span class="nv"> </span><span class="s">into</span><span class="nv"> </span><span class="s">that.&quot;</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;One</span><span class="nv"> </span><span class="s">moment.&quot;</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;Checking</span><span class="nv"> </span><span class="s">on</span><span class="nv"> </span><span class="s">that</span><span class="nv"> </span><span class="s">now.&quot;</span>
+</code></pre></div>
+
+<p>Notes:
+- Set <code>voice_channel_inactivity_timeout_seconds: 0</code> if you want the bot to remain in the voice channel until an explicit <code>/voice leave</code> or manual disconnect. The default preserves the historical 300-second idle auto-leave.
+- <code>voice_playback_timeout_seconds</code> is a floor, not a hard cap for long TTS. Hermes probes the generated audio duration and waits for <code>duration + 30s</code> when that is longer than the configured floor.
+- The acknowledgement fires at most once per turn, only when the bot is in a voice channel and the mixer is active. It uses your configured TTS provider.
+- <code>ambient_path</code> accepts any file <code>ffmpeg</code> can decode; it's looped seamlessly. Leave it empty to use the built-in synthesised pad (no asset needed).
+- All settings live in <code>config.yaml</code> (not <code>.env</code>) — they're behavioral, not secrets.
+- When <code>voice_fx.enabled</code> is <code>false</code>, voice playback uses the original one-shot path and nothing changes.</p>
+<h2 id="forum-channels">Forum Channels</h2>
+<p>Discord forum channels (type 15) don't accept direct messages — every post in a forum must be a thread. Hermes auto-detects forum channels and creates a new thread post whenever it needs to send there, so text replies, TTS, images, voice messages, and file attachments all work without special handling from the agent.</p>
+<ul>
+<li><strong>Thread name</strong> is derived from the first line of the message (markdown heading prefix stripped, capped at 100 chars). When the message is attachment-only, the filename is used as the fallback thread name.</li>
+<li><strong>Attachments</strong> ride along on the starter message of the new thread — no separate upload step, no partial sends.</li>
+<li><strong>One call, one thread</strong>: each forum send creates a new thread. Successive sends to the same forum will therefore produce separate threads.</li>
+<li><strong>Detection is three-layered</strong>: the channel directory cache first, a process-local probe cache second, and a live <code>GET /channels/{id}</code> probe as a last resort (whose result is then memoized for the life of the process).</li>
+</ul>
+<p>Refreshing the directory (<code>/channels refresh</code> on platforms that expose it, or a gateway restart) populates the cache with any forum channels created after the bot started.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="bot-is-online-but-not-responding-to-messages">Bot is online but not responding to messages</h3>
+<p><strong>Cause</strong>: Either Message Content Intent is disabled, or Discord auth is failing closed because no access policy is configured.</p>
+<p><strong>Fix</strong>:</p>
+<ol>
+<li>Go to <a href="https://discord.com/developers/applications" class="ext" target="_blank" rel="noopener">Developer Portal</a> → your app → Bot → Privileged Gateway Intents → enable <strong>Message Content Intent</strong> → Save Changes.</li>
+<li>Verify that at least one Discord access policy is configured:</li>
+</ol>
+<p>```bash
+   # recommended: allow specific users
+   DISCORD_ALLOWED_USERS=284102345871466496</p>
+<p># or allow a trusted guild/dev bot to behave like pre-0.18 Discord
+   DISCORD_ALLOW_ALL_USERS=true
+   ```</p>
+<ol>
+<li>Restart the gateway:</li>
+</ol>
+<p><code>bash
+   hermes gateway restart</code></p>
+<p>If the gateway log says Discord is connected and REST API checks work, but every inbound message is silent, look for this warning in <code>~/.hermes/logs/gateway.log</code>:</p>
+<div class="highlight"><pre><span></span><code>No Discord access policy configured; inbound Discord messages will be denied by default.
+</code></pre></div>
+
+<p>Hermes 0.18 intentionally fails closed on externally reachable adapters. A Discord bot with no <code>DISCORD_ALLOWED_USERS</code>, no <code>DISCORD_ALLOWED_ROLES</code>, no <code>DISCORD_ALLOWED_CHANNELS</code>, and no explicit allow-all flag will connect successfully but deny inbound users before normal message handling.</p>
+<h3 id="privileged-intents--privilegedintentsrequired-error-on-startup">"Privileged intents" / <code>PrivilegedIntentsRequired</code> error on startup</h3>
+<p><strong>Cause</strong>: Hermes requests privileged Gateway Intents that are not enabled for your bot in the Developer Portal. Discord then rejects the WebSocket connection. Hermes always requests <strong>Message Content Intent</strong>. It also requests <strong>Server Members Intent</strong> when your allowlist uses usernames (not numeric IDs) or when <code>DISCORD_ALLOWED_ROLES</code> is set. Presence Intent is not required.</p>
+<p><strong>Fix</strong>:</p>
+<ol>
+<li>Go to <a href="https://discord.com/developers/applications" class="ext" target="_blank" rel="noopener">Developer Portal</a> → your app → Bot → Privileged Gateway Intents.</li>
+<li>Enable <strong>Message Content Intent</strong> (required). Enable <strong>Server Members Intent</strong> if you use usernames or role allowlists.</li>
+<li>Click <strong>Save Changes</strong>, then restart the gateway (<code>hermes gateway restart</code>).</li>
+</ol>
+<p>The gateway log should name the exact intent(s) Hermes requested. Until they are enabled, Discord will keep rejecting the connection — this is a portal configuration error, not a flaky network issue.</p>
+<h3 id="bot-cant-see-messages-in-a-specific-channel">Bot can't see messages in a specific channel</h3>
+<p><strong>Cause</strong>: The bot's role doesn't have permission to view that channel.</p>
+<p><strong>Fix</strong>: In Discord, go to the channel's settings → Permissions → add the bot's role with <strong>View Channel</strong> and <strong>Read Message History</strong> enabled.</p>
+<h3 id="403-forbidden-errors">403 Forbidden errors</h3>
+<p><strong>Cause</strong>: The bot is missing required permissions.</p>
+<p><strong>Fix</strong>: Re-invite the bot with the correct permissions using the URL from Step 5, or manually adjust the bot's role permissions in Server Settings → Roles.</p>
+<h3 id="bot-is-offline">Bot is offline</h3>
+<p><strong>Cause</strong>: The Hermes gateway isn't running, or the token is incorrect.</p>
+<p><strong>Fix</strong>: Check that <code>hermes gateway</code> is running. Verify <code>DISCORD_BOT_TOKEN</code> in your <code>.env</code> file. If you recently reset the token, update it.</p>
+<h3 id="user-not-allowed--bot-ignores-you">"User not allowed" / Bot ignores you</h3>
+<p><strong>Cause</strong>: Your User ID isn't in <code>DISCORD_ALLOWED_USERS</code>.</p>
+<p><strong>Fix</strong>: Add your User ID to <code>DISCORD_ALLOWED_USERS</code> in <code>~/.hermes/.env</code> and restart the gateway.</p>
+<h3 id="people-in-the-same-channel-are-sharing-context-unexpectedly">People in the same channel are sharing context unexpectedly</h3>
+<p><strong>Cause</strong>: <code>group_sessions_per_user</code> is disabled, or the platform cannot provide a user ID for the messages in that context.</p>
+<p><strong>Fix</strong>: Set this in <code>~/.hermes/config.yaml</code> and restart the gateway:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>If you intentionally want a shared room conversation, leave it off — just expect shared transcript history and shared interrupt behavior.</p>
+<h2 id="security">Security</h2>
+<div class="admonition adm-warning"><p class="adm-title">Warning</p>
+<p>Always set <code>DISCORD_ALLOWED_USERS</code> (or <code>DISCORD_ALLOWED_ROLES</code>) to restrict who can interact with the bot. Without either, the gateway denies all users by default as a safety measure. Only authorize people you trust — authorized users have full access to the agent's capabilities, including tool use and system access.</p>
+</div>
+<h3 id="role-based-access-control">Role-Based Access Control</h3>
+<p>For servers where access is managed by roles instead of individual user lists (moderator teams, support staff, internal tooling), use <code>DISCORD_ALLOWED_ROLES</code> — a comma-separated list of role IDs. Any member with one of those roles is authorized.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env — works alongside or instead of DISCORD_ALLOWED_USERS</span>
+<span class="nv">DISCORD_ALLOWED_ROLES</span><span class="o">=</span><span class="m">987654321098765432</span>,876543210987654321
+</code></pre></div>
+
+<p>Semantics:</p>
+<ul>
+<li><strong>OR with user allowlist.</strong> A user is authorized if their ID is in <code>DISCORD_ALLOWED_USERS</code> <strong>or</strong> they have any role in <code>DISCORD_ALLOWED_ROLES</code>.</li>
+<li><strong>Server Members Intent auto-enabled.</strong> When <code>DISCORD_ALLOWED_ROLES</code> is set, the bot enables the Members intent on connect — required for Discord to send role information with member records.</li>
+<li><strong>Role IDs, not names.</strong> Grab them from Discord: <strong>User Settings → Advanced → Developer Mode ON</strong>, then right-click any role → <strong>Copy Role ID</strong>.</li>
+<li><strong>DM fallback.</strong> In DMs the role check scans mutual guilds; a user with an allowed role in any shared server is authorized in DMs too.</li>
+</ul>
+<p>This is the preferred pattern when the moderation team churns — new moderators get access the moment the role is granted, with no <code>.env</code> edit or gateway restart.</p>
+<h3 id="mention-control">Mention Control</h3>
+<p>By default, Hermes blocks the bot from pinging <code>@everyone</code>, <code>@here</code>, and role mentions, even if its reply contains those tokens. This prevents a poorly-worded prompt or echoed user content from spamming a whole server. Individual <code>@user</code> pings and reply-reference pings (the little "replying to…" chip) stay enabled so normal conversation still works.</p>
+<p>You can relax these defaults via either env vars or <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">discord</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">allow_mentions</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">everyone</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">      </span><span class="c1"># allow the bot to ping @everyone / @here</span>
+<span class="w">    </span><span class="nt">roles</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">         </span><span class="c1"># allow the bot to ping @role mentions</span>
+<span class="w">    </span><span class="nt">users</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">          </span><span class="c1"># allow the bot to ping individual @users</span>
+<span class="w">    </span><span class="nt">replied_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># ping the author when replying to their message</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env — env vars win over config.yaml</span>
+<span class="nv">DISCORD_ALLOW_MENTION_EVERYONE</span><span class="o">=</span><span class="nb">false</span>
+<span class="nv">DISCORD_ALLOW_MENTION_ROLES</span><span class="o">=</span><span class="nb">false</span>
+<span class="nv">DISCORD_ALLOW_MENTION_USERS</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">DISCORD_ALLOW_MENTION_REPLIED_USER</span><span class="o">=</span><span class="nb">true</span>
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Leave <code>everyone</code> and <code>roles</code> at <code>false</code> unless you know exactly why you need them. It is very easy for an LLM to produce the string <code>@everyone</code> inside a normal-looking response; without this protection, that would notify every member of your server.</p>
+</div>
+<p>For more information on securing your Hermes Agent deployment, see the <a href="../security.html">Security Guide</a>.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/messaging/discord</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-hermes-behaves">How Hermes Behaves</a></li>
+<li class="lvl3"><a href="#discord-gateway-model">Discord Gateway Model</a></li>
+<li class="lvl3"><a href="#session-model-in-discord">Session Model in Discord</a></li>
+<li class="lvl3"><a href="#interrupts-and-concurrency">Interrupts and Concurrency</a></li>
+<li class="lvl3"><a href="#gateway-websocket-health">Gateway WebSocket health</a></li>
+<li class="lvl2"><a href="#step-1-create-a-discord-application">Step 1: Create a Discord Application</a></li>
+<li class="lvl2"><a href="#step-2-create-the-bot">Step 2: Create the Bot</a></li>
+<li class="lvl2"><a href="#step-3-enable-privileged-gateway-intents">Step 3: Enable Privileged Gateway Intents</a></li>
+<li class="lvl2"><a href="#step-4-get-the-bot-token">Step 4: Get the Bot Token</a></li>
+<li class="lvl2"><a href="#step-5-generate-the-invite-url">Step 5: Generate the Invite URL</a></li>
+<li class="lvl3"><a href="#option-a-using-the-installation-tab-recommended">Option A: Using the Installation Tab (Recommended)</a></li>
+<li class="lvl3"><a href="#option-b-manual-url">Option B: Manual URL</a></li>
+<li class="lvl3"><a href="#required-permissions">Required Permissions</a></li>
+<li class="lvl3"><a href="#recommended-additional-permissions">Recommended Additional Permissions</a></li>
+<li class="lvl3"><a href="#permission-integers">Permission Integers</a></li>
+<li class="lvl2"><a href="#step-6-invite-to-your-server">Step 6: Invite to Your Server</a></li>
+<li class="lvl2"><a href="#step-7-find-your-discord-user-id">Step 7: Find Your Discord User ID</a></li>
+<li class="lvl2"><a href="#step-8-configure-hermes-agent">Step 8: Configure Hermes Agent</a></li>
+<li class="lvl3"><a href="#option-a-interactive-setup-recommended">Option A: Interactive Setup (Recommended)</a></li>
+<li class="lvl3"><a href="#option-b-manual-configuration">Option B: Manual Configuration</a></li>
+<li class="lvl2"><a href="#configuration-reference">Configuration Reference</a></li>
+<li class="lvl3"><a href="#environment-variables-env">Environment Variables (.env)</a></li>
+<li class="lvl3"><a href="#bot-to-bot-handoffs-tag-once-collect-the-burst">Bot-to-bot handoffs: tag once, collect the burst</a></li>
+<li class="lvl3"><a href="#config-file-configyaml">Config File (config.yaml)</a></li>
+<li class="lvl2"><a href="#slash-command-access-control">Slash Command Access Control</a></li>
+<li class="lvl2"><a href="#interactive-model-picker">Interactive Model Picker</a></li>
+<li class="lvl2"><a href="#native-slash-commands-for-skills">Native Slash Commands for Skills</a></li>
+<li class="lvl3"><a href="#disabling-slash-command-registration">Disabling Slash Command Registration</a></li>
+<li class="lvl2"><a href="#sending-media-inline-media-tags">Sending Media (inline MEDIA: tags)</a></li>
+<li class="lvl2"><a href="#receiving-arbitrary-file-types">Receiving Arbitrary File Types</a></li>
+<li class="lvl2"><a href="#interactive-prompts-clarify">Interactive Prompts (clarify)</a></li>
+<li class="lvl3"><a href="#prompt-layout">Prompt layout</a></li>
+<li class="lvl2"><a href="#home-channel">Home Channel</a></li>
+<li class="lvl3"><a href="#using-the-slash-command">Using the Slash Command</a></li>
+<li class="lvl3"><a href="#manual-configuration">Manual Configuration</a></li>
+<li class="lvl2"><a href="#voice-messages">Voice Messages</a></li>
+<li class="lvl3"><a href="#voice-channel-audio-effects-ambient--verbal-acks">Voice Channel Audio Effects (ambient + verbal acks)</a></li>
+<li class="lvl2"><a href="#forum-channels">Forum Channels</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl3"><a href="#bot-is-online-but-not-responding-to-messages">Bot is online but not responding to messages</a></li>
+<li class="lvl3"><a href="#privileged-intents--privilegedintentsrequired-error-on-startup">&quot;Privileged intents&quot; / PrivilegedIntentsRequired error on startup</a></li>
+<li class="lvl3"><a href="#bot-cant-see-messages-in-a-specific-channel">Bot can&#x27;t see messages in a specific channel</a></li>
+<li class="lvl3"><a href="#403-forbidden-errors">403 Forbidden errors</a></li>
+<li class="lvl3"><a href="#bot-is-offline">Bot is offline</a></li>
+<li class="lvl3"><a href="#user-not-allowed--bot-ignores-you">&quot;User not allowed&quot; / Bot ignores you</a></li>
+<li class="lvl3"><a href="#people-in-the-same-channel-are-sharing-context-unexpectedly">People in the same channel are sharing context unexpectedly</a></li>
+<li class="lvl2"><a href="#security">Security</a></li>
+<li class="lvl3"><a href="#role-based-access-control">Role-Based Access Control</a></li>
+<li class="lvl3"><a href="#mention-control">Mention Control</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

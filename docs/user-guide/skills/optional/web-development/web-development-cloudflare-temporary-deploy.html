@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloudflare Temporary Deploy — Deploy a Worker live, no account, via wrangler --temporary · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/web-development/web-development-cloudflare-temporary-deploy</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="cloudflare-temporary-deploy">Cloudflare Temporary Deploy</h1>
+<p>Deploy a Worker live, no account, via wrangler --temporary.</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/web-development/cloudflare-temporary-deploy</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/web-development\cloudflare-temporary-deploy</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>Hermes Agent</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>cloudflare</code>, <code>workers</code>, <code>wrangler</code>, <code>deploy</code>, <code>temporary</code>, <code>agent</code>, <code>serverless</code>, <code>web-development</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="cloudflare-temporary-deploy-skill">Cloudflare Temporary Deploy Skill</h1>
+<p>Deploy a Cloudflare Worker to a live <code>workers.dev</code> URL with zero account setup, using <code>wrangler deploy --temporary</code>. Cloudflare provisions a throwaway account, deploys, and prints a claim URL valid for 60 minutes; unclaimed accounts auto-delete. This gives an agent a tight write → deploy → verify loop without any OAuth, signup, or token copy-paste.</p>
+<p>This skill does NOT cover production deploys (use <code>wrangler login</code> + a permanent account for those), nor non-Worker Cloudflare products beyond the temporary-account limits below.</p>
+<h2 id="when-to-use">When to Use</h2>
+<p>Load this skill when the user wants to:</p>
+<ul>
+<li><strong>Ship agent-written code to a live URL</strong> without first creating a Cloudflare account — "deploy this and give me a link"</li>
+<li><strong>Iterate in a background/autonomous session</strong> where a browser OAuth step would be a hard stop</li>
+<li><strong>Prototype or evaluate Workers</strong> quickly with a throwaway, claimable target</li>
+<li><strong>Build a self-verifying deploy loop</strong> — deploy, <code>curl</code> the live URL, confirm output matches the code, redeploy</li>
+</ul>
+<h2 id="when-not-to-use">When NOT to Use</h2>
+<ul>
+<li><strong>Production or CI/CD</strong> → use a permanent account (<code>wrangler login</code> or <code>CLOUDFLARE_API_TOKEN</code>). <code>--temporary</code> errors out if any credential is present.</li>
+<li><strong>Wrangler is already authenticated</strong> → <code>--temporary</code> returns an error by design. Run <code>wrangler logout</code> first only if the user explicitly wants a throwaway deploy.</li>
+<li><strong>Long-lived hosting</strong> → temporary deployments are deleted after 60 minutes unless claimed.</li>
+</ul>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li><strong>Wrangler 4.102.0 or later.</strong> This is the version that introduced <code>--temporary</code>. Earlier versions do not have it. Verify with <code>npx wrangler@latest --version</code>.</li>
+<li><strong>Node 18+ / npm</strong> (or <code>npx</code>, <code>yarn</code>, <code>pnpm</code>). No global install needed — <code>npx wrangler@latest</code> works.</li>
+<li><strong>No Cloudflare credentials present.</strong> <code>--temporary</code> only works when Wrangler is unauthenticated: no OAuth login, no <code>CLOUDFLARE_API_TOKEN</code> / <code>CLOUDFLARE_API_KEY</code> env var, no <code>~/.wrangler</code> / <code>~/.config/.wrangler</code> cached OAuth. Use the <code>terminal</code> tool's environment as-is; do not set those vars.</li>
+<li>Network egress to <code>cloudflare.com</code> and <code>workers.dev</code>.</li>
+<li>Using <code>--temporary</code> accepts Cloudflare's Terms of Service and Privacy Policy.</li>
+</ul>
+<h2 id="how-to-run">How to Run</h2>
+<p>Use the <code>terminal</code> tool for every step. Always pin the version (<code>wrangler@latest</code> or <code>wrangler@4.102.0</code> or newer) so you don't accidentally run an old global wrangler that lacks the flag.</p>
+<ol>
+<li><strong>Scaffold a minimal Worker</strong> (skip if the project already exists). A Worker needs a <code>wrangler.toml</code> (or <code>wrangler.jsonc</code>) and an entry script. Minimal TypeScript example — write these with <code>write_file</code>:</li>
+</ol>
+<p><code>wrangler.jsonc</code>:
+   <code>jsonc
+   {
+     "name": "hello-agent",
+     "main": "src/index.ts",
+     "compatibility_date": "2025-01-01"
+   }</code></p>
+<p><code>src/index.ts</code>:
+   <code>typescript
+   export default {
+     async fetch(): Promise&lt;Response&gt; {
+       return new Response("hello cloudflare");
+     },
+   };</code></p>
+<ol>
+<li>
+<p><strong>Deploy with <code>--temporary</code></strong> from the project directory:
+   <code>npx wrangler@latest deploy --temporary</code>
+   The proof-of-work check adds a short automatic delay. On success Wrangler prints an <code>Account: &lt;name&gt; (created)</code> (or <code>(reused)</code>) line, a <code>Claim URL</code>, and the live <code>https://&lt;worker&gt;.&lt;account&gt;.workers.dev</code> URL.</p>
+</li>
+<li>
+<p><strong>Parse the URLs</strong> from that output. Run the helper to extract them reliably instead of eyeballing:
+   <code>npx wrangler@latest deploy --temporary 2&gt;&amp;1 | python scripts/parse_deploy_output.py</code>
+   (Resolve <code>scripts/parse_deploy_output.py</code> to this skill's absolute path.) It prints JSON: <code>{"live_url", "claim_url", "account", "account_state", "expires_minutes", "deployed"}</code>.</p>
+</li>
+<li>
+<p><strong>Verify the deploy is actually live</strong> — do not trust the deploy log alone. <code>curl</code> the live URL and confirm the body matches what the code returns:
+   <code>curl -sS &lt;live_url&gt;</code></p>
+</li>
+<li>
+<p><strong>Iterate.</strong> Edit the code, redeploy with the same <code>npx wrangler@latest deploy --temporary</code>. Within the 60-minute window Wrangler reuses the cached temporary account (<code>Account: &lt;name&gt; (reused)</code>), so the URL stays stable. <code>curl</code> again to confirm the change.</p>
+</li>
+<li>
+<p><strong>Hand the claim URL to the user.</strong> Tell them: open it within 60 minutes to keep the deployment and any resources; if they don't claim it, everything auto-deletes. Treat the claim URL as a secret — it grants ownership of the account.</p>
+</li>
+</ol>
+<h2 id="quick-reference">Quick Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Command</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Check version (need 4.102.0+)</td>
+<td><code>npx wrangler@latest --version</code></td>
+</tr>
+<tr>
+<td>Deploy (no account)</td>
+<td><code>npx wrangler@latest deploy --temporary</code></td>
+</tr>
+<tr>
+<td>Deploy + parse URLs</td>
+<td><code>npx wrangler@latest deploy --temporary 2&gt;&amp;1 \| python scripts/parse_deploy_output.py</code></td>
+</tr>
+<tr>
+<td>Verify live</td>
+<td><code>curl -sS &lt;live_url&gt;</code></td>
+</tr>
+<tr>
+<td>Clear cached temp account</td>
+<td><code>npx wrangler@latest logout</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="temporary-account-product-limits">Temporary account product limits</h3>
+<table>
+<thead>
+<tr>
+<th>Product</th>
+<th>Limit on a temporary account</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Workers</td>
+<td>Deploys to <code>workers.dev</code></td>
+</tr>
+<tr>
+<td>Static Assets</td>
+<td>Up to 1,000 files, 5 MiB each</td>
+</tr>
+<tr>
+<td>KV</td>
+<td>Allowed</td>
+</tr>
+<tr>
+<td>D1</td>
+<td>1 database, 100 MB per DB / 100 MB total</td>
+</tr>
+<tr>
+<td>Durable Objects</td>
+<td>Allowed</td>
+</tr>
+<tr>
+<td>Hyperdrive</td>
+<td>2 configs, 10 connections</td>
+</tr>
+<tr>
+<td>Queues</td>
+<td>Up to 10</td>
+</tr>
+<tr>
+<td>SSL/TLS certs</td>
+<td>Allowed</td>
+</tr>
+</tbody>
+</table>
+<h2 id="pitfalls">Pitfalls</h2>
+<ul>
+<li><strong><code>--temporary</code> is not in <code>wrangler deploy --help</code> and is not a global flag.</strong> It is intentionally hidden and surfaced dynamically: when an unauthenticated <code>wrangler deploy</code> fails, Wrangler prints "rerun with <code>--temporary</code>". Don't conclude the flag is missing just because <code>--help</code> omits it — check the version instead.</li>
+<li><strong>Old global wrangler.</strong> A stale globally-installed <code>wrangler</code> (<code>&lt; 4.102.0</code>) silently lacks the flag. Always invoke <code>npx wrangler@latest</code> (or a pinned <code>&gt;=4.102.0</code>) so you control the version.</li>
+<li><strong>Auth present → hard error.</strong> If <code>wrangler login</code> was ever run, or <code>CLOUDFLARE_API_TOKEN</code>/<code>CLOUDFLARE_API_KEY</code> is set, <code>--temporary</code> errors. Either unset the var for this shell or <code>wrangler logout</code>. Never strip a user's real credentials without telling them.</li>
+<li><strong>Rate limiting.</strong> Creating temporary accounts too fast fails. Reuse the cached account (just redeploy) within the 60-minute window instead of forcing a new one; if rate-limited, wait or use a permanent account.</li>
+<li><strong>60-minute hard expiry, not extendable.</strong> If the deploy must outlive an hour, the user must claim it. Surface this clearly.</li>
+<li><strong><code>curl</code> may briefly serve the old body after a redeploy.</strong> <code>workers.dev</code> has a short edge cache; the <code>(reused)</code> line plus a new <code>Current Version ID</code> confirm the deploy succeeded even if <code>curl</code> shows stale content for a few seconds. Re-curl, or add a cache-busting query string, before concluding a redeploy failed.</li>
+<li><strong>Don't log the claim URL into shared transcripts as "just a link."</strong> It is credential-equivalent.</li>
+</ul>
+<h2 id="verification">Verification</h2>
+<ul>
+<li><code>npx wrangler@latest --version</code> returns <code>&gt;= 4.102.0</code>.</li>
+<li><code>npx wrangler@latest deploy --temporary</code> prints a <code>workers.dev</code> live URL and a <code>claim-preview?claimToken=</code> claim URL.</li>
+<li><code>curl -sS &lt;live_url&gt;</code> returns the exact body the Worker code produces.</li>
+<li>A second deploy reports <code>Account: &lt;name&gt; (reused)</code> and the live URL is unchanged.</li>
+<li>The parser script's self-test passes: <code>python scripts/parse_deploy_output.py --selftest</code>.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/web-development/web-development-cloudflare-temporary-deploy</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#when-to-use">When to Use</a></li>
+<li class="lvl2"><a href="#when-not-to-use">When NOT to Use</a></li>
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#how-to-run">How to Run</a></li>
+<li class="lvl2"><a href="#quick-reference">Quick Reference</a></li>
+<li class="lvl3"><a href="#temporary-account-product-limits">Temporary account product limits</a></li>
+<li class="lvl2"><a href="#pitfalls">Pitfalls</a></li>
+<li class="lvl2"><a href="#verification">Verification</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

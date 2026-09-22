@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Programmatic Integration · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/programmatic-integration</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="programmatic-integration">Programmatic Integration</h1>
+<p>Hermes ships three protocols for driving the agent from external programs — IDE plugins, custom UIs, CI pipelines, embedded sub-agents. Pick the one that matches your transport and consumer.</p>
+<table>
+<thead>
+<tr>
+<th>Protocol</th>
+<th>Transport</th>
+<th>Best for</th>
+<th>Defined by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>ACP</strong></td>
+<td>JSON-RPC over stdio</td>
+<td>IDE clients (VS Code, Zed, JetBrains) that already speak the <a href="https://github.com/zed-industries/agent-client-protocol" class="ext" target="_blank" rel="noopener">Agent Client Protocol</a></td>
+<td><code>acp_adapter/</code></td>
+</tr>
+<tr>
+<td><strong>TUI gateway</strong></td>
+<td>JSON-RPC over stdio (or WebSocket)</td>
+<td>Custom hosts that want fine-grained control of sessions, slash commands, approvals, and streaming events</td>
+<td><code>tui_gateway/server.py</code></td>
+</tr>
+<tr>
+<td><strong>API server</strong></td>
+<td>HTTP + Server-Sent Events</td>
+<td>OpenAI-compatible frontends (Open WebUI, LobeChat, LibreChat…) and language-agnostic web clients</td>
+<td><code>gateway/platforms/api_server.py</code></td>
+</tr>
+</tbody>
+</table>
+<p>All three drive the same <code>AIAgent</code> core. They differ only in wire format and which set of features they expose.</p>
+<hr />
+<h2 id="acp-agent-client-protocol">ACP (Agent Client Protocol)</h2>
+<p><code>hermes acp</code> starts a stdio JSON-RPC server speaking ACP. Used in production by VS Code (Zed Industries' ACP extension), Zed, and any JetBrains IDE with an ACP plugin.</p>
+<p>Capabilities exposed: session creation, prompt submission, streaming agent message chunks, tool-call events, permission requests, session fork, cancel, and authentication. Tool output is rendered into ACP <code>Diff</code>/<code>ToolCall</code> content blocks the IDE understands.</p>
+<p>Full lifecycle, event bridge, and approval flow: <a href="acp-internals.html">ACP Internals</a>.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>acp<span class="w">                  </span><span class="c1"># serve ACP on stdio</span>
+hermes<span class="w"> </span>acp<span class="w"> </span>--check<span class="w">          </span><span class="c1"># verify ACP dependencies and adapter imports</span>
+hermes<span class="w"> </span>acp<span class="w"> </span>--setup<span class="w">          </span><span class="c1"># interactive provider/model setup for ACP terminal auth</span>
+</code></pre></div>
+
+<hr />
+<h2 id="tui-gateway-json-rpc">TUI Gateway JSON-RPC</h2>
+<p><code>tui_gateway/server.py</code> is the protocol the Ink TUI (<code>hermes --tui</code>) and the embedded dashboard PTY bridge talk to. Any external host can speak the same protocol over stdio (or WebSocket via <code>tui_gateway/ws.py</code>).</p>
+<h3 id="method-catalog-selected">Method catalog (selected)</h3>
+<div class="highlight"><pre><span></span><code>prompt.submit           prompt.background       session.steer
+session.create          session.list            session.active_list
+session.activate        session.close           session.interrupt
+session.history         session.compress        session.branch
+session.title           session.usage           session.status
+clarify.lock            config.set / config.get commands.catalog
+client.capabilities     gateway.capabilities    ping
+command.resolve         command.dispatch        cli.exec
+reload.mcp              reload.env              process.stop
+delegation.status       subagent.interrupt      subagent.steer
+spawn_tree.save / list / load
+terminal.resize         clipboard.paste         image.attach
+</code></pre></div>
+
+<p><code>session.active_list</code>, <code>session.activate</code>, and <code>session.close</code> are the process-local live-session controls used by the TUI session switcher. Use <code>session.list</code> / <code>/resume</code> for saved transcript discovery; use the active-session methods only for sessions that are currently open in the TUI gateway process.</p>
+<p>Within one authenticated gateway, resuming or activating a live session attaches another event subscriber rather than replacing the previous connection. Streaming and terminal events go to all attached clients; disconnecting one client does not end a session another client is viewing. Existing submit exclusivity and configured busy-input policy remain in force. Attached clients can steer the session's subagents; browser-controller results still require the connection that registered that controller. This does not enable independent gateway processes to write the same session, nor does it imply durable prompt admission across an owner restart.</p>
+<h3 id="model-overrides-on-sessioncreate">Model overrides on <code>session.create</code></h3>
+<p><code>session.create</code> accepts per-session <code>model</code> / <code>provider</code> overrides. A pair the provider cannot serve (<code>model: gpt-5.5</code> with <code>provider: anthropic</code>, or with no <code>provider</code> when the profile's configured provider is Anthropic) is refused up front with JSON-RPC code <code>-32602</code> instead of minting a session whose first turn fails at the provider; <code>error.data</code> carries <code>model</code>, <code>provider</code> and up to five <code>suggestions</code> from that provider's catalog, and <code>error.message</code> repeats them. The check is offline and only refuses names Hermes knows belong elsewhere: custom endpoints (<code>custom</code>, <code>custom:&lt;name&gt;</code>), aggregators (OpenRouter, Nous, …), models in the provider's own family that the curated list has not caught up with, and names no catalog lists are all accepted as before.</p>
+<h3 id="rewinding-history-on-promptsubmit">Rewinding history on <code>prompt.submit</code></h3>
+<p>A rewind / edit / regenerate is a <code>prompt.submit</code> that drops part of the stored transcript before running the new turn. Because that write is a destructive rewrite of the session's durable rows, the gateway honors it only when the client states its intent:</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>truncate_before_user_ordinal</code></td>
+<td>Zero-based index of the user turn to cut at. Everything from that turn onward is dropped. Display-only timeline rows (<code>display_kind</code>) are not counted. Must be a real integer — a JSON boolean is refused with code <code>4004</code>.</td>
+</tr>
+<tr>
+<td><code>truncate_before_row_id</code></td>
+<td>Integer SQLite row ID (<code>messages.id</code> / <code>row_id</code>) of the target user turn to cut at. Preferred durable address. When both ordinal and row ID are provided, gateway verifies they match (returning <code>4030</code> on mismatch). An unknown/stale row ID is refused with <code>4018</code> — it does <strong>not</strong> fall back to the ordinal.</td>
+</tr>
+<tr>
+<td><code>confirm_truncate</code></td>
+<td>Required whenever an ordinal, message ID, or row ID is sent. Declares that this submit really is a rewind, not an ordinary send that happens to carry leftover parameters. Sending it without a target is refused with code <code>4004</code>.</td>
+</tr>
+<tr>
+<td><code>confirm_empty_truncate</code></td>
+<td>Additionally required when the cut would leave the transcript empty (ordinal <code>0</code>).</td>
+</tr>
+</tbody>
+</table>
+<p>A truncation parameter without <code>confirm_truncate</code> is refused with code <code>4004</code> or <code>4029</code> and nothing is written. Hosts that implement rewind must set the flag at the moment the user asks for it, and must never keep truncation parameters in state across ordinary submits. Prefer <code>truncate_before_row_id</code> (from resume <code>row_id</code> / <code>_row_id</code>) over ordinals; keep the ordinal as a back-compat / optimistic-row path only when no durable id is available yet.</p>
+<p>A truncating submit is never absorbed by the busy-input policy. While a turn is still running, an ordinary <code>prompt.submit</code> is steered, redirected, or queued (<code>display.busy_input_mode</code>), but a rewind / edit / regenerate refuses with code <code>4009</code> (<code>session busy</code>) instead — queueing it would drop the history cut and run the edit as a plain follow-up after the un-edited turn. Hosts call <code>session.interrupt</code> and retry the same submit until it lands; the Desktop app does this automatically, so editing a message while Hermes is still thinking stops the live turn and reruns from the edited prompt.</p>
+<p>On a successful truncating submit against a durable session, the <code>prompt.submit</code> result additionally carries <code>survivor_user_row_ids</code> — the fresh post-rewrite row IDs of the surviving user turns, in visible-user-ordinal order. The rewrite re-inserts the kept prefix as new rows, so every row ID the host cached before the rewind is stale afterward; rebind cached IDs from this list (a <code>null</code> entry means that turn has no durable ID — drop the cached one) or the next rewind targeting an older surviving turn will be refused with <code>4018</code>.</p>
+<h3 id="events-streamed-back">Events streamed back</h3>
+<p><code>message.delta</code>, <code>message.complete</code>, <code>tool.start</code>, <code>tool.generating</code>, <code>tool.complete</code>, <code>gateway.ready</code>, <code>request.cancel</code>, plus session lifecycle and error events.</p>
+<h3 id="serverclient-requests-questions-the-agent-asks-you">Server→client requests (questions the agent asks you)</h3>
+<p>Approvals, clarify questions, sudo/secret prompts, vault unlock, MCP setup and the desktop read/act bridges are <strong>JSON-RPC requests from the gateway to the client</strong>, not events. The frame carries a string id, and the client answers with a normal JSON-RPC response bearing the same id:</p>
+<div class="highlight"><pre><span></span><code>← {&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:&quot;srq-7&quot;,&quot;method&quot;:&quot;approval&quot;,&quot;params&quot;:{&quot;session_id&quot;:&quot;…&quot;,&quot;request_id&quot;:&quot;…&quot;,&quot;command&quot;:&quot;rm -rf build&quot;,&quot;description&quot;:&quot;…&quot;}}
+→ {&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:&quot;srq-7&quot;,&quot;result&quot;:{&quot;choice&quot;:&quot;once&quot;}}
+</code></pre></div>
+
+<p>Methods: <code>approval</code> → <code>{choice}</code>; <code>clarify</code> → <code>{answer}</code> (single) or <code>{answers}</code> / <code>{}</code> cancel (batch, with <code>clarify.lock</code> to lock one answer early); <code>sudo</code>, <code>secret</code>, <code>vault.code</code>, <code>vault.unlock_prompt</code> → <code>{value}</code>; <code>connection</code> → <code>{settled_by, targets}</code> (the <code>manage_connections</code> card: one outcome per target); <code>terminal.read</code>, <code>window.read</code>, <code>preview.act</code>, <code>tour</code> → <code>{value}</code> (JSON text). Respond with a JSON-RPC error (<code>-32601</code>) for a method your host does not implement so the agent fails fast instead of waiting out the timeout.</p>
+<p><strong>Advertise that you answer them (breaking for existing WebSocket integrations).</strong> Once per connection, after <code>gateway.ready</code>, call <code>client.capabilities</code> with <code>{"server_requests": true}</code>; the result lists the request methods this backend may send. A WebSocket client that never does is treated as a build that predates server→client requests: the gateway fails every such request for it immediately (the agent sees the same "no answer" an error response produces; an approval is withdrawn, not denied) instead of stalling for the full deadline. There is no grace path — a third-party WebSocket client that answered <code>clarify</code>/<code>approval</code>/<code>sudo</code>/… before this change but never sends <code>client.capabilities</code> now has every such request refused until it adds the one call. A session with no client attached is not affected — its open questions wait in <code>open_requests</code> for the reconnect replay. The stdio TUI, the desktop app and the dashboard advertise through the shared <code>JsonRpcRequestChannel</code>.</p>
+<p>When the gateway withdraws a question (timeout, interrupt, answered from another surface) it emits <code>request.cancel</code> <code>{ id, method, reason }</code>; clear only the matching prompt. <code>session.resume</code> / <code>session.activate</code> results and <code>session.events.since</code> carry <code>open_requests</code> — the still-open frames — so a reconnecting client re-renders (and can still answer) them.</p>
+<h3 id="rebuilding-the-in-flight-turn-on-reconnect">Rebuilding the in-flight turn on reconnect</h3>
+<p><code>session.resume</code> / <code>session.activate</code> results carry <code>inflight</code> — the turn still running (or the retained failed one) that history does not hold yet: <code>user</code>, <code>assistant</code> streamed so far, <code>streaming</code>, mid-turn <code>corrections</code>, and error fields. When the turn was started by the gateway rather than typed by a person (a background-process completion, an async delegation result, a hidden scaffolding prompt) <code>inflight</code> also carries the same <code>display_kind</code> / <code>display_metadata</code> the persisted <code>messages</code> row will get, so a client renders the live prompt exactly as it will render history after the turn lands — a <code>process_complete</code> timeline marker with <code>display_metadata.display_text</code>, nothing at all for <code>hidden</code>. Both fields are absent for genuine user input; never infer origin from the prompt text (a user quoting a marker string is still a user).</p>
+<h3 id="pi-style-rpc-mapping">Pi-style RPC mapping</h3>
+<p>Every command in the Pi-mono RPC spec (<a href="https://github.com/NousResearch/hermes-agent/issues/360" class="ext" target="_blank" rel="noopener">issue #360</a>) has a TUI-gateway equivalent:</p>
+<table>
+<thead>
+<tr>
+<th>Pi command</th>
+<th>Hermes equivalent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>prompt</code></td>
+<td><code>prompt.submit</code> (or ACP <code>session/prompt</code>)</td>
+</tr>
+<tr>
+<td><code>steer</code></td>
+<td><code>session.steer</code></td>
+</tr>
+<tr>
+<td><code>follow_up</code></td>
+<td><code>prompt.submit</code> queued after current turn</td>
+</tr>
+<tr>
+<td><code>abort</code></td>
+<td><code>session.interrupt</code></td>
+</tr>
+<tr>
+<td><code>set_model</code></td>
+<td><code>command.dispatch</code> for <code>/model &lt;provider:model&gt;</code> (mid-session, persistent)</td>
+</tr>
+<tr>
+<td><code>compact</code></td>
+<td><code>session.compress</code></td>
+</tr>
+<tr>
+<td><code>get_state</code></td>
+<td><code>session.status</code></td>
+</tr>
+<tr>
+<td><code>get_messages</code></td>
+<td><code>session.history</code></td>
+</tr>
+<tr>
+<td><code>switch_session</code></td>
+<td><code>session.resume</code></td>
+</tr>
+<tr>
+<td><code>fork</code></td>
+<td><code>session.branch</code></td>
+</tr>
+<tr>
+<td><code>ui_request</code> / <code>ui_response</code></td>
+<td>server→client requests <code>clarify</code> / <code>sudo</code> / <code>secret</code> / <code>approval</code> answered by JSON-RPC response frames</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="openai-compatible-api-server">OpenAI-Compatible API Server</h2>
+<p><code>gateway/platforms/api_server.py</code> exposes hermes over HTTP for any client that already speaks the OpenAI format. Useful when you want a web frontend, a curl-driven CI runner, or a non-Python consumer.</p>
+<p>Endpoints:</p>
+<div class="highlight"><pre><span></span><code>POST /v1/chat/completions        OpenAI Chat Completions (streaming via SSE)
+POST /v1/responses               OpenAI Responses API (stateful)
+POST /v1/runs                    Start a run, returns run_id (202)
+GET  /v1/runs/{id}               Run status
+GET  /v1/runs/{id}/events        SSE stream of lifecycle events
+POST /v1/runs/{id}/approval      Resolve a pending approval
+POST /v1/runs/{id}/steer         Inject mid-run guidance at the next tool boundary
+POST /v1/runs/{id}/stop          Interrupt the run
+GET  /v1/capabilities            Machine-readable feature flags
+POST /v1/browser-control/register Register a browser controller
+GET  /v1/browser-control/ws       Browser-controller WebSocket
+GET  /v1/models                  Lists hermes-agent
+GET  /api/model/options          Provider-aware picker inventory
+GET  /health, /health/detailed
+</code></pre></div>
+
+<p>Setup, headers (<code>X-Hermes-Session-Id</code>, <code>X-Hermes-Session-Key</code>), and frontend wiring: <a href="../user-guide/features/api-server.html">API Server</a>.</p>
+<p>Browser extensions can opt into the disabled-by-default controller protocol to
+drive the exact browser session that opened the Hermes conversation. The API
+and dashboard transports share one principal-bound broker and one explicit
+capability allowlist; see <a href="../user-guide/features/api-server.html#browser-extension-control">Browser-extension control</a>.</p>
+<h3 id="model-catalog-surfaces">Model catalog surfaces</h3>
+<p>The OpenAI-compatible API intentionally keeps <code>GET /v1/models</code> minimal: it is
+the compatibility endpoint frontends expect, not the full Hermes provider/model
+picker catalog.</p>
+<p>If an external control plane needs Hermes' curated provider rows, per-model
+pricing, or capability hints, use one of the authenticated picker surfaces:</p>
+<ul>
+<li>API server REST: <code>GET /api/model/options</code> with the API-server bearer key</li>
+<li>Dashboard backend REST: <code>GET /api/model/options</code> with <code>X-Hermes-Session-Token</code></li>
+<li>TUI gateway RPC: <code>model.options</code></li>
+</ul>
+<p>Those surfaces share the same payload builder and the same custom-provider
+probe policy:</p>
+<ul>
+<li>Normal open: probe only the current custom provider so offline saved
+  endpoints do not stall the picker.</li>
+<li>Explicit refresh (<code>refresh=1</code> or <code>refresh: true</code>): bust the provider-model
+  cache and probe all saved custom providers so live catalogs repopulate fully.</li>
+</ul>
+<p>Use <code>/v1/models</code> for OpenAI-client compatibility. Use <code>/api/model/options</code> or
+<code>model.options</code> when you are building a Hermes-aware model picker.</p>
+<p><code>POST /v1/runs/{id}/steer</code> is the HTTP equivalent of Hermes <code>/steer</code>: it does not create a new user turn or immediately rewrite the assistant output already in flight. Instead, the text is appended to the live run and becomes visible to the agent after the next tool boundary, so it can course-correct without discarding the current tool-calling loop.</p>
+<p><code>/v1/runs/{id}/steer</code> is only accepted while the run status is <code>running</code>. Queued, approval-paused, stopping, cancelled, failed, and completed runs return <code>409 run_not_accepting_steer</code>, even if the server still retains internal agent references during cooperative shutdown.</p>
+<p>A <code>200</code> (and the <code>run.steered</code> event) means the text was <strong>queued</strong>, not that the agent consumed it. If a steer lands after the agent's final response — with no later tool boundary to deliver it at — the undelivered text is returned as <code>pending_steer</code> on the terminal event (<code>run.completed</code>, <code>run.failed</code>, or <code>run.cancelled</code>) and run status, so the client can replay it as the next user turn instead of losing it.</p>
+<h4 id="terminal-run-status">Terminal run status</h4>
+<p>The terminal status of a run is derived from how the agent's turn actually ended, and the terminal event name always matches it (<code>run.&lt;status&gt;</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Turn outcome</th>
+<th>Status</th>
+<th>Terminal event</th>
+<th>Flags on the event / status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Final answer produced</td>
+<td><code>completed</code></td>
+<td><code>run.completed</code></td>
+<td><code>completed: true</code></td>
+</tr>
+<tr>
+<td>Interrupted (<code>/stop</code>, or an interrupt inside the agent)</td>
+<td><code>cancelled</code></td>
+<td><code>run.cancelled</code></td>
+<td><code>completed: false</code>, <code>interrupted: true</code>, <code>turn_exit_reason</code> naming the issuer — <code>interrupted_by_user</code> for a human stop, <code>interrupted_by_system(&lt;issuer&gt;)</code> / <code>interrupted_during_api_call(&lt;issuer&gt;)</code> when a watchdog (e.g. <code>cron_inactivity_watchdog</code>, <code>turn_liveness_watchdog</code>, <code>gateway_inactivity_watchdog</code>, <code>session_turn_lease_lost</code>) ended the turn</td>
+</tr>
+<tr>
+<td>Provider/agent failure</td>
+<td><code>failed</code></td>
+<td><code>run.failed</code></td>
+<td><code>completed: false</code>, <code>error</code></td>
+</tr>
+<tr>
+<td>Gateway shut down while the run was active (<code>/v1/runs</code> only)</td>
+<td><code>interrupted</code></td>
+<td><code>run.interrupted</code></td>
+<td><code>error: "Gateway shutdown interrupted the run."</code> — recorded before the agent is interrupted and never overwritten by the turn's late result; a client <code>/stop</code> still settles as <code>cancelled</code></td>
+</tr>
+<tr>
+<td>Ended without finishing (iteration budget, truncated or partial reply)</td>
+<td><code>failed</code></td>
+<td><code>run.failed</code></td>
+<td><code>completed: false</code>, <code>partial</code> when applicable, <code>turn_exit_reason</code> (e.g. <code>max_iterations_reached(60/60)</code>), <code>output</code> with any fallback text</td>
+</tr>
+</tbody>
+</table>
+<p>A run is never reported as <code>completed</code> with <code>completed: false</code> or <code>partial: true</code> in the same payload. The same rule applies to <code>/api/sessions/{id}/chat/stream</code>, whose <code>assistant.completed</code> payload carries the real <code>completed</code> / <code>partial</code> / <code>interrupted</code> flags and whose terminal event is <code>run.completed</code>, <code>run.failed</code>, or <code>run.cancelled</code>.</p>
+<hr />
+<h2 id="which-one-should-i-use">Which one should I use?</h2>
+<ul>
+<li><strong>You're writing an IDE plugin and the IDE already speaks ACP</strong> → ACP. Zero protocol work on the IDE side.</li>
+<li><strong>You're writing a custom desktop / web / TUI host and want every Hermes feature</strong> (slash commands, approvals, clarify, multi-agent, session branching) → TUI gateway JSON-RPC.</li>
+<li><strong>You want any OpenAI-compatible frontend, a language-agnostic HTTP client, or curl-driven automation</strong> → API server.</li>
+<li><strong>You want a Python in-process embed without a subprocess</strong> → import <code>run_agent.AIAgent</code> directly. See <a href="agent-loop.html">Agent Loop</a>.</li>
+</ul>
+<hr />
+<h2 id="model-hot-swapping">Model hot-swapping</h2>
+<p>Mid-session model switching works on every surface — it's the <code>/model</code> slash command under the hood.</p>
+<ul>
+<li><strong>CLI / TUI:</strong> <code>/model claude-sonnet-4</code> or <code>/model openrouter:anthropic/claude-sonnet-4.6</code></li>
+<li><strong>TUI gateway RPC:</strong> <code>command.dispatch</code> with <code>{"command": "/model claude-sonnet-4"}</code></li>
+<li><strong>ACP:</strong> the IDE sends the slash command as a prompt; the agent dispatches it</li>
+<li><strong>API server:</strong> include a <code>model</code> field in the request body</li>
+</ul>
+<p>Provider-aware resolution (the same model name picks the right format for whatever provider you're on) is built in. See <code>hermes_cli/model_switch.py</code>.</p>
+<hr />
+<h2 id="a-note-on---mode-rpc">A note on <code>--mode rpc</code></h2>
+<p>Hermes does not have a <code>--mode rpc</code> flag. The three protocols above already cover the use cases — ACP for IDE-protocol clients, the TUI gateway for stdio JSON-RPC hosts, and the API server for HTTP. If you find a real gap that none of them fill, open an issue with the concrete consumer you're building.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/programmatic-integration</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#acp-agent-client-protocol">ACP (Agent Client Protocol)</a></li>
+<li class="lvl2"><a href="#tui-gateway-json-rpc">TUI Gateway JSON-RPC</a></li>
+<li class="lvl3"><a href="#method-catalog-selected">Method catalog (selected)</a></li>
+<li class="lvl3"><a href="#model-overrides-on-sessioncreate">Model overrides on session.create</a></li>
+<li class="lvl3"><a href="#rewinding-history-on-promptsubmit">Rewinding history on prompt.submit</a></li>
+<li class="lvl3"><a href="#events-streamed-back">Events streamed back</a></li>
+<li class="lvl3"><a href="#serverclient-requests-questions-the-agent-asks-you">Server→client requests (questions the agent asks you)</a></li>
+<li class="lvl3"><a href="#rebuilding-the-in-flight-turn-on-reconnect">Rebuilding the in-flight turn on reconnect</a></li>
+<li class="lvl3"><a href="#pi-style-rpc-mapping">Pi-style RPC mapping</a></li>
+<li class="lvl2"><a href="#openai-compatible-api-server">OpenAI-Compatible API Server</a></li>
+<li class="lvl3"><a href="#model-catalog-surfaces">Model catalog surfaces</a></li>
+<li class="lvl2"><a href="#which-one-should-i-use">Which one should I use?</a></li>
+<li class="lvl2"><a href="#model-hot-swapping">Model hot-swapping</a></li>
+<li class="lvl2"><a href="#a-note-on---mode-rpc">A note on --mode rpc</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

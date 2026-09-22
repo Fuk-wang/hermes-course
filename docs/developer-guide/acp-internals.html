@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACP Internals · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/acp-internals</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="acp-internals">ACP Internals</h1>
+<p>The ACP adapter wraps Hermes' synchronous <code>AIAgent</code> in an async JSON-RPC stdio server.</p>
+<p>Key implementation files:</p>
+<ul>
+<li><code>acp_adapter/entry.py</code></li>
+<li><code>acp_adapter/server.py</code></li>
+<li><code>acp_adapter/session.py</code></li>
+<li><code>acp_adapter/events.py</code></li>
+<li><code>acp_adapter/permissions.py</code></li>
+<li><code>acp_adapter/tools.py</code></li>
+<li><code>acp_adapter/auth.py</code></li>
+</ul>
+<h2 id="boot-flow">Boot flow</h2>
+<div class="highlight"><pre><span></span><code>hermes acp / hermes-acp / python -m acp_adapter
+  -&gt; acp_adapter.entry.main()
+  -&gt; parse --version / --check / --setup before server startup
+  -&gt; load ~/.hermes/.env
+  -&gt; configure stderr logging
+  -&gt; construct HermesACPAgent
+  -&gt; acp.run_agent(agent, use_unstable_protocol=True)
+</code></pre></div>
+
+<p>Stdout is reserved for ACP JSON-RPC transport. Human-readable logs go to stderr.</p>
+<h2 id="major-components">Major components</h2>
+<h3 id="hermesacpagent"><code>HermesACPAgent</code></h3>
+<p><code>acp_adapter/server.py</code> implements the ACP agent protocol.</p>
+<p>Responsibilities:</p>
+<ul>
+<li>initialize / authenticate</li>
+<li>new/load/resume/fork/list/cancel session methods</li>
+<li>prompt execution</li>
+<li>session model switching</li>
+<li>wiring sync AIAgent callbacks into ACP async notifications</li>
+</ul>
+<h3 id="sessionmanager"><code>SessionManager</code></h3>
+<p><code>acp_adapter/session.py</code> tracks live ACP sessions.</p>
+<p>Each session stores:</p>
+<ul>
+<li><code>session_id</code></li>
+<li><code>agent</code></li>
+<li><code>cwd</code></li>
+<li><code>model</code></li>
+<li><code>history</code></li>
+<li><code>cancel_event</code></li>
+</ul>
+<p>The manager is thread-safe and supports:</p>
+<ul>
+<li>create</li>
+<li>get</li>
+<li>remove</li>
+<li>fork</li>
+<li>list</li>
+<li>cleanup</li>
+<li>cwd updates</li>
+</ul>
+<h3 id="event-bridge">Event bridge</h3>
+<p><code>acp_adapter/events.py</code> converts AIAgent callbacks into ACP <code>session_update</code> events.</p>
+<p>Bridged callbacks:</p>
+<ul>
+<li><code>tool_progress_callback</code></li>
+<li><code>thinking_callback</code> (currently set to <code>None</code> in the ACP bridge — reasoning is forwarded through <code>step_callback</code> instead)</li>
+<li><code>step_callback</code></li>
+</ul>
+<p>Every ACP tool call reaches a terminal status: <code>tool.completed</code> closes the call with its own
+result (<code>completed</code> / <code>failed</code>), the <code>step_callback</code> <code>prev_tools</code> pass is only a fallback for
+runtimes that never project a completion, and anything still open when the turn ends —
+a denied or blocked call, an interrupted one — is marked <code>failed</code> before the response is
+returned.</p>
+<p>Because <code>AIAgent</code> runs in a worker thread while ACP I/O lives on the main event loop, the bridge uses:</p>
+<div class="highlight"><pre><span></span><code><span class="n">asyncio</span><span class="o">.</span><span class="n">run_coroutine_threadsafe</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="permission-bridge">Permission bridge</h3>
+<p><code>acp_adapter/permissions.py</code> adapts dangerous terminal approval prompts into ACP permission requests.</p>
+<p>Mapping:</p>
+<ul>
+<li><code>allow_once</code> -&gt; Hermes <code>once</code></li>
+<li><code>allow_always</code> -&gt; Hermes <code>always</code></li>
+<li>reject options -&gt; Hermes <code>deny</code></li>
+</ul>
+<p>Timeouts and bridge failures deny by default.</p>
+<h3 id="tool-rendering-helpers">Tool rendering helpers</h3>
+<p><code>acp_adapter/tools.py</code> maps Hermes tools to ACP tool kinds and builds editor-facing content.</p>
+<p>Examples:</p>
+<ul>
+<li><code>patch</code> / <code>write_file</code> -&gt; file diffs</li>
+<li><code>terminal</code> -&gt; shell command text</li>
+<li><code>read_file</code> / <code>search_files</code> -&gt; text previews</li>
+<li>large results -&gt; truncated text blocks for UI safety</li>
+</ul>
+<h2 id="session-lifecycle">Session lifecycle</h2>
+<div class="highlight"><pre><span></span><code>new_session(cwd)
+  -&gt; create SessionState
+  -&gt; create AIAgent(platform=&quot;acp&quot;, enabled_toolsets=[&quot;hermes-acp&quot;])
+  -&gt; bind task_id/session_id to cwd override
+
+prompt(..., session_id)
+  -&gt; extract text from ACP content blocks
+  -&gt; reset cancel event
+  -&gt; install callbacks + approval bridge
+  -&gt; run AIAgent in ThreadPoolExecutor
+  -&gt; update session history
+  -&gt; emit final agent message chunk
+</code></pre></div>
+
+<p>A turn that ends in a terminal failure (provider refusal, non-retryable error, exhausted
+retries, interrupt before any reply) is closed by the core loop with a Hermes-authored
+assistant row ("Your request was not processed…" / "This turn did not complete…") so the
+durable transcript never ends on an open <code>user</code> row. Without it the next prompt would be
+merged into the failed request and replayed. Context-overflow failures are exempt: their
+repair is session rotation, not another row.</p>
+<h3 id="cancelation">Cancelation</h3>
+<p><code>cancel(session_id)</code>:</p>
+<ul>
+<li>sets the session cancel event</li>
+<li>calls <code>agent.interrupt()</code> when available</li>
+<li>causes the prompt response to return <code>stop_reason="cancelled"</code></li>
+</ul>
+<h3 id="forking">Forking</h3>
+<p><code>fork_session()</code> deep-copies message history into a new live session, preserving conversation state while giving the fork its own session ID and cwd.</p>
+<h2 id="providerauth-behavior">Provider/auth behavior</h2>
+<p>ACP does not implement its own auth store.</p>
+<p>Instead it reuses Hermes' runtime resolver:</p>
+<ul>
+<li><code>acp_adapter/auth.py</code></li>
+<li><code>hermes_cli/runtime_provider.py</code></li>
+</ul>
+<p>So ACP advertises and uses the currently configured Hermes provider/credentials. It also always advertises a terminal setup auth method (<code>hermes-setup</code>, args <code>--setup</code>) so first-run ACP clients can open Hermes' interactive model/provider configuration before starting a normal ACP session.</p>
+<h2 id="working-directory-binding">Working directory binding</h2>
+<p>ACP sessions carry an editor cwd.</p>
+<p>The session manager binds that cwd to the ACP session ID via task-scoped terminal/file overrides, so file and terminal tools operate relative to the editor workspace.</p>
+<h2 id="duplicate-same-name-tool-calls">Duplicate same-name tool calls</h2>
+<p>The event bridge tracks tool IDs FIFO per tool name, not just one ID per name. This is important for:</p>
+<ul>
+<li>parallel same-name calls</li>
+<li>repeated same-name calls in one step</li>
+</ul>
+<p>Without FIFO queues, completion events would attach to the wrong tool invocation.</p>
+<h2 id="approval-callback-restoration">Approval callback restoration</h2>
+<p>ACP temporarily installs an approval callback on the terminal tool during prompt execution, then restores the previous callback afterward. This avoids leaving ACP session-specific approval handlers installed globally forever.</p>
+<h2 id="current-limitations">Current limitations</h2>
+<ul>
+<li>ACP sessions are persisted to the shared <code>~/.hermes/state.db</code> (SessionDB) and transparently restored across process restarts; they appear in <code>session_search</code></li>
+<li>non-text prompt blocks are currently ignored for request text extraction</li>
+<li>editor-specific UX varies by ACP client implementation</li>
+</ul>
+<h2 id="related-files">Related files</h2>
+<ul>
+<li><code>tests/acp_adapter/</code> — ACP test suite</li>
+<li><code>toolsets.py</code> — <code>hermes-acp</code> toolset definition</li>
+<li><code>hermes_cli/main.py</code> — <code>hermes acp</code> CLI subcommand</li>
+<li><code>pyproject.toml</code> — <code>[acp]</code> optional dependency + <code>hermes-acp</code> script</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/acp-internals</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#boot-flow">Boot flow</a></li>
+<li class="lvl2"><a href="#major-components">Major components</a></li>
+<li class="lvl3"><a href="#hermesacpagent">HermesACPAgent</a></li>
+<li class="lvl3"><a href="#sessionmanager">SessionManager</a></li>
+<li class="lvl3"><a href="#event-bridge">Event bridge</a></li>
+<li class="lvl3"><a href="#permission-bridge">Permission bridge</a></li>
+<li class="lvl3"><a href="#tool-rendering-helpers">Tool rendering helpers</a></li>
+<li class="lvl2"><a href="#session-lifecycle">Session lifecycle</a></li>
+<li class="lvl3"><a href="#cancelation">Cancelation</a></li>
+<li class="lvl3"><a href="#forking">Forking</a></li>
+<li class="lvl2"><a href="#providerauth-behavior">Provider/auth behavior</a></li>
+<li class="lvl2"><a href="#working-directory-binding">Working directory binding</a></li>
+<li class="lvl2"><a href="#duplicate-same-name-tool-calls">Duplicate same-name tool calls</a></li>
+<li class="lvl2"><a href="#approval-callback-restoration">Approval callback restoration</a></li>
+<li class="lvl2"><a href="#current-limitations">Current limitations</a></li>
+<li class="lvl2"><a href="#related-files">Related files</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

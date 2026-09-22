@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory Provider Plugins · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/memory-provider-plugin</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="building-a-memory-provider-plugin">Building a Memory Provider Plugin</h1>
+<p>Memory provider plugins give Hermes Agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. This guide covers how to build one.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Memory providers are one of two <strong>provider plugin</strong> types. The other is <a href="context-engine-plugin.html">Context Engine Plugins</a>, which replace the built-in context compressor. Both follow the same pattern: single-select, config-driven, managed via <code>hermes plugins</code>.</p>
+</div>
+<h2 id="installation-layouts">Installation Layouts</h2>
+<p>Hermes discovers memory providers from four sources, in this precedence order:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Location</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bundled</td>
+<td><code>plugins/memory/&lt;name&gt;/</code></td>
+<td>Ships with Hermes. Closed to new providers — see <a href="https://github.com/NousResearch/hermes-agent/blob/main/CONTRIBUTING.md" class="ext" target="_blank" rel="noopener">CONTRIBUTING</a>.</td>
+</tr>
+<tr>
+<td>User</td>
+<td><code>$HERMES_HOME/plugins/&lt;name&gt;/</code></td>
+<td>Dropped in by the user, per profile.</td>
+</tr>
+<tr>
+<td>Project</td>
+<td><code>./.hermes/plugins/&lt;name&gt;/</code></td>
+<td>Opt-in via <code>HERMES_ENABLE_PROJECT_PLUGINS=1</code>.</td>
+</tr>
+<tr>
+<td>Package</td>
+<td><code>hermes_agent.memory_providers</code> entry point</td>
+<td><code>pip install</code>, nothing to copy.</td>
+</tr>
+</tbody>
+</table>
+<p>Earlier sources win on a name collision, so a directory dropped into a working
+tree can never shadow a shipped provider.</p>
+<div class="admonition adm-note"><p class="adm-title">Note</p>
+<p>This is the reverse of the general plugin system's later-wins order. A memory
+provider is activated by <em>name</em> (<code>memory.provider</code>), so shadowing would
+silently redirect the agent's memory rather than merely override a tool.</p>
+</div>
+<p>Discovery only <em>enumerates</em> — it never imports a provider. Nothing runs until
+<code>memory.provider</code> names it.</p>
+<h3 id="directory-provider">Directory Provider</h3>
+<p>A directory provider lives in <code>plugins/memory/&lt;name&gt;/</code> when bundled with
+Hermes, in <code>$HERMES_HOME/plugins/&lt;name&gt;/</code> when installed by a user, or in
+<code>./.hermes/plugins/&lt;name&gt;/</code> for a project-local one:</p>
+<div class="highlight"><pre><span></span><code>plugins/memory/my-provider/
+├── __init__.py      # MemoryProvider implementation + register() entry point
+├── plugin.yaml      # Metadata (name, description, hooks)
+└── README.md        # Setup instructions, config reference, tools
+</code></pre></div>
+
+<h3 id="packaged-provider">Packaged Provider</h3>
+<p>A pip-installed provider publishes an entry point in the
+<code>hermes_agent.memory_providers</code> group. The entry-point name is the provider
+name users select in <code>memory.provider</code>; its value points to the provider's
+<code>register(ctx)</code> function:</p>
+<div class="highlight"><pre><span></span><code><span class="k">[project.entry-points.</span><span class="s2">&quot;hermes_agent.memory_providers&quot;</span><span class="k">]</span>
+<span class="n">my-provider</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;my_provider:register&quot;</span>
+</code></pre></div>
+
+<p>Point the entry point at the <strong>package</strong>, or at a <code>register(ctx)</code> inside it, and
+keep your implementation, skills, and other resources in the normal Python
+package layout. No copy under <code>$HERMES_HOME/plugins/</code> is required.</p>
+<p>A package entry point gets everything a directory install does, including the
+two files Hermes reads from disk rather than importing — <code>config_schema.py</code>
+(the dashboard config panel) and <code>cli.py</code> (your <code>hermes &lt;provider&gt;</code>
+subcommands). Both are found next to your package's <code>__init__.py</code>, so point the
+entry point at a package rather than a single module if you ship either.</p>
+<h2 id="the-memoryprovider-abc">The MemoryProvider ABC</h2>
+<p>Your plugin implements the <code>MemoryProvider</code> abstract base class from <code>agent/memory_provider.py</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.memory_provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">MemoryProvider</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyMemoryProvider</span><span class="p">(</span><span class="n">MemoryProvider</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;my-provider&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_available</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Check if this provider can activate. NO network calls.&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MY_API_KEY&quot;</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">initialize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">session_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Called once at agent startup.</span>
+
+<span class="sd">        kwargs always includes:</span>
+<span class="sd">          hermes_home (str): Active HERMES_HOME path. Use for storage.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_api_key</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MY_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_session_id</span> <span class="o">=</span> <span class="n">session_id</span>
+
+    <span class="c1"># ... implement remaining methods</span>
+</code></pre></div>
+
+<h3 id="initialization-context">Initialization context</h3>
+<p><code>AIAgent</code> passes session context through <code>MemoryManager.initialize_all()</code> to
+<code>initialize(session_id, **kwargs)</code>. Accept <code>**kwargs</code> and tolerate missing optional
+fields; callers may initialize a provider without an agent or a session database.</p>
+<table>
+<thead>
+<tr>
+<th>Keyword</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hermes_home</code></td>
+<td>Active profile's storage directory.</td>
+</tr>
+<tr>
+<td><code>platform</code></td>
+<td>Session surface, such as <code>cli</code>, <code>gui</code>, <code>acp</code>, or <code>telegram</code>.</td>
+</tr>
+<tr>
+<td><code>session_title</code></td>
+<td>Stored session title, when available. A display label is not necessarily a user-selected identity.</td>
+</tr>
+<tr>
+<td><code>session_title_source</code></td>
+<td>Stored title provenance, when available: <code>derived</code>, <code>llm</code>, or <code>user</code>. Automatic sources must not be mistaken for explicit identity overrides; missing provenance retains a provider's legacy behavior. Shared constants live in <code>hermes_state_common.py</code>.</td>
+</tr>
+<tr>
+<td><code>cwd</code></td>
+<td>Non-empty logical workspace supplied as <code>AIAgent(cwd=...)</code>, available before provider initialization. Omitted for <code>None</code> or an empty string.</td>
+</tr>
+<tr>
+<td><code>gateway_session_key</code></td>
+<td>Stable messaging-chat identity for per-chat session isolation.</td>
+</tr>
+<tr>
+<td><code>user_id</code>, <code>user_id_alt</code>, <code>user_name</code>, <code>chat_id</code></td>
+<td>Gateway identity fields, included when present.</td>
+</tr>
+<tr>
+<td><code>agent_identity</code></td>
+<td>Active profile name, when available.</td>
+</tr>
+<tr>
+<td><code>agent_workspace</code>, <code>agent_context</code></td>
+<td>Runtime agent scope. <code>agent_workspace</code> is <code>hermes</code>; <code>agent_context</code> is <code>cron</code> for scheduler runs, <code>subagent</code> for <code>delegate_task</code> children, else <code>primary</code> — skip automatic writes for the non-primary values.</td>
+</tr>
+</tbody>
+</table>
+<p>Do not assume <code>os.getcwd()</code> identifies the conversation's workspace: one Desktop
+or gateway backend can serve several sessions. If <code>cwd</code> is absent and directory
+routing is needed, <code>agent.runtime_cwd.resolve_agent_cwd()</code> honors the session cwd
+context, then scoped <code>terminal.cwd</code> (carried internally as <code>TERMINAL_CWD</code>), then
+the launch directory. Construction-time workspace metadata does not require
+changing the process cwd or rebuilding an existing conversation's system prompt.</p>
+<p>Desktop/TUI workspace changes synchronize the live agent's <code>session_cwd</code> through
+<code>tui_gateway/session_workdir.py::_register_session_cwd</code>, including when a deferred
+agent is attached after a workspace move. This lets a first or restarted Codex
+app-server session use the current workspace instead of its construction-time
+cwd. It does not move an already-running Codex thread, reinitialize memory
+providers, change an existing Honcho session identity, or invalidate the cached
+system prompt. Provider initialization still receives the construction-time
+workspace; absent or empty cwd remains unpinned.</p>
+<h2 id="required-methods">Required Methods</h2>
+<h3 id="core-lifecycle">Core Lifecycle</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>When Called</th>
+<th>Must Implement?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code> (property)</td>
+<td>Always</td>
+<td><strong>Yes</strong></td>
+</tr>
+<tr>
+<td><code>is_available()</code></td>
+<td>Agent init, before activation</td>
+<td><strong>Yes</strong> — no network calls</td>
+</tr>
+<tr>
+<td><code>initialize(session_id, **kwargs)</code></td>
+<td>Agent startup</td>
+<td><strong>Yes</strong></td>
+</tr>
+<tr>
+<td><code>get_tool_schemas()</code></td>
+<td>After init, for tool injection</td>
+<td><strong>Yes</strong></td>
+</tr>
+<tr>
+<td><code>handle_tool_call(tool_name, args, **kwargs)</code></td>
+<td>When agent uses your tools</td>
+<td><strong>Yes</strong> (if you have tools)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="config">Config</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Purpose</th>
+<th>Must Implement?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_config_schema()</code></td>
+<td>Declare config fields for <code>hermes memory setup</code></td>
+<td><strong>Yes</strong></td>
+</tr>
+<tr>
+<td><code>save_config(values, hermes_home)</code></td>
+<td>Write non-secret config to native location</td>
+<td><strong>Yes</strong> (unless env-var-only)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="optional-hooks">Optional Hooks</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>When Called</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>system_prompt_block()</code></td>
+<td>System prompt assembly</td>
+<td>Static provider info</td>
+</tr>
+<tr>
+<td><code>prefetch(query, *, session_id="")</code></td>
+<td>Before each API call</td>
+<td>Return recalled context</td>
+</tr>
+<tr>
+<td><code>queue_prefetch(query, *, session_id="")</code></td>
+<td>After each turn</td>
+<td>Pre-warm for next turn</td>
+</tr>
+<tr>
+<td><code>sync_turn(user, assistant, *, session_id="", messages=None)</code></td>
+<td>After each completed turn</td>
+<td>Persist conversation</td>
+</tr>
+<tr>
+<td><code>on_session_end(messages)</code></td>
+<td>Conversation ends</td>
+<td>Final extraction/flush</td>
+</tr>
+<tr>
+<td><code>on_pre_compress(messages)</code></td>
+<td>Before context compression</td>
+<td>Save insights before discard</td>
+</tr>
+<tr>
+<td><code>on_memory_write(action, target, content)</code></td>
+<td>Built-in memory writes</td>
+<td>Mirror to your backend</td>
+</tr>
+<tr>
+<td><code>shutdown()</code></td>
+<td>Process exit</td>
+<td>Clean up connections</td>
+</tr>
+</tbody>
+</table>
+<h3 id="oversized-prefetch-results">Oversized prefetch results</h3>
+<p>External <code>prefetch()</code> results above the configured spill threshold are written
+to a private spill file and replaced with the configured head/tail preview.
+The preview includes the path so the agent can read the full result when it is
+actually needed. Results at or below the threshold are returned unchanged.</p>
+<p>This uses the shared <code>hooks.output_spill</code> settings (<code>10,000</code> characters by
+default); see <a href="plugins.html#oversized-context-spill">Plugins — oversized-context spill</a>.</p>
+<h2 id="pre-compress-checkpoints-fail-closed">Pre-Compress Checkpoints (fail-closed)</h2>
+<p><code>on_pre_compress()</code> is best-effort by default: if your provider raises, the
+host logs the failure and compression proceeds. That is the right default for
+insight extraction — and the wrong one for a provider whose job is to archive
+transcript evidence to a durable store <em>before</em> the lossy rewrite. For that
+case the host offers an opt-in checkpoint contract (API v2):</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.memory_provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">MemoryProvider</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyArchivingProvider</span><span class="p">(</span><span class="n">MemoryProvider</span><span class="p">):</span>
+    <span class="c1"># Opt in: every successful on_pre_compress() return means the durable</span>
+    <span class="c1"># checkpoint is committed. Raise on any failure — do not return partial</span>
+    <span class="c1"># success. Version 1 (the inherited default) is the implicit historical</span>
+    <span class="c1"># contract: best-effort semantics, raw message list.</span>
+    <span class="n">pre_compress_checkpoint_api_version</span> <span class="o">=</span> <span class="mi">2</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">on_pre_compress</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">messages</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">require_checkpoint</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="c1"># require_checkpoint mirrors the operator&#39;s checkpoint_required</span>
+        <span class="c1"># setting: True means a raise here blocks the lossy rewrite.</span>
+        <span class="n">ids</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_archive</span><span class="p">(</span><span class="n">messages</span><span class="p">)</span>   <span class="c1"># must be durable before returning</span>
+        <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;checkpoint: </span><span class="si">{</span><span class="n">ids</span><span class="si">}</span><span class="s2">&quot;</span>     <span class="c1"># forwarded into the summary prompt</span>
+</code></pre></div>
+
+<p>Operators enable enforcement per deployment:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">compression</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">checkpoint_required</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># default: false</span>
+</code></pre></div>
+
+<p>With the gate on, compression <strong>fails closed</strong> before any lossy rewrite unless
+an active provider advertising the API completed its checkpoint: the
+uncompressed transcript is preserved, the compaction attempt errors with
+<code>BLOCKED_MISSING_PREREQUISITE</code>, and it can be retried once your store
+recovers. With the gate off (default), nothing changes for existing providers.</p>
+<p>None of the providers bundled with Hermes advertise checkpoint API v2 — the
+contract is opt-in and exists for third-party archiving providers. Enabling
+<code>checkpoint_required</code> without one therefore blocks every compression attempt
+(manual and automatic): agent init logs a warning naming the active provider,
+and each refusal names <code>compression.checkpoint_required</code> as the key to disable.</p>
+<p>The gate binds to every compaction authority, not just the Hermes
+summarizer: server-side native compaction (<code>compression.codex_responses_native</code>)
+is suppressed while the gate is armed, post-turn micro-compaction
+(<code>compression.micro_compact</code>) is forced off at agent init (it absorbs old
+exchanges into a rolling summary with no checkpoint hook in its path), and
+the <code>codex_app_server</code> API mode is refused at agent init — the codex agent
+compacts its own thread with no truthful pre-compaction boundary, so a
+required checkpoint cannot be guaranteed there. The checkpoint-aware Hermes
+compressor stays the only lossy authority.</p>
+<p>What your provider receives depends on its declared API version. Version 1
+providers (the implicit default — every pre-existing provider) keep the
+historical contract: the raw message list, exactly as before. Version 2
+checkpoint providers receive normalized direct evidence instead:
+user/assistant text rows only — tool results, system messages, the
+<code>tool_calls</code> payload of assistant messages (their prose is kept), and prior
+compaction summaries are filtered host-side. Prior summaries are recognized
+via a persistent <code>_compressed_summary</code> message marker that survives process
+restarts, so a resumed session never feeds derivative summaries back into
+your archive.</p>
+<p><strong>Checkpoints must be idempotent.</strong> After a fail-closed block, the next
+compaction attempt calls <code>on_pre_compress()</code> again with the same transcript —
+and a transcript that grew only slightly produces largely overlapping
+evidence. Key your archive writes by content (for example a transcript
+digest) and upsert, so retries and overlaps deduplicate instead of
+accumulating duplicate archives.</p>
+<p>Contract tests: <code>tests/agent/test_pre_compress_checkpoint_contract.py</code>.</p>
+<h2 id="setup-ux--what-a-standalone-provider-keeps">Setup UX — what a standalone provider keeps</h2>
+<p>Every setup surface Hermes gives a bundled provider is driven by files in the provider's
+own directory, so a provider installed from the plugin catalog keeps all of them:</p>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>What the provider ships</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Desktop → Capabilities → Tools → Memory (config panel)</td>
+<td><code>config_schema.py</code> (below)</td>
+</tr>
+<tr>
+<td><code>hermes memory setup</code> wizard</td>
+<td><code>get_config_schema()</code> declares the fields the wizard prompts for, <code>save_config(config, hermes_home)</code> persists them, <code>post_setup(hermes_home, config)</code> runs afterwards for anything interactive (OAuth, first sync); <code>get_status_config()</code> feeds <code>hermes memory status</code></td>
+</tr>
+<tr>
+<td><code>hermes &lt;provider&gt; …</code> subcommands</td>
+<td><code>cli.py</code> with <code>register_cli(subparser)</code> (<a href="#adding-cli-commands">Adding CLI Commands</a>)</td>
+</tr>
+<tr>
+<td>Python dependencies</td>
+<td><code>pyproject.toml</code> <code>[project] dependencies</code> (or <code>python_dependencies</code> in <code>plugin.yaml</code>); installed under Hermes' own pins at install time and re-applied across <code>hermes update</code></td>
+</tr>
+</tbody>
+</table>
+<p>Your provider's name, <code>memory.&lt;name&gt;</code> config section, data directory and tool names are the
+contract with existing users. A provider that moves out of core keeps all four; Hermes then
+installs the catalog plugin automatically for anyone whose <code>memory.provider</code> still names it
+(on <code>hermes update</code>, and once at agent start when <code>security.allow_lazy_installs</code> is on).</p>
+<h2 id="config-schema">Config Schema</h2>
+<p><code>get_config_schema()</code> returns a list of field descriptors used by <code>hermes memory setup</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">get_config_schema</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">[</span>
+        <span class="p">{</span>
+            <span class="s2">&quot;key&quot;</span><span class="p">:</span> <span class="s2">&quot;api_key&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;My Provider API key&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;secret&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>           <span class="c1"># → written to .env</span>
+            <span class="s2">&quot;required&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+            <span class="s2">&quot;env_var&quot;</span><span class="p">:</span> <span class="s2">&quot;MY_API_KEY&quot;</span><span class="p">,</span>   <span class="c1"># explicit env var name</span>
+            <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="s2">&quot;https://my-provider.com/keys&quot;</span><span class="p">,</span>  <span class="c1"># where to get it</span>
+        <span class="p">},</span>
+        <span class="p">{</span>
+            <span class="s2">&quot;key&quot;</span><span class="p">:</span> <span class="s2">&quot;region&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Server region&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="s2">&quot;us-east&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;choices&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;us-east&quot;</span><span class="p">,</span> <span class="s2">&quot;eu-west&quot;</span><span class="p">,</span> <span class="s2">&quot;ap-south&quot;</span><span class="p">],</span>
+        <span class="p">},</span>
+        <span class="p">{</span>
+            <span class="s2">&quot;key&quot;</span><span class="p">:</span> <span class="s2">&quot;project&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Project identifier&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+        <span class="p">},</span>
+    <span class="p">]</span>
+</code></pre></div>
+
+<p>Fields with <code>secret: True</code> and <code>env_var</code> go to <code>.env</code>. Non-secret fields are passed to <code>save_config()</code>.</p>
+<div class="admonition adm-tip"><p class="adm-title">Minimal vs Full Schema</p>
+<p>Every field in <code>get_config_schema()</code> is prompted during <code>hermes memory setup</code>. Providers with many options should keep the schema minimal — only include fields the user <strong>must</strong> configure (API key, required credentials). Document optional settings in a config file reference (e.g. <code>$HERMES_HOME/myprovider.json</code>) rather than prompting for them all during setup. This keeps the setup wizard fast while still supporting advanced configuration. See the Supermemory provider for an example — it only prompts for the API key; all other options live in <code>supermemory.json</code>.</p>
+</div>
+<h2 id="save-config">Save Config</h2>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">save_config</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">values</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="n">hermes_home</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Write non-secret config to your native location.&quot;&quot;&quot;</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+    <span class="n">config_path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">hermes_home</span><span class="p">)</span> <span class="o">/</span> <span class="s2">&quot;my-provider.json&quot;</span>
+    <span class="n">config_path</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">values</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">2</span><span class="p">))</span>
+</code></pre></div>
+
+<p>For env-var-only providers, leave the default no-op.</p>
+<h2 id="plugin-entry-point">Plugin Entry Point</h2>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Called by the memory plugin discovery system.&quot;&quot;&quot;</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_memory_provider</span><span class="p">(</span><span class="n">MyMemoryProvider</span><span class="p">())</span>
+</code></pre></div>
+
+<p>A provider may also expose read-only skills from the same callback. Skills are
+qualified by the entry-point name and are loaded only when that memory provider
+is active:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+<span class="n">SKILLS_DIR</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span><span class="o">.</span><span class="n">parent</span> <span class="o">/</span> <span class="s2">&quot;skills&quot;</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_memory_provider</span><span class="p">(</span><span class="n">MyMemoryProvider</span><span class="p">())</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_skill</span><span class="p">(</span>
+        <span class="s2">&quot;maintenance&quot;</span><span class="p">,</span>
+        <span class="n">SKILLS_DIR</span> <span class="o">/</span> <span class="s2">&quot;maintenance&quot;</span> <span class="o">/</span> <span class="s2">&quot;SKILL.md&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;Maintain the provider&#39;s memory store&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p>With the <code>my-provider</code> entry point active, the skill is available as
+<code>my-provider:maintenance</code> through <code>skill_view()</code>.</p>
+<h2 id="pluginyaml">plugin.yaml</h2>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-provider</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Short</span><span class="nv"> </span><span class="s">description</span><span class="nv"> </span><span class="s">of</span><span class="nv"> </span><span class="s">what</span><span class="nv"> </span><span class="s">this</span><span class="nv"> </span><span class="s">provider</span><span class="nv"> </span><span class="s">does.&quot;</span>
+<span class="nt">hooks</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">on_session_end</span><span class="w">    </span><span class="c1"># list hooks you implement</span>
+</code></pre></div>
+
+<h2 id="threading-contract">Threading Contract</h2>
+<p><strong><code>sync_turn()</code> MUST be non-blocking.</strong> If your backend has latency (API calls, LLM processing), run the work in a daemon thread — spawned with <code>agent.memory_provider.spawn_context_thread</code>, never a bare <code>threading.Thread</code>. Profile isolation (the active <code>HERMES_HOME</code>, the per-turn secret scope) lives in <code>contextvars</code>, and a plain thread starts with an empty context: under multiplexed profiles it would silently write into the <em>default</em> profile's store, and <code>get_secret()</code> fails closed there.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.memory_provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">spawn_context_thread</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">sync_turn</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">user_content</span><span class="p">,</span> <span class="n">assistant_content</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="n">messages</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_sync</span><span class="p">():</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_api</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">user_content</span><span class="p">,</span> <span class="n">assistant_content</span><span class="p">,</span> <span class="n">session_id</span><span class="o">=</span><span class="n">session_id</span><span class="p">,</span> <span class="n">messages</span><span class="o">=</span><span class="n">messages</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s2">&quot;Sync failed: </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">e</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sync_thread</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sync_thread</span><span class="o">.</span><span class="n">is_alive</span><span class="p">():</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_sync_thread</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="mf">5.0</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_sync_thread</span> <span class="o">=</span> <span class="n">spawn_context_thread</span><span class="p">(</span><span class="n">_sync</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s2">&quot;myprovider-sync&quot;</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_sync_thread</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+</code></pre></div>
+
+<p>The same applies to prefetch and writer threads. Small JSON config sidecars (<code>$HERMES_HOME/&lt;provider&gt;.json</code>) are read with <code>utils.read_json_or_empty</code> and written with <code>utils.atomic_json_write</code>; anything under <code>config.yaml</code> goes through <code>hermes_cli.config.save_config(..., merge_existing=True)</code>.</p>
+<p><code>messages</code> is optional OpenAI-style conversation context as of the completed
+turn. When present, it includes user/assistant messages, assistant tool calls,
+and tool result messages. Providers that do not need raw turn context can omit
+the <code>messages</code> parameter; Hermes will continue calling them with the legacy
+signature.</p>
+<p>Cloud providers should document what parts of <code>messages</code> are sent off-device.
+Tool calls and tool results may contain file paths, command output, or other
+workspace data.</p>
+<h2 id="profile-isolation">Profile Isolation</h2>
+<p>All storage paths <strong>must</strong> use the <code>hermes_home</code> kwarg from <code>initialize()</code>, not hardcoded <code>~/.hermes</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># CORRECT — profile-scoped</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">hermes_constants</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_hermes_home</span>
+<span class="n">data_dir</span> <span class="o">=</span> <span class="n">get_hermes_home</span><span class="p">()</span> <span class="o">/</span> <span class="s2">&quot;my-provider&quot;</span>
+
+<span class="c1"># WRONG — shared across all profiles</span>
+<span class="n">data_dir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;~/.hermes/my-provider&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span>
+</code></pre></div>
+
+<h2 id="testing">Testing</h2>
+<p>See <code>tests/agent/test_memory_provider.py</code> and adjacent memory tests (<code>tests/agent/test_memory_session_switch.py</code>, <code>tests/agent/test_memory_user_id.py</code>, <code>tests/agent/test_memory_provider_init.py</code>) for end-to-end patterns.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.memory_manager</span><span class="w"> </span><span class="kn">import</span> <span class="n">MemoryManager</span>
+
+<span class="n">mgr</span> <span class="o">=</span> <span class="n">MemoryManager</span><span class="p">()</span>
+<span class="n">mgr</span><span class="o">.</span><span class="n">add_provider</span><span class="p">(</span><span class="n">my_provider</span><span class="p">)</span>
+<span class="n">mgr</span><span class="o">.</span><span class="n">initialize_all</span><span class="p">(</span><span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;test-1&quot;</span><span class="p">,</span> <span class="n">platform</span><span class="o">=</span><span class="s2">&quot;cli&quot;</span><span class="p">)</span>
+
+<span class="c1"># Test tool routing</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">mgr</span><span class="o">.</span><span class="n">handle_tool_call</span><span class="p">(</span><span class="s2">&quot;my_tool&quot;</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;action&quot;</span><span class="p">:</span> <span class="s2">&quot;add&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;test&quot;</span><span class="p">})</span>
+
+<span class="c1"># Test lifecycle</span>
+<span class="n">mgr</span><span class="o">.</span><span class="n">sync_all</span><span class="p">(</span><span class="s2">&quot;user msg&quot;</span><span class="p">,</span> <span class="s2">&quot;assistant msg&quot;</span><span class="p">)</span>
+<span class="n">mgr</span><span class="o">.</span><span class="n">on_session_end</span><span class="p">([])</span>
+<span class="n">mgr</span><span class="o">.</span><span class="n">shutdown_all</span><span class="p">()</span>
+</code></pre></div>
+
+<h2 id="adding-cli-commands">Adding CLI Commands</h2>
+<p>Memory provider plugins can register their own CLI subcommand tree (e.g. <code>hermes my-provider status</code>, <code>hermes my-provider config</code>). This uses a convention-based discovery system — no changes to core files needed.</p>
+<h3 id="how-it-works">How it works</h3>
+<ol>
+<li>Add a <code>cli.py</code> file to your plugin directory</li>
+<li>Define a <code>register_cli(subparser)</code> function that builds the argparse tree</li>
+<li>The memory plugin system discovers it at startup via <code>discover_plugin_cli_commands()</code></li>
+<li>Your commands appear under <code>hermes &lt;provider-name&gt; &lt;subcommand&gt;</code></li>
+</ol>
+<p><strong>Active-provider gating:</strong> Your CLI commands only appear when your provider is the active <code>memory.provider</code> in config. If a user hasn't configured your provider, your commands won't show in <code>hermes --help</code>.</p>
+<h3 id="example">Example</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/memory/my-provider/cli.py</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">my_command</span><span class="p">(</span><span class="n">args</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Handler dispatched by argparse.&quot;&quot;&quot;</span>
+    <span class="n">sub</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="s2">&quot;my_command&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">sub</span> <span class="o">==</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Provider is active and connected.&quot;</span><span class="p">)</span>
+    <span class="k">elif</span> <span class="n">sub</span> <span class="o">==</span> <span class="s2">&quot;config&quot;</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Showing config...&quot;</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Usage: hermes my-provider &lt;status|config&gt;&quot;</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register_cli</span><span class="p">(</span><span class="n">subparser</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Build the hermes my-provider argparse tree.</span>
+
+<span class="sd">    Called by discover_plugin_cli_commands() at argparse setup time.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">subs</span> <span class="o">=</span> <span class="n">subparser</span><span class="o">.</span><span class="n">add_subparsers</span><span class="p">(</span><span class="n">dest</span><span class="o">=</span><span class="s2">&quot;my_command&quot;</span><span class="p">)</span>
+    <span class="n">subs</span><span class="o">.</span><span class="n">add_parser</span><span class="p">(</span><span class="s2">&quot;status&quot;</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Show provider status&quot;</span><span class="p">)</span>
+    <span class="n">subs</span><span class="o">.</span><span class="n">add_parser</span><span class="p">(</span><span class="s2">&quot;config&quot;</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Show provider config&quot;</span><span class="p">)</span>
+    <span class="n">subparser</span><span class="o">.</span><span class="n">set_defaults</span><span class="p">(</span><span class="n">func</span><span class="o">=</span><span class="n">my_command</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="reference-implementation">Reference implementation</h3>
+<p>See <code>plugins/memory/honcho/cli.py</code> for a full example with 13 subcommands, cross-profile management (<code>--target-profile</code>), and config read/write.</p>
+<h3 id="directory-structure-with-cli">Directory structure with CLI</h3>
+<div class="highlight"><pre><span></span><code>plugins/memory/my-provider/
+├── __init__.py      # MemoryProvider implementation + register()
+├── plugin.yaml      # Metadata
+├── cli.py           # register_cli(subparser) — CLI commands
+└── README.md        # Setup instructions
+</code></pre></div>
+
+<h2 id="single-provider-rule">Single Provider Rule</h2>
+<p>Only <strong>one</strong> external memory provider can be active at a time. If a user tries to register a second, the MemoryManager rejects it with a warning. This prevents tool schema bloat and conflicting backends.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#installation-layouts">Installation Layouts</a></li>
+<li class="lvl3"><a href="#directory-provider">Directory Provider</a></li>
+<li class="lvl3"><a href="#packaged-provider">Packaged Provider</a></li>
+<li class="lvl2"><a href="#the-memoryprovider-abc">The MemoryProvider ABC</a></li>
+<li class="lvl3"><a href="#initialization-context">Initialization context</a></li>
+<li class="lvl2"><a href="#required-methods">Required Methods</a></li>
+<li class="lvl3"><a href="#core-lifecycle">Core Lifecycle</a></li>
+<li class="lvl3"><a href="#config">Config</a></li>
+<li class="lvl3"><a href="#optional-hooks">Optional Hooks</a></li>
+<li class="lvl3"><a href="#oversized-prefetch-results">Oversized prefetch results</a></li>
+<li class="lvl2"><a href="#pre-compress-checkpoints-fail-closed">Pre-Compress Checkpoints (fail-closed)</a></li>
+<li class="lvl2"><a href="#setup-ux--what-a-standalone-provider-keeps">Setup UX — what a standalone provider keeps</a></li>
+<li class="lvl2"><a href="#config-schema">Config Schema</a></li>
+<li class="lvl2"><a href="#save-config">Save Config</a></li>
+<li class="lvl2"><a href="#plugin-entry-point">Plugin Entry Point</a></li>
+<li class="lvl2"><a href="#pluginyaml">plugin.yaml</a></li>
+<li class="lvl2"><a href="#threading-contract">Threading Contract</a></li>
+<li class="lvl2"><a href="#profile-isolation">Profile Isolation</a></li>
+<li class="lvl2"><a href="#testing">Testing</a></li>
+<li class="lvl2"><a href="#adding-cli-commands">Adding CLI Commands</a></li>
+<li class="lvl3"><a href="#how-it-works">How it works</a></li>
+<li class="lvl3"><a href="#example">Example</a></li>
+<li class="lvl3"><a href="#reference-implementation">Reference implementation</a></li>
+<li class="lvl3"><a href="#directory-structure-with-cli">Directory structure with CLI</a></li>
+<li class="lvl2"><a href="#single-provider-rule">Single Provider Rule</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

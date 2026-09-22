@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Loop Internals · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/agent-loop</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="agent-loop-internals">Agent Loop Internals</h1>
+<p>The core orchestration engine is the <code>AIAgent</code> class. <code>run_agent.py</code> is now a thin facade: the loop itself lives in <code>agent/conversation_loop.py</code>, each turn phase in <code>agent/turn_*.py</code> (iteration prep, API call, API error, overflow, truncation, recovery), constructor wiring in <code>agent/agent_init.py</code>, and everything from prompt assembly to tool dispatch to provider failover in focused <code>agent/*.py</code> modules mixed into <code>AIAgent</code>.</p>
+<h2 id="core-responsibilities">Core Responsibilities</h2>
+<p><code>AIAgent</code> is responsible for:</p>
+<ul>
+<li>Assembling the effective system prompt and tool schemas via <code>prompt_builder.py</code></li>
+<li>Selecting the correct provider/API mode (chat_completions, codex_responses, anthropic_messages)</li>
+<li>Making interruptible model calls with cancellation support</li>
+<li>Executing tool calls (sequentially or concurrently via thread pool)</li>
+<li>Maintaining conversation history in OpenAI message format</li>
+<li>Handling compression, retries, and fallback model switching</li>
+<li>Tracking iteration budgets across parent and child agents</li>
+<li>Flushing persistent memory before context is lost</li>
+</ul>
+<h2 id="two-entry-points">Two Entry Points</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># Simple interface — returns final response string</span>
+<span class="n">response</span> <span class="o">=</span> <span class="n">agent</span><span class="o">.</span><span class="n">chat</span><span class="p">(</span><span class="s2">&quot;Fix the bug in main.py&quot;</span><span class="p">)</span>
+
+<span class="c1"># Full interface — returns dict with messages, metadata, usage stats</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">agent</span><span class="o">.</span><span class="n">run_conversation</span><span class="p">(</span>
+    <span class="n">user_message</span><span class="o">=</span><span class="s2">&quot;Fix the bug in main.py&quot;</span><span class="p">,</span>
+    <span class="n">system_message</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>           <span class="c1"># auto-built if omitted</span>
+    <span class="n">conversation_history</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>      <span class="c1"># auto-loaded from session if omitted</span>
+    <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;task_abc123&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><code>chat()</code> is a thin wrapper around <code>run_conversation()</code> that extracts the <code>final_response</code> field from the result dict.</p>
+<h2 id="api-modes">API Modes</h2>
+<p>Hermes supports three API execution modes, resolved from provider selection, explicit args, and base URL heuristics:</p>
+<table>
+<thead>
+<tr>
+<th>API mode</th>
+<th>Used for</th>
+<th>Client type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>chat_completions</code></td>
+<td>OpenAI-compatible endpoints (OpenRouter, custom, most providers)</td>
+<td><code>openai.OpenAI</code></td>
+</tr>
+<tr>
+<td><code>codex_responses</code></td>
+<td>OpenAI Codex / Responses API</td>
+<td><code>openai.OpenAI</code> with Responses format</td>
+</tr>
+<tr>
+<td><code>anthropic_messages</code></td>
+<td>Native Anthropic Messages API</td>
+<td><code>anthropic.Anthropic</code> via adapter</td>
+</tr>
+</tbody>
+</table>
+<p>The mode determines how messages are formatted, how tool calls are structured, how responses are parsed, and how caching/streaming works. All three converge on the same internal message format (OpenAI-style <code>role</code>/<code>content</code>/<code>tool_calls</code> dicts) before and after API calls.</p>
+<p><strong>Mode resolution order:</strong>
+1. Explicit <code>api_mode</code> constructor arg (highest priority)
+2. Provider-specific detection (e.g., <code>anthropic</code> provider → <code>anthropic_messages</code>)
+3. Base URL heuristics (e.g., <code>api.anthropic.com</code> → <code>anthropic_messages</code>)
+4. Default: <code>chat_completions</code></p>
+<h2 id="turn-lifecycle">Turn Lifecycle</h2>
+<p>Each iteration of the agent loop follows this sequence:</p>
+<div class="highlight"><pre><span></span><code>run_conversation()
+  1. Generate task_id if not provided
+  2. Append user message to conversation history
+  3. Build or reuse cached system prompt (prompt_builder.py)
+  4. Check if preflight compression is needed (&gt;50% context)
+  5. Build API messages from conversation history
+     - chat_completions: OpenAI format as-is
+     - codex_responses: convert to Responses API input items
+     - anthropic_messages: convert via anthropic_adapter.py
+  6. Inject ephemeral prompt layers (budget warnings, context pressure)
+  7. Apply prompt caching markers if on Anthropic
+  8. Make interruptible API call (_interruptible_api_call)
+  9. Parse response:
+     - If tool_calls: execute them, append results, loop back to step 5
+     - If text response: persist session, flush memory if needed, return
+</code></pre></div>
+
+<h3 id="message-format">Message Format</h3>
+<p>All messages use OpenAI-compatible format internally:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;system&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">}</span>
+<span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">}</span>
+<span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;assistant&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="s2">&quot;tool_calls&quot;</span><span class="p">:</span> <span class="p">[</span><span class="o">...</span><span class="p">]}</span>
+<span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;tool&quot;</span><span class="p">,</span> <span class="s2">&quot;tool_call_id&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>Reasoning content (from models that support extended thinking) is stored in <code>assistant_msg["reasoning"]</code> and optionally displayed via the <code>reasoning_callback</code>.</p>
+<h3 id="message-alternation-rules">Message Alternation Rules</h3>
+<p>The agent loop enforces strict message role alternation:</p>
+<ul>
+<li>After the system message: <code>User → Assistant → User → Assistant → ...</code></li>
+<li>During tool calling: <code>Assistant (with tool_calls) → Tool → Tool → ... → Assistant</code></li>
+<li><strong>Never</strong> two assistant messages in a row</li>
+<li><strong>Never</strong> two user messages in a row</li>
+<li><strong>Only</strong> <code>tool</code> role can have consecutive entries (parallel tool results)</li>
+</ul>
+<p>Providers validate these sequences and will reject malformed histories.</p>
+<h2 id="interruptible-api-calls">Interruptible API Calls</h2>
+<p>API requests are wrapped in <code>_interruptible_api_call()</code> which runs the actual HTTP call in a background thread while monitoring an interrupt event:</p>
+<div class="highlight"><pre><span></span><code>┌────────────────────────────────────────────────────┐
+│  Main thread                  API thread           │
+│                                                    │
+│   wait on:                     HTTP POST           │
+│    - response ready     ───▶   to provider         │
+│    - interrupt event                               │
+│    - timeout                                       │
+└────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<p>When interrupted (user sends new message, <code>/stop</code> command, or signal):
+- The API thread is abandoned (response discarded)
+- The agent can process the new input or shut down cleanly
+- No partial response is injected into conversation history</p>
+<h2 id="tool-execution">Tool Execution</h2>
+<h3 id="sequential-vs-concurrent">Sequential vs Concurrent</h3>
+<p>When the model returns tool calls:</p>
+<ul>
+<li><strong>Single tool call</strong> → executed directly in the main thread</li>
+<li><strong>Multiple tool calls</strong> → executed concurrently via <code>ThreadPoolExecutor</code></li>
+<li>Exception: tools marked as interactive (e.g., <code>clarify</code>) force sequential execution</li>
+<li>Results are reinserted in the original tool call order regardless of completion order</li>
+</ul>
+<h3 id="execution-flow">Execution Flow</h3>
+<div class="highlight"><pre><span></span><code>for each tool_call in response.tool_calls:
+    1. Resolve handler from tools/registry.py
+    2. Fire pre_tool_call plugin hook
+    3. Check if dangerous command (tools/approval.py)
+       - If dangerous: invoke approval_callback, wait for user
+    4. Execute handler with args + task_id
+    5. Fire post_tool_call plugin hook
+    6. Append {&quot;role&quot;: &quot;tool&quot;, &quot;content&quot;: result} to history
+</code></pre></div>
+
+<h3 id="agent-level-tools">Agent-Level Tools</h3>
+<p>Some tools are intercepted by <code>agent/tool_executor.py</code> (called from <code>agent/conversation_loop.py</code>) <em>before</em> reaching <code>handle_function_call()</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Why intercepted</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>todo</code></td>
+<td>Reads/writes agent-local task state</td>
+</tr>
+<tr>
+<td><code>memory</code></td>
+<td>Writes to persistent memory files with character limits</td>
+</tr>
+<tr>
+<td><code>session_search</code></td>
+<td>Queries session history via the agent's session DB</td>
+</tr>
+<tr>
+<td><code>delegate_task</code></td>
+<td>Spawns subagent(s) with isolated context</td>
+</tr>
+</tbody>
+</table>
+<p>These tools modify agent state directly and return synthetic tool results without going through the registry.</p>
+<h2 id="callback-surfaces">Callback Surfaces</h2>
+<p><code>AIAgent</code> supports platform-specific callbacks that enable real-time progress in the CLI, gateway, and ACP integrations:</p>
+<table>
+<thead>
+<tr>
+<th>Callback</th>
+<th>When fired</th>
+<th>Used by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tool_progress_callback</code></td>
+<td>Before/after each tool execution</td>
+<td>CLI spinner, gateway progress messages</td>
+</tr>
+<tr>
+<td><code>thinking_callback</code></td>
+<td>When model starts/stops thinking</td>
+<td>CLI "thinking..." indicator</td>
+</tr>
+<tr>
+<td><code>reasoning_callback</code></td>
+<td>When model returns reasoning content</td>
+<td>CLI reasoning display, gateway reasoning blocks</td>
+</tr>
+<tr>
+<td><code>clarify_callback</code></td>
+<td>When <code>clarify</code> tool is called</td>
+<td>CLI input prompt, gateway interactive message</td>
+</tr>
+<tr>
+<td><code>step_callback</code></td>
+<td>After each complete agent turn</td>
+<td>Gateway step tracking, ACP progress</td>
+</tr>
+<tr>
+<td><code>stream_delta_callback</code></td>
+<td>Each streaming token (when enabled)</td>
+<td>CLI streaming display</td>
+</tr>
+<tr>
+<td><code>tool_gen_callback</code></td>
+<td>When tool call is parsed from stream</td>
+<td>CLI tool preview in spinner</td>
+</tr>
+<tr>
+<td><code>status_callback</code></td>
+<td>State changes (thinking, executing, etc.)</td>
+<td>ACP status updates</td>
+</tr>
+</tbody>
+</table>
+<h2 id="budget-and-fallback-behavior">Budget and Fallback Behavior</h2>
+<h3 id="iteration-budget">Iteration Budget</h3>
+<p>The agent tracks iterations via <code>IterationBudget</code>:</p>
+<ul>
+<li>Default: 500 iterations (configurable via <code>agent.max_turns</code>)</li>
+<li>Each agent gets its own budget. Subagents get independent budgets capped at <code>delegation.max_iterations</code> (default 50) — total iterations across parent + subagents can exceed the parent's cap</li>
+<li>At 100%, the agent stops and returns a summary of work done</li>
+</ul>
+<h3 id="fallback-model">Fallback Model</h3>
+<p>When the primary model fails (429 rate limit, 5xx server error, 401/403 auth error):</p>
+<ol>
+<li>Check <code>fallback_providers</code> list in config</li>
+<li>Try each fallback in order</li>
+<li>On success, continue the conversation with the new provider</li>
+<li>On 401/403, attempt credential refresh before failing over</li>
+<li>A Codex Responses turn that stalls on reasoning-only output (three consecutive continuations with no visible text or tool call) also fails over to the next fallback with reason <code>incomplete_response</code>; if the stall consumed the iteration budget, the fallback gets exactly one bounded grace call</li>
+</ol>
+<p>The fallback system also covers auxiliary tasks independently — vision, compression, and web extraction each have their own fallback chain configurable via the <code>auxiliary.*</code> config section.</p>
+<h2 id="compression-and-persistence">Compression and Persistence</h2>
+<h3 id="when-compression-triggers">When Compression Triggers</h3>
+<ul>
+<li><strong>Preflight</strong> (before API call): If conversation exceeds 50% of model's context window</li>
+<li><strong>Gateway auto-compression</strong>: If conversation exceeds 85% (more aggressive, runs between turns)</li>
+</ul>
+<h3 id="what-happens-during-compression">What Happens During Compression</h3>
+<ol>
+<li>Memory is flushed to disk first (preventing data loss)</li>
+<li>Middle conversation turns are summarized into a compact summary</li>
+<li>The last N messages are preserved intact (<code>compression.protect_last_n</code>, default: 20)</li>
+<li>Tool call/result message pairs are kept together (never split)</li>
+<li>A new session lineage ID is generated (compression creates a "child" session)</li>
+</ol>
+<h3 id="session-persistence">Session Persistence</h3>
+<p>After each turn:
+- Messages are saved to the session store (SQLite via <code>hermes_state.py</code>)
+- Memory changes are flushed to <code>MEMORY.md</code> / <code>USER.md</code>
+- The session can be resumed later via <code>/resume</code> or <code>hermes chat --resume</code></p>
+<h2 id="key-source-files">Key Source Files</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>run_agent.py</code></td>
+<td><code>AIAgent</code> facade — public entry points; loop and turn phases live in <code>agent/</code></td>
+</tr>
+<tr>
+<td><code>agent/conversation_loop.py</code></td>
+<td>The agent loop (<code>run_conversation()</code> body)</td>
+</tr>
+<tr>
+<td><code>agent/turn_*.py</code></td>
+<td>Turn phases: iteration_prep, api_call, api_error, overflow, truncation, recovery</td>
+</tr>
+<tr>
+<td><code>agent/tool_executor.py</code></td>
+<td>Tool-call execution and agent-level tool interception</td>
+</tr>
+<tr>
+<td><code>agent/prompt_builder.py</code></td>
+<td>System prompt assembly from memory, skills, context files, personality</td>
+</tr>
+<tr>
+<td><code>agent/context_engine.py</code></td>
+<td>ContextEngine ABC — pluggable context management</td>
+</tr>
+<tr>
+<td><code>agent/context_compressor.py</code></td>
+<td>Default engine — lossy summarization algorithm</td>
+</tr>
+<tr>
+<td><code>agent/prompt_caching.py</code></td>
+<td>Anthropic prompt caching markers and cache metrics</td>
+</tr>
+<tr>
+<td><code>agent/auxiliary_client.py</code></td>
+<td>Auxiliary LLM client for side tasks (vision, summarization)</td>
+</tr>
+<tr>
+<td><code>model_tools.py</code></td>
+<td>Tool schema collection, <code>handle_function_call()</code> dispatch</td>
+</tr>
+</tbody>
+</table>
+<h2 id="related-docs">Related Docs</h2>
+<ul>
+<li><a href="provider-runtime.html">Provider Runtime Resolution</a></li>
+<li><a href="prompt-assembly.html">Prompt Assembly</a></li>
+<li><a href="context-compression-and-caching.html">Context Compression &amp; Prompt Caching</a></li>
+<li><a href="tools-runtime.html">Tools Runtime</a></li>
+<li><a href="architecture.html">Architecture Overview</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/agent-loop</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#core-responsibilities">Core Responsibilities</a></li>
+<li class="lvl2"><a href="#two-entry-points">Two Entry Points</a></li>
+<li class="lvl2"><a href="#api-modes">API Modes</a></li>
+<li class="lvl2"><a href="#turn-lifecycle">Turn Lifecycle</a></li>
+<li class="lvl3"><a href="#message-format">Message Format</a></li>
+<li class="lvl3"><a href="#message-alternation-rules">Message Alternation Rules</a></li>
+<li class="lvl2"><a href="#interruptible-api-calls">Interruptible API Calls</a></li>
+<li class="lvl2"><a href="#tool-execution">Tool Execution</a></li>
+<li class="lvl3"><a href="#sequential-vs-concurrent">Sequential vs Concurrent</a></li>
+<li class="lvl3"><a href="#execution-flow">Execution Flow</a></li>
+<li class="lvl3"><a href="#agent-level-tools">Agent-Level Tools</a></li>
+<li class="lvl2"><a href="#callback-surfaces">Callback Surfaces</a></li>
+<li class="lvl2"><a href="#budget-and-fallback-behavior">Budget and Fallback Behavior</a></li>
+<li class="lvl3"><a href="#iteration-budget">Iteration Budget</a></li>
+<li class="lvl3"><a href="#fallback-model">Fallback Model</a></li>
+<li class="lvl2"><a href="#compression-and-persistence">Compression and Persistence</a></li>
+<li class="lvl3"><a href="#when-compression-triggers">When Compression Triggers</a></li>
+<li class="lvl3"><a href="#what-happens-during-compression">What Happens During Compression</a></li>
+<li class="lvl3"><a href="#session-persistence">Session Persistence</a></li>
+<li class="lvl2"><a href="#key-source-files">Key Source Files</a></li>
+<li class="lvl2"><a href="#related-docs">Related Docs</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

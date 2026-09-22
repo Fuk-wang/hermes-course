@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Google Gemini · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / guides/google-gemini</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="google-gemini">Google Gemini</h1>
+<p>Hermes Agent 通过 <strong>Google AI Studio / Gemini API</strong> 原生支持 Google Gemini——而非 OpenAI 兼容端点。这使 Hermes 能够将其内部 OpenAI 格式的消息和工具循环转换为 Gemini 原生的 <code>generateContent</code> API，同时保留工具调用、流式传输、多模态输入以及 Gemini 特有的响应元数据。</p>
+<h2 id="前提条件">前提条件</h2>
+<ul>
+<li><strong>Google AI Studio API 密钥</strong> — 在 <a href="https://aistudio.google.com/apikey" class="ext" target="_blank" rel="noopener">aistudio.google.com/apikey</a> 创建</li>
+<li><strong>已启用计费的 Google Cloud 项目</strong> — 推荐用于 Agent 场景。Gemini 免费层级对长时间运行的 Agent 会话而言配额过小，因为 Hermes 每次用户交互可能发起多次模型调用。</li>
+<li><strong>已安装 Hermes</strong> — 原生 Gemini provider 无需额外安装 Python 包。</li>
+</ul>
+<div class="admonition adm-tip"><p class="adm-title">API 密钥路径</p>
+<p>设置 <code>GOOGLE_API_KEY</code> 或 <code>GEMINI_API_KEY</code>。Hermes 对 <code>gemini</code> provider 会同时检查这两个名称。</p>
+</div>
+<h2 id="快速开始">快速开始</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># 添加 Gemini API 密钥</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;GOOGLE_API_KEY=...&quot;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/.env
+
+<span class="c1"># 选择 Gemini 作为 provider</span>
+hermes<span class="w"> </span>model
+<span class="c1"># → 选择 &quot;More providers...&quot; → &quot;Google AI Studio&quot;</span>
+<span class="c1"># → Hermes 检查密钥层级并显示 Gemini 模型列表</span>
+<span class="c1"># → 选择一个模型</span>
+
+<span class="c1"># 开始对话</span>
+hermes<span class="w"> </span>chat
+</code></pre></div>
+
+<p>如果你偏好直接编辑配置文件，请使用原生 Gemini API 基础 URL：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini-3-flash-preview</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://generativelanguage.googleapis.com/v1beta</span>
+</code></pre></div>
+
+<h2 id="配置">配置</h2>
+<p>运行 <code>hermes model</code> 后，<code>~/.hermes/config.yaml</code> 将包含：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini-3-flash-preview</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://generativelanguage.googleapis.com/v1beta</span>
+</code></pre></div>
+
+<p><code>~/.hermes/.env</code> 中：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">GOOGLE_API_KEY</span><span class="o">=</span>...
+</code></pre></div>
+
+<h3 id="原生-gemini-api">原生 Gemini API</h3>
+<p>推荐使用的端点为：</p>
+<div class="highlight"><pre><span></span><code>https://generativelanguage.googleapis.com/v1beta
+</code></pre></div>
+
+<p>Hermes 检测到该端点后会创建原生 Gemini 适配器。在内部，Hermes 仍以 OpenAI 格式维护 Agent 循环，然后将每个请求转换为 Gemini 原生 schema：</p>
+<ul>
+<li><code>messages[]</code> → Gemini <code>contents[]</code></li>
+<li>系统提示（system prompt）→ Gemini <code>systemInstruction</code></li>
+<li>工具 schema → Gemini <code>functionDeclarations</code></li>
+<li>工具结果 → Gemini <code>functionResponse</code> 部分</li>
+<li>流式响应 → 供 Hermes 循环使用的 OpenAI 格式流式数据块</li>
+</ul>
+<div class="admonition adm-note"><p class="adm-title">Gemini 3 思维签名</p>
+<p>对于 Gemini 3 的工具调用，Hermes 会保留附加在函数调用部分的 <code>thoughtSignature</code> 值，并在下一个工具轮次中重放。这覆盖了多步骤 Agent 工作流中验证关键路径的需求。</p>
+<p>Gemini 3 也可能在其他响应部分附加思维签名。Hermes 的原生适配器目前针对 Agent 工具循环进行了优化，尚未以完整的部分级保真度重放所有非工具调用签名。</p>
+</div>
+<h3 id="优先使用原生端点">优先使用原生端点</h3>
+<p>Google 还提供了 OpenAI 兼容端点：</p>
+<div class="highlight"><pre><span></span><code>https://generativelanguage.googleapis.com/v1beta/openai/
+</code></pre></div>
+
+<p>对于 Hermes Agent 会话，请优先使用上述原生 Gemini 端点。Hermes 内置原生 Gemini 适配器，可将多轮工具调用、工具调用结果、流式传输、多模态输入以及 Gemini 响应元数据直接映射到 Gemini 的 <code>generateContent</code> API。OpenAI 兼容端点在你明确需要 OpenAI API 兼容性时仍然有用。</p>
+<p>如果你之前将 <code>GEMINI_BASE_URL</code> 设置为 <code>/openai</code> URL，请将其删除或修改：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">GEMINI_BASE_URL</span><span class="o">=</span>https://generativelanguage.googleapis.com/v1beta
+</code></pre></div>
+
+<h2 id="可用模型">可用模型</h2>
+<p><code>hermes model</code> 选择器显示 Hermes provider 注册表中维护的 Gemini 模型。常见选项包括：</p>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>ID</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gemini 3.1 Pro Preview</td>
+<td><code>gemini-3.1-pro-preview</code></td>
+<td>可用时最强大的预览模型</td>
+</tr>
+<tr>
+<td>Gemini 3 Pro Preview</td>
+<td><code>gemini-3-pro-preview</code></td>
+<td>强大的推理和编码模型</td>
+</tr>
+<tr>
+<td>Gemini 3 Flash Preview</td>
+<td><code>gemini-3-flash-preview</code></td>
+<td>推荐的默认选项，速度与能力均衡</td>
+</tr>
+<tr>
+<td>Gemini 3.1 Flash Lite Preview</td>
+<td><code>gemini-3.1-flash-lite-preview</code></td>
+<td>可用时速度最快、成本最低的选项</td>
+</tr>
+</tbody>
+</table>
+<p>模型可用性会随时间变化。如果某个模型消失或未对你的密钥启用，请重新运行 <code>hermes model</code> 并从当前列表中选择。</p>
+<div class="admonition adm-info"><p class="adm-title">模型 ID</p>
+<p>当 <code>provider: gemini</code> 时，请使用 Gemini 原生模型 ID，如 <code>gemini-3-flash-preview</code>，而非 OpenRouter 风格的 ID（如 <code>google/gemini-3-flash-preview</code>）。</p>
+</div>
+<h3 id="最新别名">最新别名</h3>
+<p>Google 为 Pro 和 Flash Gemini 系列发布了滚动别名。当你希望 Google 自动升级模型而无需修改 Hermes 配置时，<code>gemini-pro-latest</code> 和 <code>gemini-flash-latest</code> 非常实用。</p>
+<table>
+<thead>
+<tr>
+<th>别名</th>
+<th>当前指向</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gemini-pro-latest</code></td>
+<td>最新 Gemini Pro 模型</td>
+<td>需要 Google 当前 Pro 默认值时的最佳选择</td>
+</tr>
+<tr>
+<td><code>gemini-flash-latest</code></td>
+<td>最新 Gemini Flash 模型</td>
+<td>需要 Google 当前 Flash 默认值时的最佳选择</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini-pro-latest</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://generativelanguage.googleapis.com/v1beta</span>
+</code></pre></div>
+
+<p>如果需要严格的可复现性，请优先使用明确的模型 ID，如 <code>gemini-3.1-pro-preview</code> 或 <code>gemini-3-flash-preview</code>。</p>
+<h3 id="通过-gemini-api-使用-gemma">通过 Gemini API 使用 Gemma</h3>
+<p>Google 也通过 Gemini API 提供 Gemma 模型。Hermes 将这些模型识别为 Google 模型，但会在默认模型选择器中隐藏吞吐量极低的 Gemma 条目，以防新用户在长时间运行的 Agent 会话中意外选择评估层级的模型。</p>
+<p>常用评估 ID 包括：</p>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>ID</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gemma 4 31B IT</td>
+<td><code>gemma-4-31b-it</code></td>
+<td>较大的 Gemma 模型；适用于兼容性和质量评估</td>
+</tr>
+<tr>
+<td>Gemma 4 26B A4B IT</td>
+<td><code>gemma-4-26b-a4b-it</code></td>
+<td>可用时的较小活跃参数变体</td>
+</tr>
+</tbody>
+</table>
+<p>这些模型最适合作为 Gemini API 密钥的评估选项。Google 的 Gemma API 定价仅限免费层级，与生产级 Gemini 模型相比使用上限较低，因此持续的 Hermes Agent 使用通常应切换到付费 Gemini 模型、自托管部署或具有适当配额的其他 provider。</p>
+<p>如需使用选择器中隐藏的 Gemma 模型，请直接在配置中指定：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemma-4-31b-it</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://generativelanguage.googleapis.com/v1beta</span>
+</code></pre></div>
+
+<h2 id="会话中途切换模型">会话中途切换模型</h2>
+<p>在对话中使用 <code>/model</code> 命令：</p>
+<div class="highlight"><pre><span></span><code>/model gemini-3-flash-preview
+/model gemini-flash-latest
+/model gemini-3-pro-preview
+/model gemini-pro-latest
+/model gemma-4-31b-it
+/model gemini-3.1-flash-lite-preview
+</code></pre></div>
+
+<p>如果尚未配置 Gemini，请退出会话并先运行 <code>hermes model</code>。<code>/model</code> 用于在已配置的 provider 和模型之间切换，不会收集新的 API 密钥。</p>
+<h2 id="诊断">诊断</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>doctor
+</code></pre></div>
+
+<p>doctor 命令检查：</p>
+<ul>
+<li><code>GOOGLE_API_KEY</code> 或 <code>GEMINI_API_KEY</code> 是否可用</li>
+<li>已配置的 provider 凭据是否可以解析</li>
+</ul>
+<h2 id="gateway消息平台">Gateway（消息平台）</h2>
+<p>Gemini 可与所有 Hermes gateway 平台配合使用（Telegram、Discord、Slack、WhatsApp、LINE、飞书等）。将 Gemini 配置为你的 provider，然后正常启动 gateway：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>setup
+hermes<span class="w"> </span>gateway<span class="w"> </span>start
+</code></pre></div>
+
+<p>gateway 读取 <code>config.yaml</code> 并使用相同的 Gemini provider 配置。</p>
+<h2 id="故障排查">故障排查</h2>
+<h3 id="gemini-native-client-requires-an-api-key">"Gemini native client requires an API key"</h3>
+<p>Hermes 找不到可用的 API 密钥。请将以下任一项添加到 <code>~/.hermes/.env</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">GOOGLE_API_KEY</span><span class="o">=</span>...
+<span class="c1"># 或</span>
+<span class="nv">GEMINI_API_KEY</span><span class="o">=</span>...
+</code></pre></div>
+
+<p>然后重新运行 <code>hermes model</code>。</p>
+<h3 id="this-google-api-key-is-on-the-free-tier">"This Google API key is on the free tier"</h3>
+<p>Hermes 在设置期间会探测 Gemini API 密钥。由于工具调用、重试、压缩和辅助任务可能需要多次模型调用，免费层级配额在少数几轮 Agent 交互后即可耗尽。</p>
+<p>请为与密钥关联的 Google Cloud 项目启用计费，必要时重新生成密钥，然后运行：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>model
+</code></pre></div>
+
+<h3 id="404-model-not-found">"404 model not found"</h3>
+<p>所选模型对你的账号、地区或密钥不可用。重新运行 <code>hermes model</code> 并从当前列表中选择其他 Gemini 模型。</p>
+<h3 id="gemma-模型未显示在-hermes-model-中">Gemma 模型未显示在 <code>hermes model</code> 中</h3>
+<p>Hermes 默认可能会在选择器中隐藏低吞吐量的 Gemma 模型。如果你有意评估某个模型，请直接在 <code>~/.hermes/config.yaml</code> 中设置模型 ID。</p>
+<h3 id="gemma-出现-429-quota-exceeded">Gemma 出现 "429 quota exceeded"</h3>
+<p>通过 Gemini API 提供的 Gemma 模型适合评估使用，但其 Gemini API 免费层级上限较低。请将其用于兼容性测试，然后切换到付费 Gemini 模型或其他 provider 以进行持续的 Agent 会话。</p>
+<h3 id="已配置-openai-兼容端点">已配置 OpenAI 兼容端点</h3>
+<p>检查 <code>~/.hermes/.env</code> 中是否存在：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">GEMINI_BASE_URL</span><span class="o">=</span>https://generativelanguage.googleapis.com/v1beta/openai/
+</code></pre></div>
+
+<p>将其修改为原生端点或删除该覆盖项：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">GEMINI_BASE_URL</span><span class="o">=</span>https://generativelanguage.googleapis.com/v1beta
+</code></pre></div>
+
+<h3 id="工具调用因-schema-错误而失败">工具调用因 schema 错误而失败</h3>
+<p>升级 Hermes 并重新运行 <code>hermes model</code>。原生 Gemini 适配器会针对 Gemini 更严格的函数声明格式对工具 schema 进行清理；旧版本或自定义端点可能不支持此功能。</p>
+<h2 id="相关链接">相关链接</h2>
+<ul>
+<li><a href="../integrations/providers.html">AI Providers</a></li>
+<li><a href="../user-guide/configuration.html">Configuration</a></li>
+<li><a href="../user-guide/features/fallback-providers.html">Fallback Providers</a></li>
+<li><a href="aws-bedrock.html">AWS Bedrock</a> — 使用 AWS 凭据的原生云 provider 集成</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/guides/google-gemini</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#前提条件">前提条件</a></li>
+<li class="lvl2"><a href="#快速开始">快速开始</a></li>
+<li class="lvl2"><a href="#配置">配置</a></li>
+<li class="lvl3"><a href="#原生-gemini-api">原生 Gemini API</a></li>
+<li class="lvl3"><a href="#优先使用原生端点">优先使用原生端点</a></li>
+<li class="lvl2"><a href="#可用模型">可用模型</a></li>
+<li class="lvl3"><a href="#最新别名">最新别名</a></li>
+<li class="lvl3"><a href="#通过-gemini-api-使用-gemma">通过 Gemini API 使用 Gemma</a></li>
+<li class="lvl2"><a href="#会话中途切换模型">会话中途切换模型</a></li>
+<li class="lvl2"><a href="#诊断">诊断</a></li>
+<li class="lvl2"><a href="#gateway消息平台">Gateway（消息平台）</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl3"><a href="#gemini-native-client-requires-an-api-key">&quot;Gemini native client requires an API key&quot;</a></li>
+<li class="lvl3"><a href="#this-google-api-key-is-on-the-free-tier">&quot;This Google API key is on the free tier&quot;</a></li>
+<li class="lvl3"><a href="#404-model-not-found">&quot;404 model not found&quot;</a></li>
+<li class="lvl3"><a href="#gemma-模型未显示在-hermes-model-中">Gemma 模型未显示在 hermes model 中</a></li>
+<li class="lvl3"><a href="#gemma-出现-429-quota-exceeded">Gemma 出现 &quot;429 quota exceeded&quot;</a></li>
+<li class="lvl3"><a href="#已配置-openai-兼容端点">已配置 OpenAI 兼容端点</a></li>
+<li class="lvl3"><a href="#工具调用因-schema-错误而失败">工具调用因 schema 错误而失败</a></li>
+<li class="lvl2"><a href="#相关链接">相关链接</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stripe Link Cli — Agent payments via Stripe Link — cards, SPT, approvals · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/payments/payments-stripe-link-cli</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="stripe-link-cli">Stripe Link Cli</h1>
+<p>Agent payments via Stripe Link — cards, SPT, approvals.</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/payments/stripe-link-cli</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/payments\stripe-link-cli</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>0.1.0</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>Teknium (teknium1), Hermes Agent</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>Payments</code>, <code>Stripe</code>, <code>Link</code>, <code>Checkout</code>, <code>MPP</code></td>
+</tr>
+<tr>
+<td>Related skills</td>
+<td><a href="payments-mpp-agent.html"><code>mpp-agent</code></a>, <a href="payments-stripe-projects.html"><code>stripe-projects</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="stripe-link-cli-skill">Stripe Link CLI Skill</h1>
+<p>Wraps <a href="https://github.com/stripe/link-cli" class="ext" target="_blank" rel="noopener">@stripe/link-cli</a> so Hermes can complete purchases on the user's behalf using one-time-use virtual cards or Shared Payment Tokens (SPT). Every spend is gated by an in-app approval in the Link mobile/web app — Hermes cannot self-approve.</p>
+<p>US-only at the moment (Link account requirement). Windows is not supported by the upstream CLI — this skill is gated <code>[linux, macos]</code>.</p>
+<h2 id="when-to-use">When to Use</h2>
+<p>Trigger phrases:</p>
+<ul>
+<li>"buy X", "pay for X", "make a purchase", "complete checkout"</li>
+<li>"get me a card", "I need a payment method"</li>
+<li>"log in to Link", "connect my Link wallet"</li>
+<li>HTTP 402 response from a merchant API with <code>www-authenticate: ... method="stripe"</code></li>
+</ul>
+<p>If the user wants a paid API call (HTTP 402, no checkout form), the <code>card</code> path is wrong — use SPT via this same skill, or hand off to the <code>mpp-agent</code> skill.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>Node.js 20+ available on <code>PATH</code> (<code>node --version</code>)</li>
+<li>US-based (Link account requirement)</li>
+</ul>
+<p>The Link account, payment method, and spend-approval app do NOT need to be set up before Hermes attempts to pay — the CLI walks the user through them on first run:</p>
+<ul>
+<li>A Link account at https://app.link.com — created/linked during first <code>link-cli</code> auth</li>
+<li>At least one payment method — added during first run at https://app.link.com/wallet</li>
+<li>The Link mobile/web app — opened to approve the first spend request when it's made</li>
+</ul>
+<p>No env vars required — auth state is stored locally by the CLI under its own config directory.</p>
+<h2 id="install">Install</h2>
+<p>Install once, globally:</p>
+<div class="highlight"><pre><span></span><code>npm install -g @stripe/link-cli
+</code></pre></div>
+
+<p>Or invoke ad-hoc via <code>npx @stripe/link-cli</code>. The skill below uses the installed <code>link-cli</code> form.</p>
+<h2 id="how-to-run">How to Run</h2>
+<p>All commands run through the <code>terminal</code> tool. The CLI auto-detects non-TTY callers and emits compact <code>toon</code> output by default — fine for the model. Pass <code>--format json</code> if a step needs structured fields.</p>
+<p>Discover commands: <code>link-cli --llms-full</code>.
+Get a command's schema before invoking: <code>link-cli &lt;command&gt; --schema</code>.</p>
+<h2 id="procedure">Procedure</h2>
+<h3 id="1-check--establish-auth">1. Check / establish auth</h3>
+<div class="highlight"><pre><span></span><code>link-cli auth status
+</code></pre></div>
+
+<p>If not authenticated, log in with a clear client name (this label shows in the user's Link app):</p>
+<div class="highlight"><pre><span></span><code>link-cli auth login --client-name &quot;Hermes&quot; --interval 5 --timeout 300
+</code></pre></div>
+
+<p>The <code>--interval</code>/<code>--timeout</code> form polls inline so the agent doesn't need to manage a <code>_next</code> step. Print the verification URL + phrase to the user and wait for the CLI to return.</p>
+<p><strong>Do not proceed past this step until <code>auth status</code> confirms login.</strong></p>
+<h3 id="2-evaluate-the-merchant-before-creating-a-spend-request">2. Evaluate the merchant before creating a spend request</h3>
+<p>Decide the credential type:</p>
+<table>
+<thead>
+<tr>
+<th>Merchant surface</th>
+<th><code>--credential-type</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard web checkout form / Stripe Elements</td>
+<td><code>card</code> (default)</td>
+</tr>
+<tr>
+<td>Returns HTTP 402 with <code>method="stripe"</code> in <code>www-authenticate</code></td>
+<td><code>shared_payment_token</code></td>
+</tr>
+<tr>
+<td>Returns HTTP 402 without <code>method="stripe"</code></td>
+<td>unsupported — stop</td>
+</tr>
+</tbody>
+</table>
+<p>For 402 responses, do NOT decode the challenge manually. Pass the raw header:</p>
+<div class="highlight"><pre><span></span><code>link-cli mpp decode --challenge &#39;&lt;full WWW-Authenticate header&gt;&#39;
+</code></pre></div>
+
+<p>This validates the challenge and extracts the network ID + decoded request body.</p>
+<h3 id="3-list-payment-methods--shipping">3. List payment methods + shipping</h3>
+<div class="highlight"><pre><span></span><code>link-cli payment-methods list
+link-cli shipping-address list
+</code></pre></div>
+
+<p>Use the first entry unless the user specifies otherwise. The <code>id</code> from <code>payment-methods list</code> is the <code>--payment-method-id</code> in the next step.</p>
+<h3 id="4-create-the-spend-request">4. Create the spend request</h3>
+<p>Confirm the final total with the user before issuing this command. Amounts are in cents.</p>
+<div class="highlight"><pre><span></span><code>link-cli spend-request create \
+  --payment-method-id &lt;pm_id&gt; \
+  --merchant-name &quot;&lt;name&gt;&quot; \
+  --merchant-url &quot;&lt;url&gt;&quot; \
+  --context &quot;&lt;one sentence: what is being purchased and why&gt;&quot; \
+  --amount &lt;cents&gt; \
+  --line-item &quot;name:&lt;item&gt;,unit_amount:&lt;cents&gt;,quantity:1&quot; \
+  --total &quot;type:total,display_text:Total,amount:&lt;cents&gt;&quot; \
+  --request-approval
+</code></pre></div>
+
+<p>For MPP merchants add <code>--credential-type shared_payment_token</code>.</p>
+<p><code>--request-approval</code> pings the user's Link app and polls until they approve or deny. The CLI exits non-zero on deny / timeout.</p>
+<h3 id="5-retrieve-the-credential--securely">5. Retrieve the credential — SECURELY</h3>
+<p><strong>Do not print card details to stdout.</strong> Use <code>--output-file</code> so the PAN never enters the agent's transcript or logs:</p>
+<div class="highlight"><pre><span></span><code>link-cli spend-request retrieve &lt;lsrq_id&gt; \
+  --include card \
+  --output-file ~/.hermes/cache/scratch/link-card.json \
+  --format json
+</code></pre></div>
+
+<p>The file is written with <code>0600</code> perms; stdout shows only redacted fields (brand, last4, expiry) plus a <code>card_output_file</code> path.</p>
+<h3 id="6-use-the-credential">6. Use the credential</h3>
+<ul>
+<li>For web checkout: hand the file path to the user, OR pass it to a browser-driving tool that fills the form directly from disk. Never <code>read_file</code> or <code>cat</code> the card file into the agent's reasoning context.</li>
+<li>For MPP merchants:</li>
+</ul>
+<p><code>link-cli mpp pay &lt;merchant-url&gt; \
+    --spend-request-id &lt;lsrq_id&gt; \
+    --method POST \
+    --data '&lt;json body&gt;'</code></p>
+<h3 id="7-clean-up">7. Clean up</h3>
+<p>Delete the card file as soon as the purchase is done:</p>
+<div class="highlight"><pre><span></span><code>rm -f ~/.hermes/cache/scratch/link-card.json
+</code></pre></div>
+
+<h2 id="optional-run-as-an-mcp-server-instead">Optional: run as an MCP server instead</h2>
+<p><code>@stripe/link-cli --mcp</code> exposes the same commands as MCP tools over stdio. To register it with Hermes' native MCP:</p>
+<div class="highlight"><pre><span></span><code>hermes mcp add stripe-link --command &quot;npx&quot; --args &quot;@stripe/link-cli --mcp&quot;
+</code></pre></div>
+
+<p>Then <code>hermes mcp list</code> should show <code>stripe-link</code>. The same approval rules apply — MCP doesn't bypass the Link app approval step.</p>
+<h2 id="pitfalls">Pitfalls</h2>
+<ul>
+<li><strong>US-only.</strong> Outside the US, <code>auth login</code> will fail. Tell the user, don't keep retrying.</li>
+<li><strong>Card PAN must never enter agent context.</strong> Use <code>--output-file</code> every time. If you've already retrieved without it, immediately <code>link-cli auth logout</code> is not enough — the card is one-time-use but rotate hygiene matters.</li>
+<li><strong><code>--request-approval</code> blocks until the user acts.</strong> If the user is asleep, the CLI will hit its timeout. Set expectations.</li>
+<li><strong>Multi-step <code>_next</code> commands.</strong> Some commands return <code>_next.command</code> that must be executed to continue. When in doubt, prefer the inline-polling flags (<code>--interval</code>/<code>--timeout</code>).</li>
+<li><strong>Output format defaults to <code>toon</code></strong> in non-TTY mode. Fine for prose, but if a downstream step needs to parse a specific field, pass <code>--format json</code>.</li>
+<li><strong>Don't default to <code>card</code>.</strong> The merchant-evaluation step (Section 2) exists because picking the wrong credential type fails the purchase silently or leaks more data than needed.</li>
+</ul>
+<h2 id="verification">Verification</h2>
+<div class="highlight"><pre><span></span><code>link-cli --version &amp;&amp; link-cli auth status
+</code></pre></div>
+
+<p>Exit code 0 means installed and logged in.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/payments/payments-stripe-link-cli</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#when-to-use">When to Use</a></li>
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#install">Install</a></li>
+<li class="lvl2"><a href="#how-to-run">How to Run</a></li>
+<li class="lvl2"><a href="#procedure">Procedure</a></li>
+<li class="lvl3"><a href="#1-check--establish-auth">1. Check / establish auth</a></li>
+<li class="lvl3"><a href="#2-evaluate-the-merchant-before-creating-a-spend-request">2. Evaluate the merchant before creating a spend request</a></li>
+<li class="lvl3"><a href="#3-list-payment-methods--shipping">3. List payment methods + shipping</a></li>
+<li class="lvl3"><a href="#4-create-the-spend-request">4. Create the spend request</a></li>
+<li class="lvl3"><a href="#5-retrieve-the-credential--securely">5. Retrieve the credential — SECURELY</a></li>
+<li class="lvl3"><a href="#6-use-the-credential">6. Use the credential</a></li>
+<li class="lvl3"><a href="#7-clean-up">7. Clean up</a></li>
+<li class="lvl2"><a href="#optional-run-as-an-mcp-server-instead">Optional: run as an MCP server instead</a></li>
+<li class="lvl2"><a href="#pitfalls">Pitfalls</a></li>
+<li class="lvl2"><a href="#verification">Verification</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

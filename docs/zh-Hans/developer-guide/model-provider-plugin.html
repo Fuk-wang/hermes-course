@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模型提供商插件 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/model-provider-plugin</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="构建模型提供商插件">构建模型提供商插件</h1>
+<p>模型提供商插件声明一个推理后端——兼容 OpenAI 的端点、Anthropic Messages 服务器、Codex 风格的 Responses API，或 Bedrock 原生接口——Hermes 可通过这些后端路由 <code>AIAgent</code> 调用。每个内置提供商（OpenRouter、Anthropic、GMI、DeepSeek、Nvidia……）都以此类插件形式提供。第三方可通过在 <code>$HERMES_HOME/plugins/model-providers/</code> 下放置一个目录来添加自己的提供商，无需对仓库做任何修改。</p>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>模型提供商插件是<strong>提供商插件</strong>的第三种类型。其他两种分别是 <a href="memory-provider-plugin.html">Memory Provider 插件</a>（跨会话知识）和 <a href="context-engine-plugin.html">Context Engine 插件</a>（上下文压缩策略）。三者均遵循相同的"放入目录、声明 profile、无需编辑仓库"模式。</p>
+</div>
+<h2 id="发现机制">发现机制</h2>
+<p><code>providers/__init__.py._discover_providers()</code> 在任何代码首次调用 <code>get_provider_profile()</code> 或 <code>list_providers()</code> 时懒加载执行。发现顺序：</p>
+<ol>
+<li><strong>内置插件</strong> — <code>&lt;repo&gt;/plugins/model-providers/&lt;name&gt;/</code> — 随 Hermes 一同发布</li>
+<li><strong>用户插件</strong> — <code>$HERMES_HOME/plugins/model-providers/&lt;name&gt;/</code> — 放入任意目录；后续会话无需重启即可生效</li>
+<li><strong>旧版单文件</strong> — <code>&lt;repo&gt;/providers/&lt;name&gt;.py</code> — 为树外可编辑安装提供向后兼容</li>
+</ol>
+<p><strong>同名用户插件会覆盖内置插件</strong>，因为 <code>register_provider()</code> 采用后写者优先策略。放入 <code>$HERMES_HOME/plugins/model-providers/gmi/</code> 目录即可替换内置 GMI profile，无需修改仓库。</p>
+<h2 id="目录结构">目录结构</h2>
+<div class="highlight"><pre><span></span><code>plugins/model-providers/my-provider/
+├── __init__.py       # 在模块级别调用 register_provider(profile)
+├── plugin.yaml       # kind: model-provider + 元数据（可选但推荐）
+└── README.md         # 安装说明（可选）
+</code></pre></div>
+
+<p>唯一必需的文件是 <code>__init__.py</code>。<code>plugin.yaml</code> 供 <code>hermes plugins</code> 用于自省，以及供通用 PluginManager 将插件路由到正确的加载器；若缺少该文件，通用加载器会回退到源码文本启发式检测。</p>
+<h2 id="最简示例一个简单的-api-key-提供商">最简示例——一个简单的 API key 提供商</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/model-providers/acme-inference/__init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers</span><span class="w"> </span><span class="kn">import</span> <span class="n">register_provider</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ProviderProfile</span>
+
+<span class="n">acme</span> <span class="o">=</span> <span class="n">ProviderProfile</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;acme-inference&quot;</span><span class="p">,</span>
+    <span class="n">aliases</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;acme&quot;</span><span class="p">,),</span>
+    <span class="n">display_name</span><span class="o">=</span><span class="s2">&quot;Acme Inference&quot;</span><span class="p">,</span>
+    <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Acme — OpenAI-compatible direct API&quot;</span><span class="p">,</span>
+    <span class="n">signup_url</span><span class="o">=</span><span class="s2">&quot;https://acme.example.com/keys&quot;</span><span class="p">,</span>
+    <span class="n">env_vars</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;ACME_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;ACME_BASE_URL&quot;</span><span class="p">),</span>
+    <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;https://api.acme.example.com/v1&quot;</span><span class="p">,</span>
+    <span class="n">auth_type</span><span class="o">=</span><span class="s2">&quot;api_key&quot;</span><span class="p">,</span>
+    <span class="n">default_aux_model</span><span class="o">=</span><span class="s2">&quot;acme-small-fast&quot;</span><span class="p">,</span>
+    <span class="n">fallback_models</span><span class="o">=</span><span class="p">(</span>
+        <span class="s2">&quot;acme-large-v3&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;acme-medium-v3&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;acme-small-fast&quot;</span><span class="p">,</span>
+    <span class="p">),</span>
+<span class="p">)</span>
+
+<span class="n">register_provider</span><span class="p">(</span><span class="n">acme</span><span class="p">)</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/model-providers/acme-inference/plugin.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">acme-inference</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">model-provider</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Acme Inference — OpenAI-compatible direct API</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+</code></pre></div>
+
+<p>就这些。放入这两个文件后，以下集成<strong>自动生效</strong>，无需其他任何修改：</p>
+<table>
+<thead>
+<tr>
+<th>集成点</th>
+<th>位置</th>
+<th>获得的能力</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>凭据解析</td>
+<td><code>hermes_cli/auth.py</code></td>
+<td><code>PROVIDER_REGISTRY["acme-inference"]</code> 从 profile 填充</td>
+</tr>
+<tr>
+<td><code>--provider</code> CLI 标志</td>
+<td><code>hermes_cli/main.py</code></td>
+<td>接受 <code>acme-inference</code></td>
+</tr>
+<tr>
+<td><code>hermes model</code> 选择器</td>
+<td><code>hermes_cli/models.py</code></td>
+<td>出现在 <code>CANONICAL_PROVIDERS</code> 中，从 <code>{base_url}/models</code> 获取模型列表</td>
+</tr>
+<tr>
+<td><code>hermes doctor</code></td>
+<td><code>hermes_cli/doctor.py</code></td>
+<td>对 <code>ACME_API_KEY</code> 及 <code>{base_url}/models</code> 进行健康检查</td>
+</tr>
+<tr>
+<td><code>hermes setup</code></td>
+<td><code>hermes_cli/config.py</code></td>
+<td><code>ACME_API_KEY</code> 出现在 <code>OPTIONAL_ENV_VARS</code> 和设置向导中</td>
+</tr>
+<tr>
+<td>URL 反向映射</td>
+<td><code>agent/model_metadata.py</code></td>
+<td>主机名 → 提供商名称，用于自动检测</td>
+</tr>
+<tr>
+<td>辅助模型</td>
+<td><code>agent/auxiliary_client.py</code></td>
+<td>使用 <code>default_aux_model</code> 进行压缩/摘要</td>
+</tr>
+<tr>
+<td>运行时解析</td>
+<td><code>hermes_cli/runtime_provider.py</code></td>
+<td>返回正确的 <code>base_url</code>、<code>api_key</code>、<code>api_mode</code></td>
+</tr>
+<tr>
+<td>传输层</td>
+<td><code>agent/transports/chat_completions.py</code></td>
+<td>Profile 路径通过 <code>prepare_messages</code> / <code>build_extra_body</code> / <code>build_api_kwargs_extras</code> 生成 kwargs</td>
+</tr>
+</tbody>
+</table>
+<h2 id="providerprofile-字段">ProviderProfile 字段</h2>
+<p>完整定义见 <code>providers/base.py</code>。最常用的字段：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>str</td>
+<td>规范 ID——与 <code>config.yaml</code> 中的 <code>model.provider</code> 及 <code>--provider</code> 标志匹配</td>
+</tr>
+<tr>
+<td><code>aliases</code></td>
+<td><code>tuple[str, ...]</code></td>
+<td>由 <code>get_provider_profile()</code> 解析的别名（如 <code>grok</code> → <code>xai</code>）</td>
+</tr>
+<tr>
+<td><code>api_mode</code></td>
+<td>str</td>
+<td><code>chat_completions</code> | <code>codex_responses</code> | <code>anthropic_messages</code> | <code>bedrock_converse</code></td>
+</tr>
+<tr>
+<td><code>display_name</code></td>
+<td>str</td>
+<td>在 <code>hermes model</code> 选择器中显示的人类可读标签</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>str</td>
+<td>选择器副标题</td>
+</tr>
+<tr>
+<td><code>signup_url</code></td>
+<td>str</td>
+<td>首次运行设置时显示（"在此获取 API key"）</td>
+</tr>
+<tr>
+<td><code>env_vars</code></td>
+<td><code>tuple[str, ...]</code></td>
+<td>按优先级排列的 API key 环境变量；最后一个 <code>*_BASE_URL</code> 条目用作用户 base URL 覆盖</td>
+</tr>
+<tr>
+<td><code>base_url</code></td>
+<td>str</td>
+<td>默认推理端点</td>
+</tr>
+<tr>
+<td><code>models_url</code></td>
+<td>str</td>
+<td>显式目录 URL（回退到 <code>{base_url}/models</code>）</td>
+</tr>
+<tr>
+<td><code>auth_type</code></td>
+<td>str</td>
+<td><code>api_key</code> | <code>oauth_device_code</code> | <code>oauth_external</code> | <code>copilot</code> | <code>aws_sdk</code> | <code>external_process</code></td>
+</tr>
+<tr>
+<td><code>fallback_models</code></td>
+<td><code>tuple[str, ...]</code></td>
+<td>实时目录获取失败时显示的精选列表</td>
+</tr>
+<tr>
+<td><code>default_headers</code></td>
+<td><code>dict[str, str]</code></td>
+<td>随每个请求发送（如 Copilot 的 <code>Editor-Version</code>）</td>
+</tr>
+<tr>
+<td><code>fixed_temperature</code></td>
+<td>Any</td>
+<td><code>None</code> = 使用调用方的值；<code>OMIT_TEMPERATURE</code> 哨兵值 = 完全不发送 temperature（Kimi）</td>
+</tr>
+<tr>
+<td><code>default_max_tokens</code></td>
+<td><code>int \| None</code></td>
+<td>提供商级别的 max_tokens 上限（Nvidia：16384）</td>
+</tr>
+<tr>
+<td><code>default_aux_model</code></td>
+<td>str</td>
+<td>用于辅助任务（压缩、视觉、摘要）的廉价模型</td>
+</tr>
+</tbody>
+</table>
+<h2 id="可覆盖的-hook">可覆盖的 hook</h2>
+<p>对于非常规的特殊需求，可子类化 <code>ProviderProfile</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ProviderProfile</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">AcmeProfile</span><span class="p">(</span><span class="n">ProviderProfile</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">prepare_messages</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">messages</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;提供商特定的消息预处理。在 codex 清理之后、developer-role 替换之前运行。</span>
+<span class="sd">        默认：直接透传。&quot;&quot;&quot;</span>
+        <span class="c1"># 示例：Qwen 将纯文本内容规范化为 list-of-parts 数组并注入 cache_control；</span>
+        <span class="c1"># Kimi 重写 tool-call JSON</span>
+        <span class="k">return</span> <span class="n">messages</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">build_extra_body</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">session_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">context</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;提供商特定的 extra_body 字段，合并到 API 调用中。</span>
+<span class="sd">        context 包含：session_id、provider_preferences、model、base_url、</span>
+<span class="sd">        reasoning_config。默认：空 dict。&quot;&quot;&quot;</span>
+        <span class="c1"># 示例：OpenRouter 的 provider-preferences 块，</span>
+        <span class="c1"># Gemini 的 thinking_config 转换。</span>
+        <span class="k">return</span> <span class="p">{}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">build_api_kwargs_extras</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">reasoning_config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">context</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;返回 (extra_body_additions, top_level_kwargs)。当某些字段需要放在顶层</span>
+<span class="sd">        （Kimi 的 reasoning_effort）而另一些放在 extra_body（OpenRouter 的 reasoning dict）</span>
+<span class="sd">        时需要此方法。默认：({}, {})。&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="p">{},</span> <span class="p">{}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">fetch_models</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">api_key</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mf">8.0</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;实时目录获取。默认使用 Bearer 认证访问 {models_url or base_url}/models。</span>
+<span class="sd">        以下情况需覆盖：自定义认证（Anthropic）、无 REST 端点（Bedrock → None），</span>
+<span class="sd">        或公开/无认证目录（OpenRouter）。&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">fetch_models</span><span class="p">(</span><span class="n">api_key</span><span class="o">=</span><span class="n">api_key</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="hook-参考示例">Hook 参考示例</h2>
+<p>参考以下内置插件了解常用写法：</p>
+<table>
+<thead>
+<tr>
+<th>插件</th>
+<th>参考原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>plugins/model-providers/openrouter/</code></td>
+<td>带 provider preferences 的聚合器，公开模型目录</td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/gemini/</code></td>
+<td><code>thinking_config</code> 转换（原生 + OpenAI 兼容嵌套形式）</td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/kimi-coding/</code></td>
+<td><code>OMIT_TEMPERATURE</code>、<code>extra_body.thinking</code>、顶层 <code>reasoning_effort</code></td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/qwen-oauth/</code></td>
+<td>消息规范化、<code>cache_control</code> 注入、VL 高分辨率</td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/nous/</code></td>
+<td>归因标签、"禁用时省略 reasoning"</td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/custom/</code></td>
+<td>Ollama 的 <code>num_ctx</code> + <code>think: false</code> 特殊处理</td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/bedrock/</code></td>
+<td><code>api_mode="bedrock_converse"</code>，<code>fetch_models</code> 返回 None（无 REST 端点）</td>
+</tr>
+</tbody>
+</table>
+<h2 id="用户覆盖不修改仓库替换内置提供商">用户覆盖——不修改仓库替换内置提供商</h2>
+<p>假设你想将 <code>gmi</code> 指向私有测试端点进行测试。创建 <code>~/.hermes/plugins/model-providers/gmi/__init__.py</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">providers</span><span class="w"> </span><span class="kn">import</span> <span class="n">register_provider</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ProviderProfile</span>
+
+<span class="n">register_provider</span><span class="p">(</span><span class="n">ProviderProfile</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;gmi&quot;</span><span class="p">,</span>
+    <span class="n">aliases</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;gmi-cloud&quot;</span><span class="p">,</span> <span class="s2">&quot;gmicloud&quot;</span><span class="p">),</span>
+    <span class="n">env_vars</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;GMI_API_KEY&quot;</span><span class="p">,),</span>
+    <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;https://gmi-staging.internal.example.com/v1&quot;</span><span class="p">,</span>
+    <span class="n">auth_type</span><span class="o">=</span><span class="s2">&quot;api_key&quot;</span><span class="p">,</span>
+    <span class="n">default_aux_model</span><span class="o">=</span><span class="s2">&quot;google/gemini-3.1-flash-lite-preview&quot;</span><span class="p">,</span>
+<span class="p">))</span>
+</code></pre></div>
+
+<p>下次会话时，<code>get_provider_profile("gmi").base_url</code> 将返回测试 URL。无需打补丁，无需重新构建。由于用户插件在内置插件之后被发现，用户的 <code>register_provider()</code> 调用会胜出。</p>
+<h2 id="api_mode-选择">api_mode 选择</h2>
+<p>系统识别四个值。Hermes 的选择依据：</p>
+<ol>
+<li>用户显式覆盖（<code>config.yaml</code> 中设置了 <code>model.api_mode</code>）</li>
+<li>OpenCode 的按模型分发（Zen 和 Go 的 <code>opencode_model_api_mode</code>）</li>
+<li>URL 自动检测——<code>/anthropic</code> 后缀 → <code>anthropic_messages</code>，<code>api.openai.com</code> → <code>codex_responses</code>，<code>api.x.ai</code> → <code>codex_responses</code>，Kimi 域名上的 <code>/coding</code> → <code>chat_completions</code></li>
+<li><strong>Profile 的 <code>api_mode</code></strong> 作为 URL 检测无结果时的回退</li>
+<li>默认 <code>chat_completions</code></li>
+</ol>
+<p>将 <code>profile.api_mode</code> 设置为你的提供商默认使用的值——它作为提示使用。用户 URL 覆盖仍然优先。</p>
+<h2 id="认证类型">认证类型</h2>
+<table>
+<thead>
+<tr>
+<th><code>auth_type</code></th>
+<th>含义</th>
+<th>使用者</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>api_key</code></td>
+<td>单个环境变量携带静态 API key</td>
+<td>大多数提供商</td>
+</tr>
+<tr>
+<td><code>oauth_device_code</code></td>
+<td>设备码 OAuth 流程</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>oauth_external</code></td>
+<td>用户在其他地方登录，token 存入 <code>auth.json</code></td>
+<td>Anthropic OAuth、MiniMax OAuth、Qwen Portal、Nous Portal</td>
+</tr>
+<tr>
+<td><code>copilot</code></td>
+<td>GitHub Copilot token 刷新周期</td>
+<td>仅 <code>copilot</code> 插件</td>
+</tr>
+<tr>
+<td><code>aws_sdk</code></td>
+<td>AWS SDK 凭据链（IAM role、profile、env）</td>
+<td>仅 <code>bedrock</code> 插件</td>
+</tr>
+<tr>
+<td><code>external_process</code></td>
+<td>认证由 agent 启动的子进程处理</td>
+<td>仅 <code>copilot-acp</code> 插件</td>
+</tr>
+</tbody>
+</table>
+<p><code>auth_type</code> 控制哪些代码路径将你的提供商视为"简单 api-key 提供商"——若不是 <code>api_key</code>，PluginManager 仍会记录 manifest，但 Hermes CLI 层面的自动化（doctor 检查、<code>--provider</code> 标志、设置向导委托）可能会跳过它。</p>
+<h2 id="发现时机">发现时机</h2>
+<p>提供商发现是<strong>懒加载</strong>的——由进程中首次调用 <code>get_provider_profile()</code> 或 <code>list_providers()</code> 触发。实际上这在启动早期就会发生（<code>auth.py</code> 模块加载时会主动扩展 <code>PROVIDER_REGISTRY</code>）。若需验证插件是否已加载，运行：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>doctor
+</code></pre></div>
+
+<p>——成功的 <code>auth_type="api_key"</code> profile 会出现在 Provider Connectivity 部分，并附带 <code>/models</code> 探测结果。</p>
+<p>编程方式检查：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">providers</span><span class="w"> </span><span class="kn">import</span> <span class="n">list_providers</span>
+<span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">list_providers</span><span class="p">():</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">base_url</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">api_mode</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="测试你的插件">测试你的插件</h2>
+<p>将 <code>HERMES_HOME</code> 指向临时目录，避免污染真实配置：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_HOME</span><span class="o">=</span>/tmp/hermes-plugin-test
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="nv">$HERMES_HOME</span>/plugins/model-providers/my-provider
+cat<span class="w"> </span>&gt;<span class="w"> </span><span class="nv">$HERMES_HOME</span>/plugins/model-providers/my-provider/__init__.py<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<span class="s">from providers import register_provider</span>
+<span class="s">from providers.base import ProviderProfile</span>
+<span class="s">register_provider(ProviderProfile(</span>
+<span class="s">    name=&quot;my-provider&quot;,</span>
+<span class="s">    env_vars=(&quot;MY_API_KEY&quot;,),</span>
+<span class="s">    base_url=&quot;https://api.my-provider.example.com/v1&quot;,</span>
+<span class="s">    auth_type=&quot;api_key&quot;,</span>
+<span class="s">))</span>
+<span class="s">EOF</span>
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">MY_API_KEY</span><span class="o">=</span>your-test-key
+hermes<span class="w"> </span>-z<span class="w"> </span><span class="s2">&quot;hello&quot;</span><span class="w"> </span>--provider<span class="w"> </span>my-provider<span class="w"> </span>-m<span class="w"> </span>some-model
+</code></pre></div>
+
+<h2 id="通用-pluginmanager-集成">通用 PluginManager 集成</h2>
+<p>通用 <code>PluginManager</code>（即 <code>hermes plugins</code> 操作的对象）<strong>能看到</strong>模型提供商插件，但不会导入它们——<code>providers/__init__.py</code> 负责管理其生命周期。Manager 记录 manifest 用于自省，并按 <code>kind: model-provider</code> 分类。当你将一个未标记的用户插件放入 <code>$HERMES_HOME/plugins/</code>，而该插件恰好调用了带 <code>ProviderProfile</code> 的 <code>register_provider</code>，Manager 会通过源码文本启发式检测自动将其归类为 <code>kind: model-provider</code>——因此即使没有 <code>plugin.yaml</code>，插件仍能正确路由。</p>
+<h2 id="通过-pip-分发">通过 pip 分发</h2>
+<p>与所有 Hermes 插件一样，模型提供商可以作为 pip 包发布。在你的 <code>pyproject.toml</code> 中添加入口点：</p>
+<div class="highlight"><pre><span></span><code><span class="k">[project.entry-points.</span><span class="s2">&quot;hermes_agent.plugins&quot;</span><span class="k">]</span>
+<span class="n">acme-inference</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;acme_hermes_plugin:register&quot;</span>
+</code></pre></div>
+
+<p>……其中 <code>acme_hermes_plugin:register</code> 是一个调用 <code>register_provider(profile)</code> 的函数。通用 PluginManager 在 <code>discover_and_load()</code> 期间会拾取入口点插件。对于 <code>kind: model-provider</code> 的 pip 插件，你仍需在 manifest 中声明 kind（或依赖源码文本启发式检测）。</p>
+<p>完整的入口点设置请参阅 <a href="../../developer-guide/plugins.html#distribute-via-pip" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">构建 Hermes 插件</a>。</p>
+<h2 id="相关页面">相关页面</h2>
+<ul>
+<li><a href="provider-runtime.html">Provider Runtime</a> — 解析优先级及各层读取 profile 的位置</li>
+<li><a href="adding-providers.html">添加提供商</a> — 新推理后端的端到端检查清单（涵盖快速插件路径和完整 CLI/auth 集成）</li>
+<li><a href="memory-provider-plugin.html">Memory Provider 插件</a></li>
+<li><a href="context-engine-plugin.html">Context Engine 插件</a></li>
+<li><a href="plugins.html">构建 Hermes 插件</a> — 通用插件编写指南</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/model-provider-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#发现机制">发现机制</a></li>
+<li class="lvl2"><a href="#目录结构">目录结构</a></li>
+<li class="lvl2"><a href="#最简示例一个简单的-api-key-提供商">最简示例——一个简单的 API key 提供商</a></li>
+<li class="lvl2"><a href="#providerprofile-字段">ProviderProfile 字段</a></li>
+<li class="lvl2"><a href="#可覆盖的-hook">可覆盖的 hook</a></li>
+<li class="lvl2"><a href="#hook-参考示例">Hook 参考示例</a></li>
+<li class="lvl2"><a href="#用户覆盖不修改仓库替换内置提供商">用户覆盖——不修改仓库替换内置提供商</a></li>
+<li class="lvl2"><a href="#api_mode-选择">api_mode 选择</a></li>
+<li class="lvl2"><a href="#认证类型">认证类型</a></li>
+<li class="lvl2"><a href="#发现时机">发现时机</a></li>
+<li class="lvl2"><a href="#测试你的插件">测试你的插件</a></li>
+<li class="lvl2"><a href="#通用-pluginmanager-集成">通用 PluginManager 集成</a></li>
+<li class="lvl2"><a href="#通过-pip-分发">通过 pip 分发</a></li>
+<li class="lvl2"><a href="#相关页面">相关页面</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

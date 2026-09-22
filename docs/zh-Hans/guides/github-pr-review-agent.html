@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>教程：GitHub PR 审查 Agent · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / guides/github-pr-review-agent</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="教程构建-github-pr-审查-agent">教程：构建 GitHub PR 审查 Agent</h1>
+<p><strong>问题所在：</strong> 团队提交 PR 的速度比你审查的速度还快。PR 等待数天无人问津。初级开发者因为没人检查而合并了有 bug 的代码。你每天早上都在追赶 diff，而不是在写新功能。</p>
+<p><strong>解决方案：</strong> 一个全天候监控你的仓库的 AI agent，对每个新 PR 进行 bug、安全问题和代码质量审查，并向你发送摘要——这样你只需把时间花在真正需要人工判断的 PR 上。</p>
+<p><strong>你将构建的内容：</strong></p>
+<div class="highlight"><pre><span></span><code>┌───────────────────────────────────────────────────────────────────┐
+│                                                                   │
+│   Cron Timer  ──▶  Hermes Agent  ──▶  GitHub API  ──▶  Review     │
+│   (every 2h)       + gh CLI           (PR diffs)       delivery   │
+│                    + skill                             (Telegram, │
+│                    + memory                            Discord,   │
+│                                                        local)     │
+│                                                                   │
+└───────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<p>本指南使用 <strong>cron 任务</strong>按计划轮询 PR——无需服务器或公开端点，在 NAT 和防火墙后面同样可用。</p>
+<div class="admonition adm-tip"><p class="adm-title">想要实时审查？</p>
+<p>如果你有可用的公开端点，请查看<a href="webhook-github-pr-review.html">使用 Webhook 自动化 GitHub PR 评论</a>——GitHub 会在 PR 被打开或更新时立即向 Hermes 推送事件。</p>
+</div>
+<hr />
+<h2 id="前提条件">前提条件</h2>
+<ul>
+<li><strong>已安装 Hermes Agent</strong> — 参见<a href="../getting-started/installation.html">安装指南</a></li>
+<li><strong>Gateway 已运行</strong>（用于 cron 任务）：
+  <code>bash
+  hermes gateway install   # Install as a service
+  # or
+  hermes gateway           # Run in foreground</code></li>
+<li><strong>已安装并认证 GitHub CLI（<code>gh</code>）</strong>：
+  ```bash
+  # Install
+  brew install gh        # macOS
+  sudo apt install gh    # Ubuntu/Debian</li>
+</ul>
+<p># Authenticate
+  gh auth login
+  ```
+- <strong>已配置消息通知</strong>（可选）— <a href="../user-guide/messaging/telegram.html">Telegram</a> 或 <a href="../user-guide/messaging/discord.html">Discord</a></p>
+<div class="admonition adm-tip"><p class="adm-title">没有消息通知？没关系</p>
+<p>使用 <code>deliver: "local"</code> 将审查结果保存到 <code>~/.hermes/cron/output/</code>。在接入通知之前用于测试非常方便。</p>
+</div>
+<hr />
+<h2 id="第一步验证配置">第一步：验证配置</h2>
+<p>确保 Hermes 可以访问 GitHub。启动对话：</p>
+<div class="highlight"><pre><span></span><code>hermes
+</code></pre></div>
+
+<p>用一个简单命令测试：</p>
+<div class="highlight"><pre><span></span><code>Run: gh pr list --repo NousResearch/hermes-agent --state open --limit 3
+</code></pre></div>
+
+<p>你应该能看到一个开放 PR 的列表。如果成功，就可以继续了。</p>
+<hr />
+<h2 id="第二步手动试审一个-pr">第二步：手动试审一个 PR</h2>
+<p>仍在对话中，让 Hermes 审查一个真实的 PR：</p>
+<div class="highlight"><pre><span></span><code>Review this pull request. Read the diff, check for bugs, security issues,
+and code quality. Be specific about line numbers and quote problematic code.
+
+Run: gh pr diff 3888 --repo NousResearch/hermes-agent
+</code></pre></div>
+
+<p>Hermes 将会：
+1. 执行 <code>gh pr diff</code> 获取代码变更
+2. 通读整个 diff
+3. 生成包含具体发现的结构化审查报告</p>
+<p>如果你对审查质量满意，就可以开始自动化了。</p>
+<hr />
+<h2 id="第三步创建审查-skill">第三步：创建审查 Skill</h2>
+<p>Skill 为 Hermes 提供一致的审查准则，在会话和 cron 运行之间持久保存。没有 skill，审查质量会参差不齐。</p>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.hermes/skills/code-review
+</code></pre></div>
+
+<p>创建 <code>~/.hermes/skills/code-review/SKILL.md</code>：</p>
+<div class="highlight"><pre><span></span><code>---
+name: code-review
+<span class="gu">description: Review pull requests for bugs, security issues, and code quality</span>
+<span class="gu">---</span>
+
+<span class="gh"># Code Review Guidelines</span>
+
+When reviewing a pull request:
+
+<span class="gu">## What to Check</span>
+<span class="k">1.</span> <span class="gs">**Bugs**</span> — Logic errors, off-by-one, null/undefined handling
+<span class="k">2.</span> <span class="gs">**Security**</span> — Injection, auth bypass, secrets in code, SSRF
+<span class="k">3.</span> <span class="gs">**Performance**</span> — N+1 queries, unbounded loops, memory leaks
+<span class="k">4.</span> <span class="gs">**Style**</span> — Naming conventions, dead code, missing error handling
+<span class="k">5.</span> <span class="gs">**Tests**</span> — Are changes tested? Do tests cover edge cases?
+
+<span class="gu">## Output Format</span>
+For each finding:
+<span class="k">-</span><span class="w"> </span><span class="gs">**File:Line**</span> — exact location
+<span class="k">-</span><span class="w"> </span><span class="gs">**Severity**</span> — Critical / Warning / Suggestion
+<span class="k">-</span><span class="w"> </span><span class="gs">**What&#39;s wrong**</span> — one sentence
+<span class="k">-</span><span class="w"> </span><span class="gs">**Fix**</span> — how to fix it
+
+<span class="gu">## Rules</span>
+<span class="k">-</span><span class="w"> </span>Be specific. Quote the problematic code.
+<span class="k">-</span><span class="w"> </span>Don&#39;t flag style nitpicks unless they affect readability.
+<span class="k">-</span><span class="w"> </span>If the PR looks good, say so. Don&#39;t invent problems.
+<span class="k">-</span><span class="w"> </span>End with: APPROVE / REQUEST_CHANGES / COMMENT
+</code></pre></div>
+
+<p>验证是否已加载——启动 <code>hermes</code>，你应该能在启动时的 skill 列表中看到 <code>code-review</code>。</p>
+<hr />
+<h2 id="第四步教会它你的团队规范">第四步：教会它你的团队规范</h2>
+<p>这才是让审查器真正有用的关键。启动一个会话，向 Hermes 传授你的团队标准：</p>
+<div class="highlight"><pre><span></span><code>Remember: In our backend repo, we use Python with FastAPI.
+All endpoints must have type annotations and Pydantic models.
+We don&#39;t allow raw SQL — only SQLAlchemy ORM.
+Test files go in tests/ and must use pytest fixtures.
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>Remember: In our frontend repo, we use TypeScript with React.
+No `any` types allowed. All components must have props interfaces.
+We use React Query for data fetching, never useEffect for API calls.
+</code></pre></div>
+
+<p>这些记忆会永久保存——审查器无需每次提醒就会自动执行你的规范。</p>
+<hr />
+<h2 id="第五步创建自动化-cron-任务">第五步：创建自动化 Cron 任务</h2>
+<p>现在把所有内容串联起来。创建一个每 2 小时运行一次的 cron 任务：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;0 */2 * * *&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;Check for new open PRs and review them.</span>
+
+<span class="s2">Repos to monitor:</span>
+<span class="s2">- myorg/backend-api</span>
+<span class="s2">- myorg/frontend-app</span>
+
+<span class="s2">Steps:</span>
+<span class="s2">1. Run: gh pr list --repo REPO --state open --limit 5 --json number,title,author,createdAt</span>
+<span class="s2">2. For each PR created or updated in the last 4 hours:</span>
+<span class="s2">   - Run: gh pr diff NUMBER --repo REPO</span>
+<span class="s2">   - Review the diff using the code-review guidelines</span>
+<span class="s2">3. Format output as:</span>
+
+<span class="s2">## PR Reviews — today</span>
+
+<span class="s2">### [repo] #[number]: [title]</span>
+<span class="s2">**Author:** [name] | **Verdict:** APPROVE/REQUEST_CHANGES/COMMENT</span>
+<span class="s2">[findings]</span>
+
+<span class="s2">If no new PRs found, say: No new PRs to review.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;pr-review&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>code-review
+</code></pre></div>
+
+<p>验证任务已调度：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>list
+</code></pre></div>
+
+<h3 id="其他常用调度计划">其他常用调度计划</h3>
+<table>
+<thead>
+<tr>
+<th>计划</th>
+<th>触发时机</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0 */2 * * *</code></td>
+<td>每 2 小时</td>
+</tr>
+<tr>
+<td><code>0 9,13,17 * * 1-5</code></td>
+<td>工作日每天三次</td>
+</tr>
+<tr>
+<td><code>0 9 * * 1</code></td>
+<td>每周一早上汇总</td>
+</tr>
+<tr>
+<td><code>30m</code></td>
+<td>每 30 分钟（高流量仓库）</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="第六步按需手动触发">第六步：按需手动触发</h2>
+<p>不想等待调度？手动触发：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>run<span class="w"> </span>pr-review
+</code></pre></div>
+
+<p>或在对话会话中：</p>
+<div class="highlight"><pre><span></span><code>/cron run pr-review
+</code></pre></div>
+
+<hr />
+<h2 id="进阶用法">进阶用法</h2>
+<h3 id="直接在-github-上发布审查评论">直接在 GitHub 上发布审查评论</h3>
+<p>不将结果发送到 Telegram，而是让 agent 直接在 PR 上评论：</p>
+<p>在你的 cron prompt（提示词）中添加：</p>
+<div class="highlight"><pre><span></span><code>After reviewing, post your review:
+- For issues: gh pr review NUMBER --repo REPO --comment --body &quot;YOUR_REVIEW&quot;
+- For critical issues: gh pr review NUMBER --repo REPO --request-changes --body &quot;YOUR_REVIEW&quot;
+- For clean PRs: gh pr review NUMBER --repo REPO --approve --body &quot;Looks good&quot;
+</code></pre></div>
+
+<div class="admonition adm-caution"><p class="adm-title">小心</p>
+<p>确保 <code>gh</code> 使用的 token 具有 <code>repo</code> 权限范围。审查评论将以 <code>gh</code> 当前认证的用户身份发布。</p>
+</div>
+<h3 id="每周-pr-看板">每周 PR 看板</h3>
+<p>创建一个每周一早上的仓库概览：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;0 9 * * 1&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;Generate a weekly PR dashboard:</span>
+<span class="s2">- myorg/backend-api</span>
+<span class="s2">- myorg/frontend-app</span>
+<span class="s2">- myorg/infra</span>
+
+<span class="s2">For each repo show:</span>
+<span class="s2">1. Open PR count and oldest PR age</span>
+<span class="s2">2. PRs merged this week</span>
+<span class="s2">3. Stale PRs (older than 5 days)</span>
+<span class="s2">4. PRs with no reviewer assigned</span>
+
+<span class="s2">Format as a clean summary.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;weekly-dashboard&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram
+</code></pre></div>
+
+<h3 id="多仓库监控">多仓库监控</h3>
+<p>在 prompt 中添加更多仓库即可扩展规模。Agent 会按顺序处理它们——无需额外配置。</p>
+<hr />
+<h2 id="故障排查">故障排查</h2>
+<h3 id="gh-command-not-found">"gh: command not found"</h3>
+<p>Gateway 在精简环境中运行。请确保 <code>gh</code> 在系统 PATH 中，然后重启 gateway。</p>
+<h3 id="审查结果过于泛泛">审查结果过于泛泛</h3>
+<ol>
+<li>添加 <code>code-review</code> skill（第三步）</li>
+<li>通过 memory（记忆）向 Hermes 传授你的团队规范（第四步）</li>
+<li>它对你的技术栈了解越多，审查质量越好</li>
+</ol>
+<h3 id="cron-任务未运行">Cron 任务未运行</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>status<span class="w">    </span><span class="c1"># Is the gateway running?</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>list<span class="w">         </span><span class="c1"># Is the job enabled?</span>
+</code></pre></div>
+
+<h3 id="速率限制">速率限制</h3>
+<p>GitHub 对已认证用户每小时允许 5,000 次 API 请求。每次 PR 审查约消耗 3-5 次请求（列表 + diff + 可选评论）。即使每天审查 100 个 PR，也远低于限制。</p>
+<hr />
+<h2 id="下一步">下一步</h2>
+<ul>
+<li><strong><a href="webhook-github-pr-review.html">基于 Webhook 的 PR 审查</a></strong> — 在 PR 被打开时立即获得审查（需要公开端点）</li>
+<li><strong><a href="daily-briefing-bot.html">每日简报 Bot</a></strong> — 将 PR 审查与你的晨间资讯摘要结合</li>
+<li><strong><a href="../developer-guide/plugins.html">构建 Plugin</a></strong> — 将审查逻辑封装为可共享的 plugin</li>
+<li><strong><a href="../user-guide/profiles.html">Profiles</a></strong> — 运行一个专属审查器 profile，拥有独立的 memory 和配置</li>
+<li><strong><a href="../user-guide/features/fallback-providers.html">Fallback Providers</a></strong> — 确保在某个 provider 不可用时审查任务仍能正常运行</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/guides/github-pr-review-agent</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#前提条件">前提条件</a></li>
+<li class="lvl2"><a href="#第一步验证配置">第一步：验证配置</a></li>
+<li class="lvl2"><a href="#第二步手动试审一个-pr">第二步：手动试审一个 PR</a></li>
+<li class="lvl2"><a href="#第三步创建审查-skill">第三步：创建审查 Skill</a></li>
+<li class="lvl2"><a href="#第四步教会它你的团队规范">第四步：教会它你的团队规范</a></li>
+<li class="lvl2"><a href="#第五步创建自动化-cron-任务">第五步：创建自动化 Cron 任务</a></li>
+<li class="lvl3"><a href="#其他常用调度计划">其他常用调度计划</a></li>
+<li class="lvl2"><a href="#第六步按需手动触发">第六步：按需手动触发</a></li>
+<li class="lvl2"><a href="#进阶用法">进阶用法</a></li>
+<li class="lvl3"><a href="#直接在-github-上发布审查评论">直接在 GitHub 上发布审查评论</a></li>
+<li class="lvl3"><a href="#每周-pr-看板">每周 PR 看板</a></li>
+<li class="lvl3"><a href="#多仓库监控">多仓库监控</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl3"><a href="#gh-command-not-found">&quot;gh: command not found&quot;</a></li>
+<li class="lvl3"><a href="#审查结果过于泛泛">审查结果过于泛泛</a></li>
+<li class="lvl3"><a href="#cron-任务未运行">Cron 任务未运行</a></li>
+<li class="lvl3"><a href="#速率限制">速率限制</a></li>
+<li class="lvl2"><a href="#下一步">下一步</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

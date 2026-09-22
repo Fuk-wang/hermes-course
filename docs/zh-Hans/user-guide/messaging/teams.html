@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Microsoft Teams · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/messaging/teams</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="microsoft-teams-设置">Microsoft Teams 设置</h1>
+<p>将 Hermes Agent 作为机器人接入 Microsoft Teams。与 Slack 的 Socket Mode 不同，Teams 通过调用<strong>公开 HTTPS webhook</strong>（钩子）来投递消息，因此你的实例需要一个可公开访问的端点——本地开发时使用开发隧道，生产环境使用真实域名。</p>
+<p>如果你需要的是来自 Microsoft Graph 事件的会议摘要，而非普通的机器人对话，请使用专用设置页面：<a href="teams-meetings.html">Teams 会议</a>。</p>
+<h2 id="机器人的响应方式">机器人的响应方式</h2>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>个人聊天（私信）</strong></td>
+<td>机器人响应每一条消息，无需 @提及。</td>
+</tr>
+<tr>
+<td><strong>群聊</strong></td>
+<td>机器人仅在被 @提及时响应。</td>
+</tr>
+<tr>
+<td><strong>频道</strong></td>
+<td>机器人仅在被 @提及时响应。</td>
+</tr>
+</tbody>
+</table>
+<p>Teams 将 @提及作为普通消息投递，其中包含 <code>&lt;at&gt;BotName&lt;/at&gt;</code> 标签，Hermes 在处理前会自动去除这些标签。</p>
+<hr />
+<h2 id="第一步安装-teams-cli">第一步：安装 Teams CLI</h2>
+<p><code>@microsoft/teams.cli</code> 可自动完成机器人注册，无需进入 Azure 门户。</p>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>-g<span class="w"> </span>@microsoft/teams.cli@preview
+teams<span class="w"> </span>login
+</code></pre></div>
+
+<p>验证登录状态并查找你自己的 AAD 对象 ID（<code>TEAMS_ALLOWED_USERS</code> 需要用到）：</p>
+<div class="highlight"><pre><span></span><code>teams<span class="w"> </span>status<span class="w"> </span>--verbose
+</code></pre></div>
+
+<hr />
+<h2 id="第二步暴露-webhook-端口">第二步：暴露 Webhook 端口</h2>
+<p>Teams 无法向 <code>localhost</code> 投递消息。本地开发时，使用任意隧道工具获取一个公开的 HTTPS URL。默认端口为 <code>3978</code>，如需更改可通过 <code>TEAMS_PORT</code> 设置。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># devtunnel（Microsoft 官方）</span>
+devtunnel<span class="w"> </span>create<span class="w"> </span>hermes-bot<span class="w"> </span>--allow-anonymous
+devtunnel<span class="w"> </span>port<span class="w"> </span>create<span class="w"> </span>hermes-bot<span class="w"> </span>-p<span class="w"> </span><span class="m">3978</span><span class="w"> </span>--protocol<span class="w"> </span>http<span class="w">  </span><span class="c1"># 如已修改 TEAMS_PORT，请替换 3978</span>
+devtunnel<span class="w"> </span>host<span class="w"> </span>hermes-bot
+
+<span class="c1"># ngrok</span>
+ngrok<span class="w"> </span>http<span class="w"> </span><span class="m">3978</span><span class="w">  </span><span class="c1"># 如已修改 TEAMS_PORT，请替换 3978</span>
+
+<span class="c1"># cloudflared</span>
+cloudflared<span class="w"> </span>tunnel<span class="w"> </span>--url<span class="w"> </span>http://localhost:3978<span class="w">  </span><span class="c1"># 如已修改 TEAMS_PORT，请替换 3978</span>
+</code></pre></div>
+
+<p>从输出中复制 <code>https://</code> URL——下一步会用到。开发期间保持隧道运行。</p>
+<p>公开隧道 URL 使用 HTTPS，但 Hermes 的本地 webhook 监听器使用纯 HTTP。隧道会终止 TLS，并将 HTTP 转发到 <code>3978</code> 端口；不要将本地隧道端口配置为 HTTPS。</p>
+<p>生产环境请将机器人端点指向服务器的公开域名（参见<a href="../../../user-guide/messaging/teams.html#production-deployment" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">生产部署</a>）。</p>
+<hr />
+<h2 id="第三步创建机器人">第三步：创建机器人</h2>
+<div class="highlight"><pre><span></span><code>teams<span class="w"> </span>app<span class="w"> </span>create<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;Hermes&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--endpoint<span class="w"> </span><span class="s2">&quot;https://&lt;your-tunnel-url&gt;/api/messages&quot;</span>
+</code></pre></div>
+
+<p>CLI 会输出你的 <code>CLIENT_ID</code>、<code>CLIENT_SECRET</code> 和 <code>TENANT_ID</code>，以及第六步所需的安装链接。请保存客户端密钥——它不会再次显示。</p>
+<hr />
+<h2 id="第四步配置环境变量">第四步：配置环境变量</h2>
+<p>添加到 <code>~/.hermes/.env</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 必填</span>
+<span class="nv">TEAMS_CLIENT_ID</span><span class="o">=</span>&lt;your-client-id&gt;
+<span class="nv">TEAMS_CLIENT_SECRET</span><span class="o">=</span>&lt;your-client-secret&gt;
+<span class="nv">TEAMS_TENANT_ID</span><span class="o">=</span>&lt;your-tenant-id&gt;
+
+<span class="c1"># 限制特定用户访问（推荐）</span>
+<span class="c1"># 使用 `teams status --verbose` 获取 AAD 对象 ID</span>
+<span class="nv">TEAMS_ALLOWED_USERS</span><span class="o">=</span>&lt;your-aad-object-id&gt;
+</code></pre></div>
+
+<hr />
+<h2 id="第五步启动-gateway">第五步：启动 Gateway</h2>
+<div class="highlight"><pre><span></span><code><span class="nv">HERMES_UID</span><span class="o">=</span><span class="k">$(</span>id<span class="w"> </span>-u<span class="k">)</span><span class="w"> </span><span class="nv">HERMES_GID</span><span class="o">=</span><span class="k">$(</span>id<span class="w"> </span>-g<span class="k">)</span><span class="w"> </span>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>此命令启动 gateway。默认 webhook 端口为 <code>3978</code>（可通过 <code>TEAMS_PORT</code> 覆盖）。检查运行状态：</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:3978/health<span class="w">   </span><span class="c1"># 应返回：ok</span>
+docker<span class="w"> </span>logs<span class="w"> </span>-f<span class="w"> </span>hermes
+</code></pre></div>
+
+<p>查找以下日志：</p>
+<div class="highlight"><pre><span></span><code>[teams] Webhook server listening on 0.0.0.0:3978/api/messages
+</code></pre></div>
+
+<hr />
+<h2 id="第六步在-teams-中安装应用">第六步：在 Teams 中安装应用</h2>
+<div class="highlight"><pre><span></span><code>teams<span class="w"> </span>app<span class="w"> </span>get<span class="w"> </span>&lt;teamsAppId&gt;<span class="w"> </span>--install-link
+</code></pre></div>
+
+<p>在浏览器中打开输出的链接——它会直接在 Teams 客户端中打开。安装完成后，向机器人发送一条私信，即可开始使用。</p>
+<hr />
+<h2 id="配置参考">配置参考</h2>
+<h3 id="环境变量">环境变量</h3>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TEAMS_CLIENT_ID</code></td>
+<td>Azure AD 应用（客户端）ID</td>
+</tr>
+<tr>
+<td><code>TEAMS_CLIENT_SECRET</code></td>
+<td>Azure AD 客户端密钥</td>
+</tr>
+<tr>
+<td><code>TEAMS_TENANT_ID</code></td>
+<td>Azure AD 租户 ID</td>
+</tr>
+<tr>
+<td><code>TEAMS_ALLOWED_USERS</code></td>
+<td>允许使用机器人的 AAD 对象 ID，逗号分隔</td>
+</tr>
+<tr>
+<td><code>TEAMS_ALLOW_ALL_USERS</code></td>
+<td>设为 <code>true</code> 可跳过白名单，允许所有人使用</td>
+</tr>
+<tr>
+<td><code>TEAMS_HOME_CHANNEL</code></td>
+<td>用于 cron/主动消息投递的会话 ID</td>
+</tr>
+<tr>
+<td><code>TEAMS_HOME_CHANNEL_NAME</code></td>
+<td>主频道的显示名称</td>
+</tr>
+<tr>
+<td><code>TEAMS_PORT</code></td>
+<td>Webhook 端口（默认：<code>3978</code>）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="configyaml">config.yaml</h3>
+<p>也可通过 <code>~/.hermes/config.yaml</code> 进行配置：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">teams</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">client_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-client-id&quot;</span>
+<span class="w">      </span><span class="nt">client_secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-secret&quot;</span>
+<span class="w">      </span><span class="nt">tenant_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-tenant-id&quot;</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3978</span>
+</code></pre></div>
+
+<hr />
+<h2 id="功能特性">功能特性</h2>
+<h3 id="交互式审批卡片">交互式审批卡片</h3>
+<p>当 Agent 需要执行可能存在风险的命令时，它会发送一张带有四个按钮的 Adaptive Card，而不是要求你输入 <code>/approve</code>：</p>
+<ul>
+<li><strong>Allow Once</strong>——仅批准此次特定命令</li>
+<li><strong>Allow Session</strong>——在本次会话期间批准此模式</li>
+<li><strong>Always Allow</strong>——永久批准此模式</li>
+<li><strong>Deny</strong>——拒绝该命令</li>
+</ul>
+<p>点击按钮即可内联完成审批，卡片会被替换为决策结果。</p>
+<h3 id="会议摘要投递teams-会议-pipeline">会议摘要投递（Teams 会议 Pipeline）</h3>
+<p>当 <a href="msgraph-webhook.html">Teams 会议 pipeline 插件</a>启用后，此适配器同时负责会议摘要的出站投递——一个 Teams 集成面，而非两个。会议转录摘要生成后，写入器会将摘要发布到你指定的 Teams 目标。</p>
+<p>Pipeline 摘要投递在 <code>teams</code> 平台条目下与机器人配置并列配置：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">teams</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="c1"># 现有机器人配置（client_id、client_secret、tenant_id、port）...</span>
+
+<span class="w">      </span><span class="c1"># 会议摘要投递（仅在 teams_pipeline 插件启用时生效）</span>
+<span class="w">      </span><span class="nt">delivery_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;graph&quot;</span><span class="w">       </span><span class="c1"># 或 &quot;incoming_webhook&quot;</span>
+<span class="w">      </span><span class="c1"># 对于 delivery_mode: graph — 选择其中一项：</span>
+<span class="w">      </span><span class="nt">chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;19:meeting_...&quot;</span><span class="w">    </span><span class="c1"># 发布到 Teams 聊天</span>
+<span class="w">      </span><span class="c1"># team_id: &quot;...&quot;             # 或发布到频道</span>
+<span class="w">      </span><span class="c1"># channel_id: &quot;...&quot;</span>
+<span class="w">      </span><span class="c1"># access_token: &quot;...&quot;        # 可选；回退到 MSGRAPH_* 应用凭据</span>
+<span class="w">      </span><span class="c1"># 对于 delivery_mode: incoming_webhook：</span>
+<span class="w">      </span><span class="c1"># incoming_webhook_url: &quot;https://outlook.office.com/webhook/...&quot;</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>适用场景</th>
+<th>权衡</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>incoming_webhook</code></td>
+<td>使用 Teams 生成的静态 URL，简单地将摘要发布到某个频道。</td>
+<td>不支持回复线程和表情回应，显示为 webhook 配置的身份。</td>
+</tr>
+<tr>
+<td><code>graph</code></td>
+<td>通过 Microsoft Graph 以机器人身份发布带线程的频道帖子或 1:1/群聊消息。</td>
+<td>需要完成 <a href="../../guides/microsoft-graph-app-registration.html">Graph 应用注册</a>，并具备 <code>ChannelMessage.Send</code>（频道）或 <code>Chat.ReadWrite.All</code>（聊天）应用权限。</td>
+</tr>
+</tbody>
+</table>
+<p>如果 <code>teams_pipeline</code> 插件<strong>未启用</strong>，这些设置不会生效——它们仅在 pipeline 运行时绑定到 Graph webhook 入口时才会激活。</p>
+<hr />
+<h2 id="生产部署">生产部署</h2>
+<p>对于永久服务器，请在反向代理处终止 TLS，并将请求转发到 Hermes 的纯 HTTP 监听器，通常为 <code>http://127.0.0.1:3978</code>。使用该代理的公开 HTTPS 端点注册机器人：</p>
+<div class="highlight"><pre><span></span><code>teams<span class="w"> </span>app<span class="w"> </span>create<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;Hermes&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--endpoint<span class="w"> </span><span class="s2">&quot;https://your-domain.com/api/messages&quot;</span>
+</code></pre></div>
+
+<p>如果机器人已创建，只需更新端点：</p>
+<div class="highlight"><pre><span></span><code>teams<span class="w"> </span>app<span class="w"> </span>update<span class="w"> </span>--id<span class="w"> </span>&lt;teamsAppId&gt;<span class="w"> </span>--endpoint<span class="w"> </span><span class="s2">&quot;https://your-domain.com/api/messages&quot;</span>
+</code></pre></div>
+
+<p>确保公开 HTTPS 端点可从互联网访问并使用有效的 TLS 证书。Teams 会拒绝自签名证书。请将 Hermes 监听器置于代理后方；<code>3978</code> 端口本身不提供 HTTPS。</p>
+<hr />
+<h2 id="故障排查">故障排查</h2>
+<table>
+<thead>
+<tr>
+<th>问题</th>
+<th>解决方案</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>health</code> 端点正常但机器人不响应</td>
+<td>检查隧道是否仍在运行，以及机器人的消息端点是否与隧道 URL 匹配</td>
+</tr>
+<tr>
+<td>Teams 发送消息时日志显示 <code>"UNKNOWN / HTTP/1.0" 400</code></td>
+<td>隧道或反向代理正在将 HTTPS 转发到 Hermes 的纯 HTTP 监听器。请在代理处终止 TLS，并将 HTTP 转发到 <code>3978</code> 端口</td>
+</tr>
+<tr>
+<td>日志中出现 <code>KeyError: 'teams'</code></td>
+<td>重启容器——此问题已在当前版本中修复</td>
+</tr>
+<tr>
+<td>机器人响应时出现认证错误</td>
+<td>验证 <code>TEAMS_CLIENT_ID</code>、<code>TEAMS_CLIENT_SECRET</code> 和 <code>TEAMS_TENANT_ID</code> 是否均已正确设置</td>
+</tr>
+<tr>
+<td><code>No inference provider configured</code></td>
+<td>检查 <code>~/.hermes/.env</code> 中是否设置了 <code>ANTHROPIC_API_KEY</code>（或其他提供商密钥）</td>
+</tr>
+<tr>
+<td>机器人收到消息但忽略它们</td>
+<td>你的 AAD 对象 ID 可能不在 <code>TEAMS_ALLOWED_USERS</code> 中。运行 <code>teams status --verbose</code> 查找</td>
+</tr>
+<tr>
+<td>隧道 URL 在重启后变更</td>
+<td>使用命名隧道（<code>devtunnel create hermes-bot</code>）时，devtunnel URL 是持久的。ngrok 和 cloudflared 每次运行都会生成新 URL（除非你有付费计划）——URL 变更时请用 <code>teams app update</code> 更新机器人端点</td>
+</tr>
+<tr>
+<td>Teams 显示"此机器人未响应"</td>
+<td>Webhook 返回了错误。检查 <code>docker logs hermes</code> 中的错误堆栈</td>
+</tr>
+<tr>
+<td>日志中出现 <code>[teams] Failed to connect</code></td>
+<td>SDK 认证失败。仔细检查凭据，并确认租户 ID 与 <code>teams login</code> 时使用的账户匹配</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="安全性">安全性</h2>
+<div class="admonition adm-warning"><p class="adm-title">警告</p>
+<p><strong>务必设置 <code>TEAMS_ALLOWED_USERS</code></strong>，填入授权用户的 AAD 对象 ID。否则，任何能找到或安装你的机器人的人都可以与其交互。</p>
+<p>将 <code>TEAMS_CLIENT_SECRET</code> 视同密码对待——定期通过 Azure 门户或 Teams CLI 进行轮换。</p>
+</div>
+<ul>
+<li>将凭据存储在权限为 <code>600</code> 的 <code>~/.hermes/.env</code> 中（<code>chmod 600 ~/.hermes/.env</code>）</li>
+<li>机器人仅接受 <code>TEAMS_ALLOWED_USERS</code> 中用户的消息；未授权的消息会被静默丢弃</li>
+<li>你的公开端点（<code>/api/messages</code>）由 Teams Bot Framework 进行认证——不含有效 JWT 的请求会被拒绝</li>
+</ul>
+<h2 id="相关文档">相关文档</h2>
+<ul>
+<li><a href="teams-meetings.html">Teams 会议</a></li>
+<li><a href="../../guides/operate-teams-meeting-pipeline.html">运营 Teams 会议 Pipeline</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/messaging/teams</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#机器人的响应方式">机器人的响应方式</a></li>
+<li class="lvl2"><a href="#第一步安装-teams-cli">第一步：安装 Teams CLI</a></li>
+<li class="lvl2"><a href="#第二步暴露-webhook-端口">第二步：暴露 Webhook 端口</a></li>
+<li class="lvl2"><a href="#第三步创建机器人">第三步：创建机器人</a></li>
+<li class="lvl2"><a href="#第四步配置环境变量">第四步：配置环境变量</a></li>
+<li class="lvl2"><a href="#第五步启动-gateway">第五步：启动 Gateway</a></li>
+<li class="lvl2"><a href="#第六步在-teams-中安装应用">第六步：在 Teams 中安装应用</a></li>
+<li class="lvl2"><a href="#配置参考">配置参考</a></li>
+<li class="lvl3"><a href="#环境变量">环境变量</a></li>
+<li class="lvl3"><a href="#configyaml">config.yaml</a></li>
+<li class="lvl2"><a href="#功能特性">功能特性</a></li>
+<li class="lvl3"><a href="#交互式审批卡片">交互式审批卡片</a></li>
+<li class="lvl3"><a href="#会议摘要投递teams-会议-pipeline">会议摘要投递（Teams 会议 Pipeline）</a></li>
+<li class="lvl2"><a href="#生产部署">生产部署</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl2"><a href="#安全性">安全性</a></li>
+<li class="lvl2"><a href="#相关文档">相关文档</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

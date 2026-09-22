@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Script-Only Cron Jobs (No LLM) · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/cron-script-only</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="script-only-cron-jobs">Script-Only Cron Jobs</h1>
+<p>Sometimes you already know exactly what message you want to send. You don't need an agent to reason about it — you just need a script to run on a timer, and its output (if any) to land in Telegram / Discord / Slack / Signal.</p>
+<p>Hermes calls this <strong>no-agent mode</strong>. It's the cron system minus the LLM.</p>
+<!-- ascii-guard-ignore -->
+
+<div class="highlight"><pre><span></span><code>   ┌──────────────────┐          ┌──────────────────┐
+   │ scheduler tick   │  every   │ run script       │
+   │ (every N minutes)│ ──────▶ │ (bash or python) │
+   └──────────────────┘          └──────────────────┘
+                                          │
+                                          │ stdout
+                                          ▼
+                                 ┌──────────────────┐
+                                 │ delivery router  │
+                                 │ (telegram/disc…) │
+                                 └──────────────────┘
+</code></pre></div>
+
+<!-- ascii-guard-ignore-end -->
+
+<ul>
+<li><strong>No LLM call.</strong> Zero tokens, zero agent loop, zero model spend.</li>
+<li><strong>Script is the job.</strong> The script decides whether to alert. Emit output → message gets sent. Emit nothing → silent tick.</li>
+<li><strong>Bash or Python.</strong> <code>.sh</code> / <code>.bash</code> files run under <code>bash</code> from <code>PATH</code> when available, otherwise <code>/bin/bash</code>; any other extension runs under the current Python interpreter. Paths must resolve inside <code>~/.hermes/scripts/</code> (relative, absolute, or <code>~</code> forms are OK if they stay in that directory). Cron scripts do <strong>not</strong> inherit provider credentials from the Hermes process environment.</li>
+<li><strong>Same scheduler.</strong> Lives in <code>cronjob</code> alongside LLM jobs — pausing, resuming, listing, logs, and delivery targeting all work the same way.</li>
+</ul>
+<h2 id="when-to-use-it">When to Use It</h2>
+<p>Use no-agent mode for:</p>
+<ul>
+<li><strong>Memory / disk / GPU watchdogs.</strong> Run every 5 minutes, alert only when a threshold is breached.</li>
+<li><strong>CI hooks.</strong> Deploy finished → post the commit SHA. Build failed → send the last 100 lines of the log.</li>
+<li><strong>Periodic metrics.</strong> "Daily Stripe revenue at 9am" as a simple API call + pretty-print.</li>
+<li><strong>External event pollers.</strong> Check an API, alert on state change.</li>
+<li><strong>Heartbeats.</strong> Ping a dashboard every N minutes to prove the host is alive.</li>
+</ul>
+<p>Use a normal (LLM-driven) cron job when you need the agent to <strong>decide</strong> what to say — summarize a long document, pick interesting items from a feed, draft a human-friendly message. The no-agent path is for cases where the script's stdout already IS the message.</p>
+<h2 id="create-one-from-chat">Create One from Chat</h2>
+<p>The real win of no-agent mode is that the agent itself can set up the watchdog for you — no editor, no shell, no remembering CLI flags. You describe what you want, Hermes writes the script, schedules it, and tells you when it'll fire.</p>
+<h3 id="example-transcript">Example transcript</h3>
+<blockquote>
+<p><strong>You:</strong> ping me on telegram if RAM is over 85% every 5 minutes</p>
+<p><strong>Hermes:</strong> <em>(writes <code>~/.hermes/scripts/memory-watchdog.sh</code>, then calls <code>cronjob(...)</code> with <code>no_agent=true</code>)</em></p>
+<p>Set up. Runs every 5 min, alerts Telegram only when RAM is over 85%. Script: <code>memory-watchdog.sh</code>. Job ID: <code>abc123</code>.</p>
+</blockquote>
+<p>Under the hood, the agent makes two tool calls:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. Write the check script</span>
+<span class="n">write_file</span><span class="p">(</span>
+    <span class="n">path</span><span class="o">=</span><span class="s2">&quot;~/.hermes/scripts/memory-watchdog.sh&quot;</span><span class="p">,</span>
+    <span class="n">content</span><span class="o">=</span><span class="s1">&#39;&#39;&#39;#!/usr/bin/env bash</span>
+<span class="s1">ram_pct=$(free | awk &#39;/^Mem:/ {printf &quot;</span><span class="si">%d</span><span class="s1">&quot;, $3 * 100 / $2}&#39;)</span>
+<span class="s1">if [ &quot;$ram_pct&quot; -ge 85 ]; then</span>
+<span class="s1">  echo &quot;RAM $</span><span class="si">{ram_pct}% o</span><span class="s1">n $(hostname)&quot;</span>
+<span class="s1">fi</span>
+<span class="s1"># Empty stdout = silent tick; no message sent.</span>
+<span class="s1">&#39;&#39;&#39;</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># 2. Schedule it — no_agent=True skips the LLM on every tick</span>
+<span class="n">cronjob</span><span class="p">(</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span>
+    <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;every 5m&quot;</span><span class="p">,</span>
+    <span class="n">script</span><span class="o">=</span><span class="s2">&quot;memory-watchdog.sh&quot;</span><span class="p">,</span>
+    <span class="n">no_agent</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">deliver</span><span class="o">=</span><span class="s2">&quot;telegram&quot;</span><span class="p">,</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;memory-watchdog&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>From that point on every tick is free: the scheduler runs the script, pipes its stdout to Telegram if non-empty, and never touches a model.</p>
+<h3 id="what-the-agent-decides-for-you">What the agent decides for you</h3>
+<p>When you phrase a request like "alert me when X" or "every N minutes check Y and tell me if Z", Hermes' <code>cronjob</code> tool description tells it to reach for <code>no_agent=True</code> whenever the message content is fully determined by the script. It falls back to the normal LLM-driven path when the request needs reasoning (<em>"summarize the new issues"</em>, <em>"pick the most interesting headlines"</em>, <em>"draft a friendly reminder"</em>).</p>
+<p>You don't have to specify <code>--no-agent</code> yourself. Just describe the behavior.</p>
+<h3 id="managing-watchdogs-from-chat">Managing watchdogs from chat</h3>
+<p>The agent can pause, resume, edit, and remove jobs the same way it creates them:</p>
+<blockquote>
+<p><strong>You:</strong> stop the memory watchdog for tonight</p>
+<p><strong>Hermes:</strong> <em>(calls <code>cronjob(action='pause', job_id='abc123')</code>)</em></p>
+<p>Paused. Resume with "turn it back on" or via <code>hermes cron resume abc123</code>.</p>
+<p><strong>You:</strong> change it to every 15 minutes</p>
+<p><strong>Hermes:</strong> <em>(calls <code>cronjob(action='update', job_id='abc123', schedule='every 15m')</code>)</em></p>
+</blockquote>
+<p>The full lifecycle (create / list / update / pause / resume / run-now / remove) is available to the agent without you learning any CLI commands.</p>
+<h2 id="create-one-from-the-cli">Create One from the CLI</h2>
+<p>Prefer the shell? The CLI path gives you the same result with three commands:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. Write your script</span>
+cat<span class="w"> </span>&gt;<span class="w"> </span>~/.hermes/scripts/memory-watchdog.sh<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<span class="s">#!/usr/bin/env bash</span>
+<span class="s"># Alert when RAM usage is over 85%. Silent otherwise.</span>
+<span class="s">RAM_PCT=$(free | awk &#39;/^Mem:/ {printf &quot;%d&quot;, $3 * 100 / $2}&#39;)</span>
+<span class="s">if [ &quot;$RAM_PCT&quot; -ge 85 ]; then</span>
+<span class="s">  echo &quot;⚠ RAM ${RAM_PCT}% on $(hostname)&quot;</span>
+<span class="s">fi</span>
+<span class="s"># Empty stdout = silent run; no message sent.</span>
+<span class="s">EOF</span>
+chmod<span class="w"> </span>+x<span class="w"> </span>~/.hermes/scripts/memory-watchdog.sh
+
+<span class="c1"># 2. Schedule it</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 5m&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--no-agent<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--script<span class="w"> </span>memory-watchdog.sh<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;memory-watchdog&quot;</span>
+
+<span class="c1"># 3. Verify</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>list
+hermes<span class="w"> </span>cron<span class="w"> </span>run<span class="w"> </span>&lt;job_id&gt;<span class="w">    </span><span class="c1"># fire it once to test</span>
+</code></pre></div>
+
+<p>That's the whole thing. No prompt, no skill, no model.</p>
+<h2 id="how-script-output-maps-to-delivery">How Script Output Maps to Delivery</h2>
+<table>
+<thead>
+<tr>
+<th>Script behavior</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Exit 0, non-empty stdout</td>
+<td>stdout is delivered verbatim</td>
+</tr>
+<tr>
+<td>Exit 0, empty stdout</td>
+<td>Silent tick — no delivery</td>
+</tr>
+<tr>
+<td>Exit 0, stdout contains <code>{"wakeAgent": false}</code> on the last line</td>
+<td>Silent tick (shared gate with LLM jobs)</td>
+</tr>
+<tr>
+<td>Non-zero exit code</td>
+<td>Error alert is delivered (so a broken watchdog doesn't fail silently)</td>
+</tr>
+<tr>
+<td>Script timeout</td>
+<td>Error alert is delivered</td>
+</tr>
+</tbody>
+</table>
+<p>The "silent when empty" behavior is the key to the classic watchdog pattern: the script is free to run every minute, but the channel only sees a message when something actually needs attention.</p>
+<h2 id="script-rules">Script Rules</h2>
+<p>Scripts must live in <code>~/.hermes/scripts/</code>. This is enforced at both job-creation time and run time — absolute paths, <code>~/</code> expansion, and path-traversal patterns (<code>../</code>) are rejected. The same directory is shared with the pre-check script gate used by LLM jobs.</p>
+<p>Interpreter choice is by file extension:</p>
+<table>
+<thead>
+<tr>
+<th>Extension</th>
+<th>Interpreter</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.sh</code>, <code>.bash</code></td>
+<td><code>bash</code> from <code>PATH</code> (fallback <code>/bin/bash</code>)</td>
+</tr>
+<tr>
+<td>anything else</td>
+<td><code>sys.executable</code> (current Python)</td>
+</tr>
+</tbody>
+</table>
+<p>We intentionally do NOT honour <code>#!/...</code> shebangs — keeping the interpreter set explicit and small reduces the surface the scheduler trusts.</p>
+<h2 id="schedule-syntax">Schedule Syntax</h2>
+<p>Same as all other cron jobs:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 5m&quot;</span><span class="w">        </span><span class="c1"># interval</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 2h&quot;</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;0 9 * * *&quot;</span><span class="w">       </span><span class="c1"># standard cron: 9am daily</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;30m&quot;</span><span class="w">             </span><span class="c1"># one-shot: run once in 30 minutes</span>
+</code></pre></div>
+
+<p>See the <a href="../user-guide/features/cron.html">cron feature reference</a> for the full syntax.</p>
+<h2 id="delivery-targets">Delivery Targets</h2>
+<p><code>--deliver</code> accepts everything the gateway knows about. Some common shapes:</p>
+<div class="highlight"><pre><span></span><code>--deliver<span class="w"> </span>telegram<span class="w">                       </span><span class="c1"># platform home channel</span>
+--deliver<span class="w"> </span>telegram:-1001234567890<span class="w">        </span><span class="c1"># specific chat</span>
+--deliver<span class="w"> </span>telegram:-1001234567890:17585<span class="w">  </span><span class="c1"># specific Telegram forum topic</span>
+--deliver<span class="w"> </span>discord:#ops
+--deliver<span class="w"> </span>slack:#engineering
+--deliver<span class="w"> </span>signal:+15551234567
+--deliver<span class="w"> </span><span class="nb">local</span><span class="w">                          </span><span class="c1"># just save to ~/.hermes/cron/output/</span>
+</code></pre></div>
+
+<p>No running gateway is required at script-run time for bot-token platforms (Telegram, Discord, Slack, Signal, SMS, WhatsApp) — the tool calls each platform's REST endpoint directly using the credentials already in <code>~/.hermes/.env</code> / <code>~/.hermes/config.yaml</code>.</p>
+<h2 id="editing-and-lifecycle">Editing and Lifecycle</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>list<span class="w">                                    </span><span class="c1"># see all jobs</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>pause<span class="w"> </span>&lt;job_id&gt;<span class="w">                          </span><span class="c1"># stop firing, keep definition</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>resume<span class="w"> </span>&lt;job_id&gt;
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--schedule<span class="w"> </span><span class="s2">&quot;every 10m&quot;</span><span class="w">    </span><span class="c1"># adjust cadence</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--agent<span class="w">                   </span><span class="c1"># flip to LLM mode</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--no-agent<span class="w"> </span>--script<span class="w"> </span>…<span class="w">     </span><span class="c1"># flip back</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>remove<span class="w"> </span>&lt;job_id&gt;<span class="w">                         </span><span class="c1"># delete it</span>
+</code></pre></div>
+
+<p>Everything that works on LLM jobs (pause, resume, manual trigger, delivery target changes) works on no-agent jobs too.</p>
+<h2 id="worked-example-disk-space-alert">Worked Example: Disk Space Alert</h2>
+<div class="highlight"><pre><span></span><code>cat<span class="w"> </span>&gt;<span class="w"> </span>~/.hermes/scripts/disk-alert.sh<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<span class="s">#!/usr/bin/env bash</span>
+<span class="s"># Alert when / or /home is over 90% full.</span>
+<span class="s">THRESHOLD=90</span>
+<span class="s">df -h / /home 2&gt;/dev/null | awk -v t=&quot;$THRESHOLD&quot; &#39;</span>
+<span class="s">  NR &gt; 1 &amp;&amp; $5+0 &gt;= t {</span>
+<span class="s">    printf &quot;⚠ Disk %s full on %s\n&quot;, $5, $6</span>
+<span class="s">  }</span>
+<span class="s">&#39;</span>
+<span class="s">EOF</span>
+chmod<span class="w"> </span>+x<span class="w"> </span>~/.hermes/scripts/disk-alert.sh
+
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;*/15 * * * *&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--no-agent<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--script<span class="w"> </span>disk-alert.sh<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;disk-alert&quot;</span>
+</code></pre></div>
+
+<p>Silent when both filesystems are under 90%; fires exactly one line per over-threshold filesystem when one fills up.</p>
+<h2 id="comparison-with-other-patterns">Comparison with Other Patterns</h2>
+<table>
+<thead>
+<tr>
+<th>Approach</th>
+<th>What runs</th>
+<th>When to use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cronjob --no-agent</code> (this page)</td>
+<td>Your script on Hermes' schedule</td>
+<td>Recurring watchdogs / alerts / metrics that don't need reasoning</td>
+</tr>
+<tr>
+<td><code>cronjob</code> (default, LLM)</td>
+<td>Agent with optional pre-check script</td>
+<td>When the message content requires reasoning over data</td>
+</tr>
+<tr>
+<td>OS cron + <code>curl</code> to a <a href="../user-guide/messaging/webhooks.html">webhook subscription</a></td>
+<td>Your script on the OS schedule</td>
+<td>When Hermes might be unhealthy (the thing you're monitoring)</td>
+</tr>
+</tbody>
+</table>
+<p>For critical system-health watchdogs that must fire <em>even when the gateway is down</em>, use OS-level cron with a plain <code>curl</code> to a Hermes webhook subscription (or any external alerting endpoint) — those run as independent OS processes and don't depend on Hermes being up. The in-gateway scheduler is the right choice when the thing being monitored is external.</p>
+<h2 id="related">Related</h2>
+<ul>
+<li><a href="automate-with-cron.html">Automate Anything with Cron</a> — LLM-driven cron patterns.</li>
+<li><a href="../user-guide/features/cron.html">Scheduled Tasks (Cron) reference</a> — full schedule syntax, lifecycle, delivery routing.</li>
+<li><a href="../user-guide/messaging/webhooks.html">Webhook Subscriptions</a> — fire-and-forget HTTP entry points for external schedulers.</li>
+<li><a href="../developer-guide/gateway-internals.html">Gateway Internals</a> — delivery-router internals.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/cron-script-only</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#when-to-use-it">When to Use It</a></li>
+<li class="lvl2"><a href="#create-one-from-chat">Create One from Chat</a></li>
+<li class="lvl3"><a href="#example-transcript">Example transcript</a></li>
+<li class="lvl3"><a href="#what-the-agent-decides-for-you">What the agent decides for you</a></li>
+<li class="lvl3"><a href="#managing-watchdogs-from-chat">Managing watchdogs from chat</a></li>
+<li class="lvl2"><a href="#create-one-from-the-cli">Create One from the CLI</a></li>
+<li class="lvl2"><a href="#how-script-output-maps-to-delivery">How Script Output Maps to Delivery</a></li>
+<li class="lvl2"><a href="#script-rules">Script Rules</a></li>
+<li class="lvl2"><a href="#schedule-syntax">Schedule Syntax</a></li>
+<li class="lvl2"><a href="#delivery-targets">Delivery Targets</a></li>
+<li class="lvl2"><a href="#editing-and-lifecycle">Editing and Lifecycle</a></li>
+<li class="lvl2"><a href="#worked-example-disk-space-alert">Worked Example: Disk Space Alert</a></li>
+<li class="lvl2"><a href="#comparison-with-other-patterns">Comparison with Other Patterns</a></li>
+<li class="lvl2"><a href="#related">Related</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

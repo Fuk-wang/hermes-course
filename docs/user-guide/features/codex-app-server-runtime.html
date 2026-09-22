@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex App-Server Runtime (optional) · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/codex-app-server-runtime</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="codex-app-server-runtime">Codex App-Server Runtime</h1>
+<p>Hermes can optionally hand <code>openai/*</code>, <code>openai-codex/*</code> and <a href="#named-custom-providers">named custom provider</a> turns to the <a href="https://github.com/openai/codex" class="ext" target="_blank" rel="noopener">Codex CLI app-server</a> instead of running its own tool loop. When enabled, terminal commands, file edits, sandboxing, and MCP tool calls all execute inside Codex's runtime — Hermes becomes the shell around it (sessions DB, slash commands, gateway, memory and skill review).</p>
+<p>This is <strong>opt-in only</strong>. Default Hermes behavior is unchanged unless you flip the flag. Hermes never auto-routes you onto this runtime.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Not using OpenAI Codex? <code>hermes setup --portal</code> configures a non-Codex backend with Claude/Gemini/etc. in one step. See <a href="../../integrations/nous-portal.html">Nous Portal</a>.</p>
+</div>
+<h2 id="why">Why</h2>
+<ul>
+<li>Run OpenAI agent turns against your <strong>ChatGPT subscription</strong> (no API key required) using the same auth flow Codex CLI uses.</li>
+<li>Use <strong>Codex's own toolset and sandbox</strong> — <code>shell</code> for terminal/read/write/search, <code>apply_patch</code> for structured edits, <code>update_plan</code> for planning, all running inside seatbelt/landlock sandboxing.</li>
+<li><strong>Native Codex plugins</strong> — Linear, GitHub, Gmail, Calendar, Canva, etc. — installed via <code>codex plugin</code> are auto-migrated and active in your Hermes session.</li>
+<li><strong>Hermes' richer tools come along</strong> — web_search, web_extract, browser automation, vision, image generation, skills, and TTS work via an MCP callback. Codex calls back into Hermes for tools it doesn't have built in.</li>
+<li><strong>Memory and skill nudges keep working</strong> — Codex's events are projected into Hermes' message shape so the self-improvement loop sees a normal-looking transcript.</li>
+<li><strong>Your Hermes persona rides along</strong> — the composed system prompt (SOUL.md, MEMORY.md/USER.md, per-channel <code>system_prompt</code> overrides) is sent to the codex thread once as developer instructions when the thread starts, and Codex's built-in personality is disabled so it cannot compete with yours.</li>
+</ul>
+<h2 id="what-tools-the-model-actually-has">What tools the model actually has</h2>
+<p>This is the part most users want to know up front. When this runtime is on, the model running your turn has three independent sources of tools:</p>
+<h3 id="1-codexs-built-in-toolset-always-on">1. Codex's built-in toolset (always on)</h3>
+<p>These ship with <code>codex app-server</code> itself — no Hermes involvement, no MCP, no plugins. All five are available the moment the runtime starts:</p>
+<ul>
+<li><strong><code>shell</code></strong> — runs arbitrary shell commands inside the sandbox. This is how the model reads files (<code>cat</code>, <code>head</code>, <code>tail</code>), writes them (<code>echo &gt; foo</code>, heredocs), searches them (<code>find</code>, <code>rg</code>, <code>grep</code>), navigates directories (<code>ls</code>, <code>cd</code>), runs builds, manages processes, and anything else you'd do in bash.</li>
+<li><strong><code>apply_patch</code></strong> — applies a structured multi-file diff in Codex's patch format. The model uses this for non-trivial code edits (adding a function, refactoring across files); shell heredocs are still available for one-off writes.</li>
+<li><strong><code>update_plan</code></strong> — codex's internal todo / plan tracker. Equivalent of Hermes' <code>todo</code> tool, but managed entirely inside codex's runtime.</li>
+<li><strong><code>view_image</code></strong> — load a local image file into the conversation so the model can see it.</li>
+<li><strong><code>web_search</code></strong> — codex has its own built-in web search when configured. Hermes also exposes <code>web_search</code> (Firecrawl-backed) via the callback below; the model picks whichever it prefers.</li>
+</ul>
+<p>So <strong>anything you'd do via terminal — read/write/search/find/run — codex does natively</strong>. The sandbox profile (<code>:workspace</code> by default when you enable the runtime) controls what's writable.</p>
+<h3 id="2-native-codex-plugins-auto-migrated-from-your-codex-plugin-install">2. Native Codex plugins (auto-migrated from your <code>codex plugin</code> install)</h3>
+<p>When you enable the runtime, Hermes queries codex's <code>plugin/list</code> RPC and writes a <code>[plugins."&lt;name&gt;@openai-curated"]</code> entry for every plugin you have installed. The plugins themselves are managed by codex and authorized once via codex's own UI.</p>
+<p>Examples (the ones the OpenClaw thread highlighted as "YouTube-video-worthy"):</p>
+<ul>
+<li><strong>Linear</strong> — find/update issues</li>
+<li><strong>GitHub</strong> — search code, view PRs, comment</li>
+<li><strong>Gmail</strong> — read/send mail</li>
+<li><strong>Google Calendar</strong> — create/find events</li>
+<li><strong>Outlook calendar/email</strong> — same shape via the Microsoft connector</li>
+<li><strong>Canva</strong> — design generation</li>
+<li>...whatever else you've installed via <code>codex plugin marketplace add openai-curated</code> + <code>codex plugin install ...</code></li>
+</ul>
+<p>What's NOT migrated:
+- Plugins you haven't installed yet — install them in Codex first.
+- ChatGPT app marketplace entries (<code>app/list</code>) — these are already enabled inside codex by virtue of your account auth.</p>
+<h3 id="3-hermes-tool-callback-mcp-server-registered-in-codexconfigtoml">3. Hermes tool callback (MCP server, registered in <code>~/.codex/config.toml</code>)</h3>
+<p>Hermes registers itself as an MCP server so codex can call back for tools codex doesn't ship with. Available via the callback:</p>
+<ul>
+<li><strong><code>web_search</code></strong> / <strong><code>web_extract</code></strong> — Firecrawl-backed; tends to be cleaner than scraping for structured content.</li>
+<li><strong><code>browser_navigate</code> / <code>browser_click</code> / <code>browser_type</code> / <code>browser_press</code> / <code>browser_snapshot</code> / <code>browser_scroll</code> / <code>browser_back</code> / <code>browser_get_images</code> / <code>browser_console</code> / <code>browser_vision</code></strong> — full browser automation via Camofox or Browserbase.</li>
+<li><strong><code>vision_analyze</code></strong> — call a separate vision model to inspect an image (different from codex's <code>view_image</code> which loads it into the conversation).</li>
+<li><strong><code>image_generate</code></strong> — image generation through Hermes' image_gen plugin chain.</li>
+<li><strong><code>skill_view</code> / <code>skills_list</code></strong> — read from Hermes' skill library.</li>
+<li><strong><code>text_to_speech</code></strong> — TTS through Hermes' configured provider.</li>
+</ul>
+<p>When the model wants one of these, codex spawns the <code>hermes_tools_mcp_server</code> subprocess via stdio MCP, the call is dispatched through <code>model_tools.handle_function_call()</code> (same code path as Hermes' default runtime), and the result is returned to codex like any other MCP response.</p>
+<h3 id="whats-not-available-on-this-runtime">What's NOT available on this runtime</h3>
+<p>These four Hermes tools require the running AIAgent context (mid-loop state) to dispatch, and a stateless MCP callback can't drive them. Switch back to the default runtime (<code>/codex-runtime auto</code>) when you need any of them:</p>
+<ul>
+<li><strong><code>delegate_task</code></strong> — spawn subagents</li>
+<li><strong><code>memory</code></strong> — Hermes' persistent memory store</li>
+<li><strong><code>session_search</code></strong> — cross-session search</li>
+<li><strong><code>todo</code></strong> — Hermes' todo store (codex's <code>update_plan</code> is the in-runtime equivalent)</li>
+</ul>
+<h2 id="workflow-features-goal-kanban-cron">Workflow features (<code>/goal</code>, kanban, cron)</h2>
+<h3 id="goal-the-ralph-loop"><code>/goal</code> (the Ralph loop)</h3>
+<p><strong>Works on this runtime.</strong> Goals persist in <code>state_meta</code> keyed by session id, the continuation prompt feeds back as a normal user message through <code>run_conversation()</code>, and codex executes the next turn natively. The goal judge runs via the auxiliary client (configured via <code>auxiliary.goal_judge</code> in config.yaml), independent of which runtime is active. The judge's "blocked, needs user input" verdict is a clean escape if codex stalls on approvals.</p>
+<p><strong>One thing to be aware of:</strong> each continuation prompt is a fresh codex turn, which means codex re-evaluates command approval policy from scratch. If you're doing a long-running goal with lots of writes, expect more approval prompts than you'd see on a single in-session task. Set <code>default_permissions = ":workspace"</code> (which Hermes does automatically when you enable the runtime) so simple workspace writes don't require prompting.</p>
+<h3 id="kanban-multi-agent-worktree-dispatch">Kanban (multi-agent worktree dispatch)</h3>
+<p><strong>Works on this runtime, with one subtle dependency.</strong> The kanban dispatcher spawns each worker as a separate <code>hermes chat -q</code> subprocess that reads the user's config — which means if <code>model.openai_runtime: codex_app_server</code> is set globally, workers also come up on the codex runtime.</p>
+<p>What works inside a codex-runtime worker:
+- Codex's full toolset (shell, apply_patch, update_plan, view_image, web_search) — the worker does its actual task work natively
+- The migrated codex plugins — Linear, GitHub, etc.
+- The Hermes tool callback for browser_*, vision, image_gen, skills, TTS</p>
+<p>What also works because the MCP callback exposes them:
+- <strong><code>kanban_complete</code> / <code>kanban_request_review</code> / <code>kanban_request_changes</code> / <code>kanban_block</code> / <code>kanban_comment</code> / <code>kanban_heartbeat</code></strong> — the worker handoff tools. These read <code>HERMES_KANBAN_TASK</code> from env (set by the dispatcher), gate access correctly, and write to the per-board SQLite DB pinned by <code>HERMES_KANBAN_DB</code>. Without these in the callback, a worker on this runtime could do its task but couldn't report back, hanging until the dispatcher's timeout.
+- <strong><code>kanban_show</code> / <code>kanban_list</code></strong> — read-only board queries for the worker to check its own context.
+- <strong><code>kanban_create</code> / <code>kanban_unblock</code> / <code>kanban_link</code></strong> — orchestrator-only operations. Available for orchestrator agents running on the codex runtime that need to dispatch new tasks.</p>
+<p>The kanban tools are gated by <code>HERMES_KANBAN_TASK</code> env var the dispatcher sets — that var is propagated to the codex subprocess (codex inherits env) and from there to the spawned <code>hermes-tools</code> MCP server subprocess. So the tools see the right task id and gate correctly. For Codex app-server workers, Hermes also passes narrow app-server sandbox overrides when <code>HERMES_KANBAN_TASK</code> is present: keep <code>workspace-write</code> sandboxing, add the <strong>board DB directory plus every Kanban path the dispatcher pinned</strong> as extra writable roots (<code>HERMES_KANBAN_WORKSPACES_ROOT</code>, <code>HERMES_KANBAN_WORKSPACE</code>, legacy <code>HERMES_KANBAN_ROOT</code> — deduplicated, DB-dir first), and keep network disabled by default. This avoids the brittle <code>:danger-no-sandbox</code> workaround while letting <code>kanban_complete</code> / <code>kanban_block</code> update the board DB <strong>and</strong> letting workers write reports/artifacts under workspace mounts that live outside the DB directory (e.g. <code>/media/.../kanban-workspaces/...</code> on a separate drive — <a href="https://github.com/NousResearch/hermes-agent/issues/27941" class="ext" target="_blank" rel="noopener">issue #27941</a>).</p>
+<h3 id="cron-jobs">Cron jobs</h3>
+<p><strong>Not specifically tested.</strong> Cron jobs run via <code>cronjob</code> → <code>AIAgent.run_conversation</code>, the same code path as the CLI. If the cron job's config has <code>openai_runtime: codex_app_server</code> it'll run on codex. The same tool-availability rules apply — codex built-ins + plugins + MCP callback work, agent-loop tools (delegate_task, memory, session_search, todo) don't. If your cron job relies on those, scope the cron to a profile that uses the default runtime.</p>
+<h2 id="trade-offs">Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Hermes default runtime</th>
+<th>Codex app-server (opt-in)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>delegate_task</code> subagents</td>
+<td>yes</td>
+<td>not available — needs agent loop context</td>
+</tr>
+<tr>
+<td><code>memory</code>, <code>session_search</code>, <code>todo</code></td>
+<td>yes</td>
+<td>not available — needs agent loop context</td>
+</tr>
+<tr>
+<td><code>web_search</code>, <code>web_extract</code></td>
+<td>yes</td>
+<td>yes (via MCP callback)</td>
+</tr>
+<tr>
+<td>Browser automation (Camofox/Browserbase)</td>
+<td>yes</td>
+<td>yes (via MCP callback)</td>
+</tr>
+<tr>
+<td><code>vision_analyze</code>, <code>image_generate</code></td>
+<td>yes</td>
+<td>yes (via MCP callback)</td>
+</tr>
+<tr>
+<td>Image attachments in the user turn (screenshots, pasted images, <code>/image</code>)</td>
+<td>yes (native multimodal)</td>
+<td>yes — sent natively as app-server image inputs (data/http URLs) or local-image paths, never flattened to a text marker</td>
+</tr>
+<tr>
+<td><code>skill_view</code>, <code>skills_list</code></td>
+<td>yes</td>
+<td>yes (via MCP callback)</td>
+</tr>
+<tr>
+<td><code>text_to_speech</code></td>
+<td>yes</td>
+<td>yes (via MCP callback)</td>
+</tr>
+<tr>
+<td>Codex <code>shell</code> (terminal/read/write/search/find/run)</td>
+<td>—</td>
+<td>yes (Codex built-in)</td>
+</tr>
+<tr>
+<td>Codex <code>apply_patch</code> (structured multi-file edits)</td>
+<td>—</td>
+<td>yes (Codex built-in)</td>
+</tr>
+<tr>
+<td>Codex <code>update_plan</code> (in-runtime todo)</td>
+<td>—</td>
+<td>yes (Codex built-in)</td>
+</tr>
+<tr>
+<td>Codex <code>view_image</code> (load image into conversation)</td>
+<td>—</td>
+<td>yes (Codex built-in)</td>
+</tr>
+<tr>
+<td>Codex sandbox (seatbelt/landlock, profiles)</td>
+<td>—</td>
+<td>yes (Codex built-in)</td>
+</tr>
+<tr>
+<td>ChatGPT subscription auth</td>
+<td>—</td>
+<td>yes (via <code>openai-codex</code> provider)</td>
+</tr>
+<tr>
+<td>Native Codex plugins (Linear, GitHub, etc.)</td>
+<td>—</td>
+<td>yes (auto-migrated)</td>
+</tr>
+<tr>
+<td>User MCP servers</td>
+<td>yes</td>
+<td>yes (auto-migrated to codex)</td>
+</tr>
+<tr>
+<td>Memory + skill review (background)</td>
+<td>yes</td>
+<td>yes (via item projection)</td>
+</tr>
+<tr>
+<td>System prompt / SOUL.md / channel <code>system_prompt</code> overrides</td>
+<td>yes</td>
+<td>yes (sent once as developer instructions on thread start)</td>
+</tr>
+<tr>
+<td>Multi-turn conversations</td>
+<td>yes</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>/goal</code> (Ralph loop)</td>
+<td>yes</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>Kanban worker dispatch</td>
+<td>yes</td>
+<td>yes (via callback)</td>
+</tr>
+<tr>
+<td>Kanban orchestrator tools</td>
+<td>yes</td>
+<td>yes (via callback)</td>
+</tr>
+<tr>
+<td>All gateway platforms</td>
+<td>yes</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>Named custom providers (<code>providers.&lt;name&gt;</code>)</td>
+<td>yes</td>
+<td>yes — a matching <code>[model_providers.&lt;name&gt;]</code> in <code>~/.codex/config.toml</code> is required</td>
+</tr>
+<tr>
+<td>Other non-OpenAI providers</td>
+<td>yes</td>
+<td>n/a — not routed through codex</td>
+</tr>
+</tbody>
+</table>
+<h3 id="live-display">Live display</h3>
+<p>Even though the agent loop runs inside the Codex subprocess, the runtime
+bridges Codex's event stream into the same display path the default runtime
+uses:</p>
+<ul>
+<li>Live assistant deltas, reasoning (including summary deltas), and stable-ID
+  tool start/completion events surface in the TUI, desktop, and messaging
+  gateways as the turn runs. The completion-only history projector remains
+  separate, so a resumed session hydrates the same tool cards shown during
+  the turn.</li>
+<li>Gateway commentary stays visible when token streaming is disabled, and
+  live tool events are forwarded even for notifications drained ahead of an
+  approval request. Commentary honors <code>display.show_commentary</code>.</li>
+</ul>
+<h2 id="prerequisites">Prerequisites</h2>
+<ol>
+<li><strong>Codex CLI installed:</strong>
+   <code>bash
+   npm i -g @openai/codex
+   codex --version   # 0.130.0 or newer</code></li>
+<li><strong>Codex OAuth login.</strong> The codex subprocess reads <code>~/.codex/auth.json</code>. Two ways to populate it:
+   <code>bash
+   codex login                  # writes tokens to ~/.codex/auth.json</code>
+   Hermes' own <code>hermes auth add openai-codex</code> writes to <code>~/.hermes/auth.json</code> — that's a separate session. <strong>Run <code>codex login</code> separately</strong> if you haven't.</li>
+</ol>
+<p><a id="named-custom-providers"></a><strong>Or: a named custom provider.</strong> A <code>providers.&lt;name&gt;</code> entry in Hermes config can use this runtime when the <strong>same name</strong> is defined as a Codex provider. Hermes config:</p>
+<p>```yaml
+   providers:
+     my-gateway:
+       api: https://gateway.example.com/v1
+       key_env: MY_GATEWAY_API_KEY
+       default_model: gpt-5.4</p>
+<p>model:
+     provider: custom:my-gateway
+     default: gpt-5.4
+     openai_runtime: codex_app_server
+   ```</p>
+<p>and the matching table in <code>~/.codex/config.toml</code>:</p>
+<p><code>toml
+   [model_providers.my-gateway]
+   name = "My Gateway"
+   base_url = "https://gateway.example.com/v1"
+   env_key = "MY_GATEWAY_API_KEY"
+   wire_api = "responses"</code></p>
+<p>Hermes sends only <code>model</code> and <code>modelProvider = "my-gateway"</code> on <code>thread/start</code>; codex resolves <code>base_url</code> and reads the key from <code>env_key</code> in its own environment. <strong>Hermes never forwards the API key</strong>, so <code>MY_GATEWAY_API_KEY</code> must be present in the process environment Hermes runs in — <code>~/.hermes/.env</code> is loaded at startup and provider credentials are inherited by the codex subprocess. Auxiliary calls (titles, compression, memory review) still use Hermes' own <code>providers.my-gateway</code> entry.</p>
+<p>Caveats: the name after <code>custom:</code> is the <code>providers:</code> config key and must match the <code>[model_providers.&lt;name&gt;]</code> table name exactly — if it does not exist on the codex side, codex reports an unknown provider rather than silently using the Hermes endpoint. Anonymous <code>provider: custom</code> (a bare <code>base_url</code>) is not eligible: it has no stable name to hand to codex, so it stays on Hermes' standard runtime.</p>
+<ol>
+<li><strong>(Optional) Install the Codex plugins you want.</strong> When you enable the runtime, Hermes auto-migrates whichever curated plugins you've already installed via Codex CLI:
+   <code>bash
+   codex plugin marketplace add openai-curated
+   # then via codex's TUI, install Linear / GitHub / Gmail / etc.</code>
+   Hermes will discover them and write <code>[plugins."&lt;name&gt;@openai-curated"]</code> entries to <code>~/.codex/config.toml</code> automatically.</li>
+</ol>
+<h2 id="enabling">Enabling</h2>
+<p>In a Hermes session:</p>
+<div class="highlight"><pre><span></span><code>/codex-runtime codex_app_server
+</code></pre></div>
+
+<p>That command:
+- Verifies the <code>codex</code> CLI is installed (blocks with an install hint if not).
+- Persists <code>model.openai_runtime: codex_app_server</code> to your config.yaml.
+- Migrates user MCP servers from <code>~/.hermes/config.yaml</code> to <code>~/.codex/config.toml</code>.
+- <strong>Discovers and migrates installed native Codex plugins</strong> (Linear, GitHub, Gmail, Calendar, Canva, etc.) by querying Codex's <code>plugin/list</code> RPC.
+- <strong>Registers Hermes' own tools as an MCP server</strong> so the codex subprocess can call back for tools codex doesn't ship with.
+- <strong>Writes <code>default_permissions = ":workspace"</code></strong> so the sandbox allows writes within the workspace without prompting for every operation.
+- Tells you what was migrated. Takes effect on the <strong>next</strong> session — the current cached agent keeps the prior runtime so prompt caches stay valid.</p>
+<p>Synonyms: <code>/codex-runtime on</code>, <code>/codex-runtime off</code>, <code>/codex-runtime auto</code>.</p>
+<p>To check current state without changing anything:</p>
+<div class="highlight"><pre><span></span><code>/codex-runtime
+</code></pre></div>
+
+<p>You can also set it manually in <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">openai_runtime</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">codex_app_server</span><span class="w">   </span><span class="c1"># default is &quot;auto&quot; (= Hermes runtime)</span>
+</code></pre></div>
+
+<p>If the Hermes process cannot resolve <code>codex</code> from <code>PATH</code> — typical for gateway services,
+cron and Kanban workers, or a desktop-bundled CLI — and the first turn fails with
+<code>No such file or directory: 'codex'</code>, point the runtime at the executable explicitly:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">openai_runtime</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">codex_app_server</span>
+<span class="w">  </span><span class="nt">codex_bin</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/Applications/Codex.app/Contents/Resources/codex</span><span class="w">   </span><span class="c1"># default: &quot;codex&quot; from PATH</span>
+</code></pre></div>
+
+<p><code>model.codex_bin</code> is used everywhere Hermes spawns codex: the <code>/codex-runtime</code> availability
+check, native plugin discovery during migration, and the long-lived app-server subprocess.
+The value is a single executable path, not a shell command — no quoting or extra arguments.</p>
+<h2 id="self-improvement-loop-memory--skill-nudges">Self-improvement loop (memory + skill nudges)</h2>
+<p>Hermes' background self-improvement fires on counter thresholds:</p>
+<ul>
+<li>Every 10 user prompts → a forked review agent looks at the conversation and decides whether anything should be saved to memory.</li>
+<li>Every 10 tool iterations within a single turn → same idea but for skills (<code>skill_manage</code> writes).</li>
+</ul>
+<p><strong>Both keep working on the codex runtime.</strong> The codex path projects each completed <code>commandExecution</code> / <code>fileChange</code> / <code>mcpToolCall</code> / <code>dynamicToolCall</code> item into a synthetic <code>assistant tool_call</code> + <code>tool</code> result message, so by the time the review runs it sees the same shape it sees on the default Hermes runtime.</p>
+<p>How the wiring stays equivalent:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Default runtime</th>
+<th>Codex runtime</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>_turns_since_memory</code> increments</td>
+<td>per user prompt, in run_conversation pre-loop</td>
+<td>same code path, before the early-return</td>
+</tr>
+<tr>
+<td><code>_iters_since_skill</code> increments</td>
+<td>per tool iteration in the chat-completions loop</td>
+<td>by <code>turn.tool_iterations</code> after the codex turn returns</td>
+</tr>
+<tr>
+<td>Memory trigger (<code>_turns_since_memory &gt;= _memory_nudge_interval</code>)</td>
+<td>computed in pre-loop, fires after response</td>
+<td>computed in pre-loop, passed through to codex helper</td>
+</tr>
+<tr>
+<td>Skill trigger (<code>_iters_since_skill &gt;= _skill_nudge_interval</code>)</td>
+<td>computed after the loop</td>
+<td>computed after the codex turn</td>
+</tr>
+<tr>
+<td><code>_spawn_background_review(messages_snapshot=..., review_memory=..., review_skills=...)</code></td>
+<td>called when either trigger fires</td>
+<td>called identically when either trigger fires</td>
+</tr>
+</tbody>
+</table>
+<p>One detail: the review fork itself needs to call Hermes' agent-loop tools (<code>memory</code>, <code>skill_manage</code>), which require Hermes' own dispatch. So when the parent agent is on <code>codex_app_server</code>, the review fork is <strong>downgraded to <code>codex_responses</code></strong> — same OAuth credentials, same <code>openai-codex</code> provider, but talks to OpenAI's Responses API directly so Hermes owns the loop and the agent-loop tools work. This is invisible to the user.</p>
+<p>Net effect: enable the codex runtime and your memory + skill nudges keep firing exactly as they would otherwise.</p>
+<h2 id="how-approvals-work">How approvals work</h2>
+<p>Codex requests approval before executing commands or applying patches. These get translated into Hermes' standard "Dangerous Command" prompt:</p>
+<div class="highlight"><pre><span></span><code>╭───────────────────────────────────────╮
+│ Dangerous Command                     │
+│                                       │
+│ /bin/bash -lc &#39;echo hello &gt; foo.txt&#39;  │
+│                                       │
+│ ❯ 1. Allow once                       │
+│   2. Allow for this session           │
+│   3. Deny                             │
+│                                       │
+│ Codex requests exec in /your/cwd      │
+╰───────────────────────────────────────╯
+</code></pre></div>
+
+<ul>
+<li><strong>Allow once</strong> → approve this single command.</li>
+<li><strong>Allow for this session</strong> → Codex won't re-prompt for similar commands.</li>
+<li><strong>Deny</strong> → command is rejected; Codex continues in read-only mode.</li>
+</ul>
+<p>For <code>apply_patch</code> (file edit) approvals, Hermes shows a summary of what changed (<code>1 add, 1 update: src/new.py, src/old.py</code>) when codex provides the data via the corresponding <code>fileChange</code> item.</p>
+<h2 id="permission-profiles">Permission profiles</h2>
+<p>Codex has three built-in permission profiles:
+- <code>:read-only</code> — no writes; every shell command requires approval
+- <code>:workspace</code> — writes within the current workspace allowed without prompts (Hermes' default when you enable the runtime)
+- <code>:danger-no-sandbox</code> — no sandbox at all (don't use this unless you understand it)</p>
+<p>You can override the default in <code>~/.codex/config.toml</code> outside Hermes' managed block:</p>
+<div class="highlight"><pre><span></span><code><span class="n">default_permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;:read-only&quot;</span>
+</code></pre></div>
+
+<p>(Hermes will preserve your override on re-migration as long as it lives outside the <code># managed by hermes-agent</code> markers.)</p>
+<h2 id="auxiliary-tasks-and-chatgpt-subscription-token-cost">Auxiliary tasks and ChatGPT subscription token cost</h2>
+<p>When this runtime is on with the <code>openai-codex</code> provider, <strong>auxiliary tasks (title generation, context compression, vision auto-detect, the background self-improvement review fork) also flow through your ChatGPT subscription by default</strong>, because Hermes' auxiliary client uses the main provider/model when no per-task override is set.</p>
+<p>This isn't specific to <code>codex_app_server</code> — it's true for the existing <code>codex_responses</code> path too — but it's more visible here because you're explicitly opting in for the subscription billing.</p>
+<p>To route specific aux tasks to a cheaper / different model, set explicit overrides in <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">title_generation</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">google/gemini-3-flash-preview</span>
+<span class="w">  </span><span class="nt">compression</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">google/gemini-3-flash-preview</span>
+<span class="w">  </span><span class="nt">vision</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">google/gemini-3-flash-preview</span>
+<span class="w">  </span><span class="nt">goal_judge</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">google/gemini-3-flash-preview</span>
+</code></pre></div>
+
+<p>The self-improvement review fork inherits the main runtime via <code>_current_main_runtime()</code> and Hermes downgrades it from <code>codex_app_server</code> to <code>codex_responses</code> automatically (so the fork can actually call <code>memory</code> and <code>skill_manage</code> — Hermes' own agent-loop tools). That fork still uses your subscription auth unless you've routed aux tasks elsewhere.</p>
+<h2 id="editing-codexconfigtoml-safely">Editing <code>~/.codex/config.toml</code> safely</h2>
+<p>Hermes wraps everything it manages between two marker comments:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># managed by hermes-agent — `hermes codex-runtime migrate` regenerates this section</span>
+<span class="n">default_permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;:workspace&quot;</span>
+<span class="k">[mcp_servers.filesystem]</span>
+<span class="p">...</span>
+<span class="k">[plugins.</span><span class="s2">&quot;github@openai-curated&quot;</span><span class="k">]</span>
+<span class="p">...</span>
+<span class="c1"># end hermes-agent managed section</span>
+</code></pre></div>
+
+<p>Anything <strong>outside</strong> that block is yours. Re-running migration (via <code>/codex-runtime codex_app_server</code>, whenever you toggle the runtime on, or <code>hermes codex-runtime migrate</code>) replaces the managed block in place but preserves user content above and below it verbatim. This means you can:</p>
+<ul>
+<li>Add your own MCP servers Hermes doesn't know about</li>
+<li>Override <code>default_permissions</code> to <code>:read-only</code> if you prefer to be prompted</li>
+<li>Configure codex-only options (model, providers, otel, etc.)</li>
+<li>Add user-defined permission profiles in <code>[permissions.&lt;name&gt;]</code> tables</li>
+</ul>
+<p>Anything you add <strong>inside</strong> the managed block will get clobbered on the next migration. If you need a tweak that requires editing the managed block, file an issue and we'll add the knob.</p>
+<p><strong>Same-name servers.</strong> If your own <code>[mcp_servers.&lt;name&gt;]</code> table (outside the block) uses the same name as a server in Hermes' <code>mcp_servers</code>, your table wins: Hermes skips its projection for that name instead of emitting a second <code>[mcp_servers.&lt;name&gt;]</code> header (which is invalid TOML and would stop codex from starting). The migration report lists such names under "Kept N user-owned MCP server(s)". To let Hermes manage the server, delete your table and re-run the migration. The rendered file is parsed as TOML before it replaces <code>config.toml</code>; an unparsable result is reported and the existing file is left untouched.</p>
+<h3 id="running-the-migration-from-a-script">Running the migration from a script</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>codex-runtime<span class="w"> </span>migrate<span class="w">            </span><span class="c1"># rewrite the managed block for the active profile</span>
+hermes<span class="w"> </span>codex-runtime<span class="w"> </span>migrate<span class="w"> </span>--dry-run<span class="w">  </span><span class="c1"># report only, no write</span>
+hermes<span class="w"> </span>codex-runtime<span class="w"> </span>migrate<span class="w"> </span>--json<span class="w">     </span><span class="c1"># machine-readable report (migrated, preserved_user_servers, errors, …)</span>
+hermes<span class="w"> </span>-p<span class="w"> </span>work<span class="w"> </span>codex-runtime<span class="w"> </span>migrate<span class="w">    </span><span class="c1"># a named profile&#39;s mcp_servers</span>
+</code></pre></div>
+
+<p>This is the same migration <code>/codex-runtime codex_app_server</code> runs; it is idempotent, writes atomically, and exits non-zero when the report contains errors. It writes <code>$CODEX_HOME/config.toml</code> when <code>CODEX_HOME</code> is set (see below), otherwise <code>~/.codex/config.toml</code>.</p>
+<h2 id="multi-profile--multi-tenant-setups">Multi-profile / multi-tenant setups</h2>
+<p>By default, Hermes points the codex subprocess at <code>~/.codex/</code> regardless of which Hermes profile is active. This means <code>hermes -p work</code> and <code>hermes -p personal</code> share the same Codex auth, plugins, and config. For most users this is the right behavior — it matches what running <code>codex</code> CLI directly would do.</p>
+<p>If you want per-profile Codex isolation (separate auth, separate installed plugins, separate config), set <code>CODEX_HOME</code> explicitly per profile. The cleanest way is to point at a directory under your <code>HERMES_HOME</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Inside the work profile, you might wrap hermes:</span>
+<span class="nv">CODEX_HOME</span><span class="o">=</span>~/.hermes/profiles/work/codex<span class="w"> </span>hermes<span class="w"> </span>chat
+</code></pre></div>
+
+<p>You'll need to re-run <code>codex login</code> once with that <code>CODEX_HOME</code> set so the OAuth tokens land in the profile-scoped location. After that, <code>hermes -p work</code> will operate on isolated Codex state.</p>
+<p>We don't auto-scope this because moving an existing user's <code>~/.codex/</code> would silently invalidate their Codex CLI auth — anyone who already ran <code>codex login</code> would have to re-authenticate. Opt-in feels safer than surprising users.</p>
+<h2 id="home-environment-variable-passthrough">HOME environment variable passthrough</h2>
+<p>Hermes does NOT rewrite <code>HOME</code> when spawning the codex app-server subprocess (we use <code>os.environ.copy()</code> and only overlay <code>CODEX_HOME</code> and <code>RUST_LOG</code>). This means:</p>
+<ul>
+<li>Commands codex runs via its <code>shell</code> tool see the real user <code>HOME</code> and find <code>~/.gitconfig</code>, <code>~/.gh/</code>, <code>~/.aws/</code>, <code>~/.npmrc</code>, etc. correctly.</li>
+<li>Codex's internal state stays isolated through <code>CODEX_HOME</code> (which points at <code>~/.codex/</code> by default).</li>
+</ul>
+<p>This matches the boundary OpenClaw arrived at after some early experimentation: isolate Codex's state, leave the user's home alone. (Cf. openclaw/openclaw#81562.)</p>
+<h2 id="mcp-server-migration">MCP server migration</h2>
+<p>Hermes' <code>mcp_servers</code> config is auto-translated to the TOML format Codex expects. The migration runs every time you enable the runtime and is idempotent — re-runs replace the managed section but preserve any user-edited Codex config.</p>
+<p>What translates:</p>
+<table>
+<thead>
+<tr>
+<th>Hermes (<code>config.yaml</code>)</th>
+<th>Codex (<code>config.toml</code>)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>command</code> + <code>args</code> + <code>env</code></td>
+<td>stdio transport</td>
+</tr>
+<tr>
+<td><code>url</code> + <code>headers</code></td>
+<td>streamable_http transport</td>
+</tr>
+<tr>
+<td><code>timeout</code></td>
+<td><code>tool_timeout_sec</code></td>
+</tr>
+<tr>
+<td><code>connect_timeout</code></td>
+<td><code>startup_timeout_sec</code></td>
+</tr>
+<tr>
+<td><code>enabled: false</code></td>
+<td><code>enabled = false</code></td>
+</tr>
+</tbody>
+</table>
+<p>What's not migrated:
+- Hermes-specific keys like <code>sampling</code> (Codex's MCP client has no equivalent — these are dropped with a per-server warning).</p>
+<h2 id="native-codex-plugin-migration">Native Codex plugin migration</h2>
+<p>Plugins installed via <code>codex plugin</code> (Linear, GitHub, Gmail, Calendar, Canva, etc.) are discovered through Codex's <code>plugin/list</code> RPC. For each plugin where <code>installed: true</code>, Hermes writes a <code>[plugins."&lt;name&gt;@openai-curated"]</code> block enabling it in your Hermes session.</p>
+<p>This means: when your friend says "I have Calendar and GitHub set up in my Codex CLI" and they enable Hermes' codex runtime, Hermes activates those automatically. No re-configuration needed.</p>
+<p>What's NOT migrated:
+- Plugins you haven't installed yet — install them in Codex first.
+- Plugins where codex reports <code>availability != AVAILABLE</code> (broken install, expired OAuth, removed from marketplace, etc.). These are skipped to avoid writing config that would fail at activation time.
+- ChatGPT app marketplace entries (the per-account <code>app/list</code> results — these are already enabled inside codex by virtue of your account auth).
+- Plugin OAuth — you authorize each plugin once in Codex itself; Hermes doesn't touch credentials.</p>
+<h2 id="hermes-tool-callback-the-new-mcp-server">Hermes tool callback (the new MCP server)</h2>
+<p>Codex's built-in toolset covers shell/file ops/patches but doesn't have web search, browser automation, vision, image generation, etc. To keep those usable in a codex turn, Hermes registers itself as an MCP server in <code>~/.codex/config.toml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">[mcp_servers.hermes-tools]</span>
+<span class="n">command</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/path/to/python&quot;</span>
+<span class="n">args</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;-m&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;agent.transports.hermes_tools_mcp_server&quot;</span><span class="p">]</span>
+<span class="n">env</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">HERMES_HOME</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;/your/.hermes&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">PYTHONPATH</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">HERMES_QUIET</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;1&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="n">startup_timeout_sec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">30.0</span>
+<span class="n">tool_timeout_sec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">600.0</span>
+</code></pre></div>
+
+<p>When the model calls <code>web_search</code> (or another exposed Hermes tool), codex spawns the <code>hermes_tools_mcp_server</code> subprocess via stdio, the request is dispatched through <code>model_tools.handle_function_call()</code>, and the result is projected back to codex like any other MCP response.</p>
+<p><strong>Tools available via the callback:</strong> <code>web_search</code>, <code>web_extract</code>, <code>browser_navigate</code>, <code>browser_click</code>, <code>browser_type</code>, <code>browser_press</code>, <code>browser_snapshot</code>, <code>browser_scroll</code>, <code>browser_back</code>, <code>browser_get_images</code>, <code>browser_console</code>, <code>browser_vision</code>, <code>vision_analyze</code>, <code>image_generate</code>, <code>skill_view</code>, <code>skills_list</code>, <code>text_to_speech</code>.</p>
+<p><strong>Tools NOT available:</strong> <code>delegate_task</code>, <code>memory</code>, <code>session_search</code>, <code>todo</code>. These need the running AIAgent context to dispatch (mid-loop state) and a stateless MCP callback can't drive them. Use the default Hermes runtime (<code>/codex-runtime auto</code>) when you need these.</p>
+<h2 id="disabling">Disabling</h2>
+<p>Switch back at any time:</p>
+<div class="highlight"><pre><span></span><code>/codex-runtime auto
+</code></pre></div>
+
+<p>Effective on the next session. The Codex managed block stays in <code>~/.codex/config.toml</code> so you can re-enable later without losing config — or remove it manually if you prefer.</p>
+<h2 id="limitations">Limitations</h2>
+<p>This runtime is <strong>opt-in beta</strong>. Working as of Hermes Agent 2026.5 + Codex CLI 0.130.0:</p>
+<ul>
+<li>Multi-turn conversations</li>
+<li><code>commandExecution</code> and <code>fileChange</code> (apply_patch) approvals via Hermes UI</li>
+<li>MCP tool calls (verified against <code>@modelcontextprotocol/server-filesystem</code> and the new <code>hermes-tools</code> callback)</li>
+<li>Native Codex plugin migration (verified against Linear / GitHub / Calendar inventory)</li>
+<li>Deny/cancel paths</li>
+<li>Toggle on/off cycle</li>
+<li>Memory and skill nudge counters (verified live via integration tests)</li>
+<li>Hermes web_search through codex (verified live: "OpenAI Codex CLI – Getting Started" returned end-to-end)</li>
+</ul>
+<p>Known limitations:</p>
+<ul>
+<li><strong>Hermes auth and codex auth are separate sessions.</strong> You need both <code>codex login</code> AND <code>hermes auth add openai-codex</code> for the cleanest UX (the runtime uses codex's session for the LLM call). This is a deliberate design choice in Hermes' <code>_import_codex_cli_tokens</code> — Hermes won't share OAuth state with codex CLI to avoid clobbering each other on token refresh.</li>
+<li><strong><code>delegate_task</code>, <code>memory</code>, <code>session_search</code>, <code>todo</code> are unavailable on this runtime.</strong> They need the running AIAgent context which a stateless MCP callback can't provide. Use <code>/codex-runtime auto</code> when you need these.</li>
+<li><strong>No inline patch preview in approval prompts when codex doesn't track the changeset.</strong> Codex's <code>fileChange</code> approval params don't always carry the changeset. Hermes caches the data from the corresponding <code>item/started</code> notification when possible, but if approval arrives before the item has streamed, the prompt falls back to whatever <code>reason</code> codex provides.</li>
+<li><strong><code>fallback_providers</code> fail over only on quota and rate-limit failures.</strong> When a codex app-server turn fails with a billing / usage-limit / rate-limit error, Hermes switches to the configured <a href="fallback-providers.html">fallback provider</a> and retries the same turn on it; auth failures (<code>codex login</code> expired), turn timeouts and unknown-model errors do not fail over on this runtime and surface as the turn's error instead.</li>
+<li><strong>Prior Hermes history is seeded only into a thread codex starts from scratch.</strong> A codex thread that codex hands back via <code>thread/resume</code> already holds the conversation. When no resumable thread exists — the session ran on another provider before <code>/model</code> switched to openai-codex, codex could not resume the stored thread, or the running thread was retired — the new thread's <code>developerInstructions</code> carry Hermes' system prompt followed by the session's prior turns (user and assistant text, tool names, tool-result previews; the most recent ~32K characters). When the composed prompt changes mid-session (for example <code>/personality</code> in the TUI or Desktop), the next turn retires the running thread and starts a new one carrying the updated prompt plus that same history seed.</li>
+<li><strong>The codex thread itself does survive a restart.</strong> After each committed turn Hermes stores the codex thread id on the session row (<code>codex_thread_id</code> in the session's <code>model_config</code>, <code>hermes sessions</code> / <code>state.db</code>). The next agent built for that same Hermes session — a later <code>/api/sessions/{id}/chat</code> request, or the first turn after the API server or gateway restarts — issues <code>thread/resume</code> for the stored id before <code>turn/start</code>, so the model keeps its own memory of the earlier turns (that is why no history seed is sent on resume). When codex cannot hand the thread back (its rollout was deleted, <code>CODEX_HOME</code> changed, the previous app-server was killed while still writing it), Hermes fails closed: it drops the stored id, starts a fresh thread and shows one line — <code>Codex thread could not be resumed; starting a new one.</code> — on the status rail of the surface you are on (CLI, TUI/Desktop, messaging gateway). A <code>/new</code> session never resumes an older thread.</li>
+<li><strong>Sub-second cancellation isn't guaranteed.</strong> Mid-stream interrupts (Ctrl+C while codex is responding) are sent via <code>turn/interrupt</code>, but if codex has already flushed the final message, you get the response anyway.</li>
+</ul>
+<p>If you find a bug, <a href="https://github.com/NousResearch/hermes-agent/issues" class="ext" target="_blank" rel="noopener">open an issue</a> with the output of <code>hermes logs --since 5m</code>. Mention <code>codex-runtime</code> in the title so it's easy to triage.</p>
+<h2 id="architecture">Architecture</h2>
+<div class="highlight"><pre><span></span><code>                ┌─── Hermes shell (CLI / TUI / gateway) ───┐
+                │  sessions DB · slash commands · memory   │
+                │  &amp; skill review · cron · session pickers │
+                └──┬──────────────────────────────────────┬┘
+                   │ user_message               final     │
+                   ▼                            text +    │
+        ┌──────────────────────────────────┐   projected  │
+        │  AIAgent.run_conversation()       │   messages   │
+        │   if api_mode == codex_app_server │              │
+        │     → CodexAppServerSession       │              │
+        │   else: chat_completions / codex_responses (default)
+        └────┬─────────────────────────────┘              │
+             │ JSON-RPC over stdio                        │
+             ▼                                            │
+        ┌──────────────────────────────────┐              │
+        │  codex app-server (subprocess)    │──────────────┘
+        │   thread/start|resume, turn/start │
+        │   item/* notifications            │
+        │   shell + apply_patch + update_plan│
+        │   view_image + sandbox            │
+        │   ┌─────────────────────────┐     │
+        │   │  MCP client             │     │
+        │   │  ├─ user MCP servers    │     │
+        │   │  ├─ native plugins      │     │
+        │   │  │   (linear, github,   │     │
+        │   │  │    gmail, calendar,  │     │
+        │   │  │    canva, ...)       │     │
+        │   │  └─ hermes-tools ───────┼─────────────────┐
+        │   │       (callback to     │     │           │
+        │   │        Hermes&#39; richer  │     │           │
+        │   │        tools)          │     │           │
+        │   └─────────────────────────┘     │           │
+        └──────────────────────────────────┘           │
+                                                        │
+                                                        ▼
+        ┌──────────────────────────────────────────────────────────┐
+        │  hermes_tools_mcp_server.py (subprocess on demand)        │
+        │   web_search, web_extract, browser_*, vision_analyze,    │
+        │   image_generate, skill_view, skills_list, text_to_speech│
+        └──────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<p>For implementation details, see <a href="https://github.com/NousResearch/hermes-agent/pull/24182" class="ext" target="_blank" rel="noopener">PR #24182</a> and the <a href="https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md" class="ext" target="_blank" rel="noopener">Codex app-server protocol README</a>.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/codex-app-server-runtime</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#why">Why</a></li>
+<li class="lvl2"><a href="#what-tools-the-model-actually-has">What tools the model actually has</a></li>
+<li class="lvl3"><a href="#1-codexs-built-in-toolset-always-on">1. Codex&#x27;s built-in toolset (always on)</a></li>
+<li class="lvl3"><a href="#2-native-codex-plugins-auto-migrated-from-your-codex-plugin-install">2. Native Codex plugins (auto-migrated from your codex plugin install)</a></li>
+<li class="lvl3"><a href="#3-hermes-tool-callback-mcp-server-registered-in-codexconfigtoml">3. Hermes tool callback (MCP server, registered in ~/.codex/config.toml)</a></li>
+<li class="lvl3"><a href="#whats-not-available-on-this-runtime">What&#x27;s NOT available on this runtime</a></li>
+<li class="lvl2"><a href="#workflow-features-goal-kanban-cron">Workflow features (/goal, kanban, cron)</a></li>
+<li class="lvl3"><a href="#goal-the-ralph-loop">/goal (the Ralph loop)</a></li>
+<li class="lvl3"><a href="#kanban-multi-agent-worktree-dispatch">Kanban (multi-agent worktree dispatch)</a></li>
+<li class="lvl3"><a href="#cron-jobs">Cron jobs</a></li>
+<li class="lvl2"><a href="#trade-offs">Trade-offs</a></li>
+<li class="lvl3"><a href="#live-display">Live display</a></li>
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#enabling">Enabling</a></li>
+<li class="lvl2"><a href="#self-improvement-loop-memory--skill-nudges">Self-improvement loop (memory + skill nudges)</a></li>
+<li class="lvl2"><a href="#how-approvals-work">How approvals work</a></li>
+<li class="lvl2"><a href="#permission-profiles">Permission profiles</a></li>
+<li class="lvl2"><a href="#auxiliary-tasks-and-chatgpt-subscription-token-cost">Auxiliary tasks and ChatGPT subscription token cost</a></li>
+<li class="lvl2"><a href="#editing-codexconfigtoml-safely">Editing ~/.codex/config.toml safely</a></li>
+<li class="lvl3"><a href="#running-the-migration-from-a-script">Running the migration from a script</a></li>
+<li class="lvl2"><a href="#multi-profile--multi-tenant-setups">Multi-profile / multi-tenant setups</a></li>
+<li class="lvl2"><a href="#home-environment-variable-passthrough">HOME environment variable passthrough</a></li>
+<li class="lvl2"><a href="#mcp-server-migration">MCP server migration</a></li>
+<li class="lvl2"><a href="#native-codex-plugin-migration">Native Codex plugin migration</a></li>
+<li class="lvl2"><a href="#hermes-tool-callback-the-new-mcp-server">Hermes tool callback (the new MCP server)</a></li>
+<li class="lvl2"><a href="#disabling">Disabling</a></li>
+<li class="lvl2"><a href="#limitations">Limitations</a></li>
+<li class="lvl2"><a href="#architecture">Architecture</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

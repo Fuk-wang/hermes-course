@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webhooks · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/messaging/webhooks</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="webhooks">Webhooks</h1>
+<p>接收来自外部服务（GitHub、GitLab、JIRA、Stripe 等）的事件，并自动触发 Hermes agent 运行。Webhook 适配器运行一个 HTTP 服务器，接受 POST 请求、验证 HMAC 签名、将 payload（载荷）转换为 agent prompt（提示词），并将响应路由回来源或其他已配置的平台。</p>
+<p>agent 处理事件后，可通过在 PR 上发布评论、向 Telegram/Discord 发送消息或记录结果来响应。</p>
+<h2 id="视频教程">视频教程</h2>
+<div style={{position: 'relative', width: '100%', aspectRatio: '16 / 9', marginBottom: '1.5rem'}}>
+  <iframe
+    src="https://www.youtube.com/embed/WNYe5mD4fY8"
+    title="Hermes Agent — Webhooks Tutorial"
+    style={{position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', border: 0}}
+    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+    allowFullScreen
+  />
+</div>
+
+<hr />
+<h2 id="快速开始">快速开始</h2>
+<ol>
+<li>通过 <code>hermes gateway setup</code> 或环境变量启用</li>
+<li>在 <code>config.yaml</code> 中定义路由，<strong>或</strong>使用 <code>hermes webhook subscribe</code> 动态创建</li>
+<li>将你的服务指向 <code>http://your-server:8644/webhooks/&lt;route-name&gt;</code></li>
+</ol>
+<hr />
+<h2 id="设置">设置</h2>
+<p>有两种方式启用 webhook 适配器。</p>
+<h3 id="通过设置向导">通过设置向导</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>setup
+</code></pre></div>
+
+<p>按照提示启用 webhooks、设置端口和全局 HMAC secret。</p>
+<h3 id="通过环境变量">通过环境变量</h3>
+<p>添加到 <code>~/.hermes/.env</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">WEBHOOK_ENABLED</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">WEBHOOK_PORT</span><span class="o">=</span><span class="m">8644</span><span class="w">        </span><span class="c1"># default</span>
+<span class="nv">WEBHOOK_SECRET</span><span class="o">=</span>your-global-secret
+</code></pre></div>
+
+<h3 id="验证服务器">验证服务器</h3>
+<p>gateway 运行后：</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8644/health
+</code></pre></div>
+
+<p>预期响应：</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ok&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;platform&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;webhook&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="configuring-routes">配置路由</h2>
+<p>路由定义了不同 webhook 来源的处理方式。每个路由是 <code>config.yaml</code> 中 <code>platforms.webhook.extra.routes</code> 下的一个命名条目。</p>
+<h3 id="路由属性">路由属性</h3>
+<table>
+<thead>
+<tr>
+<th>属性</th>
+<th>是否必填</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>events</code></td>
+<td>否</td>
+<td>要接受的事件类型列表（例如 <code>["pull_request"]</code>）。若为空，则接受所有事件。事件类型从 <code>X-GitHub-Event</code>、<code>X-GitLab-Event</code> 或 payload 中的 <code>event_type</code> 读取。</td>
+</tr>
+<tr>
+<td><code>secret</code></td>
+<td><strong>是</strong></td>
+<td>用于签名验证的 HMAC secret。若路由未设置，则回退到全局 <code>secret</code>。仅用于测试时可设为 <code>"INSECURE_NO_AUTH"</code>（跳过验证）。</td>
+</tr>
+<tr>
+<td><code>prompt</code></td>
+<td>否</td>
+<td>使用点号表示法访问 payload 字段的模板字符串（例如 <code>{pull_request.title}</code>）。若省略，则将完整 JSON payload 转储到 prompt 中。</td>
+</tr>
+<tr>
+<td><code>filters</code></td>
+<td>否</td>
+<td>声明式 payload 过滤器，在认证/请求体/事件过滤之后、agent 或直接投递之前求值。不匹配时返回 <code>{"status":"ignored","reason":"filter"}</code>（HTTP 200）。</td>
+</tr>
+<tr>
+<td><code>script</code></td>
+<td>否</td>
+<td>位于 <code>~/.hermes/scripts/</code> 下的过滤/转换脚本。webhook payload 以 JSON 形式通过 stdin 传入。stdout 为 JSON 对象时会在模板渲染前替换 payload；文本 stdout 以 <code>script_output</code> 形式暴露；空 stdout、<code>[SILENT]</code> 或非零退出码会忽略该 webhook。</td>
+</tr>
+<tr>
+<td><code>skills</code></td>
+<td>否</td>
+<td>agent 运行时加载的 skill 名称列表。</td>
+</tr>
+<tr>
+<td><code>deliver</code></td>
+<td>否</td>
+<td>响应发送目标：<code>github_comment</code>、<code>telegram</code>、<code>discord</code>、<code>slack</code>、<code>signal</code>、<code>sms</code>、<code>whatsapp</code>、<code>matrix</code>、<code>mattermost</code>、<code>homeassistant</code>、<code>email</code>、<code>dingtalk</code>、<code>feishu</code>、<code>wecom</code>、<code>weixin</code>、<code>bluebubbles</code>、<code>qqbot</code>，或 <code>log</code>（默认）。</td>
+</tr>
+<tr>
+<td><code>deliver_extra</code></td>
+<td>否</td>
+<td>额外的投递配置——键取决于 <code>deliver</code> 类型（例如 <code>repo</code>、<code>pr_number</code>、<code>chat_id</code>）。值支持与 <code>prompt</code> 相同的 <code>{dot.notation}</code> 模板语法。</td>
+</tr>
+<tr>
+<td><code>deliver_only</code></td>
+<td>否</td>
+<td>若为 <code>true</code>，完全跳过 agent——渲染后的 <code>prompt</code> 模板直接作为消息体投递。零 LLM token 消耗，亚秒级投递。参见<a href="#direct-delivery-mode">直接投递模式</a>了解使用场景。要求 <code>deliver</code> 为真实目标（非 <code>log</code>）。</td>
+</tr>
+<tr>
+<td><code>cron_job</code></td>
+<td>否</td>
+<td>每次事件触发一个已有的 cron 任务（按 ID 或名称），而不是启动新的 webhook agent 会话。渲染后的 <code>prompt</code> 作为单次运行的临时上下文；以任务自身的 prompt、skills、模型和投递设置为准。与 <code>deliver_only</code> 互斥。参见<a href="#event-triggered-cron-jobs">事件触发的 Cron 任务</a>。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="完整示例">完整示例</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8644</span>
+<span class="w">      </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;global-fallback-secret&quot;</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">github-pr</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;pull_request&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;github-webhook-secret&quot;</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">            </span><span class="no">Review this pull request:</span>
+<span class="w">            </span><span class="no">Repository: {repository.full_name}</span>
+<span class="w">            </span><span class="no">PR #{number}: {pull_request.title}</span>
+<span class="w">            </span><span class="no">Author: {pull_request.user.login}</span>
+<span class="w">            </span><span class="no">URL: {pull_request.html_url}</span>
+<span class="w">            </span><span class="no">Diff URL: {pull_request.diff_url}</span>
+<span class="w">            </span><span class="no">Action: {action}</span>
+<span class="w">          </span><span class="nt">skills</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;github-code-review&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;github_comment&quot;</span>
+<span class="w">          </span><span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">repo</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{repository.full_name}&quot;</span>
+<span class="w">            </span><span class="nt">pr_number</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{number}&quot;</span>
+<span class="w">        </span><span class="nt">deploy-notify</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;push&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;deploy-secret&quot;</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;New</span><span class="nv"> </span><span class="s">push</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">{repository.full_name}</span><span class="nv"> </span><span class="s">branch</span><span class="nv"> </span><span class="s">{ref}:</span><span class="nv"> </span><span class="s">{head_commit.message}&quot;</span>
+<span class="w">          </span><span class="nt">filters</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;ref&quot;</span>
+<span class="w">              </span><span class="nt">equals</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;refs/heads/main&quot;</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;telegram&quot;</span>
+</code></pre></div>
+
+<h3 id="payload-filters">Payload 过滤器</h3>
+<p>当服务商发送宽泛的事件流、但只有部分 payload 应唤醒 agent 或触发 <code>deliver_only</code> 投递时，使用 <code>filters</code>。过滤器在签名验证、请求体解析和 <code>events</code> 之后运行，但在 prompt 渲染、幂等去重、agent 调度或直接投递之前运行。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">todoist</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;item:updated&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;todoist-secret&quot;</span>
+<span class="w">          </span><span class="nt">filters</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;payload.labels&quot;</span>
+<span class="w">              </span><span class="nt">contains</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;hermes&quot;</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">any</span><span class="p">:</span>
+<span class="w">                </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;payload.priority&quot;</span>
+<span class="w">                  </span><span class="nt">equals</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span>
+<span class="w">                </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;payload.project_id&quot;</span>
+<span class="w">                  </span><span class="nt">in_file</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;~/.hermes/data/todoist/watchlist.json&quot;</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Todoist</span><span class="nv"> </span><span class="s">task</span><span class="nv"> </span><span class="s">changed:</span><span class="nv"> </span><span class="s">{payload.content}&quot;</span>
+</code></pre></div>
+
+<p>支持的操作符：</p>
+<ul>
+<li><code>exists: true|false</code></li>
+<li><code>missing: true</code></li>
+<li><code>equals</code> / <code>not_equals</code></li>
+<li><code>contains</code> — 适用于字符串、列表和 dict 键</li>
+<li><code>in</code> — 内联列表</li>
+<li><code>in_file</code> — JSON 数组、JSON 对象（使用其键）或按行分隔的文本文件</li>
+<li><code>regex</code></li>
+<li><code>all</code>、<code>any</code> 和 <code>not</code> 分组</li>
+</ul>
+<p>字段路径使用点号表示法。当存在顶层 <code>payload</code> 对象时，<code>payload.foo</code> 从中读取；对扁平 payload 则从 webhook 请求体根部读取。<code>event</code> / <code>event_type</code> 匹配解析出的事件类型，<code>headers.&lt;Name&gt;</code> 读取请求头。</p>
+<h3 id="script-filters-and-transforms">脚本过滤与转换</h3>
+<p>当声明式过滤器不够用时，使用 <code>script</code>。脚本必须位于当前 profile 的 <code>~/.hermes/scripts/</code> 目录下；相对路径在该目录内解析，且禁止路径穿越到目录之外。<code>.sh</code> 和 <code>.bash</code> 脚本用 bash 运行，其他扩展名用当前 Python 解释器运行。</p>
+<p>路由 payload 以 JSON 形式发送到 stdin：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/scripts/todoist-hermes-label.py</span>
+
+
+<span class="n">payload</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">stdin</span><span class="p">)</span>
+<span class="n">labels</span> <span class="o">=</span> <span class="n">payload</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;payload&quot;</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;labels&quot;</span><span class="p">,</span> <span class="p">[])</span>
+<span class="k">if</span> <span class="s2">&quot;hermes&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">labels</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;[SILENT]&quot;</span><span class="p">)</span>
+    <span class="k">raise</span> <span class="ne">SystemExit</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+<span class="n">payload</span><span class="p">[</span><span class="s2">&quot;body&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">payload</span><span class="p">[</span><span class="s2">&quot;payload&quot;</span><span class="p">][</span><span class="s2">&quot;content&quot;</span><span class="p">]</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">payload</span><span class="p">))</span>
+</code></pre></div>
+
+<p>脚本结果：</p>
+<ul>
+<li>stdout 为 JSON 对象时，替换 <code>prompt</code> 和 <code>deliver_extra</code> 使用的 payload。</li>
+<li>非 JSON 文本 stdout 会以 <code>script_output</code> 字段加入 payload。</li>
+<li>空 stdout、精确的 <code>[SILENT]</code>、<code>{"__hermes_ignore__": true}</code>、超时、脚本缺失或非零退出码，均返回 HTTP 200 及 <code>{"status":"ignored","reason":"script"}</code>。</li>
+</ul>
+<h3 id="prompt-模板">Prompt 模板</h3>
+<p>Prompt 使用点号表示法访问 webhook payload 中的嵌套字段：</p>
+<ul>
+<li><code>{pull_request.title}</code> 解析为 <code>payload["pull_request"]["title"]</code></li>
+<li><code>{repository.full_name}</code> 解析为 <code>payload["repository"]["full_name"]</code></li>
+<li><code>{__raw__}</code> — 特殊 token，将<strong>整个 payload</strong> 以缩进 JSON 格式转储（截断至 4000 个字符）。适用于监控告警或通用 webhook，agent 需要完整上下文时使用。</li>
+<li>缺失的键保留为字面量 <code>{key}</code> 字符串（不报错）</li>
+<li>嵌套的 dict 和 list 会被 JSON 序列化并截断至 2000 个字符</li>
+</ul>
+<p>可以将 <code>{__raw__}</code> 与常规模板变量混合使用：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;PR</span><span class="nv"> </span><span class="s">#{pull_request.number}</span><span class="nv"> </span><span class="s">by</span><span class="nv"> </span><span class="s">{pull_request.user.login}:</span><span class="nv"> </span><span class="s">{__raw__}&quot;</span>
+</code></pre></div>
+
+<p>若路由未配置 <code>prompt</code> 模板，则将整个 payload 以缩进 JSON 格式转储（截断至 4000 个字符）。</p>
+<p><code>deliver_extra</code> 的值中同样支持点号表示法模板。</p>
+<h3 id="论坛话题投递">论坛话题投递</h3>
+<p>向 Telegram 投递 webhook 响应时，可通过在 <code>deliver_extra</code> 中包含 <code>message_thread_id</code>（或 <code>thread_id</code>）来指定特定论坛话题：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">webhooks</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">alerts</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;alert&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Alert:</span><span class="nv"> </span><span class="s">{__raw__}&quot;</span>
+<span class="w">      </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;telegram&quot;</span>
+<span class="w">      </span><span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;-1001234567890&quot;</span>
+<span class="w">        </span><span class="nt">message_thread_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;42&quot;</span>
+</code></pre></div>
+
+<p>若 <code>deliver_extra</code> 中未提供 <code>chat_id</code>，则回退到目标平台配置的主频道。</p>
+<hr />
+<h2 id="github-pr-review">GitHub PR 审查（分步说明）</h2>
+<p>本演练将为每个 pull request 设置自动代码审查。</p>
+<h3 id="1-在-github-中创建-webhook">1. 在 GitHub 中创建 webhook</h3>
+<ol>
+<li>进入你的仓库 → <strong>Settings</strong> → <strong>Webhooks</strong> → <strong>Add webhook</strong></li>
+<li>将 <strong>Payload URL</strong> 设为 <code>http://your-server:8644/webhooks/github-pr</code></li>
+<li>将 <strong>Content type</strong> 设为 <code>application/json</code></li>
+<li>将 <strong>Secret</strong> 设为与路由配置匹配的值（例如 <code>github-webhook-secret</code>）</li>
+<li>在 <strong>Which events?</strong> 下，选择 <strong>Let me select individual events</strong> 并勾选 <strong>Pull requests</strong></li>
+<li>点击 <strong>Add webhook</strong></li>
+</ol>
+<h3 id="2-添加路由配置">2. 添加路由配置</h3>
+<p>按照上方示例，将 <code>github-pr</code> 路由添加到 <code>~/.hermes/config.yaml</code>。</p>
+<h3 id="3-确保-gh-cli-已认证">3. 确保 <code>gh</code> CLI 已认证</h3>
+<p><code>github_comment</code> 投递类型使用 GitHub CLI 发布评论：</p>
+<div class="highlight"><pre><span></span><code>gh<span class="w"> </span>auth<span class="w"> </span>login
+</code></pre></div>
+
+<h3 id="4-测试">4. 测试</h3>
+<p>在仓库中打开一个 pull request。webhook 触发后，Hermes 处理事件并在 PR 上发布审查评论。</p>
+<hr />
+<h2 id="gitlab-webhook-setup">GitLab Webhook 设置</h2>
+<p>GitLab webhook 的工作方式类似，但使用不同的认证机制。GitLab 通过 <code>X-Gitlab-Token</code> 请求头以明文字符串匹配（非 HMAC）发送 secret。</p>
+<h3 id="1-在-gitlab-中创建-webhook">1. 在 GitLab 中创建 webhook</h3>
+<ol>
+<li>进入你的项目 → <strong>Settings</strong> → <strong>Webhooks</strong></li>
+<li>将 <strong>URL</strong> 设为 <code>http://your-server:8644/webhooks/gitlab-mr</code></li>
+<li>输入你的 <strong>Secret token</strong></li>
+<li>选择 <strong>Merge request events</strong>（以及其他你需要的事件）</li>
+<li>点击 <strong>Add webhook</strong></li>
+</ol>
+<h3 id="2-添加路由配置_1">2. 添加路由配置</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">gitlab-mr</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;merge_request&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-gitlab-secret-token&quot;</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">            </span><span class="no">Review this merge request:</span>
+<span class="w">            </span><span class="no">Project: {project.path_with_namespace}</span>
+<span class="w">            </span><span class="no">MR !{object_attributes.iid}: {object_attributes.title}</span>
+<span class="w">            </span><span class="no">Author: {object_attributes.last_commit.author.name}</span>
+<span class="w">            </span><span class="no">URL: {object_attributes.url}</span>
+<span class="w">            </span><span class="no">Action: {object_attributes.action}</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;log&quot;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="delivery-options">投递选项</h2>
+<p><code>deliver</code> 字段控制 agent 处理 webhook 事件后响应的发送目标。</p>
+<table>
+<thead>
+<tr>
+<th>投递类型</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>log</code></td>
+<td>将响应记录到 gateway 日志输出。这是默认值，适合测试使用。</td>
+</tr>
+<tr>
+<td><code>github_comment</code></td>
+<td>通过 <code>gh</code> CLI 将响应作为 PR/issue 评论发布。需要 <code>deliver_extra.repo</code> 和 <code>deliver_extra.pr_number</code>。<code>gh</code> CLI 必须安装并在 gateway 主机上完成认证（<code>gh auth login</code>）。</td>
+</tr>
+<tr>
+<td><code>telegram</code></td>
+<td>将响应路由到 Telegram。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>discord</code></td>
+<td>将响应路由到 Discord。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>slack</code></td>
+<td>将响应路由到 Slack。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>signal</code></td>
+<td>将响应路由到 Signal。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>sms</code></td>
+<td>通过 Twilio 将响应路由到 SMS。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>whatsapp</code></td>
+<td>将响应路由到 WhatsApp。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>matrix</code></td>
+<td>将响应路由到 Matrix。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>mattermost</code></td>
+<td>将响应路由到 Mattermost。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>homeassistant</code></td>
+<td>将响应路由到 Home Assistant。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>email</code></td>
+<td>将响应路由到 Email。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>dingtalk</code></td>
+<td>将响应路由到 DingTalk。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>feishu</code></td>
+<td>将响应路由到 Feishu/Lark。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>wecom</code></td>
+<td>将响应路由到 WeCom。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>weixin</code></td>
+<td>将响应路由到 Weixin（微信）。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+<tr>
+<td><code>bluebubbles</code></td>
+<td>将响应路由到 BlueBubbles（iMessage）。使用主频道，或在 <code>deliver_extra</code> 中指定 <code>chat_id</code>。</td>
+</tr>
+</tbody>
+</table>
+<p>跨平台投递时，目标平台也必须在 gateway 中启用并连接。若 <code>deliver_extra</code> 中未提供 <code>chat_id</code>，响应将发送到该平台配置的主频道。</p>
+<hr />
+<h2 id="direct-delivery-mode">直接投递模式</h2>
+<p>默认情况下，每次 webhook POST 都会触发一次 agent 运行——payload 成为 prompt，agent 处理后投递响应。这会在每次事件时消耗 LLM token。</p>
+<p>对于只需<strong>推送纯文本通知</strong>的场景——无需推理、无需 agent 循环，只需投递消息——可在路由上设置 <code>deliver_only: true</code>。渲染后的 <code>prompt</code> 模板直接作为消息体，适配器将其直接分发到配置的投递目标。</p>
+<h3 id="何时使用直接投递">何时使用直接投递</h3>
+<ul>
+<li><strong>外部服务推送</strong> — Supabase/Firebase webhook 在数据库变更时触发 → 即时通知 Telegram 用户</li>
+<li><strong>监控告警</strong> — Datadog/Grafana 告警 webhook → 推送到 Discord 频道</li>
+<li><strong>agent 间通知</strong> — Agent A 通知 Agent B 的用户某个长时任务已完成</li>
+<li><strong>后台任务完成</strong> — Cron 任务完成 → 将结果发布到 Slack</li>
+</ul>
+<p>优势：</p>
+<ul>
+<li><strong>零 LLM token</strong> — agent 从不被调用</li>
+<li><strong>亚秒级投递</strong> — 单次适配器调用，无推理循环</li>
+<li><strong>与 agent 模式相同的安全性</strong> — HMAC 认证、速率限制、幂等性和请求体大小限制均正常生效</li>
+<li><strong>同步响应</strong> — 投递成功后 POST 返回 <code>200 OK</code>，若目标拒绝则返回 <code>502</code>，便于上游服务智能重试</li>
+</ul>
+<h3 id="示例从-supabase-推送到-telegram">示例：从 Supabase 推送到 Telegram</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8644</span>
+<span class="w">      </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;global-secret&quot;</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">antenna-matches</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;antenna-webhook-secret&quot;</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;telegram&quot;</span>
+<span class="w">          </span><span class="nt">deliver_only</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;🎉</span><span class="nv"> </span><span class="s">New</span><span class="nv"> </span><span class="s">match:</span><span class="nv"> </span><span class="s">{match.user_name}</span><span class="nv"> </span><span class="s">matched</span><span class="nv"> </span><span class="s">with</span><span class="nv"> </span><span class="s">you!&quot;</span>
+<span class="w">          </span><span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{match.telegram_chat_id}&quot;</span>
+</code></pre></div>
+
+<p>你的 Supabase edge function 使用 HMAC-SHA256 对 payload 签名并 POST 到 <code>https://your-server:8644/webhooks/antenna-matches</code>。webhook 适配器验证签名、从 payload 渲染模板、投递到 Telegram，并返回 <code>200 OK</code>。</p>
+<h3 id="示例通过-cli-动态订阅">示例：通过 CLI 动态订阅</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span>subscribe<span class="w"> </span>antenna-matches<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver-chat-id<span class="w"> </span><span class="s2">&quot;123456789&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver-only<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--prompt<span class="w"> </span><span class="s2">&quot;🎉 New match: {match.user_name} matched with you!&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--description<span class="w"> </span><span class="s2">&quot;Antenna match notifications&quot;</span>
+</code></pre></div>
+
+<h3 id="响应状态码">响应状态码</h3>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>200 OK</code></td>
+<td>投递成功。响应体：<code>{"status": "delivered", "route": "...", "target": "...", "delivery_id": "..."}</code></td>
+</tr>
+<tr>
+<td><code>200 OK</code>（status=duplicate）</td>
+<td>在幂等性 TTL（1 小时）内重复的 <code>X-GitHub-Delivery</code> ID。不重复投递。</td>
+</tr>
+<tr>
+<td><code>401 Unauthorized</code></td>
+<td>HMAC 签名无效或缺失。</td>
+</tr>
+<tr>
+<td><code>400 Bad Request</code></td>
+<td>JSON 请求体格式错误。</td>
+</tr>
+<tr>
+<td><code>404 Not Found</code></td>
+<td>未知路由名称。</td>
+</tr>
+<tr>
+<td><code>413 Payload Too Large</code></td>
+<td>请求体超过 <code>max_body_bytes</code>。</td>
+</tr>
+<tr>
+<td><code>429 Too Many Requests</code></td>
+<td>路由速率限制已超出。</td>
+</tr>
+<tr>
+<td><code>502 Bad Gateway</code></td>
+<td>目标适配器拒绝消息或抛出异常。错误记录在服务端日志中；响应体为通用的 <code>Delivery failed</code>，避免泄露适配器内部信息。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="配置注意事项">配置注意事项</h3>
+<ul>
+<li><code>deliver_only: true</code> 要求 <code>deliver</code> 为真实目标。<code>deliver: log</code>（或省略 <code>deliver</code>）在启动时会被拒绝——适配器发现路由配置错误时拒绝启动。</li>
+<li>直接投递模式下 <code>skills</code> 字段被忽略（不运行 agent，无处注入 skill）。</li>
+<li>模板渲染使用与 agent 模式相同的 <code>{dot.notation}</code> 语法，包括 <code>{__raw__}</code> token。</li>
+<li>幂等性使用相同的 <code>X-GitHub-Delivery</code> / <code>X-Request-ID</code> 请求头——携带相同 ID 的重试返回 <code>status=duplicate</code> 且<strong>不</strong>重复投递。</li>
+</ul>
+<hr />
+<h2 id="event-triggered-cron-jobs">事件触发的 Cron 任务</h2>
+<p>在路由上设置 <code>cron_job</code>，即可在事件到达时触发一个<strong>已有的 cron 任务</strong>——无需按固定周期轮询，也不会启动新的 webhook agent 会话。这让任何定时任务都能变成事件驱动的任务：把原有的定时计划保留为兜底扫描（或设为低频），让 webhook 在事情真正发生的那一刻立即触发它。</p>
+<p>工作原理：</p>
+<ol>
+<li>事件经过与其他路由相同的 HMAC 认证、速率限制、<code>events</code>/<code>filters</code>/<code>script</code> 过滤和幂等去重。</li>
+<li>路由的 <code>prompt</code> 模板根据 payload 渲染后，作为<strong>单次运行的临时上下文</strong>注入任务（与 <code>cronjob(action='run', prompt=...)</code> 走同一条通道——任务存储的 prompt 永远不会被修改）。</li>
+<li>任务通过与调度器相同的 at-most-once 认领机制触发，因此 webhook 突发流量不会重复触发正在运行的任务，任务自身的投递目标会收到输出。</li>
+</ol>
+<h3 id="示例在收到-review-反馈时触发-pr-审查任务">示例：在收到 review 反馈时触发 PR 审查任务</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">pr-feedback</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;pull_request_review&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;github-webhook-secret&quot;</span>
+<span class="w">          </span><span class="nt">cron_job</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;pr-review-sweeper&quot;</span><span class="w">        </span><span class="c1"># 已有任务的 ID 或名称</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">            </span><span class="no">{repository.full_name} 的 PR #{number} 收到了来自</span>
+<span class="w">            </span><span class="no">{review.user.login} 的新审查反馈：{review.body}</span>
+</code></pre></div>
+
+<h3 id="通过-cli">通过 CLI</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span>subscribe<span class="w"> </span>pr-feedback<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--events<span class="w"> </span><span class="s2">&quot;pull_request_review&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cron-job<span class="w"> </span><span class="s2">&quot;pr-review-sweeper&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--prompt<span class="w"> </span><span class="s2">&quot;PR #{number} 收到反馈：{review.body}&quot;</span>
+</code></pre></div>
+
+<p>创建订阅时会立即校验任务引用，拼写错误会当场报错。</p>
+<h3 id="注意事项">注意事项</h3>
+<ul>
+<li><code>cron_job</code> 与 <code>deliver_only</code> 互斥（路由同时设置两者时适配器拒绝启动）。cron 任务自行处理投递。</li>
+<li><code>cron_job</code> 路由会忽略路由级的 <code>deliver</code>、<code>deliver_extra</code> 和 <code>skills</code> 字段——以任务自身的设置为准。</li>
+<li>已暂停/已禁用的任务不会被触发；事件会被记录并丢弃。</li>
+<li>POST 立即返回 <code>202 Accepted</code>；任务在后台运行。</li>
+</ul>
+<hr />
+<h2 id="dynamic-subscriptions">动态订阅（CLI）</h2>
+<p>除了 <code>config.yaml</code> 中的静态路由，还可以使用 <code>hermes webhook</code> CLI 命令动态创建 webhook 订阅。当 agent 本身需要设置事件驱动触发器时，这尤为有用。</p>
+<h3 id="创建订阅">创建订阅</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span>subscribe<span class="w"> </span>github-issues<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--events<span class="w"> </span><span class="s2">&quot;issues&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--prompt<span class="w"> </span><span class="s2">&quot;New issue #{issue.number}: {issue.title}\nBy: {issue.user.login}\n\n{issue.body}&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver-chat-id<span class="w"> </span><span class="s2">&quot;-100123456789&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--description<span class="w"> </span><span class="s2">&quot;Triage new GitHub issues&quot;</span>
+</code></pre></div>
+
+<p>此命令返回 webhook URL 和自动生成的 HMAC secret。将你的服务配置为 POST 到该 URL。</p>
+<h3 id="列出订阅">列出订阅</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span>list
+</code></pre></div>
+
+<h3 id="删除订阅">删除订阅</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span>remove<span class="w"> </span>github-issues
+</code></pre></div>
+
+<h3 id="测试订阅">测试订阅</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>webhook<span class="w"> </span><span class="nb">test</span><span class="w"> </span>github-issues
+hermes<span class="w"> </span>webhook<span class="w"> </span><span class="nb">test</span><span class="w"> </span>github-issues<span class="w"> </span>--payload<span class="w"> </span><span class="s1">&#39;{&quot;issue&quot;: {&quot;number&quot;: 42, &quot;title&quot;: &quot;Test&quot;}}&#39;</span>
+</code></pre></div>
+
+<h3 id="动态订阅的工作原理">动态订阅的工作原理</h3>
+<ul>
+<li>订阅存储在 <code>~/.hermes/webhook_subscriptions.json</code></li>
+<li>webhook 适配器在每次收到请求时热重载该文件（基于 mtime 检测，开销可忽略不计）</li>
+<li><code>config.yaml</code> 中的静态路由始终优先于同名的动态订阅</li>
+<li>动态订阅与静态路由使用相同的格式和功能（events、prompt 模板、skills、delivery）</li>
+<li>无需重启 gateway——订阅后立即生效</li>
+</ul>
+<h3 id="agent-驱动的订阅">agent 驱动的订阅</h3>
+<p>agent 可通过 terminal 工具在 <code>webhook-subscriptions</code> skill 的引导下创建订阅。向 agent 请求"为 GitHub issues 设置 webhook"，它将运行相应的 <code>hermes webhook subscribe</code> 命令。</p>
+<hr />
+<h2 id="security">安全性</h2>
+<p>webhook 适配器包含多层安全机制：</p>
+<h3 id="hmac-签名验证">HMAC 签名验证</h3>
+<p>适配器使用适合各来源的方式验证传入的 webhook 签名：</p>
+<ul>
+<li><strong>GitHub</strong>：<code>X-Hub-Signature-256</code> 请求头——以 <code>sha256=</code> 为前缀的 HMAC-SHA256 十六进制摘要</li>
+<li><strong>GitLab</strong>：<code>X-Gitlab-Token</code> 请求头——明文 secret 字符串匹配</li>
+<li><strong>通用</strong>：<code>X-Webhook-Signature</code> 请求头——原始 HMAC-SHA256 十六进制摘要</li>
+</ul>
+<p>若已配置 secret 但请求中不存在已识别的签名请求头，则请求被拒绝。</p>
+<h3 id="secret-为必填项">Secret 为必填项</h3>
+<p>每个路由必须有 secret——直接设置在路由上或从全局 <code>secret</code> 继承。没有 secret 的路由会导致适配器在启动时报错退出。仅用于开发/测试时，可将 secret 设为 <code>"INSECURE_NO_AUTH"</code> 以完全跳过验证。</p>
+<p><code>INSECURE_NO_AUTH</code> 仅在 gateway 绑定到回环地址（<code>127.0.0.1</code>、<code>localhost</code>、<code>::1</code>）时被接受。若与非回环绑定（如 <code>0.0.0.0</code> 或局域网 IP）组合使用，适配器拒绝启动——这可防止在公共接口上意外暴露未认证的端点。</p>
+<h3 id="速率限制">速率限制</h3>
+<p>每个路由默认限制为<strong>每分钟 30 次请求</strong>（固定窗口）。可全局配置：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">rate_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60</span><span class="w">  </span><span class="c1"># requests per minute</span>
+</code></pre></div>
+
+<p>超出限制的请求收到 <code>429 Too Many Requests</code> 响应。</p>
+<h3 id="幂等性">幂等性</h3>
+<p>投递 ID（来自 <code>X-GitHub-Delivery</code>、<code>X-Request-ID</code> 或时间戳回退）缓存 <strong>1 小时</strong>。重复投递（例如 webhook 重试）会被静默跳过并返回 <code>200</code> 响应，防止重复触发 agent 运行。</p>
+<h3 id="请求体大小限制">请求体大小限制</h3>
+<p>超过 <strong>1 MB</strong> 的 payload 在读取请求体之前即被拒绝。可配置：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">max_body_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2097152</span><span class="w">  </span><span class="c1"># 2 MB</span>
+</code></pre></div>
+
+<h3 id="prompt-注入风险">Prompt 注入风险</h3>
+<div class="admonition adm-warning"><p class="adm-title">警告</p>
+<p>Webhook payload 包含攻击者可控的数据——PR 标题、commit 消息、issue 描述等均可能包含恶意指令。在暴露于互联网时，请在沙箱环境（Docker、VM）中运行 gateway。考虑使用 Docker 或 SSH terminal 后端进行隔离。</p>
+</div>
+<hr />
+<h2 id="troubleshooting">故障排查</h2>
+<h3 id="webhook-未到达">Webhook 未到达</h3>
+<ul>
+<li>验证端口已暴露且可从 webhook 来源访问</li>
+<li>检查防火墙规则——端口 <code>8644</code>（或你配置的端口）必须开放</li>
+<li>验证 URL 路径是否匹配：<code>http://your-server:8644/webhooks/&lt;route-name&gt;</code></li>
+<li>使用 <code>/health</code> 端点确认服务器正在运行</li>
+</ul>
+<h3 id="签名验证失败">签名验证失败</h3>
+<ul>
+<li>确保路由配置中的 secret 与 webhook 来源中配置的 secret 完全一致</li>
+<li>对于 GitHub，secret 基于 HMAC——检查 <code>X-Hub-Signature-256</code></li>
+<li>对于 GitLab，secret 为明文 token 匹配——检查 <code>X-Gitlab-Token</code></li>
+<li>检查 gateway 日志中的 <code>Invalid signature</code> 警告</li>
+</ul>
+<h3 id="事件被忽略">事件被忽略</h3>
+<ul>
+<li>检查事件类型是否在路由的 <code>events</code> 列表中</li>
+<li>GitHub 事件使用如 <code>pull_request</code>、<code>push</code>、<code>issues</code> 等值（<code>X-GitHub-Event</code> 请求头的值）</li>
+<li>GitLab 事件使用如 <code>merge_request</code>、<code>push</code> 等值（<code>X-GitLab-Event</code> 请求头的值）</li>
+<li>若 <code>events</code> 为空或未设置，则接受所有事件</li>
+</ul>
+<h3 id="agent-未响应">Agent 未响应</h3>
+<ul>
+<li>在前台运行 gateway 以查看日志：<code>hermes gateway run</code></li>
+<li>检查 prompt 模板是否正确渲染</li>
+<li>验证投递目标已配置并连接</li>
+</ul>
+<h3 id="重复响应">重复响应</h3>
+<ul>
+<li>幂等性缓存应能防止此问题——检查 webhook 来源是否发送了投递 ID 请求头（<code>X-GitHub-Delivery</code> 或 <code>X-Request-ID</code>）</li>
+<li>投递 ID 缓存 1 小时</li>
+</ul>
+<h3 id="gh-cli-错误github-评论投递"><code>gh</code> CLI 错误（GitHub 评论投递）</h3>
+<ul>
+<li>在 gateway 主机上运行 <code>gh auth login</code></li>
+<li>确保已认证的 GitHub 用户对该仓库有写权限</li>
+<li>检查 <code>gh</code> 是否已安装并在 PATH 中</li>
+</ul>
+<hr />
+<h2 id="environment-variables">环境变量</h2>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>描述</th>
+<th>默认值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>WEBHOOK_ENABLED</code></td>
+<td>启用 webhook 平台适配器</td>
+<td><code>false</code></td>
+</tr>
+<tr>
+<td><code>WEBHOOK_PORT</code></td>
+<td>接收 webhook 的 HTTP 服务器端口</td>
+<td><code>8644</code></td>
+</tr>
+<tr>
+<td><code>WEBHOOK_SECRET</code></td>
+<td>全局 HMAC secret（路由未指定自身 secret 时作为回退）</td>
+<td><em>（无）</em></td>
+</tr>
+</tbody>
+</table>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/messaging/webhooks</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#视频教程">视频教程</a></li>
+<li class="lvl2"><a href="#快速开始">快速开始</a></li>
+<li class="lvl2"><a href="#设置">设置</a></li>
+<li class="lvl3"><a href="#通过设置向导">通过设置向导</a></li>
+<li class="lvl3"><a href="#通过环境变量">通过环境变量</a></li>
+<li class="lvl3"><a href="#验证服务器">验证服务器</a></li>
+<li class="lvl2"><a href="#configuring-routes">配置路由</a></li>
+<li class="lvl3"><a href="#路由属性">路由属性</a></li>
+<li class="lvl3"><a href="#完整示例">完整示例</a></li>
+<li class="lvl3"><a href="#payload-filters">Payload 过滤器</a></li>
+<li class="lvl3"><a href="#script-filters-and-transforms">脚本过滤与转换</a></li>
+<li class="lvl3"><a href="#prompt-模板">Prompt 模板</a></li>
+<li class="lvl3"><a href="#论坛话题投递">论坛话题投递</a></li>
+<li class="lvl2"><a href="#github-pr-review">GitHub PR 审查（分步说明）</a></li>
+<li class="lvl3"><a href="#1-在-github-中创建-webhook">1. 在 GitHub 中创建 webhook</a></li>
+<li class="lvl3"><a href="#2-添加路由配置">2. 添加路由配置</a></li>
+<li class="lvl3"><a href="#3-确保-gh-cli-已认证">3. 确保 gh CLI 已认证</a></li>
+<li class="lvl3"><a href="#4-测试">4. 测试</a></li>
+<li class="lvl2"><a href="#gitlab-webhook-setup">GitLab Webhook 设置</a></li>
+<li class="lvl3"><a href="#1-在-gitlab-中创建-webhook">1. 在 GitLab 中创建 webhook</a></li>
+<li class="lvl3"><a href="#2-添加路由配置_1">2. 添加路由配置</a></li>
+<li class="lvl2"><a href="#delivery-options">投递选项</a></li>
+<li class="lvl2"><a href="#direct-delivery-mode">直接投递模式</a></li>
+<li class="lvl3"><a href="#何时使用直接投递">何时使用直接投递</a></li>
+<li class="lvl3"><a href="#示例从-supabase-推送到-telegram">示例：从 Supabase 推送到 Telegram</a></li>
+<li class="lvl3"><a href="#示例通过-cli-动态订阅">示例：通过 CLI 动态订阅</a></li>
+<li class="lvl3"><a href="#响应状态码">响应状态码</a></li>
+<li class="lvl3"><a href="#配置注意事项">配置注意事项</a></li>
+<li class="lvl2"><a href="#event-triggered-cron-jobs">事件触发的 Cron 任务</a></li>
+<li class="lvl3"><a href="#示例在收到-review-反馈时触发-pr-审查任务">示例：在收到 review 反馈时触发 PR 审查任务</a></li>
+<li class="lvl3"><a href="#通过-cli">通过 CLI</a></li>
+<li class="lvl3"><a href="#注意事项">注意事项</a></li>
+<li class="lvl2"><a href="#dynamic-subscriptions">动态订阅（CLI）</a></li>
+<li class="lvl3"><a href="#创建订阅">创建订阅</a></li>
+<li class="lvl3"><a href="#列出订阅">列出订阅</a></li>
+<li class="lvl3"><a href="#删除订阅">删除订阅</a></li>
+<li class="lvl3"><a href="#测试订阅">测试订阅</a></li>
+<li class="lvl3"><a href="#动态订阅的工作原理">动态订阅的工作原理</a></li>
+<li class="lvl3"><a href="#agent-驱动的订阅">agent 驱动的订阅</a></li>
+<li class="lvl2"><a href="#security">安全性</a></li>
+<li class="lvl3"><a href="#hmac-签名验证">HMAC 签名验证</a></li>
+<li class="lvl3"><a href="#secret-为必填项">Secret 为必填项</a></li>
+<li class="lvl3"><a href="#速率限制">速率限制</a></li>
+<li class="lvl3"><a href="#幂等性">幂等性</a></li>
+<li class="lvl3"><a href="#请求体大小限制">请求体大小限制</a></li>
+<li class="lvl3"><a href="#prompt-注入风险">Prompt 注入风险</a></li>
+<li class="lvl2"><a href="#troubleshooting">故障排查</a></li>
+<li class="lvl3"><a href="#webhook-未到达">Webhook 未到达</a></li>
+<li class="lvl3"><a href="#签名验证失败">签名验证失败</a></li>
+<li class="lvl3"><a href="#事件被忽略">事件被忽略</a></li>
+<li class="lvl3"><a href="#agent-未响应">Agent 未响应</a></li>
+<li class="lvl3"><a href="#重复响应">重复响应</a></li>
+<li class="lvl3"><a href="#gh-cli-错误github-评论投递">gh CLI 错误（GitHub 评论投递）</a></li>
+<li class="lvl2"><a href="#environment-variables">环境变量</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

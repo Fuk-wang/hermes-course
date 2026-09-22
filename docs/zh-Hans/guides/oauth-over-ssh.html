@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSH / 远程主机上的 OAuth · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / guides/oauth-over-ssh</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="ssh--远程主机上的-oauth">SSH / 远程主机上的 OAuth</h1>
+<p>部分 Hermes 提供商——<strong>Spotify</strong> 和 <strong>远程 MCP 服务器</strong>（Linear、Sentry、Atlassian、Asana、Figma 等）——使用<em>回环重定向（loopback redirect）</em> OAuth 流程。认证服务器将浏览器重定向到 <code>http://127.0.0.1:&lt;port&gt;/callback</code>，由 Hermes 启动的小型 HTTP 监听器获取授权码。</p>
+<p>当 Hermes 和浏览器在同一台机器上时，这一切运行正常。一旦两者不在同一台机器上就会出问题：你笔记本上的浏览器试图访问<strong>你笔记本</strong>上的 <code>127.0.0.1</code>，但监听器绑定的是<strong>远程服务器</strong>上的 <code>127.0.0.1</code>。</p>
+<p>解决方法是一行 SSH 本地端口转发。对于交互式终端上的 MCP 服务器，通常也可以直接粘贴重定向 URL（无需隧道）。</p>
+<p><strong>xAI Grok OAuth（<code>xai-oauth</code>）使用 OAuth 设备代码</strong>，不是回环回调——在任意浏览器中打开打印的验证 URL，Hermes 轮询直到批准即可，无需 SSH 隧道。请参阅 <a href="xai-grok-oauth.html">xAI Grok OAuth</a>。</p>
+<h2 id="快速概览">快速概览</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># 在你的本地机器（笔记本）上，另开一个终端：</span>
+ssh<span class="w"> </span>-N<span class="w"> </span>-L<span class="w"> </span><span class="m">43827</span>:127.0.0.1:43827<span class="w"> </span>user@remote-host
+
+<span class="c1"># 在远程机器的现有 SSH 会话中：</span>
+hermes<span class="w"> </span>auth<span class="w"> </span>add<span class="w"> </span>spotify<span class="w"> </span>--no-browser
+<span class="c1"># → Hermes 打印授权 URL，在笔记本的浏览器中打开。</span>
+<span class="c1"># → 浏览器重定向到 127.0.0.1:43827/callback，隧道转发到远程监听器，登录完成。</span>
+</code></pre></div>
+
+<p>Hermes 会在 <code>Waiting for callback on ...</code> 一行打印实际绑定的端口——从那里复制。Spotify 默认端口为 <code>43827</code>。</p>
+<h2 id="哪些提供商需要此操作">哪些提供商需要此操作</h2>
+<table>
+<thead>
+<tr>
+<th>提供商</th>
+<th>回环端口</th>
+<th>需要隧道？</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Spotify</td>
+<td><code>43827</code>（默认）</td>
+<td>是，当 Hermes 在远程时</td>
+</tr>
+<tr>
+<td>MCP 服务器（<code>auth: oauth</code>）</td>
+<td>每台服务器自动选择</td>
+<td>是（或粘贴重定向 URL）</td>
+</tr>
+<tr>
+<td><code>xai-oauth</code>（Grok SuperGrok）</td>
+<td>不适用</td>
+<td>否——设备代码流程</td>
+</tr>
+<tr>
+<td><code>anthropic</code>（Claude Pro/Max）</td>
+<td>不适用</td>
+<td>否——粘贴代码流程</td>
+</tr>
+<tr>
+<td><code>openai-codex</code>（ChatGPT Plus/Pro）</td>
+<td>不适用</td>
+<td>否——设备码流程</td>
+</tr>
+<tr>
+<td><code>minimax</code>、<code>nous-portal</code></td>
+<td>不适用</td>
+<td>否——设备码流程</td>
+</tr>
+</tbody>
+</table>
+<p>如果你的提供商不在表中，则不需要隧道。</p>
+<h2 id="为什么监听器不能直接绑定-0000">为什么监听器不能直接绑定 0.0.0.0</h2>
+<p>Spotify 和大多数 MCP OAuth 服务器会根据白名单验证 <code>redirect_uri</code> 参数，并要求回环形式（<code>http://127.0.0.1:&lt;精确端口&gt;/callback</code>）。将监听器绑定到 <code>0.0.0.0</code> 或使用不同端口会导致认证服务器以 redirect_uri 不匹配为由拒绝请求。SSH 隧道可以端到端保持回环 URI 不变。</p>
+<h2 id="分步操作单次-ssh-跳转">分步操作：单次 SSH 跳转</h2>
+<h3 id="1-从本地机器启动隧道">1. 从本地机器启动隧道</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Spotify（端口 43827）</span>
+ssh<span class="w"> </span>-N<span class="w"> </span>-L<span class="w"> </span><span class="m">43827</span>:127.0.0.1:43827<span class="w"> </span>user@remote-host
+</code></pre></div>
+
+<p><code>-N</code> 表示「不打开远程 shell，仅保持隧道」。登录期间保持此终端运行。</p>
+<h3 id="2-在另一个-ssh-会话中运行认证命令">2. 在另一个 SSH 会话中运行认证命令</h3>
+<div class="highlight"><pre><span></span><code>ssh<span class="w"> </span>user@remote-host
+hermes<span class="w"> </span>auth<span class="w"> </span>add<span class="w"> </span>spotify<span class="w"> </span>--no-browser
+</code></pre></div>
+
+<p>Hermes 检测到 SSH 会话，跳过自动打开浏览器，并打印授权 URL 以及 <code>Waiting for callback on http://127.0.0.1:&lt;port&gt;/callback</code>。</p>
+<h3 id="3-在本地浏览器中打开-url">3. 在本地浏览器中打开 URL</h3>
+<p>从远程终端复制授权 URL，粘贴到笔记本的浏览器中。批准同意后，认证服务器重定向到 <code>http://127.0.0.1:&lt;port&gt;/callback</code>。浏览器经隧道访问，请求转发到远程监听器，Hermes 打印 <code>Login successful!</code>。</p>
+<p>看到成功提示后即可关闭隧道（在第一个终端按 Ctrl+C）。</p>
+<h2 id="通过跳板机">通过跳板机</h2>
+<p>如果通过堡垒机 / 跳板机访问 Hermes，使用 SSH 内置的 <code>-J</code>（ProxyJump）：</p>
+<div class="highlight"><pre><span></span><code>ssh<span class="w"> </span>-N<span class="w"> </span>-L<span class="w"> </span><span class="m">43827</span>:127.0.0.1:43827<span class="w"> </span>-J<span class="w"> </span>jump-user@jump-host<span class="w"> </span>user@final-host
+</code></pre></div>
+
+<h2 id="故障排除">故障排除</h2>
+<h3 id="bind-12700143827-address-already-in-use"><code>bind [127.0.0.1]:43827: Address already in use</code></h3>
+<p>笔记本上已有进程占用该端口。结束占用进程后重试 <code>ssh -L</code>。</p>
+<h3 id="等待本地回调超时">等待本地回调超时</h3>
+<p>重定向未到达远程监听器。确认隧道仍在运行，并使用最新一次 <code>Waiting for callback on ...</code> 中的端口（首选端口被占用时 Hermes 可能自动递增）。</p>
+<h2 id="另请参阅">另请参阅</h2>
+<ul>
+<li><a href="xai-grok-oauth.html">xAI Grok OAuth</a>——设备代码；无需 SSH 隧道</li>
+<li><a href="../../user-guide/features/spotify.html#running-over-ssh--in-a-headless-environment" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">Spotify（SSH 上运行）</a></li>
+<li><a href="../../user-guide/features/mcp.html#oauth-authenticated-http-servers" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">原生 MCP 客户端（OAuth 部分）</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/guides/oauth-over-ssh</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#快速概览">快速概览</a></li>
+<li class="lvl2"><a href="#哪些提供商需要此操作">哪些提供商需要此操作</a></li>
+<li class="lvl2"><a href="#为什么监听器不能直接绑定-0000">为什么监听器不能直接绑定 0.0.0.0</a></li>
+<li class="lvl2"><a href="#分步操作单次-ssh-跳转">分步操作：单次 SSH 跳转</a></li>
+<li class="lvl3"><a href="#1-从本地机器启动隧道">1. 从本地机器启动隧道</a></li>
+<li class="lvl3"><a href="#2-在另一个-ssh-会话中运行认证命令">2. 在另一个 SSH 会话中运行认证命令</a></li>
+<li class="lvl3"><a href="#3-在本地浏览器中打开-url">3. 在本地浏览器中打开 URL</a></li>
+<li class="lvl2"><a href="#通过跳板机">通过跳板机</a></li>
+<li class="lvl2"><a href="#故障排除">故障排除</a></li>
+<li class="lvl3"><a href="#bind-12700143827-address-already-in-use">bind [127.0.0.1]:43827: Address already in use</a></li>
+<li class="lvl3"><a href="#等待本地回调超时">等待本地回调超时</a></li>
+<li class="lvl2"><a href="#另请参阅">另请参阅</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

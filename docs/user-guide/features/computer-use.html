@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Computer Use · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/computer-use</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="computer-use">Computer Use</h1>
+<p>Hermes Agent can drive your desktop — clicking, typing, scrolling,
+dragging — in the <strong>background</strong> on <strong>macOS, Windows, and Linux</strong>. Your
+cursor doesn't move, keyboard focus doesn't change, and your virtual
+desktops / Spaces don't switch on you. You and the agent co-work on the
+same machine.</p>
+<p>Unlike most computer-use integrations, this works with <strong>any tool-capable
+model</strong> — Claude, GPT, Gemini, or an open model on a local
+OpenAI-compatible endpoint. There's no Anthropic-native schema to worry
+about.</p>
+<h2 id="how-it-works">How it works</h2>
+<p>The built-in <code>computer_use</code> toolset is the recommended Hermes integration. It
+speaks MCP over stdio to
+<a href="https://github.com/trycua/cua" class="ext" target="_blank" rel="noopener"><code>cua-driver</code></a>, an open-source background
+computer-use driver. Each platform uses the appropriate accessibility +
+input stack under the hood:</p>
+<table>
+<thead>
+<tr>
+<th>Platform</th>
+<th>Accessibility tree</th>
+<th>Input dispatch</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>macOS</td>
+<td>AX (private SkyLight SPIs)</td>
+<td><code>SLPSPostEventRecordTo</code> — pid-scoped, no cursor warp</td>
+</tr>
+<tr>
+<td>Windows</td>
+<td>UIAutomation</td>
+<td><code>SendInput</code> + <code>PostMessage</code> — no focus steal</td>
+</tr>
+<tr>
+<td>Linux</td>
+<td>AT-SPI (X11 + Wayland)</td>
+<td>XTest (X11) / virtual-keyboard (Wayland)</td>
+</tr>
+</tbody>
+</table>
+<p>The result is the same on every platform: the agent can read the
+accessibility tree of any visible window AND post synthesized events
+without bringing it to front, switching virtual desktops, or moving the
+real OS cursor.</p>
+<p>For the underlying contract — <em>why</em> background mode matters, the
+no-foreground invariant, click-dispatch internals — see
+<strong><a href="https://cua.ai/docs/explanation/the-no-foreground-contract" class="ext" target="_blank" rel="noopener">cua.ai/docs/explanation/the-no-foreground-contract</a></strong>.</p>
+<h2 id="enabling">Enabling</h2>
+<p><strong>Fresh installs already have the driver.</strong> The Hermes installer
+(<code>install.sh</code> / <code>install.ps1</code>) pre-installs <code>cua-driver</code> (best-effort;
+pass <code>--skip-computer-use</code> / <code>-SkipComputerUse</code> to opt out), so enabling
+Computer Use is just a config flip:</p>
+<ul>
+<li><strong><code>hermes tools</code></strong> → pick <code>🖱️  Computer Use</code> — installs the driver
+  automatically if it's still missing.</li>
+<li><strong>Dashboard / desktop app</strong> → toggle the Computer Use toolset — if the
+  driver is missing, the toggle kicks off the install in the background
+  automatically (watch progress in the toolset panel).</li>
+</ul>
+<p><strong>Manual fallback (older installs, skipped installer step):</strong></p>
+<div class="highlight"><pre><span></span><code>hermes computer-use install
+</code></pre></div>
+
+<p>This fetches and runs the upstream cua-driver installer — <code>install.sh</code>
+on macOS/Linux, <code>install.ps1</code> on Windows. Use <code>hermes computer-use
+status</code> to verify the install.</p>
+<p>Already have cua-driver? Hermes reuses it when it supports the 0.20 runtime
+contract. During setup, toolset enablement, <code>hermes update</code>, and the first
+<code>computer_use</code> call of a session, Hermes checks the local version and
+manifest. It repairs an old or incomplete standard installation through
+the upstream installer (at most once per session at runtime). A binary
+selected with <code>HERMES_CUA_DRIVER_CMD</code> stays
+under your control, so Hermes reports the incompatibility and leaves it
+unchanged.</p>
+<p>If you install Cua Driver first, <code>cua-driver skills install</code> installs Cua's
+skill pack under <code>~/.cua-driver/skills/cua-driver</code>. Hermes autodetection is a
+planned cua-driver follow-up, so currently point Hermes at that directory or
+symlink it into your skill space. You can also register raw Cua MCP tools as a
+custom MCP server, but that is an alternative for users who need the low-level
+interface. The built-in toolset provides Hermes actions, configuration,
+approvals, and diagnostics.</p>
+<p>After installing, regardless of which path you took, grant the
+platform-appropriate prereqs:</p>
+<table>
+<thead>
+<tr>
+<th>Platform</th>
+<th>Prereqs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>macOS</strong></td>
+<td>System Settings → Privacy &amp; Security → <strong>Accessibility</strong> + <strong>Screen Recording</strong>. Grant the identity named by <code>hermes computer-use doctor</code>. Standard mode uses CuaDriver.app; bounded and unrestricted modes use the Hermes host identity.</td>
+</tr>
+<tr>
+<td><strong>Windows</strong></td>
+<td>None at install time. If you're driving over SSH (not RDP / console), you need the autostart pattern — see <a href="https://cua.ai/docs/how-to-guides/driver/windows-ssh" class="ext" target="_blank" rel="noopener">cua.ai/docs/how-to-guides/driver/windows-ssh</a> for the Session 0 ↔ Session 1+ proxy.</td>
+</tr>
+<tr>
+<td><strong>Linux</strong></td>
+<td>A reachable display server: <code>DISPLAY</code> set for X11, or <code>XDG_SESSION_TYPE=wayland</code>. Wayland sessions need an XWayland bridge for capture. AT-SPI must be on (default on GNOME/KDE/Xfce).</td>
+</tr>
+</tbody>
+</table>
+<p>Then start a session with the toolset enabled:</p>
+<div class="highlight"><pre><span></span><code>hermes -t computer_use chat
+</code></pre></div>
+
+<p>or add <code>computer_use</code> to your enabled toolsets in <code>~/.hermes/config.yaml</code>.</p>
+<h2 id="permission-modes-and-logged-in-browser-profiles">Permission modes and logged-in browser profiles</h2>
+<p>Hermes maps its existing approval UX onto cua-driver's immutable runtime
+modes. Permission mode and capability manifest approval are launch settings.
+They cannot change after the runtime starts:</p>
+<table>
+<thead>
+<tr>
+<th>Hermes session</th>
+<th>cua-driver mode</th>
+<th>Human intervention</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Manual or smart approvals (default)</td>
+<td><code>standard</code></td>
+<td>Normal Hermes approvals; Cua stops at its protected boundary</td>
+</tr>
+<tr>
+<td><code>computer_use.permission_mode: bounded</code> + reviewed manifest</td>
+<td>private <code>bounded</code> daemon</td>
+<td>You review and approve the capability manifest once, at launch</td>
+</tr>
+<tr>
+<td><code>--yolo</code>, <code>/yolo</code>, or <code>approvals.mode: off</code></td>
+<td>private <code>unrestricted</code> daemon</td>
+<td>One explicit Hermes risk acceptance; no runtime Cua prompts</td>
+</tr>
+</tbody>
+</table>
+<p>Browser work — including pages in a signed-in profile — goes through the
+<code>browser</code> toolset (<code>browser_exec</code>), not <code>computer_use</code>. The former
+<code>computer_use.grant_existing_profile</code> opt-in was removed along with the typed
+browser route; a leftover key in config.yaml is ignored.</p>
+<h3 id="bounded-mode-for-repeatable-automation">Bounded mode for repeatable automation</h3>
+<p>For recurring browser automation (cron jobs, scheduled research against an
+authenticated app), <code>bounded</code> mode uses a capability manifest you review once:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">computer_use</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">permission_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">bounded</span>
+<span class="w">  </span><span class="nt">capability_manifest</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.hermes/cua-manifest.yaml</span>
+</code></pre></div>
+
+<p>The manifest names the apps, browser profile kinds, allowed origins, and
+typed tools the session may use (see the
+<a href="https://cua.ai/docs/reference/cua-driver/permission-modes" class="ext" target="_blank" rel="noopener">cua-driver permission modes reference</a>
+for the format). Hermes launches a private runtime with
+<code>--capability-manifest ... --approve-capability-manifest</code>; anything outside
+the manifest fails closed inside cua-driver. A missing or unreadable manifest
+fails loudly at session start rather than silently downgrading. Session YOLO
+still overrides bounded for that one session.</p>
+<p>On macOS, private-session daemons launch through the installed
+<code>CuaDriver.app</code> bundle (so permission grants attribute to the driver's own
+identity instead of resetting with every Hermes build), and Hermes verifies
+the bundle's code signature — exact <code>com.trycua.driver</code> identifier and the
+official signing team — before launching it. If you build cua-driver from
+source (unsigned), opt in explicitly:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">computer_use</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">allow_unsigned_driver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># local driver development only</span>
+</code></pre></div>
+
+<p>Each MCP transport owns a private lifecycle session inside its runtime. A
+public session name is only a label for cursor identity and session-scoped
+state. It does not select, share, or keep a runtime alive. Turning <code>/yolo</code> off,
+resetting or closing the Hermes session, cancellation cleanup, or process exit
+closes that transport session. Hermes also stops private runtimes that it
+launched for bounded or unrestricted access. One Hermes
+conversation cannot change another runtime's mode or grants. Bounded and
+unrestricted modes use a private
+embedded service under the Hermes host identity.</p>
+<p><code>smart</code> approval remains <code>standard</code>: an LLM classification cannot stand in for
+a reviewed manifest.</p>
+<div class="alert alert--warning">
+
+YOLO/unrestricted mode does not protect against prompt injection or unintended
+input. Use it only in a disposable VM or with accounts and data whose full
+compromise you accept.
+
+</div>
+
+<h2 id="hermes-computer-use-doctor--your-first-triage-stop"><code>hermes computer-use doctor</code> — your first triage stop</h2>
+<p><code>hermes computer-use doctor</code> runs cua-driver's structured
+<code>health_report</code> MCP tool and prints a per-check matrix. It's the single
+fastest way to find out <em>why</em> an action isn't working.</p>
+<div class="highlight"><pre><span></span><code>$ hermes computer-use doctor
+⚠️  cua-driver VERSION on darwin: degraded
+  ✅ binary_version: cua-driver VERSION
+  ✅ platform_supported: macOS 26.4.1 (arm64)
+  ✅ session_active: MCP session is active.
+  ❌ bundle_identity: Process has no CFBundleIdentifier.
+      → Run the binary inside CuaDriver.app so TCC grants attribute correctly.
+  ✅ tcc_accessibility: Accessibility is granted.
+  ✅ tcc_screen_recording: Screen Recording is granted.
+  ✅ ax_capability: AX is trusted and reachable.
+  ✅ screen_capture_capability: ScreenCaptureKit reachable; 1 display(s) shareable.
+</code></pre></div>
+
+<ul>
+<li><strong>Exit code 0</strong> when overall is <code>ok</code> — everything's wired up.</li>
+<li><strong>Exit code 1</strong> when <code>degraded</code> or <code>failed</code> — at least one check failed; the hint on each failure tells you what to fix.</li>
+<li><strong>Exit code 2</strong> when the cua-driver binary itself isn't reachable.</li>
+</ul>
+<p>Useful flags:</p>
+<ul>
+<li><code>--include CHECK</code> — run only the listed checks (repeat for multiple)</li>
+<li><code>--skip CHECK</code> — skip a check (wins over <code>--include</code>)</li>
+<li><code>--json</code> — emit the raw structured payload, same shape as the
+  <code>tools/call health_report</code> MCP response</li>
+</ul>
+<p>The check matrix is platform-aware: <code>bundle_identity</code> / <code>tcc_*</code> are
+<code>skip</code> on Windows + Linux because those concepts don't apply.
+<code>ax_capability</code> checks AX on macOS, UIA on Windows, AT-SPI on Linux —
+each with the right diagnostic hint when it can't reach.</p>
+<h2 id="the-agent-cursor-and-sessions">The agent cursor and sessions</h2>
+<p>When the agent acts, you'll see a <strong>tinted overlay cursor</strong> glide
+across the screen to where each click / type / scroll lands. The real
+OS cursor never moves. The overlay shows where the agent is acting. Each
+Hermes run declares a public cua-driver <strong>session name</strong> (something like
+<code>hermes-3a7b9c14d2e8</code>). The name labels cursor identity and related state, so
+concurrent runs and subagents get distinct cursors. The MCP transport owns the
+private lifecycle session inside the runtime; the public name does not.</p>
+<p>The overlay cursor is cosmetic — captures, clicks, and typing all work
+without it. Hermes disables it automatically where it is a known failure
+mode: macOS (idle CPU burn), headless Linux / WSL2 / containers, and
+<strong>Linux X11 desktops</strong> (the overlay is a fullscreen always-on-top window
+that can get stuck over every workspace after an unclean session end,
+wedging desktop input). Linux Wayland and Windows keep the overlay. Set
+<code>computer_use.no_overlay: false</code> in <code>config.yaml</code> to force the cursor on
+(or <code>true</code> to force it off) on any platform.</p>
+<p>Tune the cursor with <code>cua-driver</code>'s CLI flags or the runtime
+<code>set_agent_cursor_style</code> MCP tool — see
+<a href="https://cua.ai/docs/how-to-guides/driver/personalize-cursor" class="ext" target="_blank" rel="noopener">cua.ai/docs/how-to-guides/driver/personalize-cursor</a>
+for the full menu (built-in <code>arrow</code> vs <code>teardrop</code> silhouette, custom
+SVG / PNG / ICO via <code>--cursor-icon</code>, runtime gradient colors, bloom
+halo).</p>
+<h2 id="going-deeper--the-cua-driver-skill-pack">Going deeper — the cua-driver skill pack</h2>
+<p>Hermes keeps its wrapper skill (<code>skills/autonomous-ai-agents/computer-use/SKILL.md</code>)
+focused on the Hermes-side <code>computer_use</code> workflow and action vocabulary. For
+platform details, recording semantics, browser page interaction, and other
+deep Cua behavior, install the skill pack that the cua-driver team ships and
+maintains directly:</p>
+<div class="highlight"><pre><span></span><code>cua-driver skills install
+</code></pre></div>
+
+<p>The command links the pack into <code>~/.hermes/skills/cua-driver</code> (Hermes is one
+of the agents <code>cua-driver skills status</code> reports). The wrapper remains the
+workflow layer: the pack documents the driver's own MCP vocabulary
+(<code>get_window_state</code>, <code>element_token</code>, <code>snapshot_id</code>), which the <code>computer_use</code>
+wrapper translates to for you — keep calling <code>computer_use(action=...)</code>. The
+pack contains:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Topic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SKILL.md</code></td>
+<td>The cross-platform core (snapshot invariant, no-foreground contract, click dispatch, AX-tree mechanics)</td>
+</tr>
+<tr>
+<td><code>MACOS.md</code></td>
+<td>macOS specifics: no-foreground contract, AXMenuBar navigation, SkyLight click dispatch, Apple Events JS bridge</td>
+</tr>
+<tr>
+<td><code>WINDOWS.md</code></td>
+<td>Windows specifics: UIA tree, UWP / <code>ApplicationFrameHost</code> hosting, Session 0 isolation, autostart pattern</td>
+</tr>
+<tr>
+<td><code>LINUX.md</code></td>
+<td>Linux specifics: AT-SPI tree, X11 / Wayland, terminal-emulator detection</td>
+</tr>
+<tr>
+<td><code>RECORDING.md</code></td>
+<td>Trajectory + video recording semantics</td>
+</tr>
+<tr>
+<td><code>WEB_APPS.md</code></td>
+<td>Browser-page interaction tips</td>
+</tr>
+<tr>
+<td><code>TESTS.md</code></td>
+<td>Replay-by-trajectory workflow</td>
+</tr>
+</tbody>
+</table>
+<p>These are <strong>platform deep dives, not duplicates of the Hermes skill</strong> —
+when an agent reports "on Windows, my click landed on the wrong
+element," it reads <code>WINDOWS.md</code> for the UIA / UWP context that
+explains why and what to do differently.</p>
+<p><code>cua-driver skills status</code> shows what's installed and which agent
+harnesses it's linked into. Today the autodetect list covers Claude
+Code, Codex, OpenCode, OpenClaw, and Antigravity; <strong>Hermes
+autodetection is planned as a follow-up in <code>trycua/cua</code></strong> — until
+then, run <code>cua-driver skills install</code> once and point your harness at
+the resulting <code>~/.cua-driver/skills/cua-driver</code> directory (or symlink
+it into your usual skill space).</p>
+<h2 id="quick-example">Quick example</h2>
+<p>User prompt: <em>"Find my latest email from Stripe and summarise what they want me to do."</em></p>
+<p>The agent's plan (this is the same shape on macOS / Windows / Linux —
+the model substitutes the platform's idiomatic shortcut and app name):</p>
+<ol>
+<li><code>computer_use(action="capture", mode="som", app="Mail")</code> — gets a
+   screenshot of the email app with every sidebar item, toolbar button,
+   and message row numbered.</li>
+<li><code>computer_use(action="click", element=14)</code> — clicks the search field.</li>
+<li><code>computer_use(action="type", text="from:stripe")</code></li>
+<li><code>computer_use(action="key", keys="return", capture_after=True)</code> —
+   submit and get the new screenshot.</li>
+<li>Click the top result, read the body, summarise.</li>
+</ol>
+<p>During all of this, your cursor stays wherever you left it and the email
+app never comes to front.</p>
+<h2 id="receiving-the-actual-screenshot">Receiving the actual screenshot</h2>
+<p>Screenshots taken during computer control are normally internal — they exist
+so the model can see the screen, and the agent replies in text. But every
+image capture also saves a bounded, shareable copy under Hermes' image cache
+and reports its path, so on attachment-capable surfaces (Telegram, Discord,
+Desktop, and other gateway platforms) you can simply ask:</p>
+<blockquote>
+<p><em>"Send me a screenshot of my screen."</em></p>
+</blockquote>
+<p>and the agent delivers the real image as a native attachment, not just a
+description. On the CLI there is no attachment channel, so the agent gives
+you the saved file's path instead.</p>
+<p>Only the 20 most recent capture files are kept, and screenshots are never
+sent automatically — only when you ask for one.</p>
+<h3 id="whole-screen-vs-desktop-surface">Whole screen vs. desktop surface</h3>
+<p>"Screenshot my screen" captures <strong>everything currently displayed</strong> — a
+composited grab of all visible windows, like pressing PrtScn. This image has
+no clickable elements, so to <em>act</em> on something in it the agent re-captures
+the specific app.</p>
+<p>Asking for the <strong>desktop</strong> instead targets the OS shell surface itself —
+wallpaper, desktop icons, taskbar — with its clickable elements, so requests
+like "open the Recycle Bin on my desktop" still work.</p>
+<h2 id="provider-compatibility">Provider compatibility</h2>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Vision?</th>
+<th>Works?</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Anthropic (Claude Sonnet/Opus 3+)</td>
+<td>✅</td>
+<td>✅</td>
+<td>Best overall; SOM + raw coordinates.</td>
+</tr>
+<tr>
+<td>OpenRouter (any vision model)</td>
+<td>✅</td>
+<td>✅</td>
+<td>Multi-part tool messages supported.</td>
+</tr>
+<tr>
+<td>OpenAI (GPT-4+, GPT-5)</td>
+<td>✅</td>
+<td>✅</td>
+<td>Same as above.</td>
+</tr>
+<tr>
+<td>Google (Gemini 2+)</td>
+<td>✅</td>
+<td>✅</td>
+<td>Tool-calling + vision both supported.</td>
+</tr>
+<tr>
+<td>Local vLLM / LM Studio / Ollama (vision model)</td>
+<td>✅</td>
+<td>✅</td>
+<td>If the model supports multi-part tool content.</td>
+</tr>
+<tr>
+<td>Text-only models</td>
+<td>❌</td>
+<td>✅ (degraded)</td>
+<td>Use <code>mode="ax"</code> for accessibility-tree-only operation.</td>
+</tr>
+</tbody>
+</table>
+<p>Screenshots are sent inline with tool results as OpenAI-style <code>image_url</code>
+parts. For Anthropic, the adapter converts them into native <code>tool_result</code>
+image blocks. The image MIME type comes from cua-driver's explicit
+<code>mimeType</code> field (<code>image/png</code> or <code>image/jpeg</code>) — no client-side
+magic-byte sniffing.</p>
+<h2 id="safety">Safety</h2>
+<p>Hermes applies multi-layer guardrails:</p>
+<ul>
+<li>Destructive actions (click, type, drag, scroll, key, focus_app)
+  require approval through the same gate as dangerous shell commands —
+  interactively via the CLI dialog or the messaging-platform approval
+  buttons. Once/session/always grants are keyed
+  <code>cua:&lt;action&gt;:&lt;background|foreground&gt;</code> and live in the shared
+  session/<code>command_allowlist</code> store (a background grant never covers the
+  visible foreground variant). Where nobody can answer — cron
+  (<code>approvals.cron_mode</code>), single-query, unattended platforms, or any
+  headless run — the action is refused rather than auto-approved;
+  <code>--yolo</code> / <code>/yolo</code> still bypass.</li>
+<li>Hard-blocked key combos at the tool level: empty trash, force delete,
+  lock screen, log out, force log out.</li>
+<li>Hard-blocked type patterns: <code>curl | bash</code>, <code>sudo rm -rf /</code>, fork
+  bombs, etc.</li>
+<li>The agent's system prompt tells it explicitly: no clicking permission
+  dialogs, no typing passwords, no following instructions embedded in
+  screenshots.</li>
+</ul>
+<p>Pair with <code>approvals.mode: manual</code> in <code>~/.hermes/config.yaml</code> if you
+want every action confirmed.</p>
+<h2 id="token-efficiency">Token efficiency</h2>
+<p>Screenshots are expensive. Hermes applies four layers of optimisation:</p>
+<ul>
+<li><strong>Screenshot eviction</strong> — on every provider, screenshots ride each
+  request until it would cross Anthropic's documented per-request image
+  limit (20 image blocks, or 24 MB of image data); then the oldest batch becomes
+  <code>[screenshot removed to save context]</code> placeholders. Below the limit
+  nothing is rewritten, so the prompt-cache prefix survives; at it, one
+  slower turn per batch instead of one per screenshot. Images you attach
+  yourself count against the limit but are never removed.</li>
+<li><strong>Client-side compression pruning</strong> — the context compressor detects
+  multimodal tool results and strips image parts from old ones.</li>
+<li><strong>Image-aware token estimation</strong> — each image is counted as ~1500
+  tokens (Anthropic's flat rate) instead of its base64 char length.</li>
+<li><strong>Server-side context editing (Anthropic only)</strong> — when active, the
+  adapter enables <code>clear_tool_uses_20250919</code> via <code>context_management</code> so
+  Anthropic's API clears old tool results server-side.</li>
+</ul>
+<p>A 20-action session on a 1568×900 display typically costs ~30K tokens
+of screenshot context, not ~600K.</p>
+<h2 id="limitations">Limitations</h2>
+<ul>
+<li><strong>Performance.</strong> Background mode is slower than foreground —
+  accessibility-routed events take ~5–20 ms on macOS, ~3–10 ms on
+  Windows UIA, ~5–15 ms on Linux AT-SPI vs direct HID posting. Not
+  noticeable for agent-speed clicking; noticeable if you try to record
+  a speed-run.</li>
+<li><strong>No keyboard password entry.</strong> <code>type</code> has hard-block patterns on
+  command-shell payloads; for passwords, use the system's autofill
+  (macOS Keychain / Windows Credential Manager / GNOME Keyring /
+  KWallet).</li>
+<li><strong>Some apps don't expose an accessibility tree.</strong> Modern UWP apps on
+  Windows, Electron &lt; 28 on Linux, and a few macOS apps with custom
+  drawing (Logic, Final Cut, some games) have sparse or empty AX trees.
+  Fall back to pixel coordinates if the tree is empty — or skip the
+  task entirely.</li>
+<li><strong>Windows: elevated (admin) windows can't be driven from a normal
+  agent.</strong> Windows UIPI (User Interface Privilege Isolation) enforces
+  integrity-level boundaries: a Medium-integrity process (the default
+  Hermes agent) cannot enumerate the UIA tree of, or inject mouse input
+  into, a window owned by a High-integrity (Administrator) process.
+  Symptom: <code>capture(mode='som')</code> returns 0 elements and <code>click(...)</code>
+  reports success while doing nothing, even though the screenshot
+  renders fine (GDI capture sits below the integrity check). Keyboard
+  events partially bypass UIPI, so Tab / Enter can still navigate an
+  elevated dialog. This is an OS constraint, not a cua-driver bug — it
+  affects every Windows automation stack. To drive elevated windows,
+  run the Hermes agent itself at High integrity (launch from an
+  elevated terminal); otherwise target non-elevated windows.</li>
+<li><strong>Windows: <code>hermes computer-use doctor</code> fails with "Access is denied"
+  while the tool works.</strong> A cua-driver installed under
+  <code>C:\Program Files\WindowsApps</code> cannot be executed by the Hermes venv
+  interpreter (WinError 5 from <code>CreateProcess</code>), even though the shell
+  resolves the same binary fine. The doctor now reports this as a
+  diagnosis instead of a traceback. Fix once: reinstall with the upstream
+  installer (lands under your user profile) or set
+  <code>HERMES_CUA_DRIVER_CMD</code> to a copy outside <code>WindowsApps</code>.</li>
+<li><strong>Platform-specific deployment gotchas:</strong></li>
+<li><strong>macOS</strong> uses private SkyLight SPIs. Apple can change them in any
+    OS update. Hermes warns when the installed cua-driver is older than
+    the version it was tested against.</li>
+<li><strong>Windows</strong> SSH sessions run in <strong>Session 0</strong>, which has no
+    interactive desktop. Drive Hermes from inside the RDP / console
+    session, or set up cua-driver's autostart Scheduled Task —
+    <a href="https://cua.ai/docs/how-to-guides/driver/windows-ssh" class="ext" target="_blank" rel="noopener">windows-ssh</a>
+    has the recipe.</li>
+<li><strong>Linux</strong> requires a reachable display server. Headless servers
+    need Xvfb (<code>Xvfb :99 -screen 0 1920x1080x24</code>) before
+    <code>computer_use</code> can capture or inject events. Pure Wayland sessions
+    need an XWayland bridge for screen capture (cua-driver's Wayland
+    inject path handles input independently).</li>
+</ul>
+<p>For cross-platform GUI automation without the desktop overhead (and
+without TCC / Session 0 / X11 setup), the <code>browser</code> toolset uses a
+real headless Chromium and is the right answer for web-only tasks.</p>
+<h2 id="configuration">Configuration</h2>
+<p>Permission mode and manifest (see
+<a href="#permission-modes-and-logged-in-browser-profiles">Permission modes</a> above):</p>
+<div class="highlight"><pre><span></span><code><span class="nt">computer_use</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">permission_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">standard</span><span class="w">        </span><span class="c1"># standard (default) | bounded</span>
+<span class="w">  </span><span class="nt">capability_manifest</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">          </span><span class="c1"># capability manifest path, required for bounded</span>
+</code></pre></div>
+
+<p>On Linux, native Wayland support remains an explicit opt-in. Hermes passes the
+opt-in to every cua-driver process, including gateway sessions, only when that
+process also has <code>WAYLAND_DISPLAY</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">computer_use</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">native_wayland</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>Restart a running gateway after changing this setting.</p>
+<p>Override the driver binary path (tests / CI / local builds):</p>
+<div class="highlight"><pre><span></span><code>HERMES_CUA_DRIVER_CMD=/path/to/your/cua-driver
+</code></pre></div>
+
+<p>Swap the backend entirely (for testing):</p>
+<div class="highlight"><pre><span></span><code>HERMES_COMPUTER_USE_BACKEND=noop   # records calls, no side effects
+</code></pre></div>
+
+<h3 id="telemetry">Telemetry</h3>
+<p>cua-driver ships with anonymous usage telemetry (PostHog) enabled by default
+upstream. <strong>Hermes disables it for you</strong> — on every cua-driver invocation
+(the MCP backend, <code>status</code>, <code>doctor</code>, and install) Hermes sets
+<code>CUA_DRIVER_RS_TELEMETRY_ENABLED=0</code> in the driver's environment.</p>
+<p>To opt back in (let cua-driver use its own default and send telemetry), set
+this in <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">computer_use</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">cua_telemetry</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># default: false (telemetry off)</span>
+</code></pre></div>
+
+<p>When it's on, <code>hermes computer-use doctor</code> reports <code>telemetry: enabled</code>;
+when off (the default), it reports <code>telemetry: disabled via
+CUA_DRIVER_RS_TELEMETRY_ENABLED</code>.</p>
+<h2 id="testing-against-a-local-cua-driver-build">Testing against a local cua-driver build</h2>
+<p>When you're developing cua-driver itself — or want to test an
+unreleased fix — point Hermes at a binary you built from source instead
+of the published release. Hermes resolves the driver with
+<code>shutil.which("cua-driver")</code> and <strong>does not enforce
+<code>HERMES_CUA_DRIVER_VERSION</code></strong>, so a local build (reported as
+<code>0.0.0-local-*</code>) is accepted as-is. Two approaches:</p>
+<h3 id="option-a--install-local-build--put-it-on-path">Option A — <code>install-local</code> (build + put it on PATH)</h3>
+<p>From your <code>trycua/cua</code> checkout, run the upstream local installer. It
+builds the Rust backend in release mode and drops <code>cua-driver</code> into the
+same install layout the production installer uses, adding its bin dir
+to your PATH:</p>
+<div class="highlight"><pre><span></span><code><span class="c"># Windows (PowerShell), from the cua repo root</span>
+<span class="p">./</span><span class="n">libs</span><span class="p">/</span><span class="n">cua-driver</span><span class="p">/</span><span class="n">scripts</span><span class="p">/</span><span class="nb">install-local</span><span class="p">.</span><span class="n">ps1</span> <span class="n">-NoAutoStart</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># macOS / Linux, from the cua repo root  (defaults to a debug build without --release)</span>
+./libs/cua-driver/scripts/install-local.sh<span class="w"> </span>--release
+</code></pre></div>
+
+<ul>
+<li>Windows stages the build under <code>%USERPROFILE%\.cua-driver\packages\…</code>
+  and junctions
+  <code>%LOCALAPPDATA%\Programs\Cua\cua-driver\bin</code> (added to your User
+  PATH) to it. macOS/Linux symlinks <code>cua-driver</code> into <code>~/.local/bin</code>
+  (override with <code>--bin-dir &lt;path&gt;</code>).</li>
+<li><code>-NoAutoStart</code> skips registering the <code>cua-driver-serve</code> logon daemon
+  — you don't need it for Hermes testing (see notes).</li>
+</ul>
+<p>Then open a fresh shell (so the PATH change is visible) and confirm:</p>
+<div class="highlight"><pre><span></span><code>cua-driver --version                 # local builds report 0.0.0-local-release
+# Windows:      (Get-Command cua-driver).Source
+# macOS/Linux:  which cua-driver
+</code></pre></div>
+
+<h3 id="option-b--point-hermes-straight-at-the-built-binary-fastest-loop">Option B — point Hermes straight at the built binary (fastest loop)</h3>
+<p>Skip the install ceremony entirely: <code>cargo build</code> and set
+<code>HERMES_CUA_DRIVER_CMD</code> to the resulting binary. Best for rapid
+edit/build/test.</p>
+<div class="highlight"><pre><span></span><code>cargo<span class="w"> </span>build<span class="w"> </span>-p<span class="w"> </span>cua-driver<span class="w">            </span><span class="c1"># add --release for a release build; run from libs/cua-driver/rust</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code># Windows (.env)
+HERMES_CUA_DRIVER_CMD=C:\path\to\cua\libs\cua-driver\rust\target\debug\cua-driver.exe
+# macOS / Linux (.env)
+HERMES_CUA_DRIVER_CMD=/path/to/cua/libs/cua-driver/rust/target/debug/cua-driver
+</code></pre></div>
+
+<h3 id="confirm-hermes-is-using-your-build">Confirm Hermes is using your build</h3>
+<ul>
+<li><code>hermes computer-use status</code> prints the resolved binary path and
+  version.</li>
+<li><code>hermes computer-use doctor</code> confirms the binary is reachable and
+  exercises the full MCP path end-to-end.</li>
+<li>In a session, <code>computer_use(action="capture")</code> exercises the spawned
+  <code>cua-driver mcp</code> child process.</li>
+</ul>
+<h3 id="notes--gotchas">Notes &amp; gotchas</h3>
+<ul>
+<li><strong>Hermes spawns a <code>cua-driver mcp</code> stdio proxy.</strong> In a normal session the
+  proxy connects to (and may start) the standard machine daemon. In explicit
+  Hermes YOLO, Hermes instead owns a private <code>cua-driver serve --embedded</code>
+  child and points the proxy at its private socket or named pipe. The Windows
+  autostart/UIAccess pattern still matters for interactive Session 1+ input
+  from SSH — see the Limitations section.</li>
+<li><strong>Locked binary on Windows.</strong> A running <code>cua-driver-serve</code> daemon can
+  hold <code>cua-driver.exe</code> and block an overwrite on rebuild.
+  <code>install-local.ps1</code> renames the locked binary out of the way
+  automatically; if you <code>cargo build</code> manually (Option B), stop it
+  first with <code>cua-driver autostart disable</code> (or <code>schtasks /End /TN
+  cua-driver-serve</code>).</li>
+<li><strong>Rebuild loop.</strong> After editing cua-driver source, re-run
+  <code>install-local</code> (rebuilds, restages, flips the <code>current</code> junction)
+  for Option A, or just re-<code>cargo build</code> for Option B — no Hermes
+  change needed either way.</li>
+<li><strong>Local builds skip the version check.</strong> Hermes warns when the
+  installed cua-driver is older than its per-OS tested baseline, but
+  exempts <code>0.0.0-local-*</code> dev builds — so your local build never
+  triggers that warning.</li>
+</ul>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p><strong>First action when anything's off: run <code>hermes computer-use doctor</code>.</strong>
+The structured per-check matrix tells you (and any agent helping you
+debug) exactly what's wrong.</p>
+<p>Specific failure modes the doctor doesn't catch:</p>
+<p><strong><code>computer_use backend unavailable: cua-driver is not installed</code></strong> —
+Run <code>hermes computer-use install</code> to fetch the cua-driver binary, or
+run <code>hermes tools</code> and enable the Computer Use toolset.</p>
+<p><strong>Clicks seem to have no effect</strong> — Capture and verify. A modal you
+didn't see may be blocking input. Dismiss it with <code>escape</code> or the close
+button.</p>
+<p><strong>Element indices are stale</strong> — SOM indices are only valid until the
+next <code>capture</code>. Re-capture after any state-changing action. The
+wrapper carries opaque <code>element_token</code>s for stale detection — you'll
+see an explicit error rather than a wrong click.</p>
+<p><strong>"blocked pattern in type text"</strong> — The text you tried to <code>type</code>
+matches the dangerous-shell-pattern list. Break the command up or
+reconsider.</p>
+<p><strong>Empty captures on Linux</strong> — <code>DISPLAY</code> not set, or you're on pure
+Wayland without an XWayland bridge. <code>hermes computer-use doctor</code> will
+flag this as <code>ax_capability: fail</code> with a <code>Set DISPLAY (X11)…</code> hint.</p>
+<p><strong>Empty captures on Windows over SSH</strong> — You're in Session 0 (the
+services session). Drive from RDP / console directly, or set up the
+autostart pattern — see
+<a href="https://cua.ai/docs/how-to-guides/driver/windows-ssh" class="ext" target="_blank" rel="noopener">cua.ai/docs/how-to-guides/driver/windows-ssh</a>.</p>
+<h2 id="see-also">See also</h2>
+<ul>
+<li><strong>Hermes-side skill</strong> — <code>skills/autonomous-ai-agents/computer-use/SKILL.md</code> — teaches the
+  Hermes <code>computer_use</code> action vocabulary; this is what the agent loads.</li>
+<li><strong>cua-driver skill pack</strong> — for platform-specific deep dives
+  (macOS no-foreground contract, Windows UIA + Session 0, Linux AT-SPI</li>
+<li>X11/Wayland, recording, browser pages), run
+  <code>cua-driver skills install</code> and read <code>MACOS.md</code> / <code>WINDOWS.md</code> /
+  <code>LINUX.md</code> / <code>RECORDING.md</code> / <code>WEB_APPS.md</code>. Hermes autodetection is a
+  planned follow-up; currently point Hermes at the installed pack directory
+  or symlink it into your skill space.</li>
+<li><strong>cua.ai/docs</strong> — the cua-driver project's documentation:</li>
+<li><a href="https://cua.ai/docs/explanation/what-is-computer-use" class="ext" target="_blank" rel="noopener">What is computer use?</a> — concept intro</li>
+<li><a href="https://cua.ai/docs/explanation/the-no-foreground-contract" class="ext" target="_blank" rel="noopener">The no-foreground contract</a> — <em>why</em> background mode matters</li>
+<li><a href="https://cua.ai/docs/how-to-guides/driver/install" class="ext" target="_blank" rel="noopener">Install reference</a> — cross-platform install details</li>
+<li><a href="https://cua.ai/docs/how-to-guides/driver/personalize-cursor" class="ext" target="_blank" rel="noopener">Personalize the agent cursor</a> — built-in shapes, custom assets, runtime overrides</li>
+<li><a href="https://cua.ai/docs/how-to-guides/driver/windows-ssh" class="ext" target="_blank" rel="noopener">Drive Windows over SSH</a> — the Session 0 → Session 1+ autostart pattern</li>
+<li><a href="https://cua.ai/docs/how-to-guides/driver/keep-running" class="ext" target="_blank" rel="noopener">Keep cua-driver running</a> — autostart / daemon lifecycle</li>
+<li><a href="https://cua.ai/docs/how-to-guides/driver/connect-your-agent" class="ext" target="_blank" rel="noopener">Connect your agent</a> — register cua-driver with various harnesses (Hermes among them)</li>
+<li><a href="https://github.com/trycua/cua" class="ext" target="_blank" rel="noopener">cua-driver source (trycua/cua)</a></li>
+<li><a href="browser.html">Browser automation</a> for cross-platform web tasks where you don't need to drive native apps.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/computer-use</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-it-works">How it works</a></li>
+<li class="lvl2"><a href="#enabling">Enabling</a></li>
+<li class="lvl2"><a href="#permission-modes-and-logged-in-browser-profiles">Permission modes and logged-in browser profiles</a></li>
+<li class="lvl3"><a href="#bounded-mode-for-repeatable-automation">Bounded mode for repeatable automation</a></li>
+<li class="lvl2"><a href="#hermes-computer-use-doctor--your-first-triage-stop">hermes computer-use doctor — your first triage stop</a></li>
+<li class="lvl2"><a href="#the-agent-cursor-and-sessions">The agent cursor and sessions</a></li>
+<li class="lvl2"><a href="#going-deeper--the-cua-driver-skill-pack">Going deeper — the cua-driver skill pack</a></li>
+<li class="lvl2"><a href="#quick-example">Quick example</a></li>
+<li class="lvl2"><a href="#receiving-the-actual-screenshot">Receiving the actual screenshot</a></li>
+<li class="lvl3"><a href="#whole-screen-vs-desktop-surface">Whole screen vs. desktop surface</a></li>
+<li class="lvl2"><a href="#provider-compatibility">Provider compatibility</a></li>
+<li class="lvl2"><a href="#safety">Safety</a></li>
+<li class="lvl2"><a href="#token-efficiency">Token efficiency</a></li>
+<li class="lvl2"><a href="#limitations">Limitations</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl3"><a href="#telemetry">Telemetry</a></li>
+<li class="lvl2"><a href="#testing-against-a-local-cua-driver-build">Testing against a local cua-driver build</a></li>
+<li class="lvl3"><a href="#option-a--install-local-build--put-it-on-path">Option A — install-local (build + put it on PATH)</a></li>
+<li class="lvl3"><a href="#option-b--point-hermes-straight-at-the-built-binary-fastest-loop">Option B — point Hermes straight at the built binary (fastest loop)</a></li>
+<li class="lvl3"><a href="#confirm-hermes-is-using-your-build">Confirm Hermes is using your build</a></li>
+<li class="lvl3"><a href="#notes--gotchas">Notes &amp;amp; gotchas</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl2"><a href="#see-also">See also</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

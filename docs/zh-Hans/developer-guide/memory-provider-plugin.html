@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory Provider 插件 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/memory-provider-plugin</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="构建-memory-provider-插件">构建 Memory Provider 插件</h1>
+<p>Memory provider 插件为 Hermes Agent 提供跨会话的持久化知识，超越内置的 MEMORY.md 和 USER.md。本指南介绍如何构建一个 memory provider 插件。</p>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>Memory provider 是两种 <strong>provider 插件</strong>类型之一。另一种是 <a href="context-engine-plugin.html">Context Engine 插件</a>，用于替换内置的上下文压缩器。两者遵循相同的模式：单选、配置驱动、通过 <code>hermes plugins</code> 管理。</p>
+</div>
+<h2 id="目录结构">目录结构</h2>
+<p>每个 memory provider 位于 <code>plugins/memory/&lt;name&gt;/</code>：</p>
+<div class="highlight"><pre><span></span><code>plugins/memory/my-provider/
+├── __init__.py      # MemoryProvider 实现 + register() 入口点
+├── plugin.yaml      # 元数据（name、description、hooks）
+└── README.md        # 配置说明、配置参考、工具
+</code></pre></div>
+
+<h2 id="memoryprovider-抽象基类">MemoryProvider 抽象基类</h2>
+<p>你的插件需要实现 <code>agent/memory_provider.py</code> 中的 <code>MemoryProvider</code> 抽象基类（ABC）：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.memory_provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">MemoryProvider</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyMemoryProvider</span><span class="p">(</span><span class="n">MemoryProvider</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;my-provider&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_available</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;检查此 provider 是否可以激活。禁止发起网络请求。&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MY_API_KEY&quot;</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">initialize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">session_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;在 agent 启动时调用一次。</span>
+
+<span class="sd">        kwargs 始终包含：</span>
+<span class="sd">          hermes_home (str): 当前活跃的 HERMES_HOME 路径。用于存储数据。</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_api_key</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MY_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_session_id</span> <span class="o">=</span> <span class="n">session_id</span>
+
+    <span class="c1"># ... 实现其余方法</span>
+</code></pre></div>
+
+<h2 id="必须实现的方法">必须实现的方法</h2>
+<h3 id="核心生命周期">核心生命周期</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>调用时机</th>
+<th>是否必须实现？</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code>（property）</td>
+<td>始终</td>
+<td><strong>是</strong></td>
+</tr>
+<tr>
+<td><code>is_available()</code></td>
+<td>agent 初始化，激活前</td>
+<td><strong>是</strong> — 禁止网络请求</td>
+</tr>
+<tr>
+<td><code>initialize(session_id, **kwargs)</code></td>
+<td>agent 启动</td>
+<td><strong>是</strong></td>
+</tr>
+<tr>
+<td><code>get_tool_schemas()</code></td>
+<td>初始化后，用于注入工具</td>
+<td><strong>是</strong></td>
+</tr>
+<tr>
+<td><code>handle_tool_call(name, args)</code></td>
+<td>agent 调用你的工具时</td>
+<td><strong>是</strong>（如果有工具）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="配置">配置</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>用途</th>
+<th>是否必须实现？</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_config_schema()</code></td>
+<td>为 <code>hermes memory setup</code> 声明配置字段</td>
+<td><strong>是</strong></td>
+</tr>
+<tr>
+<td><code>save_config(values, hermes_home)</code></td>
+<td>将非敏感配置写入原生位置</td>
+<td><strong>是</strong>（除非仅使用环境变量）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="可选-hook">可选 Hook</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>调用时机</th>
+<th>使用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>system_prompt_block()</code></td>
+<td>系统 prompt 组装时</td>
+<td>静态 provider 信息</td>
+</tr>
+<tr>
+<td><code>prefetch(query)</code></td>
+<td>每次 API 调用前</td>
+<td>返回召回的上下文</td>
+</tr>
+<tr>
+<td><code>queue_prefetch(query)</code></td>
+<td>每轮对话结束后</td>
+<td>为下一轮预热</td>
+</tr>
+<tr>
+<td><code>sync_turn(user, assistant)</code></td>
+<td>每轮对话完成后</td>
+<td>持久化对话内容</td>
+</tr>
+<tr>
+<td><code>on_session_end(messages)</code></td>
+<td>对话结束时</td>
+<td>最终提取/刷新</td>
+</tr>
+<tr>
+<td><code>on_pre_compress(messages)</code></td>
+<td>上下文压缩前</td>
+<td>在丢弃前保存关键信息</td>
+</tr>
+<tr>
+<td><code>on_memory_write(action, target, content)</code></td>
+<td>内置 memory 写入时</td>
+<td>同步到你的后端</td>
+</tr>
+<tr>
+<td><code>shutdown()</code></td>
+<td>进程退出时</td>
+<td>清理连接</td>
+</tr>
+</tbody>
+</table>
+<h2 id="配置-schema">配置 Schema</h2>
+<p><code>get_config_schema()</code> 返回一个字段描述符列表，供 <code>hermes memory setup</code> 使用：</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">get_config_schema</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">[</span>
+        <span class="p">{</span>
+            <span class="s2">&quot;key&quot;</span><span class="p">:</span> <span class="s2">&quot;api_key&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;My Provider API key&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;secret&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>           <span class="c1"># → 写入 .env</span>
+            <span class="s2">&quot;required&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+            <span class="s2">&quot;env_var&quot;</span><span class="p">:</span> <span class="s2">&quot;MY_API_KEY&quot;</span><span class="p">,</span>   <span class="c1"># 显式指定环境变量名</span>
+            <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="s2">&quot;https://my-provider.com/keys&quot;</span><span class="p">,</span>  <span class="c1"># 获取密钥的地址</span>
+        <span class="p">},</span>
+        <span class="p">{</span>
+            <span class="s2">&quot;key&quot;</span><span class="p">:</span> <span class="s2">&quot;region&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Server region&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="s2">&quot;us-east&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;choices&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;us-east&quot;</span><span class="p">,</span> <span class="s2">&quot;eu-west&quot;</span><span class="p">,</span> <span class="s2">&quot;ap-south&quot;</span><span class="p">],</span>
+        <span class="p">},</span>
+        <span class="p">{</span>
+            <span class="s2">&quot;key&quot;</span><span class="p">:</span> <span class="s2">&quot;project&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;Project identifier&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+        <span class="p">},</span>
+    <span class="p">]</span>
+</code></pre></div>
+
+<p><code>secret: True</code> 且带有 <code>env_var</code> 的字段写入 <code>.env</code>。非敏感字段传递给 <code>save_config()</code>。</p>
+<div class="admonition adm-tip"><p class="adm-title">最简 Schema 与完整 Schema</p>
+<p><code>get_config_schema()</code> 中的每个字段都会在 <code>hermes memory setup</code> 期间提示用户输入。选项较多的 provider 应保持 schema 精简——只包含用户<strong>必须</strong>配置的字段（API key、必要凭证）。可选配置请在配置文件参考文档中说明（例如 <code>$HERMES_HOME/myprovider.json</code>），而不是在 setup 向导中逐一提示。这样既能保持 setup 流程简洁，又支持高级配置。可参考 Supermemory provider 的实现——它只提示输入 API key，其余选项均位于 <code>supermemory.json</code> 中。</p>
+</div>
+<h2 id="保存配置">保存配置</h2>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">save_config</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">values</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="n">hermes_home</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;将非敏感配置写入原生位置。&quot;&quot;&quot;</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+    <span class="n">config_path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">hermes_home</span><span class="p">)</span> <span class="o">/</span> <span class="s2">&quot;my-provider.json&quot;</span>
+    <span class="n">config_path</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">values</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">2</span><span class="p">))</span>
+</code></pre></div>
+
+<p>对于仅使用环境变量的 provider，保留默认的空实现即可。</p>
+<h2 id="插件入口点">插件入口点</h2>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;由 memory 插件发现系统调用。&quot;&quot;&quot;</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_memory_provider</span><span class="p">(</span><span class="n">MyMemoryProvider</span><span class="p">())</span>
+</code></pre></div>
+
+<h2 id="pluginyaml">plugin.yaml</h2>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-provider</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;此</span><span class="nv"> </span><span class="s">provider</span><span class="nv"> </span><span class="s">功能的简短描述。&quot;</span>
+<span class="nt">hooks</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">on_session_end</span><span class="w">    </span><span class="c1"># 列出你实现的 hook</span>
+</code></pre></div>
+
+<h2 id="线程约定">线程约定</h2>
+<p><strong><code>sync_turn()</code> 必须是非阻塞的。</strong> 如果你的后端存在延迟（API 调用、LLM 处理），请在守护线程中执行：</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">sync_turn</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">user_content</span><span class="p">,</span> <span class="n">assistant_content</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_sync</span><span class="p">():</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_api</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">user_content</span><span class="p">,</span> <span class="n">assistant_content</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s2">&quot;Sync failed: </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">e</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sync_thread</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sync_thread</span><span class="o">.</span><span class="n">is_alive</span><span class="p">():</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_sync_thread</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="mf">5.0</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_sync_thread</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">_sync</span><span class="p">,</span> <span class="n">daemon</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_sync_thread</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+</code></pre></div>
+
+<h2 id="profile-隔离">Profile 隔离</h2>
+<p>所有存储路径<strong>必须</strong>使用 <code>initialize()</code> 中的 <code>hermes_home</code> kwarg，而不是硬编码的 <code>~/.hermes</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 正确 — 按 profile 隔离</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">hermes_constants</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_hermes_home</span>
+<span class="n">data_dir</span> <span class="o">=</span> <span class="n">get_hermes_home</span><span class="p">()</span> <span class="o">/</span> <span class="s2">&quot;my-provider&quot;</span>
+
+<span class="c1"># 错误 — 所有 profile 共享</span>
+<span class="n">data_dir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;~/.hermes/my-provider&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span>
+</code></pre></div>
+
+<h2 id="测试">测试</h2>
+<p>完整的端到端测试模式（使用真实 SQLite provider）请参见 <code>tests/agent/test_memory_plugin_e2e.py</code>。</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.memory_manager</span><span class="w"> </span><span class="kn">import</span> <span class="n">MemoryManager</span>
+
+<span class="n">mgr</span> <span class="o">=</span> <span class="n">MemoryManager</span><span class="p">()</span>
+<span class="n">mgr</span><span class="o">.</span><span class="n">add_provider</span><span class="p">(</span><span class="n">my_provider</span><span class="p">)</span>
+<span class="n">mgr</span><span class="o">.</span><span class="n">initialize_all</span><span class="p">(</span><span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;test-1&quot;</span><span class="p">,</span> <span class="n">platform</span><span class="o">=</span><span class="s2">&quot;cli&quot;</span><span class="p">)</span>
+
+<span class="c1"># 测试工具路由</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">mgr</span><span class="o">.</span><span class="n">handle_tool_call</span><span class="p">(</span><span class="s2">&quot;my_tool&quot;</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;action&quot;</span><span class="p">:</span> <span class="s2">&quot;add&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;test&quot;</span><span class="p">})</span>
+
+<span class="c1"># 测试生命周期</span>
+<span class="n">mgr</span><span class="o">.</span><span class="n">sync_all</span><span class="p">(</span><span class="s2">&quot;user msg&quot;</span><span class="p">,</span> <span class="s2">&quot;assistant msg&quot;</span><span class="p">)</span>
+<span class="n">mgr</span><span class="o">.</span><span class="n">on_session_end</span><span class="p">([])</span>
+<span class="n">mgr</span><span class="o">.</span><span class="n">shutdown_all</span><span class="p">()</span>
+</code></pre></div>
+
+<h2 id="添加-cli-命令">添加 CLI 命令</h2>
+<p>Memory provider 插件可以注册自己的 CLI 子命令树（例如 <code>hermes my-provider status</code>、<code>hermes my-provider config</code>）。这套系统基于约定发现，无需修改核心文件。</p>
+<h3 id="工作原理">工作原理</h3>
+<ol>
+<li>在插件目录中添加 <code>cli.py</code> 文件</li>
+<li>定义 <code>register_cli(subparser)</code> 函数来构建 argparse 树</li>
+<li>memory 插件系统在启动时通过 <code>discover_plugin_cli_commands()</code> 自动发现</li>
+<li>你的命令以 <code>hermes &lt;provider-name&gt; &lt;subcommand&gt;</code> 的形式出现</li>
+</ol>
+<p><strong>仅对活跃 provider 开放：</strong> 你的 CLI 命令只在你的 provider 是配置中活跃的 <code>memory.provider</code> 时才会出现。如果用户尚未配置你的 provider，你的命令不会显示在 <code>hermes --help</code> 中。</p>
+<h3 id="示例">示例</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/memory/my-provider/cli.py</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">my_command</span><span class="p">(</span><span class="n">args</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;由 argparse 分发的处理函数。&quot;&quot;&quot;</span>
+    <span class="n">sub</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="s2">&quot;my_command&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">sub</span> <span class="o">==</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Provider is active and connected.&quot;</span><span class="p">)</span>
+    <span class="k">elif</span> <span class="n">sub</span> <span class="o">==</span> <span class="s2">&quot;config&quot;</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Showing config...&quot;</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Usage: hermes my-provider &lt;status|config&gt;&quot;</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register_cli</span><span class="p">(</span><span class="n">subparser</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;构建 hermes my-provider 的 argparse 树。</span>
+
+<span class="sd">    在 argparse 初始化时由 discover_plugin_cli_commands() 调用。</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">subs</span> <span class="o">=</span> <span class="n">subparser</span><span class="o">.</span><span class="n">add_subparsers</span><span class="p">(</span><span class="n">dest</span><span class="o">=</span><span class="s2">&quot;my_command&quot;</span><span class="p">)</span>
+    <span class="n">subs</span><span class="o">.</span><span class="n">add_parser</span><span class="p">(</span><span class="s2">&quot;status&quot;</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Show provider status&quot;</span><span class="p">)</span>
+    <span class="n">subs</span><span class="o">.</span><span class="n">add_parser</span><span class="p">(</span><span class="s2">&quot;config&quot;</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Show provider config&quot;</span><span class="p">)</span>
+    <span class="n">subparser</span><span class="o">.</span><span class="n">set_defaults</span><span class="p">(</span><span class="n">func</span><span class="o">=</span><span class="n">my_command</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="参考实现">参考实现</h3>
+<p>完整示例请参见 <code>plugins/memory/honcho/cli.py</code>，包含 13 个子命令、跨 profile 管理（<code>--target-profile</code>）以及配置读写。</p>
+<h3 id="含-cli-的目录结构">含 CLI 的目录结构</h3>
+<div class="highlight"><pre><span></span><code>plugins/memory/my-provider/
+├── __init__.py      # MemoryProvider 实现 + register()
+├── plugin.yaml      # 元数据
+├── cli.py           # register_cli(subparser) — CLI 命令
+└── README.md        # 配置说明
+</code></pre></div>
+
+<h2 id="单-provider-规则">单 Provider 规则</h2>
+<p>同一时间只能有<strong>一个</strong>外部 memory provider 处于活跃状态。如果用户尝试注册第二个，MemoryManager 会拒绝并发出警告。这可以防止工具 schema 膨胀和后端冲突。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/memory-provider-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#目录结构">目录结构</a></li>
+<li class="lvl2"><a href="#memoryprovider-抽象基类">MemoryProvider 抽象基类</a></li>
+<li class="lvl2"><a href="#必须实现的方法">必须实现的方法</a></li>
+<li class="lvl3"><a href="#核心生命周期">核心生命周期</a></li>
+<li class="lvl3"><a href="#配置">配置</a></li>
+<li class="lvl3"><a href="#可选-hook">可选 Hook</a></li>
+<li class="lvl2"><a href="#配置-schema">配置 Schema</a></li>
+<li class="lvl2"><a href="#保存配置">保存配置</a></li>
+<li class="lvl2"><a href="#插件入口点">插件入口点</a></li>
+<li class="lvl2"><a href="#pluginyaml">plugin.yaml</a></li>
+<li class="lvl2"><a href="#线程约定">线程约定</a></li>
+<li class="lvl2"><a href="#profile-隔离">Profile 隔离</a></li>
+<li class="lvl2"><a href="#测试">测试</a></li>
+<li class="lvl2"><a href="#添加-cli-命令">添加 CLI 命令</a></li>
+<li class="lvl3"><a href="#工作原理">工作原理</a></li>
+<li class="lvl3"><a href="#示例">示例</a></li>
+<li class="lvl3"><a href="#参考实现">参考实现</a></li>
+<li class="lvl3"><a href="#含-cli-的目录结构">含 CLI 的目录结构</a></li>
+<li class="lvl2"><a href="#单-provider-规则">单 Provider 规则</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

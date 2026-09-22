@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>注册 Microsoft Graph 应用程序 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / guides/microsoft-graph-app-registration</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="注册-microsoft-graph-应用程序">注册 Microsoft Graph 应用程序</h1>
+<p>Teams 会议流水线使用<strong>仅限应用</strong>（daemon）身份验证从 Microsoft Graph 读取会议转录、录制及相关产物——无需用户登录，无需每次会议单独交互式授权。这需要一个经过管理员同意、具备应用程序权限的 Azure AD 应用注册。</p>
+<p>本指南涵盖以下步骤：</p>
+<ol>
+<li>创建应用注册</li>
+<li>创建客户端密钥</li>
+<li>授予流水线所需的 Graph API 权限</li>
+<li>管理员同意这些权限</li>
+<li>（可选）通过应用程序访问策略将应用限定到特定用户</li>
+</ol>
+<p>完成本指南需要<strong>租户管理员权限</strong>（或由管理员代为授予同意）。请记录收集到的值——最终需要填入 <code>~/.hermes/.env</code>。</p>
+<h2 id="前提条件">前提条件</h2>
+<ul>
+<li>一个具备 Teams Premium 或 Teams 许可证（可生成会议转录和录制）的 Microsoft 365 租户</li>
+<li>可访问 Azure 门户 <a href="https://entra.microsoft.com" class="ext" target="_blank" rel="noopener">entra.microsoft.com</a> 的管理员权限</li>
+<li>一个可公开访问的 HTTPS 端点，用于接收 Graph 变更通知（在后续 webhook 监听器步骤中配置）</li>
+</ul>
+<h2 id="步骤-1创建应用注册">步骤 1：创建应用注册</h2>
+<ol>
+<li>以租户管理员身份登录 <a href="https://entra.microsoft.com" class="ext" target="_blank" rel="noopener">entra.microsoft.com</a>。</li>
+<li>导航至 <strong>Identity → Applications → App registrations</strong>。</li>
+<li>点击 <strong>New registration</strong>。</li>
+<li>填写以下内容：</li>
+<li><strong>Name：</strong><code>Hermes Teams Meeting Pipeline</code>（或任何你能识别的名称）。</li>
+<li><strong>Supported account types：</strong><em>Accounts in this organizational directory only (Single tenant)</em>。</li>
+<li><strong>Redirect URI：</strong>留空——仅限应用的身份验证不需要此项。</li>
+<li>点击 <strong>Register</strong>。</li>
+</ol>
+<p>页面将跳转至应用概览页。复制以下两个值：</p>
+<ul>
+<li><strong>Application (client) ID</strong> → <code>MSGRAPH_CLIENT_ID</code></li>
+<li><strong>Directory (tenant) ID</strong> → <code>MSGRAPH_TENANT_ID</code></li>
+</ul>
+<h2 id="步骤-2创建客户端密钥">步骤 2：创建客户端密钥</h2>
+<ol>
+<li>在左侧导航栏中，打开 <strong>Certificates &amp; secrets</strong>。</li>
+<li>点击 <strong>New client secret</strong>。</li>
+<li><strong>Description：</strong><code>hermes-graph-secret</code>。<strong>Expires：</strong>根据你的轮换策略选择合适的值（通常为 6-24 个月）。</li>
+<li>点击 <strong>Add</strong>。</li>
+<li>立即复制 <strong>Value</strong> 列的值——该值仅显示一次。此值即为 <code>MSGRAPH_CLIENT_SECRET</code>。</li>
+</ol>
+<blockquote>
+<p><strong>Secret ID</strong> 列不是密钥本身。你需要的是 <strong>Value</strong> 列。</p>
+</blockquote>
+<h2 id="步骤-3授予-graph-api-权限">步骤 3：授予 Graph API 权限</h2>
+<p>流水线使用最小化的应用程序权限集。仅添加所需权限；每项权限都会扩大应用在租户范围内的读取能力。</p>
+<ol>
+<li>在左侧导航栏中，打开 <strong>API permissions</strong>。</li>
+<li>点击 <strong>Add a permission</strong> → <strong>Microsoft Graph</strong> → <strong>Application permissions</strong>。</li>
+<li>根据下表添加流水线所需的权限。</li>
+<li>添加完成后，点击 <strong>Grant admin consent for <code>&lt;your tenant&gt;</code></strong>。每项权限的 Status 列应变为绿色对勾。</li>
+</ol>
+<h3 id="转录优先摘要所需权限">转录优先摘要所需权限</h3>
+<table>
+<thead>
+<tr>
+<th>权限</th>
+<th>允许应用执行的操作</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>OnlineMeetings.Read.All</code></td>
+<td>读取 Teams 在线会议元数据（主题、参与者、加入 URL）。</td>
+</tr>
+<tr>
+<td><code>OnlineMeetingTranscript.Read.All</code></td>
+<td>读取 Teams 生成的会议转录。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="录制回退所需权限当转录不可用时">录制回退所需权限（当转录不可用时）</h3>
+<table>
+<thead>
+<tr>
+<th>权限</th>
+<th>允许应用执行的操作</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>OnlineMeetingRecording.Read.All</code></td>
+<td>下载 Teams 会议录制以进行离线语音转文字处理。</td>
+</tr>
+<tr>
+<td><code>CallRecords.Read.All</code></td>
+<td>仅知道加入 URL 时，通过通话记录解析会议信息。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="出站摘要投递所需权限仅限-graph-模式">出站摘要投递所需权限（仅限 Graph 模式）</h3>
+<p>若 <code>platforms.teams.extra.delivery_mode</code> 设置为 <code>graph</code>，流水线将通过 Graph API 将摘要发布到 Teams 频道或聊天。如果使用 <code>incoming_webhook</code> 投递模式，可跳过这些权限。</p>
+<table>
+<thead>
+<tr>
+<th>权限</th>
+<th>允许应用执行的操作</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ChannelMessage.Send</code></td>
+<td>以应用身份向 Teams 频道发布消息。</td>
+</tr>
+<tr>
+<td><code>Chat.ReadWrite.All</code></td>
+<td>向一对一及群组聊天发布消息（仅在将 <code>chat_id</code> 设为投递目标时需要）。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="不推荐的权限">不推荐的权限</h3>
+<ul>
+<li><code>OnlineMeetings.ReadWrite.All</code> / <code>Chat.ReadWrite</code>（不带 <code>.All</code>）——权限范围超出流水线所需。</li>
+<li>委托权限——流水线使用仅限应用（客户端凭据）流程；委托权限在没有用户登录的情况下无法生效。</li>
+</ul>
+<h2 id="步骤-4推荐通过应用程序访问策略限定应用范围">步骤 4：（推荐）通过应用程序访问策略限定应用范围</h2>
+<p>默认情况下，<code>OnlineMeetings.Read.All</code> 等应用程序权限会授予应用访问租户中<strong>所有</strong>会议的权限。对于合作伙伴演示和开发租户而言这没有问题；但在生产环境中，你几乎肯定需要限制应用可读取哪些用户的会议。</p>
+<p>Microsoft 专门为 Teams 提供了<strong>应用程序访问策略</strong>（Application Access Policies）。该策略仅支持 PowerShell 操作，没有门户 UI。</p>
+<p>在已安装并连接 MicrosoftTeams 模块的管理员 PowerShell 中（<code>Connect-MicrosoftTeams</code>）执行：</p>
+<div class="highlight"><pre><span></span><code><span class="c"># Create a policy scoped to the Hermes app</span>
+<span class="nb">New-CsApplicationAccessPolicy</span> <span class="p">`</span>
+  <span class="n">-Identity</span> <span class="s2">&quot;Hermes-Meeting-Pipeline-Policy&quot;</span> <span class="p">`</span>
+  <span class="n">-AppIds</span> <span class="s2">&quot;&lt;MSGRAPH_CLIENT_ID&gt;&quot;</span> <span class="p">`</span>
+  <span class="n">-Description</span> <span class="s2">&quot;Restrict Hermes meeting pipeline to allow-listed users&quot;</span>
+
+<span class="c"># Grant the policy to specific users whose meetings the pipeline may read</span>
+<span class="nb">Grant-CsApplicationAccessPolicy</span> <span class="p">`</span>
+  <span class="n">-PolicyName</span> <span class="s2">&quot;Hermes-Meeting-Pipeline-Policy&quot;</span> <span class="p">`</span>
+  <span class="n">-Identity</span> <span class="s2">&quot;alice@example.com&quot;</span>
+
+<span class="nb">Grant-CsApplicationAccessPolicy</span> <span class="p">`</span>
+  <span class="n">-PolicyName</span> <span class="s2">&quot;Hermes-Meeting-Pipeline-Policy&quot;</span> <span class="p">`</span>
+  <span class="n">-Identity</span> <span class="s2">&quot;bob@example.com&quot;</span>
+</code></pre></div>
+
+<p>授权后策略生效最长需要 30 分钟。使用以下命令验证：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">Test-CsApplicationAccessPolicy</span> <span class="n">-Identity</span> <span class="s2">&quot;alice@example.com&quot;</span> <span class="n">-AppId</span> <span class="s2">&quot;&lt;MSGRAPH_CLIENT_ID&gt;&quot;</span>
+</code></pre></div>
+
+<p>若不配置此策略，<strong>任何</strong>用户的会议均可被读取——这正是该权限在技术层面所授予的范围。生产租户请勿跳过此步骤。</p>
+<h2 id="步骤-5将凭据写入环境文件">步骤 5：将凭据写入环境文件</h2>
+<p>将收集到的三个值填入 <code>~/.hermes/.env</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MSGRAPH_TENANT_ID</span><span class="o">=</span>&lt;directory-tenant-id&gt;
+<span class="nv">MSGRAPH_CLIENT_ID</span><span class="o">=</span>&lt;application-client-id&gt;
+<span class="nv">MSGRAPH_CLIENT_SECRET</span><span class="o">=</span>&lt;client-secret-value&gt;
+</code></pre></div>
+
+<p>设置文件权限，确保只有你能读取密钥：</p>
+<div class="highlight"><pre><span></span><code>chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span>~/.hermes/.env
+</code></pre></div>
+
+<h2 id="步骤-6验证令牌流程">步骤 6：验证令牌流程</h2>
+<p>Hermes 内置了 Graph 身份验证冒烟测试。在 Hermes 安装目录下执行：</p>
+<div class="highlight"><pre><span></span><code><span class="n">python</span> <span class="o">-</span><span class="n">c</span> <span class="s2">&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">tools.microsoft_graph_auth</span><span class="w"> </span><span class="kn">import</span> <span class="n">MicrosoftGraphTokenProvider</span>
+<span class="n">provider</span> <span class="o">=</span> <span class="n">MicrosoftGraphTokenProvider</span><span class="o">.</span><span class="n">from_env</span><span class="p">()</span>
+<span class="n">token</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">provider</span><span class="o">.</span><span class="n">get_access_token</span><span class="p">())</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;Token acquired, length:&#39;</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">token</span><span class="p">))</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">provider</span><span class="o">.</span><span class="n">inspect_token_health</span><span class="p">())</span>
+<span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>成功执行后将打印一个较长的 token（令牌）字符串，以及一个健康状态字典，其中 <code>cached: True</code>，<code>expires_in_seconds</code> 值接近 3600。失败时将抛出 <code>MicrosoftGraphTokenError</code>，并附带 Azure 错误码——最常见的错误如下：</p>
+<table>
+<thead>
+<tr>
+<th>Azure 错误码</th>
+<th>含义</th>
+<th>修复方法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AADSTS7000215: Invalid client secret</code></td>
+<td>密钥值不匹配或已过期。</td>
+<td>在步骤 2 中生成新密钥，并更新 <code>.env</code>。</td>
+</tr>
+<tr>
+<td><code>AADSTS700016: Application not found</code></td>
+<td><code>MSGRAPH_CLIENT_ID</code> 错误或租户不匹配。</td>
+<td>确认步骤 1 中的值来自同一应用。</td>
+</tr>
+<tr>
+<td><code>AADSTS90002: Tenant not found</code></td>
+<td><code>MSGRAPH_TENANT_ID</code> 存在拼写错误。</td>
+<td>重新从应用概览页复制 Directory (tenant) ID。</td>
+</tr>
+<tr>
+<td><code>insufficient_claims</code>（调用时报错，非获取令牌时）</td>
+<td>令牌获取成功，但 Graph 返回 401/403。</td>
+<td>跳过了步骤 3 的管理员同意，或添加权限后未重新同意。重新进入 API permissions 并点击 <strong>Grant admin consent</strong>。</td>
+</tr>
+</tbody>
+</table>
+<h2 id="轮换客户端密钥">轮换客户端密钥</h2>
+<p>Azure 客户端密钥有固定的过期时间。在密钥过期前：</p>
+<ol>
+<li>在步骤 2 中创建第二个客户端密钥，不要删除第一个。</li>
+<li>用新值更新 <code>~/.hermes/.env</code> 中的 <code>MSGRAPH_CLIENT_SECRET</code>。</li>
+<li>重启 gateway 以使新密钥生效：<code>hermes gateway restart</code>。</li>
+<li>使用上述冒烟测试进行验证。</li>
+<li>在 Azure 门户中删除旧密钥。</li>
+</ol>
+<h2 id="后续步骤">后续步骤</h2>
+<p>凭据验证通过后，继续完成以下配置：</p>
+<ul>
+<li><strong>Webhook 监听器配置</strong>——部署接收 Graph 变更通知的 <code>msgraph_webhook</code> gateway 平台。</li>
+<li><strong>流水线配置</strong>——配置 Teams 会议流水线运行时及操作员 CLI。</li>
+<li><strong>出站投递</strong>——将摘要回传至 Teams 频道或聊天。</li>
+</ul>
+<p>上述页面将随添加对应运行时的 PR 一并发布。本凭据配置是独立的前提步骤，可提前完成。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/guides/microsoft-graph-app-registration</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#前提条件">前提条件</a></li>
+<li class="lvl2"><a href="#步骤-1创建应用注册">步骤 1：创建应用注册</a></li>
+<li class="lvl2"><a href="#步骤-2创建客户端密钥">步骤 2：创建客户端密钥</a></li>
+<li class="lvl2"><a href="#步骤-3授予-graph-api-权限">步骤 3：授予 Graph API 权限</a></li>
+<li class="lvl3"><a href="#转录优先摘要所需权限">转录优先摘要所需权限</a></li>
+<li class="lvl3"><a href="#录制回退所需权限当转录不可用时">录制回退所需权限（当转录不可用时）</a></li>
+<li class="lvl3"><a href="#出站摘要投递所需权限仅限-graph-模式">出站摘要投递所需权限（仅限 Graph 模式）</a></li>
+<li class="lvl3"><a href="#不推荐的权限">不推荐的权限</a></li>
+<li class="lvl2"><a href="#步骤-4推荐通过应用程序访问策略限定应用范围">步骤 4：（推荐）通过应用程序访问策略限定应用范围</a></li>
+<li class="lvl2"><a href="#步骤-5将凭据写入环境文件">步骤 5：将凭据写入环境文件</a></li>
+<li class="lvl2"><a href="#步骤-6验证令牌流程">步骤 6：验证令牌流程</a></li>
+<li class="lvl2"><a href="#轮换客户端密钥">轮换客户端密钥</a></li>
+<li class="lvl2"><a href="#后续步骤">后续步骤</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuring Models · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/configuring-models</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="configuring-models">Configuring Models</h1>
+<p>Hermes uses two kinds of model slots:</p>
+<ul>
+<li><strong>Main model</strong> — what the agent thinks with. Every user message, every tool-call loop, every streamed response goes through this model.</li>
+<li><strong>Auxiliary models</strong> — smaller side-jobs the agent offloads. Context compression, vision (image analysis), web-page summarization, approval scoring, MCP tool routing, session-title generation, and skill search. Each has its own slot and can be overridden independently.</li>
+</ul>
+<p>This page covers configuring both from the dashboard. If you prefer config files or the CLI, jump to <a href="#alternative-methods">Alternative methods</a> at the bottom. To run models on your own machine instead of a cloud provider, see <a href="local-models.html">Local Models</a>.</p>
+<div class="admonition adm-tip"><p class="adm-title">Fastest path: Nous Portal</p>
+<p><a href="features/tool-gateway.html">Nous Portal</a> provides 300+ models under one subscription. On a fresh install, run <code>hermes setup --portal</code> to log in and set Nous as your provider in one command. Inspect what's wired up with <code>hermes portal info</code>.</p>
+<ul>
+<li>Portal subscribers also get <strong>10% off token-billed providers</strong>.</li>
+</ul>
+</div>
+<div class="admonition adm-note"><p class="adm-title">`model:` schema — empty string vs. mapping</p>
+<p>On a brand-new install the bundled default config has <code>model: ""</code> (an empty string sentinel meaning "not configured yet"). The first time you run <code>hermes setup</code> or <code>hermes model</code>, that key is upgraded in-place to a mapping with <code>provider</code>, <code>default</code>, <code>base_url</code>, and <code>api_mode</code> sub-keys — the shape shown throughout this page and in <a href="profiles.html"><code>profiles.md</code></a> / <a href="configuration.html"><code>configuration.md</code></a>. If you ever see an empty string in <code>config.yaml</code>, run <code>hermes model</code> (or click <strong>Change</strong> in the dashboard) and Hermes will write the dict form for you.</p>
+</div>
+<h2 id="the-models-page">The Models page</h2>
+<p>Open the dashboard and click <strong>Models</strong> in the sidebar. You get two sections:</p>
+<ol>
+<li><strong>Model Settings</strong> — the top panel, where you assign models to slots.</li>
+<li><strong>Usage analytics</strong> — ranked cards showing every model that ran a session in the selected period, with token counts, cost, and capability badges.</li>
+</ol>
+<p><img alt="Models page overview" src="../../assets/img/docs/dashboard-models/overview.png" /></p>
+<p>The top card is the <strong>Model Settings</strong> panel. The main row always shows what the agent will spin up for new sessions. Click <strong>Change</strong> to open the picker.</p>
+<h2 id="setting-the-main-model">Setting the main model</h2>
+<p>Click <strong>Change</strong> on the Main model row:</p>
+<p><img alt="Model picker dialog" src="../../assets/img/docs/dashboard-models/picker-dialog.png" /></p>
+<p>The picker has two columns:</p>
+<ul>
+<li><strong>Left</strong> — authenticated providers. Only providers you've set up (API key set, OAuth'd, or defined as a custom endpoint) show up here. If a provider is missing, head to <strong>Keys</strong> and add its credential.</li>
+<li><strong>Right</strong> — the curated model list for the selected provider. These are the agentic models Hermes recommends for that provider, not the raw <code>/models</code> dump (which on OpenRouter includes 400+ models including TTS, image generators, and rerankers).</li>
+</ul>
+<p>Type in the filter box to narrow by provider name, slug, or model ID.</p>
+<p>Pick a model, hit <strong>Switch</strong>, and Hermes writes it to <code>~/.hermes/config.yaml</code> under the <code>model</code> section. <strong>This applies to new sessions only</strong> — any chat tab you already have open keeps running whatever model it started with. To hot-swap the current chat, use the <code>/model</code> slash command inside it.</p>
+<h3 id="mid-session-switches-and-context-warnings">Mid-session switches and context warnings</h3>
+<p>When you switch models <strong>inside an active session</strong> (Herm TUI model picker, <code>hermes</code> CLI, or <code>/model</code> on Telegram/Discord), Hermes estimates whether your <strong>next message</strong> will run <strong>preflight context compression</strong> against the new model's window. If the session is already near or above that model's compression threshold (see <a href="configuration.html#context-compression">Context Compression</a>), the switch reply includes a warning — the same <code>warning_message</code> path used for expensive-model notices. The switch still applies immediately; compression runs on the <strong>first user message after the switch</strong>, before the model answers.</p>
+<div class="admonition adm-warning"><p class="adm-title">Mid-session switches reset the prompt cache</p>
+<p>Prompt caches are keyed to the model serving the request, so any mid-conversation model change — an explicit <code>/model</code> switch, an <a href="features/fallback-providers.html">automatic fallback</a>, or a <a href="features/credential-pools.html">credential-pool</a> rotation onto a different account — means the next message re-reads the entire conversation at full input-token price instead of the cached (~75–90% discounted) rate. On a long session this one-time re-read can dwarf the per-token difference between the two models. Switch when you need to, but prefer doing it early in a conversation or right after starting a fresh session.</p>
+</div>
+<p>Because of that one-time re-read cost, Hermes asks for <strong>explicit confirmation</strong> before applying a mid-session switch when the live session already holds a large context (default: <strong>100,000 tokens</strong>, measured from the latest provider-billed prompt size). The confirmation renders through the same selection-guard prompt as the expensive-model and data-training warnings wherever a live session is switching: the CLI and TUI <code>/model</code> command and picker, and a typed gateway <code>/model</code> in a chat with an active agent. Tune or disable it in <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># Ask before mid-session switches when the session exceeds this many</span>
+<span class="w">  </span><span class="c1"># context tokens (the next reply re-reads them uncached). 0 disables.</span>
+<span class="w">  </span><span class="nt">switch_context_confirm_tokens</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100000</span>
+</code></pre></div>
+
+<p>Re-selecting the model you're already on never prompts (the cache stays warm), and sessions with no measured context (fresh sessions, non-live surfaces) are exempt.</p>
+<h3 id="unattended-data-training-tiers">Unattended data-training tiers</h3>
+<p>Models with a <code>-contributor</code> suffix (e.g. <code>muse-spark-1.2-contributor</code>, <code>muse-spark-1.3-contributor</code>) are discounted because the vendor may train on your prompts and completions. Interactive model selection always shows a confirmation prompt. Non-interactive startup paths such as Kanban workers and cron agents fail closed because they cannot ask that question.</p>
+<p>If training on the unattended workload's data is acceptable, record a persistent acknowledgement:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>security.allow_data_training_tiers_noninteractive<span class="w"> </span><span class="nb">true</span>
+</code></pre></div>
+
+<p>Hermes still prints the full data-policy warning and the acknowledgement key on every unattended startup, so worker logs retain an audit trail. This setting does not approve expensive-model or provider-routing warnings, and it does not replace the interactive confirmation prompt. Revoke it with <code>hermes config unset security.allow_data_training_tiers_noninteractive</code>.</p>
+<h2 id="setting-auxiliary-models">Setting auxiliary models</h2>
+<p>Click <strong>Show auxiliary</strong> to reveal the 11 task slots:</p>
+<p><img alt="Auxiliary panel expanded" src="../../assets/img/docs/dashboard-models/auxiliary-expanded.png" /></p>
+<p>Every auxiliary task defaults to <code>auto</code> — meaning Hermes tries your main model for that job too. If that route is unavailable or hits a capacity-style failure, <code>auto</code> follows any task-specific <code>auxiliary.&lt;task&gt;.fallback_chain</code>, then the main <code>fallback_providers</code> / <code>fallback_model</code> chain. It never guesses a provider you did not configure: with a main provider selected and no fallback declared, the side task is skipped with a warning rather than billed to another account you happen to be logged into. (Hermes' built-in discovery chain only runs when no main provider is selected at all.) Override a specific task when you want a cheaper or faster model for a side-job.</p>
+<h3 id="common-override-patterns">Common override patterns</h3>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>When to override</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Title Gen</strong></td>
+<td>When title latency or cost matters more than matching the main model. Pin a known-good flash model, or set <code>auxiliary.title_generation.prefer_fast_model: true</code> to let Hermes choose the provider's fast tier.</td>
+</tr>
+<tr>
+<td><strong>Vision</strong></td>
+<td>When your main model lacks vision support. Point it at <code>google/gemini-2.5-flash</code> or <code>gpt-4o-mini</code>.</td>
+</tr>
+<tr>
+<td><strong>Compression</strong></td>
+<td>When you're burning reasoning tokens on Opus/M2.7 just to summarize context. A fast chat model does the job at 1/50th the cost.</td>
+</tr>
+<tr>
+<td><strong>Approval</strong></td>
+<td>For <code>approval_mode: smart</code> — a fast/cheap model (haiku, flash, gpt-5-mini) decides whether to auto-approve low-risk commands. Expensive models here are waste.</td>
+</tr>
+<tr>
+<td><strong>Web Extract</strong></td>
+<td>When you use <code>web_extract</code> heavily. Same logic as compression — summarization doesn't need reasoning.</td>
+</tr>
+<tr>
+<td><strong>Skills Hub</strong></td>
+<td><code>hermes skills search</code> uses this. Usually fine at <code>auto</code>.</td>
+</tr>
+<tr>
+<td><strong>MCP</strong></td>
+<td>MCP tool routing. Usually fine at <code>auto</code>.</td>
+</tr>
+<tr>
+<td><strong>Triage Specifier</strong></td>
+<td>Routes the Kanban triage specifier (<code>hermes kanban specify</code>) that expands a rough one-liner into a concrete spec. A cheap, capable model works well.</td>
+</tr>
+<tr>
+<td><strong>Kanban Decomposer</strong></td>
+<td>Routes Kanban task decomposition — splits a triage task into a graph of child tasks for specialist profiles.</td>
+</tr>
+<tr>
+<td><strong>Profile Describer</strong></td>
+<td>Routes profile-description generation (<code>hermes profile describe --auto</code> / the dashboard auto-generate button). Short, cheap call.</td>
+</tr>
+<tr>
+<td><strong>Curator</strong></td>
+<td>Routes the curator skill-usage review pass. Can run for minutes on reasoning models, so a cheaper aux model is often worthwhile.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="per-task-override">Per-task override</h3>
+<p>Click <strong>Change</strong> on any auxiliary row. Same picker opens, same behavior — pick provider + model, hit Switch. The row updates to show <code>provider · model</code> instead of <code>auto (use main model)</code>.</p>
+<h3 id="reset-all-to-auto">Reset all to auto</h3>
+<p>If you've over-tuned and want to start over, click <strong>Reset all to auto</strong> at the top of the auxiliary section. Every slot goes back to using your main model.</p>
+<h2 id="the-use-as-shortcut">The "Use as" shortcut</h2>
+<p>Every model card on the page has a <strong>Use as</strong> dropdown. This is the fast path — pick a model you see in your analytics, click <strong>Use as</strong>, and assign it to the main slot or any specific auxiliary task in one click:</p>
+<p><img alt="Use as dropdown" src="../../assets/img/docs/dashboard-models/use-as-dropdown.png" /></p>
+<p>The dropdown has:</p>
+<ul>
+<li><strong>Main model</strong> — same as clicking Change on the main row.</li>
+<li><strong>All auxiliary tasks</strong> — assigns this model to all 11 aux slots at once. Useful when you just want every side-job on a cheap flash model.</li>
+<li><strong>Individual task options</strong> — Vision, Web Extract, Compression, etc. The currently-assigned model for each task is marked <code>current</code>.</li>
+</ul>
+<p>Cards are badged with <code>main</code> or <code>aux · &lt;task&gt;</code> when they're currently assigned to something — so you can see at a glance which of your historical models are wired in where.</p>
+<h2 id="what-gets-written-to-configyaml">What gets written to <code>config.yaml</code></h2>
+<p>When you save via the dashboard, Hermes writes to <code>~/.hermes/config.yaml</code>:</p>
+<p><strong>Main model:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">anthropic/claude-opus-4.7</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&#39;</span><span class="w">        </span><span class="c1"># cleared on provider switch</span>
+<span class="w">  </span><span class="nt">api_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">chat_completions</span>
+</code></pre></div>
+
+<p><strong>Auxiliary override (example — vision on gemini-flash):</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">vision</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">google/gemini-2.5-flash</span>
+<span class="w">    </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&#39;</span>
+<span class="w">    </span><span class="nt">api_key</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&#39;</span>
+<span class="w">    </span><span class="nt">timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">120</span>
+<span class="w">    </span><span class="nt">extra_body</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span>
+<span class="w">    </span><span class="nt">download_timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span>
+</code></pre></div>
+
+<p><strong>Auxiliary on auto (default):</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">compression</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">auto</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&#39;</span>
+<span class="w">    </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&#39;</span>
+<span class="w">    </span><span class="c1"># ... other fields unchanged</span>
+</code></pre></div>
+
+<p><code>provider: auto</code> with <code>model: ''</code> tells Hermes to use the main model for that task, while still honoring fallback policy if the main route cannot serve the auxiliary call.</p>
+<p>Optional task-specific fallback chains live under the same auxiliary task:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">title_generation</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">auto</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&#39;</span>
+<span class="w">    </span><span class="nt">fallback_chain</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span>
+<span class="w">        </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">inclusionai/ring-2.6-1t:free</span>
+</code></pre></div>
+
+<p>When <code>fallback_chain</code> is absent, <code>auto</code> uses the top-level <code>fallback_providers</code> chain. If that is also absent and the main provider cannot serve the call, the task is skipped with a warning — Hermes does not fall through to other logged-in providers.</p>
+<h2 id="per-provider-request-options">Per-provider request options</h2>
+<p>Provider entries (<code>providers.&lt;name&gt;</code> in the <code>providers:</code> dict, or items in the legacy <code>custom_providers</code> list) accept knobs that shape how Hermes talks to the endpoint:</p>
+<p><strong><code>extra_headers</code></strong> — a mapping of extra HTTP headers attached to every LLM request routed to that provider's base URL. They are applied last, after URL/profile defaults and user header overrides, so they survive credential swaps and client rebuilds. Useful for Cloudflare Access service tokens, proxy auth, or custom bearer schemes:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">providers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">my-gateway</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">api</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://llm.internal.example.com/v1</span>
+<span class="w">    </span><span class="nt">api_key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sk-...</span>
+<span class="w">    </span><span class="nt">extra_headers</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">CF-Access-Client-Id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;xxxx.access&quot;</span>
+<span class="w">      </span><span class="nt">CF-Access-Client-Secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;yyyy&quot;</span>
+</code></pre></div>
+
+<p>Header values routinely carry credentials — Hermes never logs them. <code>extra_headers</code> applies to OpenAI-compatible routes and to <code>anthropic_messages</code> routes (the main client, <code>/model</code> switches, rebuilds and auxiliary clients alike); <code>bedrock_converse</code> does not use it. A relay behind a WAF that rejects the SDK's default <code>User-Agent</code> (403 "Your request was blocked" or a browser-challenge page) is the typical reason to set one — Hermes reports such a 403 as a firewall/CDN block rather than an API-key rejection.</p>
+<p><strong><code>session_affinity_header</code></strong> — the NAME of a header that carries Hermes' conversation id on every request to that provider (main turn on <code>chat_completions</code>, <code>anthropic_messages</code> and <code>codex_responses</code>, plus auxiliary calls such as compression and titles). Off unless set — Hermes never sends a session identifier to an endpoint that did not ask for one. Session-aware proxies fronting a stateful backend (LiteLLM's <code>x-litellm-session-id</code>, self-hosted Claude/OpenAI gateways) otherwise have nothing to correlate an agent loop on and treat nearly every request as a new conversation, re-sending the whole history upstream on each turn. The value is opaque, stable across the turns of one conversation (including compaction), and different for every conversation:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">providers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">my-proxy</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">api</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http://127.0.0.1:4000/v1</span>
+<span class="w">    </span><span class="nt">api_key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sk-...</span>
+<span class="w">    </span><span class="nt">session_affinity_header</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">x-litellm-session-id</span>
+</code></pre></div>
+
+<p><strong><code>discover_models</code></strong> — set to <code>false</code> (default <code>true</code>) to skip querying the endpoint's <code>/models</code> listing and use only the <code>models</code> you configured on the entry. Handy for gateways whose model listing is slow, unreliable, or noisy:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">providers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">my-gateway</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">api</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://llm.internal.example.com/v1</span>
+<span class="w">    </span><span class="nt">discover_models</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">    </span><span class="nt">models</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-finetune-v2</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-finetune-v1</span>
+</code></pre></div>
+
+<p>With discovery off, the model picker (<code>hermes model</code>, <code>/model</code>) shows the configured list instead of a live probe.</p>
+<p><strong><code>openai_native_compaction</code></strong> — set this capability to <code>true</code> only for an OpenAI-compatible endpoint that you trust with conversation content. Native compaction sends its payload to that provider's configured <code>base_url</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">providers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">trusted-proxy</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">api</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://llm.internal.example.com/v1</span>
+<span class="w">    </span><span class="nt">capabilities</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">openai_native_compaction</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>For a gateway that resolves a bare model alias only after receiving the
+request, opt the alias into prompt-cache markers with the per-model
+<code>prompt_caching</code> capability:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">providers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">model-proxy</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">api</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://gateway.example.com/v1</span>
+<span class="w">    </span><span class="nt">transport</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openai_chat</span><span class="w">  </span><span class="c1"># or anthropic_messages</span>
+<span class="w">    </span><span class="nt">models</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">fable</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">context_length</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1000000</span>
+<span class="w">        </span><span class="nt">prompt_caching</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>Hermes matches this declaration to the exact provider route and runtime model
+id, without rewriting the alias or inferring support from its provider name,
+host, or model family. The marker layout follows the configured transport:
+<code>openai_chat</code> uses the OpenAI-compatible envelope layout and
+<code>anthropic_messages</code> uses the native inner-block layout. Set
+<code>prompt_caching: false</code> to explicitly disable cache markers for a model; when
+omitted, Hermes keeps its normal provider and model capability detection.</p>
+<div class="admonition adm-note"><p class="adm-title">Legacy format</p>
+<p>Older configs used a top-level <code>custom_providers:</code> list (with <code>base_url</code> instead of <code>api</code>). It still works and is auto-migrated to the <code>providers:</code> dict on <code>hermes update</code> (config v12).</p>
+</div>
+<h3 id="nous-portal-which-wire-carries-claude">Nous Portal: which wire carries Claude</h3>
+<p>Nous Portal serves its <code>anthropic/*</code> models on two routes: OpenAI-compatible <code>/v1/chat/completions</code> and the native Anthropic Messages wire <code>/v1/messages</code>. <code>nous.anthropic_wire</code> picks one:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">nous</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">anthropic_wire</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">chat</span><span class="w">     </span><span class="c1"># default. &quot;native&quot; = the Anthropic Messages wire; &quot;auto&quot; = decide per session</span>
+</code></pre></div>
+
+<p><code>chat</code> is the default for now. The native wire is the better transport (signed thinking blocks pass through unchanged, native <code>cache_control</code> scopes), but on the Portal's OpenRouter-served path it currently re-writes the previous turn's prompt cache on 14–20% of consecutive calls in concurrent tool loops, which is 15–20% of a fan-out's cache-write bill; the chat route measured 0 on the same test. Set <code>native</code> to opt back in (for example once the portal-side fix has shipped). Only <code>anthropic/*</code> models are affected; everything else on Nous already uses chat/completions.</p>
+<p><code>auto</code> is for when the Portal serves the same model from more than one upstream. A session starts on chat, Hermes reads which upstream answered the first call, and switches that session to native only when the upstream is one where native is known to be clean (the switch happens between calls, so no in-flight response and no warm cache is lost). Today no upstream is cleared, so <code>auto</code> behaves exactly like <code>chat</code>; it exists so the flip can be made from a measurement rather than a config change.</p>
+<h2 id="when-does-it-take-effect">When does it take effect?</h2>
+<ul>
+<li><strong>CLI</strong> (<code>hermes chat</code>): next <code>hermes chat</code> invocation.</li>
+<li><strong>Gateway</strong> (Telegram, Discord, Slack, etc.): next <em>new</em> session. Existing sessions keep their model. Restart the gateway (<code>hermes gateway restart</code>) if you want to force all sessions to pick up the change.</li>
+<li><strong>Dashboard chat tab</strong> (<code>/chat</code>): next new PTY. The currently-open chat keeps its model — use <code>/model</code> inside it to hot-swap.</li>
+</ul>
+<p>Changes never invalidate prompt caches on running sessions. That's deliberate: swapping the main model inside a session requires a cache reset (the system prompt contains model-specific content), and we reserve that for the explicit <code>/model</code> slash command inside chat.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="no-authenticated-providers-in-the-picker">"No authenticated providers" in the picker</h3>
+<p>Hermes lists a provider only if it has a working credential. Check <strong>Keys</strong> in the sidebar — you should see one of: an API key, a successful OAuth, or a custom endpoint URL. If the provider you want isn't there, run <code>hermes setup</code> to wire it up, or go to <strong>Keys</strong> and add the env var.</p>
+<h3 id="main-model-didnt-change-in-my-running-chat">Main model didn't change in my running chat</h3>
+<p>Expected. The dashboard writes <code>config.yaml</code>, which new sessions read. The currently-open chat is a live agent process — it keeps whatever model it was spawned with. Use <code>/model &lt;name&gt;</code> inside the chat to hot-swap that specific session.</p>
+<h3 id="auxiliary-override-didnt-take-effect">Auxiliary override "didn't take effect"</h3>
+<p>Three things to check:</p>
+<ol>
+<li><strong>Did you start a new session?</strong> Existing chats don't re-read config.</li>
+<li><strong>Is <code>provider</code> set to something other than <code>auto</code>?</strong> If the field shows <code>auto</code>, the task is still using your main model. Click <strong>Change</strong> and pick a real provider.</li>
+<li><strong>Is the provider authenticated?</strong> If you assigned <code>minimax</code> to a task but don't have a MiniMax API key, that task falls back to the openrouter default and logs a warning in <code>agent.log</code>.</li>
+</ol>
+<h3 id="i-picked-a-model-but-hermes-switched-providers-on-me">I picked a model but Hermes switched providers on me</h3>
+<p>On OpenRouter (or any aggregator), bare model names resolve <em>within</em> the aggregator first. So <code>claude-sonnet-4</code> on OpenRouter becomes <code>anthropic/claude-sonnet-4.6</code>, staying on your OpenRouter auth. But if you typed <code>claude-sonnet-4</code> on a native Anthropic auth, it would stay as <code>claude-sonnet-4-6</code>. If you see an unexpected provider switch, check that your current provider is what you expect — the picker always shows the current main at the top of the dialog.</p>
+<h2 id="alternative-methods">Alternative methods</h2>
+<h3 id="cli-slash-command">CLI slash command</h3>
+<p>Inside any <code>hermes chat</code> session:</p>
+<div class="highlight"><pre><span></span><code>/model gpt-5.4 --provider openrouter             # session-only
+/model gpt-5.4 --provider openrouter --global    # also persists to config.yaml
+/model claude-opus-4.6 --once                    # next turn only, then auto-restores
+</code></pre></div>
+
+<p><code>--global</code> does the same thing the dashboard's <strong>Change</strong> button does, plus it switches the running session in-place.</p>
+<p><code>--once</code> switches for a single turn and restores the previous model afterward — on success, error, or interrupt alike. Nothing is persisted: a gateway restart mid-turn comes back on the original model. Useful for escalating one hard question to an expensive model ("ask Opus just this once") or dropping to a cheap model for a throwaway query.</p>
+<div class="admonition adm-note"><p class="adm-title">Prompt-cache cost</p>
+<p>A one-turn switch breaks the provider's prompt-cache prefix twice (switching out and back). In a long session on a cached-prefix provider (Anthropic, OpenAI), the next turn re-pays full input cost — <code>--once</code> wins for short sessions or cheap→expensive escalation, but a quick side question inside a long expensive session can cost more than it saves.</p>
+</div>
+<h3 id="custom-aliases">Custom aliases</h3>
+<p>Define your own short names for models you reach for often, then use <code>/model &lt;alias&gt;</code> in a running session or <code>hermes chat --model &lt;alias&gt;</code> at startup. There are two equivalent formats — pick whichever fits your workflow.</p>
+<p><strong>Canonical (top-level <code>model_aliases:</code>)</strong> — full control over provider + base_url:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">model_aliases</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">fav</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">claude-sonnet-4.6</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">anthropic</span>
+<span class="w">  </span><span class="nt">grok</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">grok-4</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">x-ai</span>
+</code></pre></div>
+
+<p>An alias that points at its own endpoint can also carry that endpoint's
+credential, with either <code>api_key</code> (a literal, or a <code>"${VAR}"</code> reference) or
+<code>key_env</code> (the name of an environment variable). If both are set, <code>api_key</code>
+wins:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model_aliases</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">theta</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">theta-1</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">custom</span>
+<span class="w">    </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://theta.example.com/v1&quot;</span>
+<span class="w">    </span><span class="nt">key_env</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">THETA_API_KEY</span><span class="w">        </span><span class="c1"># or: api_key: &quot;${THETA_API_KEY}&quot;</span>
+</code></pre></div>
+
+<p>When an alias sets neither, the key is resolved from the alias <strong>host</strong> —
+<code>OLLAMA_API_KEY</code> for an <code>ollama.com</code> endpoint, <code>DEEPSEEK_API_KEY</code> for
+<code>api.deepseek.com</code>, and so on. It is never inherited from whichever provider
+happened to be active before the switch, so switching to an alias cannot send
+one provider's secret to another provider's host.</p>
+<p><strong>Short string form (<code>model.aliases.&lt;name&gt;: provider/model</code>)</strong> — convenient from the shell because <code>hermes config set</code> writes scalars and now also parses inline list/mapping literals, though this short alias form still can't carry a custom <code>base_url</code>:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>model.aliases.fav<span class="w"> </span>anthropic/claude-opus-4.6
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>model.aliases.grok<span class="w"> </span>x-ai/grok-4
+</code></pre></div>
+
+<blockquote>
+<p><code>hermes config set</code> also accepts inline <strong>list/mapping literals</strong> (JSON/YAML flow style). Quote them so your shell passes them through intact:</p>
+<p><code>bash
+hermes config set platform_toolsets.line '["clarify", "file", "web"]'
+hermes config set display.tool_progress_overrides '{"terminal": "off"}'</code></p>
+</blockquote>
+<p>Both paths feed the same loader (<code>hermes_cli/model_switch.py</code>). Entries declared in <code>model_aliases:</code> take precedence over <code>model.aliases:</code> entries with the same name.</p>
+<p>Then <code>/model fav</code> or <code>/model grok</code> in chat. User aliases shadow built-in short names (<code>sonnet</code>, <code>kimi</code>, <code>opus</code>, etc.). See <a href="../reference/slash-commands.html#custom-model-aliases">Custom model aliases</a> for the full reference.</p>
+<h3 id="hermes-model-subcommand"><code>hermes model</code> subcommand</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>model<span class="w">            </span><span class="c1"># Interactive provider + model picker (the canonical way to switch defaults)</span>
+</code></pre></div>
+
+<p><code>hermes model</code> walks you through picking a provider, authenticating (OAuth flows open a browser; API-key providers prompt for the key), and then choosing a specific model from that provider's curated catalog. The choice is written to <code>model.provider</code> and <code>model.default</code> in <code>~/.hermes/config.yaml</code>. After a new model is saved, a reasoning-effort step follows (<code>minimal</code> … <code>ultra</code>, <strong>Disable reasoning</strong>, or <strong>Skip</strong> to keep the current value) and writes <code>agent.reasoning_effort</code>; the step is skipped for models the catalog marks as having no reasoning control. The provider list also has a <strong>Reasoning effort for the current model...</strong> row to change only the effort.</p>
+<p><strong>Configure auxiliary models...</strong> opens the per-task side-model picker (vision, compression, approval, delegation, …). Each task's provider → model pick ends with the same effort step, stored as <code>auxiliary.&lt;task&gt;.reasoning_effort</code> (or <code>delegation.reasoning_effort</code>), with an extra <strong>Provider default</strong> row that leaves the level up to the provider. Tasks whose block has no <code>reasoning_effort</code> key by design (MoA slots, memory query rewrite) skip the step.</p>
+<p>To list providers/models without launching the picker, use the dashboard or the REST endpoints below. To inspect what the CLI will actually use right now: <code>hermes config get model --json</code> and <code>hermes status</code>.</p>
+<h3 id="direct-config-edit">Direct config edit</h3>
+<p>Edit <code>~/.hermes/config.yaml</code> and restart whatever reads it. See the <a href="configuration.html">Configuration reference</a> for the full schema.</p>
+<h3 id="rest-api">REST API</h3>
+<p>The dashboard uses three endpoints. Useful for scripting:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># List authenticated providers + curated model lists</span>
+curl<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;X-Hermes-Session-Token: </span><span class="nv">$TOKEN</span><span class="s2">&quot;</span><span class="w"> </span>http://localhost:PORT/api/model/options
+
+<span class="c1"># Read current main + auxiliary assignments</span>
+curl<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;X-Hermes-Session-Token: </span><span class="nv">$TOKEN</span><span class="s2">&quot;</span><span class="w"> </span>http://localhost:PORT/api/model/auxiliary
+
+<span class="c1"># Set the main model</span>
+curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;X-Hermes-Session-Token: </span><span class="nv">$TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;scope&quot;:&quot;main&quot;,&quot;provider&quot;:&quot;openrouter&quot;,&quot;model&quot;:&quot;anthropic/claude-opus-4.7&quot;}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>http://localhost:PORT/api/model/set
+
+<span class="c1"># Override a single auxiliary task</span>
+curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;X-Hermes-Session-Token: </span><span class="nv">$TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;scope&quot;:&quot;auxiliary&quot;,&quot;task&quot;:&quot;vision&quot;,&quot;provider&quot;:&quot;openrouter&quot;,&quot;model&quot;:&quot;google/gemini-2.5-flash&quot;}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>http://localhost:PORT/api/model/set
+
+<span class="c1"># Assign one model to every auxiliary task</span>
+curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;X-Hermes-Session-Token: </span><span class="nv">$TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;scope&quot;:&quot;auxiliary&quot;,&quot;task&quot;:&quot;&quot;,&quot;provider&quot;:&quot;openrouter&quot;,&quot;model&quot;:&quot;google/gemini-2.5-flash&quot;}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>http://localhost:PORT/api/model/set
+
+<span class="c1"># Reset all auxiliary tasks to auto</span>
+curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;X-Hermes-Session-Token: </span><span class="nv">$TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;scope&quot;:&quot;auxiliary&quot;,&quot;task&quot;:&quot;__reset__&quot;,&quot;provider&quot;:&quot;&quot;,&quot;model&quot;:&quot;&quot;}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>http://localhost:PORT/api/model/set
+</code></pre></div>
+
+<p>The session token is injected into the dashboard HTML at startup and rotates on every server restart. Grab it from the browser devtools (<code>window.__HERMES_SESSION_TOKEN__</code>) if you're scripting against a running dashboard.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/configuring-models</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#the-models-page">The Models page</a></li>
+<li class="lvl2"><a href="#setting-the-main-model">Setting the main model</a></li>
+<li class="lvl3"><a href="#mid-session-switches-and-context-warnings">Mid-session switches and context warnings</a></li>
+<li class="lvl3"><a href="#unattended-data-training-tiers">Unattended data-training tiers</a></li>
+<li class="lvl2"><a href="#setting-auxiliary-models">Setting auxiliary models</a></li>
+<li class="lvl3"><a href="#common-override-patterns">Common override patterns</a></li>
+<li class="lvl3"><a href="#per-task-override">Per-task override</a></li>
+<li class="lvl3"><a href="#reset-all-to-auto">Reset all to auto</a></li>
+<li class="lvl2"><a href="#the-use-as-shortcut">The &quot;Use as&quot; shortcut</a></li>
+<li class="lvl2"><a href="#what-gets-written-to-configyaml">What gets written to config.yaml</a></li>
+<li class="lvl2"><a href="#per-provider-request-options">Per-provider request options</a></li>
+<li class="lvl3"><a href="#nous-portal-which-wire-carries-claude">Nous Portal: which wire carries Claude</a></li>
+<li class="lvl2"><a href="#when-does-it-take-effect">When does it take effect?</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl3"><a href="#no-authenticated-providers-in-the-picker">&quot;No authenticated providers&quot; in the picker</a></li>
+<li class="lvl3"><a href="#main-model-didnt-change-in-my-running-chat">Main model didn&#x27;t change in my running chat</a></li>
+<li class="lvl3"><a href="#auxiliary-override-didnt-take-effect">Auxiliary override &quot;didn&#x27;t take effect&quot;</a></li>
+<li class="lvl3"><a href="#i-picked-a-model-but-hermes-switched-providers-on-me">I picked a model but Hermes switched providers on me</a></li>
+<li class="lvl2"><a href="#alternative-methods">Alternative methods</a></li>
+<li class="lvl3"><a href="#cli-slash-command">CLI slash command</a></li>
+<li class="lvl3"><a href="#custom-aliases">Custom aliases</a></li>
+<li class="lvl3"><a href="#hermes-model-subcommand">hermes model subcommand</a></li>
+<li class="lvl3"><a href="#direct-config-edit">Direct config edit</a></li>
+<li class="lvl3"><a href="#rest-api">REST API</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

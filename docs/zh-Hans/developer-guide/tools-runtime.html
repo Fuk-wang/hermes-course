@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工具运行时 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/tools-runtime</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="工具运行时">工具运行时</h1>
+<p>Hermes 工具是自注册函数，按 toolset（工具集）分组，并通过中央注册表/调度系统执行。</p>
+<p>主要文件：</p>
+<ul>
+<li><code>tools/registry.py</code></li>
+<li><code>model_tools.py</code></li>
+<li><code>toolsets.py</code></li>
+<li><code>tools/terminal_tool.py</code></li>
+<li><code>tools/environments/*</code></li>
+</ul>
+<h2 id="工具注册模型">工具注册模型</h2>
+<p>每个工具模块在导入时调用 <code>registry.register(...)</code>。</p>
+<p><code>model_tools.py</code> 负责导入/发现工具模块，并构建供模型使用的 schema 列表。</p>
+<h3 id="registryregister-的工作原理"><code>registry.register()</code> 的工作原理</h3>
+<p><code>tools/</code> 中的每个工具文件在模块级别调用 <code>registry.register()</code> 来声明自身。函数签名如下：</p>
+<div class="highlight"><pre><span></span><code><span class="n">registry</span><span class="o">.</span><span class="n">register</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;terminal&quot;</span><span class="p">,</span>               <span class="c1"># 唯一工具名称（用于 API schema）</span>
+    <span class="n">toolset</span><span class="o">=</span><span class="s2">&quot;terminal&quot;</span><span class="p">,</span>            <span class="c1"># 该工具所属的 toolset</span>
+    <span class="n">schema</span><span class="o">=</span><span class="p">{</span><span class="o">...</span><span class="p">},</span>                  <span class="c1"># 面向模型的 schema（描述、参数）</span>
+    <span class="n">handler</span><span class="o">=</span><span class="n">handle_terminal</span><span class="p">,</span>       <span class="c1"># 工具被调用时执行的函数</span>
+    <span class="n">check_fn</span><span class="o">=</span><span class="n">check_terminal</span><span class="p">,</span>       <span class="c1"># 可选：返回 True/False 表示是否可用</span>
+    <span class="n">requires_env</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;SOME_VAR&quot;</span><span class="p">],</span>     <span class="c1"># 可选：所需的环境变量（用于 UI 显示）</span>
+    <span class="n">is_async</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>                <span class="c1"># handler 是否为异步协程</span>
+    <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Run commands&quot;</span><span class="p">,</span>    <span class="c1"># 可选的 ToolEntry 注册表元数据</span>
+    <span class="n">emoji</span><span class="o">=</span><span class="s2">&quot;💻&quot;</span><span class="p">,</span>                    <span class="c1"># 用于 spinner/进度显示的 emoji</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>每次调用都会创建一个 <code>ToolEntry</code>，以工具名称为键存储在单例 <code>ToolRegistry._tools</code> 字典中。若不同 toolset 之间出现名称冲突，会记录警告，后注册的条目覆盖前者。</p>
+<p><code>schema["description"]</code> 是面向模型的权威描述。独立的 <code>description=</code> 参数用于填充 <code>ToolEntry.description</code>；省略该参数时，注册表元数据会回退到 schema 中的描述。<code>get_definitions()</code> 根据 <code>entry.schema</code> 构建 OpenAI function definition，并不会在 schema 缺少 <code>description</code> 时把 <code>entry.description</code> 复制进去。因此，只提供 <code>description=</code> 不会向模型描述该工具；如果两个值不同，模型看到的是 schema 中的值。除非某个注册表消费者确实需要不同的元数据，否则应只在 schema 中定义一次描述。</p>
+<h3 id="发现机制discover_builtin_tools">发现机制：<code>discover_builtin_tools()</code></h3>
+<p>当 <code>model_tools.py</code> 被导入时，会调用 <code>tools/registry.py</code> 中的 <code>discover_builtin_tools()</code>。该函数使用 AST 解析扫描所有 <code>tools/*.py</code> 文件，找出包含顶层 <code>registry.register()</code> 调用的模块，然后导入它们：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># tools/registry.py（简化版）</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">discover_builtin_tools</span><span class="p">(</span><span class="n">tools_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+    <span class="n">tools_path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">tools_dir</span><span class="p">)</span> <span class="k">if</span> <span class="n">tools_dir</span> <span class="k">else</span> <span class="n">Path</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span><span class="o">.</span><span class="n">parent</span>
+    <span class="k">for</span> <span class="n">path</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">tools_path</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="s2">&quot;*.py&quot;</span><span class="p">)):</span>
+        <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">name</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;__init__.py&quot;</span><span class="p">,</span> <span class="s2">&quot;registry.py&quot;</span><span class="p">,</span> <span class="s2">&quot;mcp_tool.py&quot;</span><span class="p">}:</span>
+            <span class="k">continue</span>
+        <span class="k">if</span> <span class="n">_module_registers_tools</span><span class="p">(</span><span class="n">path</span><span class="p">):</span>  <span class="c1"># AST 检查顶层 registry.register()</span>
+            <span class="n">importlib</span><span class="o">.</span><span class="n">import_module</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;tools.</span><span class="si">{</span><span class="n">path</span><span class="o">.</span><span class="n">stem</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>这种自动发现机制意味着新工具文件会被自动识别——无需手动维护列表。AST 检查只匹配顶层的 <code>registry.register()</code> 调用（不匹配函数内部的调用），因此 <code>tools/</code> 中的辅助模块不会被导入。</p>
+<p>每次导入都会触发模块的 <code>registry.register()</code> 调用。可选工具中的错误（例如图像生成工具缺少 <code>fal_client</code>）会被捕获并记录——不会阻止其他工具加载。</p>
+<p>核心工具发现完成后，还会发现 MCP 工具和插件工具：</p>
+<ol>
+<li><strong>MCP 工具</strong> — <code>tools.mcp_tool.discover_mcp_tools()</code> 读取 MCP 服务器配置，并注册来自外部服务器的工具。</li>
+<li><strong>插件工具</strong> — <code>hermes_cli.plugins.discover_plugins()</code> 加载用户/项目/pip 插件，这些插件可能注册额外的工具。</li>
+</ol>
+<h2 id="工具可用性检查check_fn">工具可用性检查（<code>check_fn</code>）</h2>
+<p>每个工具可以选择性地提供一个 <code>check_fn</code>——一个可调用对象，在工具可用时返回 <code>True</code>，否则返回 <code>False</code>。典型的检查包括：</p>
+<ul>
+<li><strong>API 密钥是否存在</strong> — 例如，<code>lambda: bool(os.environ.get("SERP_API_KEY"))</code> 用于网络搜索</li>
+<li><strong>服务是否运行</strong> — 例如，检查 Honcho 服务器是否已配置</li>
+<li><strong>二进制文件是否已安装</strong> — 例如，验证浏览器工具的 <code>playwright</code> 是否可用</li>
+</ul>
+<p>当 <code>registry.get_definitions()</code> 为模型构建 schema 列表时，会运行每个工具的 <code>check_fn()</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 简化自 registry.py</span>
+<span class="k">if</span> <span class="n">entry</span><span class="o">.</span><span class="n">check_fn</span><span class="p">:</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">available</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">check_fn</span><span class="p">())</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="n">available</span> <span class="o">=</span> <span class="kc">False</span>   <span class="c1"># 异常 = 不可用</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">available</span><span class="p">:</span>
+        <span class="k">continue</span>            <span class="c1"># 完全跳过该工具</span>
+</code></pre></div>
+
+<p>关键行为：
+- 检查结果<strong>按调用缓存</strong>——若多个工具共享同一个 <code>check_fn</code>，只运行一次。
+- <code>check_fn()</code> 中的异常被视为"不可用"（故障安全）。
+- <code>is_toolset_available()</code> 方法检查某个 toolset 的 <code>check_fn</code> 是否通过，用于 UI 显示和 toolset 解析。</p>
+<h2 id="toolset-解析">Toolset 解析</h2>
+<p>Toolset 是工具的命名集合。Hermes 通过以下方式解析它们：</p>
+<ul>
+<li>显式启用/禁用的 toolset 列表</li>
+<li>平台预设（<code>hermes-cli</code>、<code>hermes-telegram</code> 等）</li>
+<li>动态 MCP toolset</li>
+<li>精选的特殊用途集合，如 <code>hermes-acp</code></li>
+</ul>
+<h3 id="get_tool_definitions-如何过滤工具"><code>get_tool_definitions()</code> 如何过滤工具</h3>
+<p>主入口点为 <code>model_tools.get_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)</code>：</p>
+<ol>
+<li>
+<p><strong>若提供了 <code>enabled_toolsets</code></strong> — 仅包含这些 toolset 中的工具。每个 toolset 名称通过 <code>resolve_toolset()</code> 解析，将复合 toolset 展开为单个工具名称。</p>
+</li>
+<li>
+<p><strong>若提供了 <code>disabled_toolsets</code></strong> — 从所有 toolset 开始，减去已禁用的。</p>
+</li>
+<li>
+<p><strong>若两者均未提供</strong> — 包含所有已知 toolset。</p>
+</li>
+<li>
+<p><strong>注册表过滤</strong> — 解析后的工具名称集合传递给 <code>registry.get_definitions()</code>，后者应用 <code>check_fn</code> 过滤并返回 OpenAI 格式的 schema。</p>
+</li>
+<li>
+<p><strong>动态 schema 修补</strong> — 过滤后，<code>execute_code</code> 和 <code>browser_navigate</code> 的 schema 会被动态调整，仅引用实际通过过滤的工具（防止模型幻觉出不可用的工具）。</p>
+</li>
+</ol>
+<h3 id="旧版-toolset-名称">旧版 toolset 名称</h3>
+<p>带有 <code>_tools</code> 后缀的旧版 toolset 名称（例如 <code>web_tools</code>、<code>terminal_tools</code>）通过 <code>_LEGACY_TOOLSET_MAP</code> 映射到其现代工具名称，以保持向后兼容性。</p>
+<h2 id="调度">调度</h2>
+<p>运行时，工具通过中央注册表调度，但部分 agent 级别的工具（如 memory/todo/session-search 处理）由 agent 循环直接处理。</p>
+<h3 id="调度流程模型-tool_call--handler-执行">调度流程：模型 tool_call → handler 执行</h3>
+<p>当模型返回 <code>tool_call</code> 时，流程如下：</p>
+<div class="highlight"><pre><span></span><code>模型响应包含 tool_call
+    ↓
+run_agent.py agent 循环
+    ↓
+model_tools.handle_function_call(name, args, task_id, user_task)
+    ↓
+[Agent 循环工具？] → 由 agent 循环直接处理（todo、memory、session_search、delegate_task）
+    ↓
+[插件 pre-hook] → invoke_hook(&quot;pre_tool_call&quot;, ...)
+    ↓
+registry.dispatch(name, args, **kwargs)
+    ↓
+按名称查找 ToolEntry
+    ↓
+[异步 handler？] → 通过 _run_async() 桥接
+[同步 handler？]  → 直接调用
+    ↓
+返回结果字符串（或 JSON 错误）
+    ↓
+[插件 post-hook] → invoke_hook(&quot;post_tool_call&quot;, ...)
+</code></pre></div>
+
+<h3 id="错误包装">错误包装</h3>
+<p>所有工具执行在两个层级进行错误处理：</p>
+<ol>
+<li>
+<p><strong><code>registry.dispatch()</code></strong> — 捕获 handler 抛出的任何异常，并以 JSON 形式返回 <code>{"error": "Tool execution failed: ExceptionType: message"}</code>。</p>
+</li>
+<li>
+<p><strong><code>handle_function_call()</code></strong> — 将整个调度包裹在次级 try/except 中，返回 <code>{"error": "Error executing tool_name: message"}</code>。</p>
+</li>
+</ol>
+<p>这确保模型始终收到格式正确的 JSON 字符串，而不会遇到未处理的异常。</p>
+<h3 id="agent-循环工具">Agent 循环工具</h3>
+<p>以下四个工具在注册表调度之前被拦截，因为它们需要 agent 级别的状态（TodoStore、MemoryStore 等）：</p>
+<ul>
+<li><code>todo</code> — 规划/任务跟踪</li>
+<li><code>memory</code> — 持久化 memory 写入</li>
+<li><code>session_search</code> — 跨会话召回</li>
+<li><code>delegate_task</code> — 生成子 agent 会话</li>
+</ul>
+<p>这些工具的 schema 仍在注册表中注册（供 <code>get_tool_definitions</code> 使用），但若调度以某种方式直接到达它们，其 handler 会返回一个存根错误。</p>
+<h3 id="异步桥接">异步桥接</h3>
+<p>当工具 handler 为异步时，<code>_run_async()</code> 将其桥接到同步调度路径：</p>
+<ul>
+<li><strong>CLI 路径（无运行中的事件循环）</strong> — 使用持久化事件循环以保持缓存的异步客户端存活</li>
+<li><strong>Gateway 路径（有运行中的事件循环）</strong> — 使用 <code>asyncio.run()</code> 启动一个一次性线程</li>
+<li><strong>工作线程（并行工具）</strong> — 使用存储在线程本地存储中的每线程持久化循环</li>
+</ul>
+<h2 id="dangerous_patterns-审批流程">DANGEROUS_PATTERNS 审批流程</h2>
+<p>终端工具集成了定义在 <code>tools/approval.py</code> 中的危险命令审批系统：</p>
+<ol>
+<li><strong>模式检测</strong> — <code>DANGEROUS_PATTERNS</code> 是一个 <code>(regex, description)</code> 元组列表，涵盖破坏性操作：</li>
+<li>递归删除（<code>rm -rf</code>）</li>
+<li>文件系统格式化（<code>mkfs</code>、<code>dd</code>）</li>
+<li>SQL 破坏性操作（<code>DROP TABLE</code>、不带 <code>WHERE</code> 的 <code>DELETE FROM</code>）</li>
+<li>系统配置覆写（<code>&gt; /etc/</code>）</li>
+<li>服务操控（<code>systemctl stop</code>）</li>
+<li>远程代码执行（<code>curl | sh</code>）</li>
+<li>
+<p>Fork bomb、进程终止等</p>
+</li>
+<li>
+<p><strong>检测</strong> — 在执行任何终端命令之前，<code>detect_dangerous_command(command)</code> 会对所有模式进行检查。</p>
+</li>
+<li>
+<p><strong>审批提示</strong> — 若发现匹配：</p>
+</li>
+<li><strong>CLI 模式</strong> — 交互式提示要求用户批准、拒绝或永久允许</li>
+<li><strong>Gateway 模式</strong> — 异步审批回调将请求发送至消息平台</li>
+<li>
+<p><strong>智能审批</strong> — 可选地，辅助 LLM 可自动批准匹配模式但风险较低的命令（例如，<code>rm -rf node_modules/</code> 是安全的，但匹配"递归删除"模式）</p>
+</li>
+<li>
+<p><strong>会话状态</strong> — 审批按会话跟踪。一旦在某个会话中批准了"递归删除"，后续的 <code>rm -rf</code> 命令不会再次提示。</p>
+</li>
+<li>
+<p><strong>永久允许列表</strong> — "永久允许"选项会将该模式写入 <code>config.yaml</code> 的 <code>command_allowlist</code>，跨会话持久化。</p>
+</li>
+</ol>
+<h2 id="终端运行时环境">终端/运行时环境</h2>
+<p>终端系统支持多种后端：</p>
+<ul>
+<li>local</li>
+<li>docker</li>
+<li>ssh</li>
+<li>singularity</li>
+<li>modal</li>
+<li>daytona</li>
+<li>vercel_sandbox</li>
+</ul>
+<p>还支持：</p>
+<ul>
+<li>按任务的 cwd 覆盖</li>
+<li>后台进程管理</li>
+<li>PTY 模式</li>
+<li>危险命令的审批回调</li>
+</ul>
+<h2 id="并发">并发</h2>
+<p>工具调用可以顺序执行，也可以并发执行，具体取决于工具组合和交互需求。</p>
+<h2 id="相关文档">相关文档</h2>
+<ul>
+<li><a href="../reference/toolsets-reference.html">Toolsets 参考</a></li>
+<li><a href="../reference/tools-reference.html">内置工具参考</a></li>
+<li><a href="agent-loop.html">Agent 循环内部机制</a></li>
+<li><a href="acp-internals.html">ACP 内部机制</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/tools-runtime</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#工具注册模型">工具注册模型</a></li>
+<li class="lvl3"><a href="#registryregister-的工作原理">registry.register() 的工作原理</a></li>
+<li class="lvl3"><a href="#发现机制discover_builtin_tools">发现机制：discover_builtin_tools()</a></li>
+<li class="lvl2"><a href="#工具可用性检查check_fn">工具可用性检查（check_fn）</a></li>
+<li class="lvl2"><a href="#toolset-解析">Toolset 解析</a></li>
+<li class="lvl3"><a href="#get_tool_definitions-如何过滤工具">get_tool_definitions() 如何过滤工具</a></li>
+<li class="lvl3"><a href="#旧版-toolset-名称">旧版 toolset 名称</a></li>
+<li class="lvl2"><a href="#调度">调度</a></li>
+<li class="lvl3"><a href="#调度流程模型-tool_call--handler-执行">调度流程：模型 tool_call → handler 执行</a></li>
+<li class="lvl3"><a href="#错误包装">错误包装</a></li>
+<li class="lvl3"><a href="#agent-循环工具">Agent 循环工具</a></li>
+<li class="lvl3"><a href="#异步桥接">异步桥接</a></li>
+<li class="lvl2"><a href="#dangerous_patterns-审批流程">DANGEROUS_PATTERNS 审批流程</a></li>
+<li class="lvl2"><a href="#终端运行时环境">终端/运行时环境</a></li>
+<li class="lvl2"><a href="#并发">并发</a></li>
+<li class="lvl2"><a href="#相关文档">相关文档</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Use MCP with Hermes · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/use-mcp-with-hermes</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="use-mcp-with-hermes">Use MCP with Hermes</h1>
+<p>This guide shows how to actually use MCP with Hermes Agent in day-to-day workflows.</p>
+<p>If the feature page explains what MCP is, this guide is about how to get value from it quickly and safely.</p>
+<h2 id="when-should-you-use-mcp">When should you use MCP?</h2>
+<p>Use MCP when:
+- a tool already exists in MCP form and you do not want to build a native Hermes tool
+- you want Hermes to operate against a local or remote system through a clean RPC layer
+- you want fine-grained per-server exposure control
+- you want to connect Hermes to internal APIs, databases, or company systems without modifying Hermes core</p>
+<p>Do not use MCP when:
+- a built-in Hermes tool already solves the job well
+- the server exposes a huge dangerous tool surface and you are not prepared to filter it
+- you only need one very narrow integration and a native tool would be simpler and safer</p>
+<h2 id="mental-model">Mental model</h2>
+<p>Think of MCP as an adapter layer:</p>
+<ul>
+<li>Hermes remains the agent</li>
+<li>MCP servers contribute tools</li>
+<li>Hermes discovers those tools at startup or reload time</li>
+<li>the model can use them like normal tools</li>
+<li>you control how much of each server is visible</li>
+</ul>
+<p>That last part matters. Good MCP usage is not just “connect everything.” It is “connect the right thing, with the smallest useful surface.”</p>
+<h2 id="step-1-install-mcp-support">Step 1: install MCP support</h2>
+<p>If you installed Hermes with the standard install script, MCP support is already included (the installer runs <code>uv pip install -e ".[all]"</code>).</p>
+<p>If you installed without extras and need to add MCP separately:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>~/.hermes/hermes-agent
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[mcp]&quot;</span>
+</code></pre></div>
+
+<p>For npm-based servers, make sure Node.js and <code>npx</code> are available.</p>
+<p>For many Python MCP servers, <code>uvx</code> is a nice default.</p>
+<h2 id="step-2-add-one-server-first">Step 2: add one server first</h2>
+<p>Start with a single, safe server.</p>
+<p>Example: filesystem access to one project directory only.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">project_fs</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;npx&quot;</span>
+<span class="w">    </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;-y&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;@modelcontextprotocol/server-filesystem&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;/home/user/my-project&quot;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<p>Then start Hermes:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>chat
+</code></pre></div>
+
+<p>Now ask something concrete:</p>
+<div class="highlight"><pre><span></span><code>Inspect this project and summarize the repo layout.
+</code></pre></div>
+
+<h2 id="step-3-verify-mcp-loaded">Step 3: verify MCP loaded</h2>
+<p>You can verify MCP in a few ways:</p>
+<ul>
+<li>Hermes banner/status should show MCP integration when configured</li>
+<li>ask Hermes what tools it has available</li>
+<li>use <code>/reload-mcp</code> after config changes</li>
+<li>check logs if the server failed to connect</li>
+<li>run <code>hermes mcp test &lt;server&gt;</code> from a shell — it connects, lists the
+  discovered tools, and exits <code>0</code> on a completed connect, <code>1</code> when the
+  connection fails, and <code>3</code> when the server is not in your config (<code>2</code> is
+  argparse's usage error), so health probes and cron watchdogs can branch on
+  <code>$?</code> instead of parsing the output</li>
+</ul>
+<p>A practical test prompt:</p>
+<div class="highlight"><pre><span></span><code>Tell me which MCP-backed tools are available right now.
+</code></pre></div>
+
+<h2 id="step-4-start-filtering-immediately">Step 4: start filtering immediately</h2>
+<p>Do not wait until later if the server exposes a lot of tools.</p>
+<h3 id="example-whitelist-only-what-you-want">Example: whitelist only what you want</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">github</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;npx&quot;</span>
+<span class="w">    </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;-y&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;@modelcontextprotocol/server-github&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">env</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">GITHUB_PERSONAL_ACCESS_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;***&quot;</span>
+<span class="w">    </span><span class="nt">tools</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">include</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">list_issues</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">create_issue</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">search_code</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<p>This is usually the best default for sensitive systems.</p>
+<h2 id="wsl2-bridge-hermes-in-wsl-to-windows-chrome">WSL2: bridge Hermes in WSL to Windows Chrome</h2>
+<p>This is the practical setup when:</p>
+<ul>
+<li>Hermes runs inside WSL2</li>
+<li>the browser you want to control is your normal signed-in Chrome on Windows</li>
+<li><code>/browser connect</code> is awkward or unreliable from WSL</li>
+</ul>
+<p>In this setup, Hermes does <strong>not</strong> connect to Chrome directly. Instead:</p>
+<ul>
+<li>Hermes runs in WSL</li>
+<li>Hermes starts a local stdio MCP server</li>
+<li>that MCP server is launched through Windows interop (<code>cmd.exe</code> or <code>powershell.exe</code>)</li>
+<li>the MCP server attaches to your live Windows Chrome session</li>
+</ul>
+<p>Mental model:</p>
+<div class="highlight"><pre><span></span><code>Hermes (WSL) -&gt; MCP stdio bridge -&gt; Windows Chrome
+</code></pre></div>
+
+<h3 id="why-this-mode-is-useful">Why this mode is useful</h3>
+<ul>
+<li>you keep your real Windows browser profile, cookies, and logins</li>
+<li>Hermes stays in its supported Unix environment (WSL2)</li>
+<li>browser control is exposed as MCP tools instead of relying on Hermes core browser transport</li>
+</ul>
+<h3 id="recommended-server">Recommended server</h3>
+<p>Use <code>chrome-devtools-mcp</code>.</p>
+<p>If your Windows Chrome already has live remote debugging enabled from <code>chrome://inspect/#remote-debugging</code>, add it like this from WSL:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>mcp<span class="w"> </span>add<span class="w"> </span>chrome-devtools-win<span class="w"> </span>--command<span class="w"> </span>cmd.exe<span class="w"> </span>--args<span class="w"> </span>/c<span class="w"> </span>npx<span class="w"> </span>-y<span class="w"> </span>chrome-devtools-mcp@latest<span class="w"> </span>--autoConnect<span class="w"> </span>--no-usage-statistics
+</code></pre></div>
+
+<p>After saving the server:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>mcp<span class="w"> </span><span class="nb">test</span><span class="w"> </span>chrome-devtools-win
+</code></pre></div>
+
+<p>Then start a fresh Hermes session or run:</p>
+<div class="highlight"><pre><span></span><code>/reload-mcp
+</code></pre></div>
+
+<h3 id="typical-prompt">Typical prompt</h3>
+<p>Once loaded, Hermes can use the MCP-prefixed browser tools directly. For example:</p>
+<div class="highlight"><pre><span></span><code>调用 MCP 工具 mcp_chrome_devtools_win_list_pages，列出当前浏览器标签页。
+</code></pre></div>
+
+<h3 id="when-browser-connect-is-the-wrong-tool">When <code>/browser connect</code> is the wrong tool</h3>
+<p>If Hermes runs in WSL and Chrome runs on Windows, <code>/browser connect</code> may fail even though Chrome is open and debuggable.</p>
+<p>Common reasons:</p>
+<ul>
+<li>WSL cannot reach the same host-local endpoint Chrome exposes to Windows tools</li>
+<li>newer Chrome live-debugging flows are not the same as a classic <code>ws://localhost:9222</code></li>
+<li>the browser is easier to attach to from a Windows-side helper like <code>chrome-devtools-mcp</code></li>
+</ul>
+<p>In those cases, keep <code>/browser connect</code> for same-environment setups and use MCP for WSL-to-Windows browser bridging.</p>
+<h3 id="known-pitfalls">Known pitfalls</h3>
+<ul>
+<li>Start Hermes from a Windows-mounted path like <code>/mnt/c/Users/&lt;you&gt;</code> or <code>/mnt/c/workspace/...</code> when using Windows stdio executables through MCP.</li>
+<li>If you start Hermes from <code>/root</code> or <code>/home/...</code>, Windows may emit a <code>UNC</code> current-directory warning before the MCP server starts.</li>
+<li>If <code>chrome-devtools-mcp --autoConnect</code> times out while enumerating pages, reduce background/frozen tabs in Chrome and retry.</li>
+</ul>
+<h3 id="example-blacklist-dangerous-actions">Example: blacklist dangerous actions</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">stripe</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://mcp.stripe.com&quot;</span>
+<span class="w">    </span><span class="nt">headers</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">Authorization</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Bearer</span><span class="nv"> </span><span class="s">***&quot;</span>
+<span class="w">    </span><span class="nt">tools</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">exclude</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">delete_customer</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">refund_payment</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<h3 id="example-disable-utility-wrappers-too">Example: disable utility wrappers too</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">docs</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://mcp.docs.example.com&quot;</span>
+<span class="w">    </span><span class="nt">tools</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">prompts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">      </span><span class="nt">resources</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<h2 id="what-does-filtering-actually-affect">What does filtering actually affect?</h2>
+<p>There are two categories of MCP-exposed functionality in Hermes:</p>
+<ol>
+<li>Server-native MCP tools</li>
+<li>filtered with:</li>
+<li><code>tools.include</code></li>
+<li>
+<p><code>tools.exclude</code></p>
+</li>
+<li>
+<p>Hermes-added utility wrappers</p>
+</li>
+<li>filtered with:</li>
+<li><code>tools.resources</code></li>
+<li><code>tools.prompts</code></li>
+</ol>
+<h3 id="utility-wrappers-you-may-see">Utility wrappers you may see</h3>
+<p>Resources:
+- <code>list_resources</code>
+- <code>read_resource</code></p>
+<p>Prompts:
+- <code>list_prompts</code>
+- <code>get_prompt</code></p>
+<p>These wrappers only appear if:
+- your config allows them, and
+- the MCP server session actually supports those capabilities</p>
+<p>So Hermes will not pretend a server has resources/prompts if it does not.</p>
+<h2 id="common-patterns">Common patterns</h2>
+<h3 id="pattern-1-local-project-assistant">Pattern 1: local project assistant</h3>
+<p>Use MCP for a repo-local filesystem or git server when you want Hermes to reason over a bounded workspace.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">fs</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;npx&quot;</span>
+<span class="w">    </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;-y&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;@modelcontextprotocol/server-filesystem&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;/home/user/project&quot;</span><span class="p p-Indicator">]</span>
+
+<span class="w">  </span><span class="nt">git</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;uvx&quot;</span>
+<span class="w">    </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;mcp-server-git&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--repository&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;/home/user/project&quot;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<p>Good prompts:</p>
+<div class="highlight"><pre><span></span><code>Review the project structure and identify where configuration lives.
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>Check the local git state and summarize what changed recently.
+</code></pre></div>
+
+<h3 id="pattern-2-repo-native-work-record-with-open-scaffold">Pattern 2: repo-native work record with Open Scaffold</h3>
+<p>Use <a href="https://github.com/graphanov/open-scaffold" class="ext" target="_blank" rel="noopener">Open Scaffold</a> when you want Hermes to read a repository's durable AI-work record: mission, plans, evidence notes, handoff packets, and review/gate results. Hermes remains the agent; Open Scaffold remains the repo-local record.</p>
+<p>Add the server for one scaffolded repository:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>mcp<span class="w"> </span>add<span class="w"> </span>open_scaffold<span class="w"> </span>--command<span class="w"> </span>npx<span class="w"> </span>--args<span class="w"> </span>-y<span class="w"> </span>open-scaffold@latest<span class="w"> </span>mcp<span class="w"> </span>serve<span class="w"> </span>--repo<span class="w"> </span>/absolute/path/to/repo
+hermes<span class="w"> </span>mcp<span class="w"> </span><span class="nb">test</span><span class="w"> </span>open_scaffold
+</code></pre></div>
+
+<p>Then keep the exposed surface read-oriented. Choose <code>select</code> in the <code>hermes mcp add</code> prompt, or edit <code>config.yaml</code> afterward:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">open_scaffold</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;npx&quot;</span>
+<span class="w">    </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;-y&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;open-scaffold@latest&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;mcp&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;serve&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--repo&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;/absolute/path/to/repo&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">tools</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">include</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">list_plans</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">get_plan</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">get_mission</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">list_evidence</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">get_evidence</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">get_status</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">search_plans</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">list_amendments</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">get_handoff</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">analyze_loop</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gate_loop</span>
+<span class="w">      </span><span class="nt">prompts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>Good prompts:</p>
+<div class="highlight"><pre><span></span><code>Use the Open Scaffold MCP tools to compile the current handoff packet and tell me the next legal action.
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>Inspect the active plans and evidence notes, then say whether this repo is ready for human review or needs another attempt.
+</code></pre></div>
+
+<p>Boundary notes:</p>
+<ul>
+<li>Open Scaffold MCP is local-first and read-only by default.</li>
+<li>Its write tools require the server to be started with <code>--allow-write</code>; do not enable that until you explicitly want Hermes to mutate <code>.osc</code> files.</li>
+<li>Open Scaffold records and gates work; it does not authorize Hermes to merge, publish, deploy, or spawn runtimes.</li>
+<li>Pin <code>open-scaffold@&lt;version&gt;</code> instead of <code>@latest</code> if you need reproducible tool schemas.</li>
+</ul>
+<h3 id="pattern-3-github-triage-assistant">Pattern 3: GitHub triage assistant</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">github</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;npx&quot;</span>
+<span class="w">    </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;-y&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;@modelcontextprotocol/server-github&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">env</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">GITHUB_PERSONAL_ACCESS_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;***&quot;</span>
+<span class="w">    </span><span class="nt">tools</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">include</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">list_issues</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">create_issue</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">update_issue</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">search_code</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">prompts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">      </span><span class="nt">resources</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>Good prompts:</p>
+<div class="highlight"><pre><span></span><code>List open issues about MCP, cluster them by theme, and draft a high-quality issue for the most common bug.
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>Search the repo for uses of _discover_and_register_server and explain how MCP tools are registered.
+</code></pre></div>
+
+<h3 id="pattern-4-internal-api-assistant">Pattern 4: internal API assistant</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">internal_api</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://mcp.internal.example.com&quot;</span>
+<span class="w">    </span><span class="nt">headers</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">Authorization</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Bearer</span><span class="nv"> </span><span class="s">***&quot;</span>
+<span class="w">    </span><span class="nt">tools</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">include</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">list_customers</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">get_customer</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">list_invoices</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">resources</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">      </span><span class="nt">prompts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>Good prompts:</p>
+<div class="highlight"><pre><span></span><code>Look up customer ACME Corp and summarize recent invoice activity.
+</code></pre></div>
+
+<p>This is the sort of place where a strict whitelist is far better than an exclude list.</p>
+<h3 id="pattern-4-documentation--knowledge-servers">Pattern 4: documentation / knowledge servers</h3>
+<p>Some MCP servers expose prompts or resources that are more like shared knowledge assets than direct actions.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">docs</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://mcp.docs.example.com&quot;</span>
+<span class="w">    </span><span class="nt">tools</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">prompts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">      </span><span class="nt">resources</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>Good prompts:</p>
+<div class="highlight"><pre><span></span><code>List available MCP resources from the docs server, then read the onboarding guide and summarize it.
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>List prompts exposed by the docs server and tell me which ones would help with incident response.
+</code></pre></div>
+
+<h2 id="tutorial-end-to-end-setup-with-filtering">Tutorial: end-to-end setup with filtering</h2>
+<p>Here is a practical progression.</p>
+<h3 id="phase-1-add-github-mcp-with-a-tight-whitelist">Phase 1: add GitHub MCP with a tight whitelist</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">github</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;npx&quot;</span>
+<span class="w">    </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;-y&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;@modelcontextprotocol/server-github&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">env</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">GITHUB_PERSONAL_ACCESS_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;***&quot;</span>
+<span class="w">    </span><span class="nt">tools</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">include</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">list_issues</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">create_issue</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">search_code</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">prompts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">      </span><span class="nt">resources</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>Start Hermes and ask:</p>
+<div class="highlight"><pre><span></span><code>Search the codebase for references to MCP and summarize the main integration points.
+</code></pre></div>
+
+<h3 id="phase-2-expand-only-when-needed">Phase 2: expand only when needed</h3>
+<p>If you later need issue updates too:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">tools</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">include</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">list_issues</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">create_issue</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">update_issue</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">search_code</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<p>Then reload:</p>
+<div class="highlight"><pre><span></span><code>/reload-mcp
+</code></pre></div>
+
+<h3 id="phase-3-add-a-second-server-with-different-policy">Phase 3: add a second server with different policy</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">mcp_servers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">github</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;npx&quot;</span>
+<span class="w">    </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;-y&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;@modelcontextprotocol/server-github&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">env</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">GITHUB_PERSONAL_ACCESS_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;***&quot;</span>
+<span class="w">    </span><span class="nt">tools</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">include</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">list_issues</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">create_issue</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">update_issue</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">search_code</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">prompts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">      </span><span class="nt">resources</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+
+<span class="w">  </span><span class="nt">filesystem</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;npx&quot;</span>
+<span class="w">    </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;-y&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;@modelcontextprotocol/server-filesystem&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;/home/user/project&quot;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<p>Now Hermes can combine them:</p>
+<div class="highlight"><pre><span></span><code>Inspect the local project files, then create a GitHub issue summarizing the bug you find.
+</code></pre></div>
+
+<p>That is where MCP gets powerful: multi-system workflows without changing Hermes core.</p>
+<h2 id="safe-usage-recommendations">Safe usage recommendations</h2>
+<h3 id="prefer-allowlists-for-dangerous-systems">Prefer allowlists for dangerous systems</h3>
+<p>For anything financial, customer-facing, or destructive:
+- use <code>tools.include</code>
+- start with the smallest set possible</p>
+<h3 id="disable-unused-utilities">Disable unused utilities</h3>
+<p>If you do not want the model browsing server-provided resources/prompts, turn them off:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">tools</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">resources</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">  </span><span class="nt">prompts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<h3 id="keep-servers-scoped-narrowly">Keep servers scoped narrowly</h3>
+<p>Examples:
+- filesystem server rooted to one project dir, not your whole home directory
+- git server pointed at one repo
+- internal API server with read-heavy tool exposure by default</p>
+<h3 id="reload-after-config-changes">Reload after config changes</h3>
+<div class="highlight"><pre><span></span><code>/reload-mcp
+</code></pre></div>
+
+<p>Do this after changing:
+- include/exclude lists
+- enabled flags
+- resources/prompts toggles
+- auth headers / env</p>
+<h2 id="troubleshooting-by-symptom">Troubleshooting by symptom</h2>
+<h3 id="the-server-connects-but-the-tools-i-expected-are-missing">"The server connects but the tools I expected are missing"</h3>
+<p>Possible causes:
+- filtered by <code>tools.include</code>
+- excluded by <code>tools.exclude</code>
+- utility wrappers disabled via <code>resources: false</code> or <code>prompts: false</code>
+- server does not actually support resources/prompts</p>
+<h3 id="the-server-is-configured-but-nothing-loads">"The server is configured but nothing loads"</h3>
+<p>Check:
+- <code>enabled: false</code> was not left in config
+- command/runtime exists (<code>npx</code>, <code>uvx</code>, etc.)
+- HTTP endpoint is reachable
+- auth env or headers are correct</p>
+<h3 id="why-do-i-see-fewer-tools-than-the-mcp-server-advertises">"Why do I see fewer tools than the MCP server advertises?"</h3>
+<p>Because Hermes now respects your per-server policy and capability-aware registration. That is expected, and usually desirable.</p>
+<h3 id="how-do-i-remove-an-mcp-server-without-deleting-the-config">"How do I remove an MCP server without deleting the config?"</h3>
+<p>Use:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>That keeps the config around but prevents connection and registration.</p>
+<h2 id="recommended-first-mcp-setups">Recommended first MCP setups</h2>
+<p>Good first servers for most users:
+- filesystem
+- git
+- GitHub
+- fetch / documentation MCP servers
+- one narrow internal API</p>
+<p>Not-great first servers:
+- giant business systems with lots of destructive actions and no filtering
+- anything you do not understand well enough to constrain</p>
+<h2 id="related-docs">Related docs</h2>
+<ul>
+<li><a href="../user-guide/features/mcp.html">MCP (Model Context Protocol)</a></li>
+<li><a href="../reference/faq.html">FAQ</a></li>
+<li><a href="../reference/slash-commands.html">Slash Commands</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/use-mcp-with-hermes</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#when-should-you-use-mcp">When should you use MCP?</a></li>
+<li class="lvl2"><a href="#mental-model">Mental model</a></li>
+<li class="lvl2"><a href="#step-1-install-mcp-support">Step 1: install MCP support</a></li>
+<li class="lvl2"><a href="#step-2-add-one-server-first">Step 2: add one server first</a></li>
+<li class="lvl2"><a href="#step-3-verify-mcp-loaded">Step 3: verify MCP loaded</a></li>
+<li class="lvl2"><a href="#step-4-start-filtering-immediately">Step 4: start filtering immediately</a></li>
+<li class="lvl3"><a href="#example-whitelist-only-what-you-want">Example: whitelist only what you want</a></li>
+<li class="lvl2"><a href="#wsl2-bridge-hermes-in-wsl-to-windows-chrome">WSL2: bridge Hermes in WSL to Windows Chrome</a></li>
+<li class="lvl3"><a href="#why-this-mode-is-useful">Why this mode is useful</a></li>
+<li class="lvl3"><a href="#recommended-server">Recommended server</a></li>
+<li class="lvl3"><a href="#typical-prompt">Typical prompt</a></li>
+<li class="lvl3"><a href="#when-browser-connect-is-the-wrong-tool">When /browser connect is the wrong tool</a></li>
+<li class="lvl3"><a href="#known-pitfalls">Known pitfalls</a></li>
+<li class="lvl3"><a href="#example-blacklist-dangerous-actions">Example: blacklist dangerous actions</a></li>
+<li class="lvl3"><a href="#example-disable-utility-wrappers-too">Example: disable utility wrappers too</a></li>
+<li class="lvl2"><a href="#what-does-filtering-actually-affect">What does filtering actually affect?</a></li>
+<li class="lvl3"><a href="#utility-wrappers-you-may-see">Utility wrappers you may see</a></li>
+<li class="lvl2"><a href="#common-patterns">Common patterns</a></li>
+<li class="lvl3"><a href="#pattern-1-local-project-assistant">Pattern 1: local project assistant</a></li>
+<li class="lvl3"><a href="#pattern-2-repo-native-work-record-with-open-scaffold">Pattern 2: repo-native work record with Open Scaffold</a></li>
+<li class="lvl3"><a href="#pattern-3-github-triage-assistant">Pattern 3: GitHub triage assistant</a></li>
+<li class="lvl3"><a href="#pattern-4-internal-api-assistant">Pattern 4: internal API assistant</a></li>
+<li class="lvl3"><a href="#pattern-4-documentation--knowledge-servers">Pattern 4: documentation / knowledge servers</a></li>
+<li class="lvl2"><a href="#tutorial-end-to-end-setup-with-filtering">Tutorial: end-to-end setup with filtering</a></li>
+<li class="lvl3"><a href="#phase-1-add-github-mcp-with-a-tight-whitelist">Phase 1: add GitHub MCP with a tight whitelist</a></li>
+<li class="lvl3"><a href="#phase-2-expand-only-when-needed">Phase 2: expand only when needed</a></li>
+<li class="lvl3"><a href="#phase-3-add-a-second-server-with-different-policy">Phase 3: add a second server with different policy</a></li>
+<li class="lvl2"><a href="#safe-usage-recommendations">Safe usage recommendations</a></li>
+<li class="lvl3"><a href="#prefer-allowlists-for-dangerous-systems">Prefer allowlists for dangerous systems</a></li>
+<li class="lvl3"><a href="#disable-unused-utilities">Disable unused utilities</a></li>
+<li class="lvl3"><a href="#keep-servers-scoped-narrowly">Keep servers scoped narrowly</a></li>
+<li class="lvl3"><a href="#reload-after-config-changes">Reload after config changes</a></li>
+<li class="lvl2"><a href="#troubleshooting-by-symptom">Troubleshooting by symptom</a></li>
+<li class="lvl3"><a href="#the-server-connects-but-the-tools-i-expected-are-missing">&quot;The server connects but the tools I expected are missing&quot;</a></li>
+<li class="lvl3"><a href="#the-server-is-configured-but-nothing-loads">&quot;The server is configured but nothing loads&quot;</a></li>
+<li class="lvl3"><a href="#why-do-i-see-fewer-tools-than-the-mcp-server-advertises">&quot;Why do I see fewer tools than the MCP server advertises?&quot;</a></li>
+<li class="lvl3"><a href="#how-do-i-remove-an-mcp-server-without-deleting-the-config">&quot;How do I remove an MCP server without deleting the config?&quot;</a></li>
+<li class="lvl2"><a href="#recommended-first-mcp-setups">Recommended first MCP setups</a></li>
+<li class="lvl2"><a href="#related-docs">Related docs</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gateway Session Lifecycle · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/gateway-session-lifecycle</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="session-lifecycle">Session Lifecycle</h1>
+<blockquote>
+<p><strong>Audience:</strong> Gateway developers and maintainers
+<strong>Source files:</strong> <code>gateway/session.py</code> (~1200 lines + <code>session_*.py</code> siblings), <code>gateway/run.py</code> (~5500 lines facade + <code>run_*.py</code> phases), <code>gateway/config.py</code>
+<strong>Last updated:</strong> 2026-06-16</p>
+</blockquote>
+<h2 id="overview">Overview</h2>
+<p>A <strong>session</strong> represents a continuous conversation between the agent and one or more users on a
+messaging platform. The session lifecycle governs when conversations persist, when they reset,
+how they survive gateway restarts, and how messages queue during concurrent operations.</p>
+<p>The session system lives primarily in two modules:</p>
+<ul>
+<li><code>gateway/session.py</code> — Data model (<code>SessionSource</code>, <code>SessionEntry</code>, <code>SessionContext</code>),
+  key generation (<code>build_session_key</code>), and the main store (<code>SessionStore</code>).</li>
+<li><code>gateway/run.py</code> — Gateway runner (<code>GatewayRunner</code>) facade that wires sessions into the message
+  processing pipeline; the phases live in <code>run_*.py</code> siblings: session housekeeping
+  (<code>run_watchers.py</code>), agent caching (<code>run_agent_cache.py</code>), restart recovery
+  (<code>session_recovery.py</code>), and message queuing (<code>run_busy.py</code>).</li>
+</ul>
+<hr />
+<h2 id="1-sessionsource--message-origin-descriptor">1. SessionSource — Message Origin Descriptor</h2>
+<p><code>SessionSource</code> is a frozen record of <em>where a message came from</em>. It is attached to every
+incoming <code>MessageEvent</code> and used for routing, isolation, and context injection.</p>
+<h3 id="fields">Fields</h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>platform</code></td>
+<td><code>Platform</code></td>
+<td><em>(required)</em></td>
+<td>Enum identifying the messaging platform (telegram, discord, slack, signal, whatsapp, matrix, local, etc.).</td>
+</tr>
+<tr>
+<td><code>chat_id</code></td>
+<td><code>str</code></td>
+<td><em>(required)</em></td>
+<td>Platform-level chat/group/channel identifier. Routed through the adapter's <code>chat_id_key</code> transform.</td>
+</tr>
+<tr>
+<td><code>chat_name</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>Human-readable name of the chat or group.</td>
+</tr>
+<tr>
+<td><code>chat_type</code></td>
+<td><code>str</code></td>
+<td><code>"dm"</code></td>
+<td>One of <code>"dm"</code>, <code>"group"</code>, <code>"channel"</code>, <code>"thread"</code>. Controls session key generation and isolation.</td>
+</tr>
+<tr>
+<td><code>user_id</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>Platform-specific user identifier. Used for authorization and per-user session isolation.</td>
+</tr>
+<tr>
+<td><code>user_name</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>Display name of the message author. Injected into system prompt.</td>
+</tr>
+<tr>
+<td><code>thread_id</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>Forum topic / Discord thread / Slack thread identifier. Differentiates threaded conversations.</td>
+</tr>
+<tr>
+<td><code>chat_topic</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>Channel topic or description (Discord channel topic, Slack channel purpose).</td>
+</tr>
+<tr>
+<td><code>user_id_alt</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>Platform-specific stable alternative ID (Signal UUID, Feishu union_id). Used when <code>user_id</code> is ephemeral.</td>
+</tr>
+<tr>
+<td><code>chat_id_alt</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>Signal group internal ID — maps a Signal group V2 identifier to its canonical form.</td>
+</tr>
+<tr>
+<td><code>is_bot</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>True when the message author is a bot or webhook (Discord bots).</td>
+</tr>
+<tr>
+<td><code>guild_id</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>Discord guild / Slack workspace / Matrix server scope identifier.</td>
+</tr>
+<tr>
+<td><code>parent_chat_id</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>Parent channel when <code>chat_id</code> refers to a thread.</td>
+</tr>
+<tr>
+<td><code>message_id</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>ID of the triggering message. Used for pin/reply/react operations and Discord ID injection (the injected <code>[Triggering message id: …]</code> note rides the API-bound message only; the persisted user row keeps the authored text).</td>
+</tr>
+<tr>
+<td><code>role_authorized</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>True when adapter granted access via a platform role (not individual user ID).</td>
+</tr>
+</tbody>
+</table>
+<h3 id="key-methods">Key Methods</h3>
+<ul>
+<li><strong><code>description</code></strong> (property: <code>str</code>) — Human-readable summary e.g. <code>"DM with Alice"</code>,
+  <code>"group: My Group, thread: 12345"</code>.</li>
+<li><strong><code>to_dict()</code> / <code>from_dict()</code></strong> — Serialization round-trip for persistence in <code>sessions.json</code>.</li>
+</ul>
+<hr />
+<h2 id="2-sessionentry--active-session-record">2. SessionEntry — Active Session Record</h2>
+<p><code>SessionEntry</code> is the per-session metadata record stored in memory and persisted to
+<code>{sessions_dir}/sessions.json</code>. Each entry maps a <code>session_key</code> to its current <code>session_id</code>.</p>
+<h3 id="fields_1">Fields</h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>session_key</code></td>
+<td><code>str</code></td>
+<td><em>(required)</em></td>
+<td>Deterministic key identifying the conversation lane (see §4).</td>
+</tr>
+<tr>
+<td><code>session_id</code></td>
+<td><code>str</code></td>
+<td><em>(required)</em></td>
+<td>Unique identifier for this specific conversation incarnation. Format: <code>YYYYMMDD_HHMMSS_&lt;8hex&gt;</code>.</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td><code>datetime</code></td>
+<td><em>(required)</em></td>
+<td>When this session incarnation was created.</td>
+</tr>
+<tr>
+<td><code>updated_at</code></td>
+<td><code>datetime</code></td>
+<td><em>(required)</em></td>
+<td>Last activity timestamp used for resource housekeeping.</td>
+</tr>
+<tr>
+<td><code>origin</code></td>
+<td><code>Optional[SessionSource]</code></td>
+<td><code>None</code></td>
+<td>The source that created this session, used for delivery routing.</td>
+</tr>
+<tr>
+<td><code>display_name</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>Chat display name (sourced from <code>SessionSource.chat_name</code>).</td>
+</tr>
+<tr>
+<td><code>platform</code></td>
+<td><code>Optional[Platform]</code></td>
+<td><code>None</code></td>
+<td>Platform enum persisted for routing across restarts.</td>
+</tr>
+<tr>
+<td><code>chat_type</code></td>
+<td><code>str</code></td>
+<td><code>"dm"</code></td>
+<td>Chat type, also persisted for policy lookup.</td>
+</tr>
+<tr>
+<td><code>input_tokens</code></td>
+<td><code>int</code></td>
+<td><code>0</code></td>
+<td>Cumulative LLM input (prompt) tokens consumed.</td>
+</tr>
+<tr>
+<td><code>output_tokens</code></td>
+<td><code>int</code></td>
+<td><code>0</code></td>
+<td>Cumulative LLM output (completion) tokens consumed.</td>
+</tr>
+<tr>
+<td><code>cache_read_tokens</code></td>
+<td><code>int</code></td>
+<td><code>0</code></td>
+<td>Cumulative prompt cache read tokens.</td>
+</tr>
+<tr>
+<td><code>cache_write_tokens</code></td>
+<td><code>int</code></td>
+<td><code>0</code></td>
+<td>Cumulative prompt cache write tokens.</td>
+</tr>
+<tr>
+<td><code>total_tokens</code></td>
+<td><code>int</code></td>
+<td><code>0</code></td>
+<td>Total token count across all turns.</td>
+</tr>
+<tr>
+<td><code>estimated_cost_usd</code></td>
+<td><code>float</code></td>
+<td><code>0.0</code></td>
+<td>Estimated cumulative USD cost.</td>
+</tr>
+<tr>
+<td><code>cost_status</code></td>
+<td><code>str</code></td>
+<td><code>"unknown"</code></td>
+<td>Cost tracking status label.</td>
+</tr>
+<tr>
+<td><code>last_prompt_tokens</code></td>
+<td><code>int</code></td>
+<td><code>0</code></td>
+<td>Last API-reported prompt token count. Used for accurate compression pre-check.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="boolean-flags-state-machine">Boolean Flags (State Machine)</h3>
+<p>SessionEntry has several boolean flags that form a simple state machine governing session
+behavior on the next access.</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>was_auto_reset</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>Set when explicit suspension causes a replacement session. Also retained for historical records.</td>
+</tr>
+<tr>
+<td><code>auto_reset_reason</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td><code>"suspended"</code> for explicit suspension; older rows may retain historical reset reasons.</td>
+</tr>
+<tr>
+<td><code>reset_had_activity</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>Whether the replaced session had prior activity.</td>
+</tr>
+<tr>
+<td><code>is_fresh_reset</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>Set by explicit <code>/new</code> or <code>/reset</code>. Triggers topic/channel skill re-injection on first message. Distinguished from <code>was_auto_reset</code> to avoid misleading "session expired" notices.</td>
+</tr>
+<tr>
+<td><code>expiry_finalized</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>Historical finalization fence retained for recovery; no timer writes it.</td>
+</tr>
+<tr>
+<td><code>suspended</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>Hard force-wipe signal. Set by <code>/stop</code> or stuck-loop escalation (3+ consecutive restart failures). On next <code>get_or_create_session()</code>, forces a new <code>session_id</code> regardless of <code>resume_pending</code>.</td>
+</tr>
+<tr>
+<td><code>resume_pending</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>Soft recovery marker. Set by <code>suspend_recently_active()</code> (crash recovery) or drain timeout. On next access, preserves the existing <code>session_id</code> — the user continues on the same transcript. Cleared after the next successful turn completes.</td>
+</tr>
+<tr>
+<td><code>resume_reason</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>None</code></td>
+<td>Why resume was marked: <code>"restart_timeout"</code>, <code>"shutdown_timeout"</code>, <code>"restart_interrupted"</code>.</td>
+</tr>
+<tr>
+<td><code>last_resume_marked_at</code></td>
+<td><code>Optional[datetime]</code></td>
+<td><code>None</code></td>
+<td>Timestamp of the last resume-pending marking.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="state-transition-logic-get_or_create_session">State Transition Logic (get_or_create_session)</h3>
+<div class="highlight"><pre><span></span><code>                    ┌──────────┐
+                    │  Incoming │
+                    │  Message  │
+                    └────┬─────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │  session_key exists  │──── No ──► Create fresh SessionEntry
+              │  AND !force_new      │
+              └──────────┬───────────┘
+                         │ Yes
+                         ▼
+              ┌──────────────────────┐
+              │  entry.suspended?    │──── Yes ──► Auto-reset: new session_id
+              └──────────┬───────────┘           (reason=&quot;suspended&quot;)
+                         │ No
+                         ▼
+              ┌──────────────────────┐
+              │ entry.resume_pending?│──── Yes ──► Return existing entry
+              └──────────┬───────────┘           (preserve session_id)
+                         │ No                     Clear flag on next successful turn
+                         ▼
+              ┌──────────────────────┐
+              │   Policy says reset? │──── Yes ──► Auto-reset: new session_id
+              └──────────┬───────────┘           (reason=&quot;idle&quot;/&quot;daily&quot;)
+                         │ No
+                         ▼
+              ┌──────────────────────┐
+              │  Return existing     │
+              │  entry, bump         │
+              │  updated_at          │
+              └──────────────────────┘
+</code></pre></div>
+
+<p><strong>Priority order in <code>get_or_create_session()</code>:</strong>
+1. <code>suspended=True</code> → always force-reset (hard wipe)
+2. <code>resume_pending=True</code> → preserve session_id (soft recovery)
+3. No trigger → return existing entry (bump <code>updated_at</code>)</p>
+<hr />
+<h2 id="3-sessionstore--storage-and-operations">3. SessionStore — Storage and Operations</h2>
+<p><code>SessionStore</code> is the main storage layer. It maintains an in-memory dict (<code>_entries</code>) persisted
+to <code>sessions.json</code>, with SQLite (<code>SessionDB</code>) as the canonical store for session metadata and
+message transcripts.</p>
+<h3 id="constructor">Constructor</h3>
+<div class="highlight"><pre><span></span><code><span class="n">SessionStore</span><span class="p">(</span><span class="n">sessions_dir</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">GatewayConfig</span><span class="p">,</span> <span class="n">has_active_processes_fn</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+</code></pre></div>
+
+<ul>
+<li><code>sessions_dir</code> — Directory where <code>sessions.json</code> lives.</li>
+<li><code>config</code> — <code>GatewayConfig</code> instance for routing and housekeeping settings.</li>
+<li><code>has_active_processes_fn</code> — Optional callback keyed by <code>session_key</code> to check for running
+  background processes. Sessions with active processes are protected from routing-entry pruning.</li>
+</ul>
+<h3 id="operations-methods">Operations (Methods)</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_or_create_session(source, force_new=False)</code></td>
+<td>Core entry point. Returns existing or creates new <code>SessionEntry</code>. Evaluates explicit suspension and restart recovery state. Creates/ends SQLite records.</td>
+</tr>
+<tr>
+<td><code>update_session(session_key, last_prompt_tokens=None)</code></td>
+<td>Lightweight metadata update after an interaction. Bumps <code>updated_at</code>, optionally records <code>last_prompt_tokens</code>.</td>
+</tr>
+<tr>
+<td><code>reset_session(session_key, display_name=None)</code></td>
+<td>Explicit reset (from <code>/new</code> or <code>/reset</code>). Creates new <code>session_id</code>, sets <code>is_fresh_reset=True</code>. Ends old SQLite session, creates new one.</td>
+</tr>
+<tr>
+<td><code>switch_session(session_key, target_session_id, *, expected_session_id=None)</code></td>
+<td>Switch to a different existing session ID (from <code>/resume</code>). Ends current SQLite session, reopens target. With <code>expected_session_id=</code> the repoint is a compare-and-swap: returns <code>None</code> without switching when the key no longer points at that session, so a caller that resolved against a snapshot across an <code>await</code> (async-delegation re-pin, Telegram topic-binding heal) cannot overwrite a concurrent <code>/new</code> or <code>/resume</code>.</td>
+</tr>
+<tr>
+<td><code>suspend_session(session_key)</code></td>
+<td>Mark session as <code>suspended=True</code> (from <code>/stop</code>). Forces auto-reset on next access.</td>
+</tr>
+<tr>
+<td><code>mark_resume_pending(session_key, reason)</code></td>
+<td>Mark session as <code>resume_pending=True</code> (from drain timeout). Preserves session_id on next access. Will NOT override <code>suspended=True</code>.</td>
+</tr>
+<tr>
+<td><code>clear_resume_pending(session_key)</code></td>
+<td>Clear <code>resume_pending</code> after a successful resumed turn. Called from gateway after <code>run_conversation()</code> returns.</td>
+</tr>
+<tr>
+<td><code>suspend_recently_active(max_age_seconds=120)</code></td>
+<td>Crash recovery: mark recently-active sessions as <code>resume_pending=True</code>. Skips already-pending and already-suspended entries. Called on startup after unclean shutdown.</td>
+</tr>
+<tr>
+<td><code>prune_old_entries(max_age_days)</code></td>
+<td>Drop entries older than <code>max_age_days</code> (based on <code>updated_at</code>). Skips <code>suspended</code> entries and sessions with active processes.</td>
+</tr>
+<tr>
+<td><code>list_sessions(active_minutes=None)</code></td>
+<td>Return all sessions, optionally filtered by recent activity. Sorted by <code>updated_at</code> descending.</td>
+</tr>
+<tr>
+<td><code>lookup_by_session_id(session_id)</code></td>
+<td>Find the active <code>SessionEntry</code> for a persisted session ID.</td>
+</tr>
+<tr>
+<td><code>has_any_sessions()</code></td>
+<td>Check if any sessions have ever been created (uses SQLite for history, not just in-memory dict).</td>
+</tr>
+<tr>
+<td><code>append_to_transcript(session_id, message, skip_db=False)</code></td>
+<td>Append a message to SQLite transcript. <code>skip_db=True</code> prevents duplicate writes when the agent already persisted.</td>
+</tr>
+<tr>
+<td><code>rewrite_transcript(session_id, messages)</code></td>
+<td>Full replacement of session transcript (used by <code>/retry</code>, <code>/undo</code>, <code>/compress</code>).</td>
+</tr>
+<tr>
+<td><code>load_transcript(session_id)</code></td>
+<td>Load all messages from a session's SQLite transcript.</td>
+</tr>
+<tr>
+<td><code>rewind_session(session_id, n=1)</code></td>
+<td>Back up <code>n</code> user turns via soft-delete (keeps audit trail); thin wrapper over <code>SessionDB.rewind_user_turn</code> (<code>hermes_state_rewind.py</code>), the one rewind shared with CLI <code>/undo</code>/<code>/retry</code> and the TUI. Returns <code>{rewound_count, turns_undone, target_text}</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="internal-helpers">Internal Helpers</h3>
+<ul>
+<li><code>_ensure_loaded()</code> / <code>_ensure_loaded_locked()</code> — Load <code>sessions.json</code> into <code>_entries</code> dict.</li>
+<li><code>_save()</code> — Atomic write to <code>sessions.json</code> via temp file + <code>atomic_replace</code>.</li>
+<li><code>_generate_session_key(source)</code> — Delegates to <code>build_session_key()</code> with config params.</li>
+</ul>
+<h3 id="storage-layout">Storage Layout</h3>
+<div class="highlight"><pre><span></span><code>{sessions_dir}/
+  sessions.json          # In-memory _entries dict, persisted as JSON
+                           Maps session_key → SessionEntry (metadata only)
+  {session_id}.jsonl     # (Legacy, removed in spec 002)
+</code></pre></div>
+
+<p>The canonical transcript store is SQLite via <code>SessionDB</code> (from <code>hermes_state</code>). The
+<code>sessions.json</code> file persists the <code>session_key → session_id</code> mapping and entry metadata
+(flags, timestamps, token counts). If SQLite is unavailable, the store falls back to
+JSONL, but this is a degradation path.</p>
+<hr />
+<h2 id="4-sessionkey-generation-rules">4. SessionKey Generation Rules</h2>
+<p>Session keys are deterministic strings that identify a conversation lane. They are generated
+by <code>build_session_key(source, group_sessions_per_user, thread_sessions_per_user)</code>.</p>
+<h3 id="key-format">Key Format</h3>
+<div class="highlight"><pre><span></span><code>agent:main:{platform}:{chat_type}[:{chat_id}][:{thread_id}][:{participant_id}]
+</code></pre></div>
+
+<h3 id="dm-rules">DM Rules</h3>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Key</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DM with chat_id</td>
+<td><code>agent:main:telegram:dm:12345</code></td>
+</tr>
+<tr>
+<td>DM with chat_id + thread</td>
+<td><code>agent:main:telegram:dm:12345:thread_678</code></td>
+</tr>
+<tr>
+<td>DM without chat_id, with participant_id</td>
+<td><code>agent:main:signal:dm:user_abc</code></td>
+</tr>
+<tr>
+<td>DM without chat_id or participant_id</td>
+<td><code>agent:main:telegram:dm</code></td>
+</tr>
+<tr>
+<td>WhatsApp DM (canonicalized)</td>
+<td><code>agent:main:whatsapp:dm:{canonical_number}</code></td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>DMs always include <code>chat_id</code> when present, isolating each private conversation.</li>
+<li><code>thread_id</code> further differentiates threaded DMs within the same DM chat.</li>
+<li>Without <code>chat_id</code>, falls back to <code>user_id_alt</code> or <code>user_id</code> as participant_id.</li>
+<li>Without any identifier, all DMs on that platform collapse to one shared session.</li>
+</ul>
+<h3 id="groupchannel-rules">Group/Channel Rules</h3>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Key</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Group chat</td>
+<td><code>agent:main:telegram:group:-10012345</code></td>
+</tr>
+<tr>
+<td>Group chat, per-user isolation</td>
+<td><code>agent:main:telegram:group:-10012345:user_abc</code></td>
+</tr>
+<tr>
+<td>Thread in group, shared</td>
+<td><code>agent:main:discord:group:12345:thread_678</code></td>
+</tr>
+<tr>
+<td>Thread in group, per-user</td>
+<td><code>agent:main:discord:group:12345:thread_678:user_abc</code></td>
+</tr>
+<tr>
+<td>Channel</td>
+<td><code>agent:main:slack:channel:C12345</code></td>
+</tr>
+<tr>
+<td>WhatsApp group (canonicalized)</td>
+<td><code>agent:main:whatsapp:group:{canonical_id}:{participant}</code></td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><code>chat_id</code> identifies the parent group/channel.</li>
+<li><code>thread_id</code> differentiates threads within that parent.</li>
+<li><strong>Per-user isolation</strong> (append <code>participant_id</code>) is controlled by:</li>
+<li><code>group_sessions_per_user</code> (default: <code>True</code>) — group/channel sessions are isolated.</li>
+<li><code>thread_sessions_per_user</code> (default: <code>False</code>) — threads are <strong>shared</strong> by default
+    (Telegram forum topics, Discord threads, Slack threads all share one session per thread).</li>
+<li><code>participant_id</code> = <code>user_id_alt</code> or <code>user_id</code> (in that priority).</li>
+<li>WhatsApp identifiers are canonicalized to handle JID/LID alias flips.</li>
+</ul>
+<h3 id="special-case-whatapp">Special Case: WhatApp</h3>
+<p>WhatsApp phone numbers go through <code>canonical_whatsapp_identifier()</code> which strips the
+<code>@s.whatsapp.net</code> suffix and normalizes to E.164 format. This prevents session fragmentation
+when the bridge returns different alias forms of the same phone number.</p>
+<hr />
+<h2 id="5-multi-user-isolation-strategy">5. Multi-User Isolation Strategy</h2>
+<p>Multi-user isolation determines whether multiple users in the same chat share a conversation
+or each get their own private session.</p>
+<h3 id="decision-logic-is_shared_multi_user_session">Decision Logic (<code>is_shared_multi_user_session</code>)</h3>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">is_shared_multi_user_session</span><span class="p">(</span><span class="n">source</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">group_sessions_per_user</span><span class="p">,</span> <span class="n">thread_sessions_per_user</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">source</span><span class="o">.</span><span class="n">chat_type</span> <span class="o">==</span> <span class="s2">&quot;dm&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>  <span class="c1"># DMs are always private</span>
+    <span class="k">if</span> <span class="n">source</span><span class="o">.</span><span class="n">thread_id</span><span class="p">:</span>
+        <span class="k">return</span> <span class="ow">not</span> <span class="n">thread_sessions_per_user</span>  <span class="c1"># Threads: shared unless per-user</span>
+    <span class="k">return</span> <span class="ow">not</span> <span class="n">group_sessions_per_user</span>       <span class="c1"># Groups: isolated unless shared</span>
+</code></pre></div>
+
+<h3 id="summary">Summary</h3>
+<table>
+<thead>
+<tr>
+<th>Chat Type</th>
+<th>Default</th>
+<th>Config Control</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DM</td>
+<td>Private (never shared)</td>
+<td>N/A</td>
+</tr>
+<tr>
+<td>Group/Channel</td>
+<td>Per-user isolation</td>
+<td><code>group_sessions_per_user</code> (default: True)</td>
+</tr>
+<tr>
+<td>Thread (forum, discord)</td>
+<td>Shared (all participants see same context)</td>
+<td><code>thread_sessions_per_user</code> (default: False)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="impact-on-system-prompt">Impact on System Prompt</h3>
+<p>When <code>shared_multi_user_session=True</code>, the system prompt omits a fixed user name and instead
+states: <em>"Multi-user {thread|session} — messages are prefixed with [sender name]. Multiple
+users may participate."</em> Individual sender names are prefixed on each user message by the
+gateway at runtime, preserving prompt caching (the system prompt doesn't change per-turn).</p>
+<hr />
+<h2 id="6-explicit-conversation-boundaries">6. Explicit Conversation Boundaries</h2>
+<p>Inactivity and wall-clock time never rotate a conversation. <code>/new</code> and <code>/reset</code>
+create an explicit boundary; context compression continues to manage long histories.
+Legacy timer configuration is ignored. The existing <code>SessionResetPolicy</code> datatype
+is inert compatibility data, not a runtime policy.</p>
+<p>Explicit suspension still creates a boundary on the next inbound turn. Recovery
+respects explicit and historical finalized boundaries rather than reopening them.
+Resource-only eviction and WebSocket orphan reaping leave conversations resumable.</p>
+<hr />
+<h2 id="7-restart-recovery-flow">7. Restart Recovery Flow</h2>
+<p>The restart recovery system ensures that in-flight sessions are preserved across gateway
+restarts, crashes, and drain timeouts. It is the solution to issue #7536.</p>
+<h3 id="startup-recovery-sequence">Startup Recovery Sequence</h3>
+<div class="highlight"><pre><span></span><code>Gateway starts
+       │
+       ▼
+┌───────────────────────────────┐
+│ Check for .clean_shutdown     │── Exists? ──► Skip suspension (clean exit)
+│ marker                        │
+└───────────────────────────────┘
+       │ Missing
+       ▼
+┌───────────────────────────────┐
+│ session_store                 │── Marks sessions updated within
+│ .suspend_recently_active()    │   last 120 seconds as resume_pending
+└───────────────────────────────┘
+       │
+       ▼
+┌───────────────────────────────┐
+│ _suspend_stuck_loop_sessions()│── Suspends sessions that have been
+│                               │   active across 3+ restarts
+└───────────────────────────────┘
+       │
+       ▼
+┌───────────────────────────────┐
+│ Queue inbound messages while  │
+│ startup restore runs          │
+│ (_startup_restore_in_progress)│
+└───────────────────────────────┘
+       │
+       ▼
+┌───────────────────────────────┐
+│ For each adapter, find        │
+│ resume_pending sessions →     │
+│ synthesize MessageEvent and   │
+│ run _handle_message to let    │
+│ the agent auto-continue       │
+└───────────────────────────────┘
+</code></pre></div>
+
+<h3 id="suspend_recently_activemax_age_seconds120">suspend_recently_active(max_age_seconds=120)</h3>
+<p>Called on gateway startup when no <code>.clean_shutdown</code> marker exists (indicating a crash or
+unexpected exit). For each session updated within the last 120 seconds:</p>
+<ul>
+<li>Sets <code>resume_pending=True</code>, <code>resume_reason="restart_interrupted"</code>,
+  <code>last_resume_marked_at=now</code>.</li>
+<li>Skips entries already <code>resume_pending=True</code> (no double-mark).</li>
+<li>Skips entries explicitly <code>suspended=True</code> (hard wipe should stay).</li>
+</ul>
+<h3 id="stuck-loop-detection-_suspend_stuck_loop_sessions">Stuck-Loop Detection (<code>_suspend_stuck_loop_sessions</code>)</h3>
+<p>Counts consecutive restarts via a JSON file (<code>{HERMES_HOME}/restart_counts.json</code>). If a
+session has been active across 3+ consecutive restarts, it's auto-suspended so the user
+gets a clean slate.</p>
+<h3 id="drain-timeout-marking">Drain-Timeout Marking</h3>
+<p>On graceful shutdown/restart, the drain system calls <code>mark_resume_pending()</code> for any
+session that was mid-turn when the drain timeout fired. Reasons:</p>
+<ul>
+<li><code>"restart_timeout"</code> — killed during restart drain</li>
+<li><code>"shutdown_timeout"</code> — killed during shutdown drain</li>
+<li><code>"restart_interrupted"</code> — crash recovery (from <code>suspend_recently_active</code>)</li>
+</ul>
+<p>All three reasons are in <code>_AUTO_RESUME_REASONS</code> and eligible for startup auto-resume.</p>
+<h3 id="auto-resume-on-next-access">Auto-Resume on Next Access</h3>
+<p>When <code>get_or_create_session()</code> encounters <code>resume_pending=True</code>:</p>
+<ol>
+<li>It returns the existing entry <strong>without</strong> creating a new <code>session_id</code>.</li>
+<li>The existing transcript is loaded intact.</li>
+<li>The marking is not cleared here — it survives until the next successful turn
+   completes (<code>clear_resume_pending()</code> is called from the gateway after
+   <code>run_conversation()</code> returns a real response).</li>
+<li>If the resumed turn is interrupted again, the <code>resume_pending</code> flag remains set,
+   and the next restart will retry. The stuck-loop counter handles terminal escalation
+   (3 retries → suspended).</li>
+</ol>
+<h3 id="clean-shutdown-marker-clean_shutdown">Clean Shutdown Marker (<code>.clean_shutdown</code>)</h3>
+<p>Written at the end of a graceful shutdown. On next startup:</p>
+<ul>
+<li>If present: skip <code>suspend_recently_active()</code> entirely. Active agents were already
+  drained, so no sessions are stuck.</li>
+<li>Then delete the marker.</li>
+</ul>
+<p>This prevents unwanted auto-resets after <code>hermes update</code>, <code>hermes gateway restart</code>,
+or <code>/restart</code>.</p>
+<hr />
+<h2 id="8-message-queuing-flow">8. Message Queuing Flow</h2>
+<p>The message queuing system handles two scenarios:</p>
+<ol>
+<li><strong>Interrupt follow-ups</strong> — When a user sends multiple messages while the agent is
+   processing, subsequent messages are queued as single-slot pending messages.</li>
+<li><strong><code>/queue</code> FIFO</strong> — Explicit <code>/queue</code> commands that must each produce their own full
+   agent turn, in order, without merging.</li>
+</ol>
+<h3 id="data-structures">Data Structures</h3>
+<div class="highlight"><pre><span></span><code>adapter._pending_messages: Dict[session_key, MessageEvent]
+    └── Single &quot;next-up&quot; slot per session. Overwritten on repeat sends
+        (burst collapse). Shared with photo-burst follow-ups.
+
+self._queued_events: Dict[session_key, List[MessageEvent]]
+    └── Overflow buffer. Each /queue invocation appends here when the
+        slot is occupied. Promoted one-at-a-time after each drain.
+</code></pre></div>
+
+<h3 id="enqueue-_enqueue_fifo">Enqueue (<code>_enqueue_fifo</code>)</h3>
+<div class="highlight"><pre><span></span><code>_enqueue_fifo(session_key, event, adapter)
+       │
+       ▼
+┌───────────────────────────────────────┐
+│ Is slot free?                         │
+│ (session_key NOT in _pending_messages)│── Yes ──► Place event in slot
+└───────────────────────────────────────┘
+       │ No
+       ▼
+Append to _queued_events[session_key] (overflow tail)
+</code></pre></div>
+
+<h3 id="dequeue--promotion-_promote_queued_event">Dequeue / Promotion (<code>_promote_queued_event</code>)</h3>
+<p>Called at the drain site after the slot was consumed. If there's an overflow item:</p>
+<ul>
+<li>When <code>pending_event is None</code> (slot was empty), return overflow head as the new event.</li>
+<li>When <code>pending_event</code> exists, stage overflow head in the slot for the next recursion.</li>
+<li>If no adapter available, push back to <code>_queued_events</code> (don't silently drop).</li>
+</ul>
+<h3 id="queue-depth">Queue Depth</h3>
+<p><code>_queue_depth(session_key, adapter)</code> returns <code>len(overflow) + (1 if slot occupied else 0)</code>.</p>
+<h3 id="clearing">Clearing</h3>
+<p>Queued events for a session are cleared on <code>/new</code> and <code>/reset</code> (via <code>_handle_reset_command</code>).
+<code>/stop</code> drops the single-slot follow-up the user sent during the interrupted turn. An
+<strong>internal</strong> wake parked in either store (an async-delegation completion notice, a kanban/cron
+<code>notify+wake</code>) survives all three commands: <code>_interrupt_and_clear_session</code> leaves it in the slot
+(promoting it out of the overflow when a discarded human follow-up held the slot) so the
+post-command drain starts it right away instead of the session idling until the next user
+message. Whether a wake pinned to a session that <code>/new</code> just closed may still run is decided at
+processing time (<code>_resolve_async_delegation_session</code>, fail-closed).</p>
+<p>Both commands also end the session's <strong>background delegations</strong> (<code>tools.async_delegation.
+interrupt_for_session</code>, selected by routing key and by the spawner's durable session id):
+<code>_interrupt_and_clear_session</code> fans the stop out for the busy path, and <code>_handle_stop_command</code>
+does the same for an idle session whose dispatching turn already ended (replying "Stopped" rather
+than "No active task to stop"). The turn's own hard interrupt never reaches those units — they are
+detached from <code>_active_children</code> at dispatch — so without the fan-out they run to completion and wake
+the chat minutes later. Each stopped unit still finalizes normally and re-enters as its completion
+notice with <code>status="interrupted"</code> and the child's partial output. <code>/new</code> and <code>/reset</code> already did this
+in <code>_handle_reset_command</code>; the shared helper's earlier call is idempotent there (a hard interrupt
+requested twice is one stop).</p>
+<h3 id="fifo-invariant">FIFO Invariant</h3>
+<p>Each <code>/queue</code> invocation produces exactly one full agent turn, in FIFO order, with no
+merging. The single-slot <code>_pending_messages</code> + overflow <code>_queued_events</code> design ensures
+that repeated sends during an active turn don't cause out-of-order processing.</p>
+<hr />
+<h2 id="9-session-context-injection">9. Session Context Injection</h2>
+<p><code>SessionContext</code> is built from a <code>SessionSource</code> and <code>GatewayConfig</code> and injected into the
+agent's system prompt. It tells the agent:</p>
+<ul>
+<li>Where the current message came from</li>
+<li>What platforms are connected</li>
+<li>Where it can deliver scheduled task outputs</li>
+<li>Whether this is a shared multi-user session</li>
+</ul>
+<h3 id="construction-build_session_context">Construction (<code>build_session_context</code>)</h3>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">build_session_context</span><span class="p">(</span><span class="n">source</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">session_entry</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SessionContext</span>
+</code></pre></div>
+
+<ol>
+<li>Collects connected platforms from config.</li>
+<li>Collects home channels for each platform.</li>
+<li>Determines <code>shared_multi_user_session</code> via <code>is_shared_multi_user_session()</code>.</li>
+<li>Attaches session metadata (key, id, timestamps) if <code>session_entry</code> is provided.</li>
+</ol>
+<h3 id="pii-redaction-build_session_context_prompt">PII Redaction (<code>build_session_context_prompt</code>)</h3>
+<p>The dynamic system prompt section (<code>## Current Session Context</code>) can optionally redact
+personally identifiable information before sending to the LLM:</p>
+<ul>
+<li>User IDs → <code>user_&lt;12hex&gt;</code> (SHA-256 prefix)</li>
+<li>Chat IDs → <code>&lt;platform&gt;:&lt;12hex&gt;</code> or just <code>&lt;12hex&gt;</code></li>
+<li>Platforms excluded from redaction: Discord (needs raw IDs for <code>@mentions</code>),
+  and any plugin-registered platform not marked <code>pii_safe</code>.</li>
+</ul>
+<p>Redaction applies only to the system prompt text. Routing, session keys, and adapter
+operations always use the original values.</p>
+<hr />
+<h2 id="10-background-housekeeping">10. Background Housekeeping</h2>
+<p>The <code>_session_housekeeping_watcher</code> periodically sweeps idle cached agents, sheds
+cache entries under memory pressure, and prunes old routing entries hourly.
+It never ends a transcript because of inactivity or the time of day.</p>
+<p>TTL, LRU and pressure eviction commit the live transcript to memory providers before
+soft-releasing clients. Active turns remain protected; terminal, browser and background
+process resources survive soft release. Routing-entry pruning preserves the canonical
+SQLite transcript, and live processes protect their routing entries from pruning.
+Historical <code>expiry_finalized</code> flags remain recovery fences but are no longer written
+by a timer watcher.</p>
+<hr />
+<h2 id="11-agent-cache">11. Agent Cache</h2>
+<p>The gateway maintains an LRU cache of <code>AIAgent</code> instances keyed by <code>session_key</code> to
+preserve prompt caching across turns.</p>
+<h3 id="cache-properties">Cache Properties</h3>
+<ul>
+<li><strong>Max size:</strong> 128 entries (<code>agent.agent_cache.max_size</code>, default <code>_AGENT_CACHE_MAX_SIZE</code>).</li>
+<li><strong>Eviction policy:</strong> Least-recently-used (LRU via <code>OrderedDict</code>).</li>
+<li><strong>Idle TTL:</strong> 3600s (1h) — <code>agent.agent_cache.idle_ttl_secs</code>, enforced by
+  <code>_session_housekeeping_watcher</code>.</li>
+<li><strong>Memory budget:</strong> <code>agent.agent_cache.memory_high_mb</code> (default <code>auto</code>) — see below.</li>
+<li><strong>Lock:</strong> <code>_agent_cache_lock</code> (threading) for thread safety.</li>
+</ul>
+<h3 id="memory-pressure-eviction">Memory-Pressure Eviction</h3>
+<p>A cached agent pins <code>_session_messages</code>, the full live transcript including tool
+outputs — tens of MB on a session with 100+ tool calls. The entry cap and the idle
+TTL are both blind to that: a gateway serving many chats keeps every warm transcript
+resident (agents that took a turn within the TTL are never idle-swept), so RSS climbs until
+the cgroup throttles and SIGTERM can no longer flush inside systemd's stop timeout
+(#80764).</p>
+<p><code>_sweep_agent_cache_under_pressure()</code> is the valve. Each watcher tick it compares anonymous
+memory against <code>memory_high_mb</code> — the cgroup's own <code>memory.stat</code> <code>anon</code> when the gateway runs
+under a cgroup limit (the scope the budget is charged against, so same-unit children such as
+<code>execute_code</code> kernels count; #110549), otherwise the process's own anonymous RSS; over budget, it evicts LRU agents
+through the same soft path the cap enforcer uses (<code>_commit_then_release_soft</code>), then
+runs <code>malloc_trim</code> so the freed arenas actually return to the OS. Evicted sessions
+rebuild their transcript from the persisted session on the next turn.</p>
+<p>Three classes of session are never shed:</p>
+<ul>
+<li>agents currently mid-turn (their clients and sandboxes are in use);</li>
+<li>the <code>protect_recent</code> most-recently-used sessions (their prompt cache is worth the
+  most);</li>
+<li>any session whose live transcript has not finished reaching disk —
+  <code>transcript_persistence_caught_up()</code> compares <code>_last_flushed_db_idx</code> against
+  <code>len(_session_messages)</code>, the same divergence the FTS write-corruption guard reacts
+  to when it preserves live history over a lagging transcript.</li>
+</ul>
+<p><code>memory_high_mb: auto</code> derives the budget from the cgroup limit the gateway runs under
+(<code>memory.high</code>, then <code>memory.max</code>, then cgroup v1), falling back to total RAM when
+uncapped. Set a number to pin it, or <code>0</code>/<code>off</code> to disable the pass entirely. Helpers
+live in <code>gateway/agent_cache_pressure.py</code>.</p>
+<h3 id="cache-lifecycle">Cache Lifecycle</h3>
+<div class="highlight"><pre><span></span><code>Message arrives
+    │
+    ▼
+get_or_create_session()  →  session_key obtained
+    │
+    ▼
+Lookup _agent_cache[session_key]
+    │
+    ├── Hit → move_to_end(), reuse AIAgent (preserves prompt cache)
+    │
+    └── Miss → create new AIAgent, store in cache
+                (if at capacity, popitem(last=False) evicts LRU entry)
+    │
+    ▼
+run_conversation()  →  agent processes message
+    │
+    ▼
+Housekeeping soft-releases idle agents without ending transcripts
+</code></pre></div>
+
+<h3 id="cleanup-flow">Cleanup Flow</h3>
+<p>Resource eviction removes the cached agent and commits memory before soft-releasing
+clients. Full <code>_cleanup_agent_resources(agent)</code> teardown is reserved for actual
+conversation boundaries and shutdown.</p>
+<hr />
+<h2 id="appendix-key-configuration">Appendix: Key Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Config Key</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>group_sessions_per_user</code></td>
+<td><code>bool</code></td>
+<td><code>true</code></td>
+<td>Isolate group/channel sessions per user</td>
+</tr>
+<tr>
+<td><code>thread_sessions_per_user</code></td>
+<td><code>bool</code></td>
+<td><code>false</code></td>
+<td>Isolate thread sessions per user</td>
+</tr>
+<tr>
+<td><code>session_store_max_age_days</code></td>
+<td><code>int</code></td>
+<td><code>0</code></td>
+<td>Prune sessions older than N days (0=disabled)</td>
+</tr>
+<tr>
+<td><code>agent.gateway_auto_continue_freshness</code></td>
+<td><code>int</code></td>
+<td><code>3600</code></td>
+<td>Seconds for resume freshness window</td>
+</tr>
+<tr>
+<td><code>agent.gateway_timeout</code></td>
+<td><code>int</code></td>
+<td><code>1800</code></td>
+<td>Agent turn timeout (30 min default)</td>
+</tr>
+<tr>
+<td><code>agent.agent_cache.max_size</code></td>
+<td><code>int</code></td>
+<td><code>128</code></td>
+<td>LRU entry cap on cached AIAgents</td>
+</tr>
+<tr>
+<td><code>agent.agent_cache.idle_ttl_secs</code></td>
+<td><code>int</code></td>
+<td><code>3600</code></td>
+<td>Evict agents idle this long</td>
+</tr>
+<tr>
+<td><code>agent.agent_cache.memory_high_mb</code></td>
+<td><code>int</code>/<code>str</code></td>
+<td><code>auto</code></td>
+<td>Anon-RSS budget above which LRU transcripts are shed</td>
+</tr>
+<tr>
+<td><code>agent.agent_cache.max_evictions_per_pass</code></td>
+<td><code>int</code></td>
+<td><code>16</code></td>
+<td>Cap on sessions shed per pressure pass</td>
+</tr>
+<tr>
+<td><code>agent.agent_cache.protect_recent</code></td>
+<td><code>int</code></td>
+<td><code>8</code></td>
+<td>MRU sessions the pressure pass never touches</td>
+</tr>
+</tbody>
+</table>
+<h2 id="state-database-and-fts-recovery">State database and FTS recovery</h2>
+<p>The canonical transcript lives in the <code>sessions</code> and <code>messages</code> tables. FTS5
+tables and their sync triggers are derived indexes that can be detached and
+rebuilt without deleting canonical messages. See
+<a href="state-db-recovery.html">State DB recovery</a> for the bounded live failure
+mode and the explicit repair procedure.</p>
+<h3 id="conversation-lifetime">Conversation lifetime</h3>
+<p>No idle or daily reset settings are supported. Explicit <code>/new</code> and <code>/reset</code>,
+compaction, suspension and crash recovery retain their separate lifecycle roles.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-session-lifecycle</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#overview">Overview</a></li>
+<li class="lvl2"><a href="#1-sessionsource--message-origin-descriptor">1. SessionSource — Message Origin Descriptor</a></li>
+<li class="lvl3"><a href="#fields">Fields</a></li>
+<li class="lvl3"><a href="#key-methods">Key Methods</a></li>
+<li class="lvl2"><a href="#2-sessionentry--active-session-record">2. SessionEntry — Active Session Record</a></li>
+<li class="lvl3"><a href="#fields_1">Fields</a></li>
+<li class="lvl3"><a href="#boolean-flags-state-machine">Boolean Flags (State Machine)</a></li>
+<li class="lvl3"><a href="#state-transition-logic-get_or_create_session">State Transition Logic (get_or_create_session)</a></li>
+<li class="lvl2"><a href="#3-sessionstore--storage-and-operations">3. SessionStore — Storage and Operations</a></li>
+<li class="lvl3"><a href="#constructor">Constructor</a></li>
+<li class="lvl3"><a href="#operations-methods">Operations (Methods)</a></li>
+<li class="lvl3"><a href="#internal-helpers">Internal Helpers</a></li>
+<li class="lvl3"><a href="#storage-layout">Storage Layout</a></li>
+<li class="lvl2"><a href="#4-sessionkey-generation-rules">4. SessionKey Generation Rules</a></li>
+<li class="lvl3"><a href="#key-format">Key Format</a></li>
+<li class="lvl3"><a href="#dm-rules">DM Rules</a></li>
+<li class="lvl3"><a href="#groupchannel-rules">Group/Channel Rules</a></li>
+<li class="lvl3"><a href="#special-case-whatapp">Special Case: WhatApp</a></li>
+<li class="lvl2"><a href="#5-multi-user-isolation-strategy">5. Multi-User Isolation Strategy</a></li>
+<li class="lvl3"><a href="#decision-logic-is_shared_multi_user_session">Decision Logic (is_shared_multi_user_session)</a></li>
+<li class="lvl3"><a href="#summary">Summary</a></li>
+<li class="lvl3"><a href="#impact-on-system-prompt">Impact on System Prompt</a></li>
+<li class="lvl2"><a href="#6-explicit-conversation-boundaries">6. Explicit Conversation Boundaries</a></li>
+<li class="lvl2"><a href="#7-restart-recovery-flow">7. Restart Recovery Flow</a></li>
+<li class="lvl3"><a href="#startup-recovery-sequence">Startup Recovery Sequence</a></li>
+<li class="lvl3"><a href="#suspend_recently_activemax_age_seconds120">suspend_recently_active(max_age_seconds=120)</a></li>
+<li class="lvl3"><a href="#stuck-loop-detection-_suspend_stuck_loop_sessions">Stuck-Loop Detection (_suspend_stuck_loop_sessions)</a></li>
+<li class="lvl3"><a href="#drain-timeout-marking">Drain-Timeout Marking</a></li>
+<li class="lvl3"><a href="#auto-resume-on-next-access">Auto-Resume on Next Access</a></li>
+<li class="lvl3"><a href="#clean-shutdown-marker-clean_shutdown">Clean Shutdown Marker (.clean_shutdown)</a></li>
+<li class="lvl2"><a href="#8-message-queuing-flow">8. Message Queuing Flow</a></li>
+<li class="lvl3"><a href="#data-structures">Data Structures</a></li>
+<li class="lvl3"><a href="#enqueue-_enqueue_fifo">Enqueue (_enqueue_fifo)</a></li>
+<li class="lvl3"><a href="#dequeue--promotion-_promote_queued_event">Dequeue / Promotion (_promote_queued_event)</a></li>
+<li class="lvl3"><a href="#queue-depth">Queue Depth</a></li>
+<li class="lvl3"><a href="#clearing">Clearing</a></li>
+<li class="lvl3"><a href="#fifo-invariant">FIFO Invariant</a></li>
+<li class="lvl2"><a href="#9-session-context-injection">9. Session Context Injection</a></li>
+<li class="lvl3"><a href="#construction-build_session_context">Construction (build_session_context)</a></li>
+<li class="lvl3"><a href="#pii-redaction-build_session_context_prompt">PII Redaction (build_session_context_prompt)</a></li>
+<li class="lvl2"><a href="#10-background-housekeeping">10. Background Housekeeping</a></li>
+<li class="lvl2"><a href="#11-agent-cache">11. Agent Cache</a></li>
+<li class="lvl3"><a href="#cache-properties">Cache Properties</a></li>
+<li class="lvl3"><a href="#memory-pressure-eviction">Memory-Pressure Eviction</a></li>
+<li class="lvl3"><a href="#cache-lifecycle">Cache Lifecycle</a></li>
+<li class="lvl3"><a href="#cleanup-flow">Cleanup Flow</a></li>
+<li class="lvl2"><a href="#appendix-key-configuration">Appendix: Key Configuration</a></li>
+<li class="lvl2"><a href="#state-database-and-fts-recovery">State database and FTS recovery</a></li>
+<li class="lvl3"><a href="#conversation-lifetime">Conversation lifetime</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

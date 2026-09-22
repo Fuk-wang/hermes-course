@@ -1,0 +1,1319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scheduled Tasks (Cron) · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/cron</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="scheduled-tasks-cron">Scheduled Tasks (Cron)</h1>
+<p>Schedule tasks to run automatically with natural language or cron expressions. Hermes exposes cron management through a single <code>cronjob</code> tool with action-style operations instead of separate schedule/list/remove tools.</p>
+<h2 id="what-cron-can-do-now">What cron can do now</h2>
+<p>Cron jobs can:</p>
+<ul>
+<li>schedule one-shot or recurring tasks</li>
+<li>pause, resume, edit, trigger, and remove jobs</li>
+<li>attach zero, one, or multiple skills to a job</li>
+<li>deliver results back to the origin chat, local files, or configured platform targets</li>
+<li>run in fresh agent sessions with the normal static tool list</li>
+<li>run in <strong>no-agent mode</strong> — a script on a schedule, its stdout delivered verbatim, zero LLM involvement (see the <a href="#no-agent-mode-script-only-jobs">no-agent mode</a> section below)</li>
+<li>fire on <strong>external events</strong> — a webhook route with <code>cron_job</code> set fires the job the moment something happens (a PR gets feedback, a service posts an alert) instead of waiting for the next scheduled tick. See <a href="../messaging/webhooks.html#event-triggered-cron-jobs">Event-Triggered Cron Jobs</a>.</li>
+</ul>
+<p>All of this is available to Hermes itself through the <code>cronjob</code> tool, so you can create, pause, edit, and remove jobs by asking in plain language — no CLI required.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p><strong>Which model does a cron job run on?</strong> Resolution at fire time is: per-job pin → <code>cron.model</code> in <code>config.yaml</code> → the global default from <code>hermes model</code>.</p>
+<ul>
+<li><strong>Per-job pin</strong> — set by <em>you</em> via the dashboard, <code>hermes cron create/edit --model … --provider …</code>, or by editing <code>~/.hermes/cron/jobs.json</code>. Once set, it sticks until you change it. The agent's <code>cronjob</code> tool cannot set or change per-job models — inference pins are user-owned.</li>
+<li><strong><code>cron.model</code> / <code>cron.model_provider</code></strong> — a cron-fleet default: every unpinned job runs on this model, independent of your chat model. Set it once (<code>hermes config set cron.model &lt;name&gt;</code>) and switching your chat model with <code>hermes model</code> or <code>/model</code> never touches your cron fleet.</li>
+<li><strong>Global default</strong> — only when neither of the above is set does a job follow <code>hermes model</code>. Hermes <strong>snapshots</strong> the provider and model at creation, and that snapshot is the job's effective pin: if you later switch the global default (<code>hermes model</code>, <code>/model</code>, <code>hermes config set model.default …</code>), the job <strong>keeps running on the model and provider it was created under</strong> and logs one INFO line per run noting the difference. A global model change never stops a scheduled job, and an unattended job never silently inherits a switch to a paid provider/model (#44585). To move a job to the new default, <strong>resnap</strong> it (<code>hermes cron resnap &lt;job_id&gt;</code>, or <code>--all</code> for every unpinned job) so it adopts the current default while staying unpinned, pin it (<code>hermes cron edit &lt;job_id&gt; --provider &lt;provider&gt; --model &lt;model&gt;</code>), or set <code>cron.model</code> to move the whole fleet at once. Jobs created before snapshots existed keep following the live global default.</li>
+</ul>
+<p>Whichever provider a job resolves to, its provider-specific request settings (e.g. <code>request_overrides</code> such as <code>extra_body</code>/<code>extra_headers</code> for custom providers) carry into the scheduled run just like an interactive session.</p>
+<p><code>hermes setup --portal</code> is the lowest-friction option for unattended runs since OAuth refresh is automatic. See <a href="../../integrations/nous-portal.html">Nous Portal</a>.</p>
+</div>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p><strong>Per-job reasoning effort.</strong> A job can pin its own thinking level, independent of the model pin: one of <code>none</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code>, <code>ultra</code>. When set, it overrides both the global <code>agent.reasoning_effort</code> and per-model <code>agent.reasoning_overrides</code> for that job's runs (<code>none</code> disables thinking). Set it via <code>hermes cron create/edit --reasoning-effort high</code>; pass an empty string on edit to clear the pin and follow config again. (It is deliberately not exposed on the agent's <code>cronjob</code> tool — model configuration stays a user decision.) Levels a model doesn't support are clamped or omitted by the provider at request time — pinning <code>xhigh</code> on a model that caps at <code>high</code> runs at <code>high</code>. The pin has no effect on <code>no_agent</code> jobs (there is no LLM call to tune). Use it to run heavy scheduled analyses at <code>high</code> while cheap recurring jobs run at <code>minimal</code>, without touching your global default.</p>
+</div>
+<div class="admonition adm-warning"><p class="adm-title">Warning</p>
+<p>Cron-run sessions cannot recursively create more cron jobs. Hermes disables cron management tools inside cron executions to prevent runaway scheduling loops.</p>
+</div>
+<h2 id="creating-scheduled-tasks">Creating scheduled tasks</h2>
+<h3 id="in-chat-with-cron">In chat with <code>/cron</code></h3>
+<div class="highlight"><pre><span></span><code>/cron<span class="w"> </span>add<span class="w"> </span><span class="s2">&quot;in 30m&quot;</span><span class="w"> </span><span class="s2">&quot;Remind me to check the build&quot;</span>
+/cron<span class="w"> </span>add<span class="w"> </span><span class="s2">&quot;every 2h&quot;</span><span class="w"> </span><span class="s2">&quot;Check server status&quot;</span>
+/cron<span class="w"> </span>add<span class="w"> </span><span class="s2">&quot;every 1h&quot;</span><span class="w"> </span><span class="s2">&quot;Summarize new feed items&quot;</span><span class="w"> </span>--skill<span class="w"> </span>blogwatcher
+/cron<span class="w"> </span>add<span class="w"> </span><span class="s2">&quot;every 1h&quot;</span><span class="w"> </span><span class="s2">&quot;Use both skills and combine the result&quot;</span><span class="w"> </span>--skill<span class="w"> </span>blogwatcher<span class="w"> </span>--skill<span class="w"> </span>maps
+</code></pre></div>
+
+<h3 id="from-the-standalone-cli">From the standalone CLI</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 2h&quot;</span><span class="w"> </span><span class="s2">&quot;Check server status&quot;</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 1h&quot;</span><span class="w"> </span><span class="s2">&quot;Summarize new feed items&quot;</span><span class="w"> </span>--skill<span class="w"> </span>blogwatcher
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 1h&quot;</span><span class="w"> </span><span class="s2">&quot;Use both skills and combine the result&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>blogwatcher<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>maps<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;Skill combo&quot;</span>
+</code></pre></div>
+
+<h3 id="through-natural-conversation">Through natural conversation</h3>
+<p>Ask Hermes normally:</p>
+<div class="highlight"><pre><span></span><code>Every morning at 9am, check Hacker News for AI news and send me a summary on Telegram.
+</code></pre></div>
+
+<p>Hermes will use the unified <code>cronjob</code> tool internally.</p>
+<h2 id="pre-dispatch-configuration-validation">Pre-dispatch configuration validation</h2>
+<p>Before constructing any agent machinery for a scheduled run, the scheduler
+validates that the job's configuration can actually produce a successful run:</p>
+<ul>
+<li>the provider API key resolves (skipped when a <code>fallback_providers</code> chain is
+  configured, since the fallback path may rescue a missing primary key),</li>
+<li>attached skills are ready (no missing required environment variables,
+  commands, or credential files),</li>
+<li>delivery platform targets are known and have gateway credentials configured
+  (<code>local</code>/<code>origin</code> targets are never checked),</li>
+<li>every MCP server the job names in its own <code>enabled_toolsets</code> resolved to at
+  least one tool for this profile. A server that connected earlier in this
+  gateway and is only reconnecting after a network blip (router reboot, DNS
+  failure) does <strong>not</strong> block: the job runs with the tools that did resolve and
+  the gateway log notes which servers were skipped (once per outage). A server
+  that never connected for this profile (wrong URL or credentials, or a server
+  another profile owns under a multiplexer), or one parked on a permanent error
+  such as revoked credentials, blocks the run.</li>
+</ul>
+<p>When validation fails, the job's <code>last_status</code> becomes <code>blocked_config</code>, ONE
+alert is delivered (it is not repeated every tick), and <strong>no LLM call is
+made</strong> — a misconfigured job never spends tokens. The next healthy run clears
+the blocked state so a future configuration break alerts again.</p>
+<p>A missing-credential verdict names the profile and <code>HERMES_HOME</code> the scheduler
+read, e.g. <code>provider credential missing: No Codex credentials stored … [profile
+'default', HERMES_HOME /opt/data]</code>. When an interactive session with "the same"
+credential works, compare that path with the shell's <code>HERMES_HOME</code>: a gateway
+started without the shell's environment (Docker <code>HOME</code> vs <code>HERMES_HOME</code>, a
+service unit) or a multiplexed satellite profile reads a different <code>auth.json</code>
+and <code>.env</code> than the shell does.</p>
+<p>To disable the validation and restore the old behavior (the run proceeds and
+fails during execution):</p>
+<div class="highlight"><pre><span></span><code><span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">preflight</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>Or: <code>hermes config set cron.preflight false</code></p>
+<h2 id="moving-unpinned-jobs-to-a-new-global-default">Moving unpinned jobs to a new global default</h2>
+<p>An unpinned job stays on the provider/model it was created under, so changing your chat model
+never changes (or stops) your cron fleet. When you <em>do</em> want scheduled jobs to move:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--provider<span class="w"> </span>&lt;provider&gt;<span class="w"> </span>--model<span class="w"> </span>&lt;model&gt;<span class="w">   </span><span class="c1"># one job</span>
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>cron.model<span class="w"> </span>&lt;model&gt;<span class="w">                               </span><span class="c1"># every unpinned job</span>
+</code></pre></div>
+
+<p><code>hermes config set model.default …</code> and the Desktop model picker list the unpinned jobs that will
+keep their original model so you can decide deliberately. Stored snapshots are refreshed whenever
+you edit a job's provider, model, or base URL.</p>
+<p>Resnapping refreshes an unpinned job's stored snapshot to the current global resolution without
+pinning it, so it keeps tracking future changes:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>resnap<span class="w"> </span>&lt;job_id&gt;<span class="w">   </span><span class="c1"># one job</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>resnap<span class="w"> </span>--all<span class="w">      </span><span class="c1"># every unpinned agent job</span>
+</code></pre></div>
+
+<p>The agent-facing <code>cronjob</code> tool accepts the same action (<code>action=resnap job_id=&lt;id&gt;</code> or
+<code>action=resnap all=true</code>). Pinned axes and <code>no_agent</code> script jobs are left untouched.</p>
+<h2 id="skill-backed-cron-jobs">Skill-backed cron jobs</h2>
+<p>A cron job can load one or more skills before it runs the prompt. Each skill loads exactly as it does from <code>/skill-name</code> in a chat session, including the <code>[Skill config ...]</code> block with its resolved <code>metadata.hermes.config</code> values from <code>config.yaml</code>.</p>
+<h3 id="single-skill">Single skill</h3>
+<div class="highlight"><pre><span></span><code><span class="n">cronjob</span><span class="p">(</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span>
+    <span class="n">skill</span><span class="o">=</span><span class="s2">&quot;blogwatcher&quot;</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;Check the configured feeds and summarize anything new.&quot;</span><span class="p">,</span>
+    <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;0 9 * * *&quot;</span><span class="p">,</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Morning feeds&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="multiple-skills">Multiple skills</h3>
+<p>Skills are loaded in order. The prompt becomes the task instruction layered on top of those skills.</p>
+<div class="highlight"><pre><span></span><code><span class="n">cronjob</span><span class="p">(</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span>
+    <span class="n">skills</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;blogwatcher&quot;</span><span class="p">,</span> <span class="s2">&quot;maps&quot;</span><span class="p">],</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;Look for new local events and interesting nearby places, then combine them into one short brief.&quot;</span><span class="p">,</span>
+    <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;every 6h&quot;</span><span class="p">,</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Local brief&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>This is useful when you want a scheduled agent to inherit reusable workflows without stuffing the full skill text into the cron prompt itself.</p>
+<h2 id="running-a-job-inside-a-project-directory">Running a job inside a project directory</h2>
+<p>Cron jobs default to running detached from any repo — no <code>AGENTS.md</code>, <code>CLAUDE.md</code>, or <code>.cursorrules</code> is loaded, and the terminal / file / code-exec tools run from whatever working directory the gateway started in. Pass <code>--workdir</code> (CLI) or <code>workdir=</code> (tool call) to change that:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Standalone CLI (schedule and prompt are positional)</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 1d at 09:00&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;Audit open PRs, summarize CI health, and post to #eng&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--workdir<span class="w"> </span>/home/me/projects/acme
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># From a chat, via the cronjob tool</span>
+<span class="n">cronjob</span><span class="p">(</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span>
+    <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;every 1d at 09:00&quot;</span><span class="p">,</span>
+    <span class="n">workdir</span><span class="o">=</span><span class="s2">&quot;/home/me/projects/acme&quot;</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;Audit open PRs, summarize CI health, and post to #eng&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>When <code>workdir</code> is set:</p>
+<ul>
+<li><code>AGENTS.md</code>, <code>CLAUDE.md</code>, and <code>.cursorrules</code> from that directory are injected into the system prompt (same discovery order as the interactive CLI)</li>
+<li><code>terminal</code>, <code>read_file</code>, <code>write_file</code>, <code>patch</code>, <code>search_files</code>, and <code>execute_code</code> all use that directory as their working directory</li>
+<li>The path must be an absolute directory that exists — relative paths and missing directories are rejected at create / update time</li>
+<li>Pass <code>--workdir ""</code> (or <code>workdir=""</code> via the tool) on edit to clear it and restore the old behaviour</li>
+</ul>
+<div class="admonition adm-note"><p class="adm-title">Isolation</p>
+<p>Each agent run binds its <code>workdir</code> to that run's unique task identity. Workdir jobs therefore use the normal parallel pool without mutating process-global terminal state or leaking paths between concurrent runs. Set <code>cron.max_parallel_jobs</code> if you want to limit total cron concurrency.</p>
+</div>
+<h2 id="editing-jobs">Editing jobs</h2>
+<p>You do not need to delete and recreate jobs just to change them.</p>
+<div class="admonition adm-tip"><p class="adm-title">Job reference</p>
+<p>The <code>&lt;job_id&gt;</code> placeholder below (and in <a href="#lifecycle-actions">Lifecycle actions</a>) also accepts the job's name (case-insensitive) — handy when you remember <code>morning-digest</code> but not the hex ID. An exact job ID takes precedence over name matches; if the reference is not an ID and a name matches more than one job, the command refuses and prints the candidate IDs so you can disambiguate.</p>
+</div>
+<h3 id="chat">Chat</h3>
+<div class="highlight"><pre><span></span><code>/cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--schedule<span class="w"> </span><span class="s2">&quot;every 4h&quot;</span>
+/cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--prompt<span class="w"> </span><span class="s2">&quot;Use the revised task&quot;</span>
+/cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--skill<span class="w"> </span>blogwatcher<span class="w"> </span>--skill<span class="w"> </span>maps
+/cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--remove-skill<span class="w"> </span>blogwatcher
+/cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--clear-skills
+</code></pre></div>
+
+<h3 id="standalone-cli">Standalone CLI</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--schedule<span class="w"> </span><span class="s2">&quot;every 4h&quot;</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--prompt<span class="w"> </span><span class="s2">&quot;Use the revised task&quot;</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--skill<span class="w"> </span>blogwatcher<span class="w"> </span>--skill<span class="w"> </span>maps
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--add-skill<span class="w"> </span>maps
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--remove-skill<span class="w"> </span>blogwatcher
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--clear-skills
+</code></pre></div>
+
+<p>Notes:</p>
+<ul>
+<li>repeated <code>--skill</code> replaces the job's attached skill list</li>
+<li><code>--add-skill</code> appends to the existing list without replacing it</li>
+<li><code>--remove-skill</code> removes specific attached skills</li>
+<li><code>--clear-skills</code> removes all attached skills</li>
+</ul>
+<h2 id="lifecycle-actions">Lifecycle actions</h2>
+<p>Cron jobs now have a fuller lifecycle than just create/remove.</p>
+<h3 id="chat_1">Chat</h3>
+<div class="highlight"><pre><span></span><code>/cron<span class="w"> </span>list
+/cron<span class="w"> </span>pause<span class="w"> </span>&lt;job_id&gt;
+/cron<span class="w"> </span>resume<span class="w"> </span>&lt;job_id&gt;
+/cron<span class="w"> </span>run<span class="w"> </span>&lt;job_id&gt;
+/cron<span class="w"> </span>remove<span class="w"> </span>&lt;job_id&gt;
+</code></pre></div>
+
+<h3 id="standalone-cli_1">Standalone CLI</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>list
+hermes<span class="w"> </span>cron<span class="w"> </span>pause<span class="w"> </span>&lt;job_id_or_name&gt;
+hermes<span class="w"> </span>cron<span class="w"> </span>resume<span class="w"> </span>&lt;job_id_or_name&gt;
+hermes<span class="w"> </span>cron<span class="w"> </span>run<span class="w"> </span>&lt;job_id_or_name&gt;
+hermes<span class="w"> </span>cron<span class="w"> </span>remove<span class="w"> </span>&lt;job_id_or_name&gt;
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id_or_name&gt;<span class="w"> </span><span class="o">[</span>...flags<span class="o">]</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>status
+hermes<span class="w"> </span>cron<span class="w"> </span>tick
+</code></pre></div>
+
+<p>What they do:</p>
+<ul>
+<li><code>pause</code> — keep the job but stop scheduling it</li>
+<li><code>resume</code> — re-enable the job. A recurring job whose slot came due while it was paused keeps that slot due, so the next tick fires one catch-up run (or logs the skip when <code>cron.catch_up_missed: false</code>) instead of silently jumping to the next occurrence; otherwise the next future run is computed</li>
+<li><code>run</code> — trigger the job on the next scheduler tick</li>
+<li><code>remove</code> — delete it entirely</li>
+<li><code>edit</code> — modify schedule, prompt, delivery, etc.</li>
+</ul>
+<p><strong>Name-based lookup.</strong> All four mutating verbs (<code>pause</code>, <code>resume</code>, <code>run</code>, <code>remove</code>, <code>edit</code>) plus the agent's <code>cronjob</code> tool now accept a job <strong>name</strong> (case-insensitive) in place of the hex ID. The agent and CLI both prefer an exact ID match if one exists; ambiguous name matches (multiple jobs sharing the same name) are refused with the full list of candidate IDs so you can pick one explicitly. Names are not unique, so this guard is load-bearing — it prevents silently mutating the wrong job when two share a name.</p>
+<h3 id="pausing-everything-hermes-pause">Pausing everything: <code>hermes pause</code></h3>
+<p><code>hermes pause [--reason ...]</code> is the global emergency stop (<code>hermes resume</code> lifts it). While it is engaged no scheduled cron fire starts, whichever door it arrives through: the built-in ticker skips its dispatch, the managed-cron (hosted scheduler) fire webhook answers <code>503</code> with <code>Retry-After: 60</code> so the scheduler redelivers the fire after you resume, and the <a href="#misfire-catch-up">misfire catch-up</a> sweep stays idle instead of force-firing everything that was held back. Runs already in flight are never killed, and nothing is lost: due work catches up on the first tick or sweep after <code>hermes resume</code>. Explicit manual runs (<code>hermes cron run</code>, the dashboard's Trigger button) are an operator override and still execute while paused.</p>
+<h3 id="creating-a-job-paused-safe-canary">Creating a job paused (safe canary)</h3>
+<p>Create a canary without a create-then-pause scheduling race:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 1h&quot;</span><span class="w"> </span><span class="s2">&quot;Post the digest&quot;</span><span class="w"> </span>--paused<span class="w"> </span>--paused-reason<span class="w"> </span><span class="s2">&quot;Awaiting review&quot;</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>resume<span class="w"> </span>&lt;job_id&gt;
+</code></pre></div>
+
+<p><code>--paused</code> stores <code>enabled: false</code>, <code>state: paused</code>, <code>next_run_at: null</code>, a pause
+timestamp and an auditable reason in the first locked write, without registering a
+trigger. Omit the reason to store "Created paused; awaiting operator approval."
+Omit <code>--paused</code> to retain normal enabled creation. <code>--paused-reason</code> requires
+<code>--paused</code>; invalid values are rejected before persistence.</p>
+<p>The same <code>paused</code> boolean and optional <code>paused_reason</code> string are accepted by
+<code>cron.jobs.create_job</code>, the cron management tool's <code>create</code> action, the gateway
+<code>POST /api/jobs</code>, and the dashboard <code>POST /api/cron/jobs</code>. Resume schedules the next
+future run. Pausing prevents automatic fires, not operator overrides: existing
+explicit <strong>Run now</strong> / force-run behavior remains available and can resume and run
+the job. It is not a security boundary against an operator who can run jobs.</p>
+<h2 id="agent-managed-scheduling-cron-jobs-that-manage-cron-jobs">Agent-managed scheduling (cron jobs that manage cron jobs)</h2>
+<p>By default, agents launched <em>by</em> the scheduler cannot use the <code>cronjob</code> tool —
+a scheduled job cannot create, edit, or remove other jobs. Opt in via
+<code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">allow_agent_scheduling</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># default: false</span>
+</code></pre></div>
+
+<p>When enabled, a scheduled agent can manage the cron table like any chat
+session: schedule follow-up one-shots from within scheduled work, tune its own
+cadence, or run a "cron librarian" job that reconciles the whole table
+(list, then update/remove/create as needed). Two properties keep this sane:</p>
+<ul>
+<li><strong>One flat, user-owned table.</strong> Jobs created from a cron run land in the
+  same <code>jobs.json</code> as every other job with no special ownership — you can
+  list, edit, or remove them exactly as if you had created them yourself.</li>
+<li><strong>No dangling delivery.</strong> A cron run is ephemeral, so <code>deliver: origin</code>
+  from inside one is resolved <strong>at create time</strong> to the creating job's own
+  concrete target (<code>platform:chat_id[:thread_id]</code>, or <code>local</code> if the creating
+  job delivers nowhere). A job created by a scheduled agent can never point
+  its output at a session that no longer exists. Explicit targets
+  (<code>local</code>, <code>all</code>, <code>telegram:&lt;chat_id&gt;</code>) are honored verbatim.</li>
+<li><strong>A job may remove itself and still report.</strong> The "watch for X, tell me
+  once, then stop" pattern — a recurring job whose run calls
+  <code>cronjob(action="remove", job_id=&lt;its own id&gt;)</code> and then answers — delivers
+  that final response and records the run as <code>completed</code>; the job record and
+  its <code>cron/output/&lt;job_id&gt;/</code> directory are gone afterwards and the final run
+  is not written there. Deleting the record from <em>outside</em> the run (another
+  process, or a replacement job reusing the id) still discards the stale
+  run's output, as before.</li>
+</ul>
+<p>Prefer prompts that update existing jobs (list first, then update by ID)
+over ones that create new jobs each run.</p>
+<h2 id="how-it-works">How it works</h2>
+<p><strong>Cron execution is handled by the gateway daemon.</strong> The gateway ticks the scheduler every 60 seconds, running any due jobs in isolated agent sessions.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>install<span class="w">     </span><span class="c1"># Install as a user service</span>
+sudo<span class="w"> </span>hermes<span class="w"> </span>gateway<span class="w"> </span>install<span class="w"> </span>--system<span class="w">   </span><span class="c1"># Linux: boot-time system service for servers</span>
+hermes<span class="w"> </span>gateway<span class="w">             </span><span class="c1"># Or run in foreground</span>
+
+hermes<span class="w"> </span>cron<span class="w"> </span>list
+hermes<span class="w"> </span>cron<span class="w"> </span>status
+</code></pre></div>
+
+<p><code>hermes cron status</code> reports whether the scheduler is alive (gateway process, ticker heartbeat, last successful tick) and the soonest scheduled run across your active jobs, ordered by actual instant even when jobs store different UTC offsets. A <code>next_run_at</code> that is already more than 15 minutes in the past is never shown as an upcoming "Next run": <code>cron status</code> prints <code>⚠ Next run &lt;time&gt; is OVERDUE — passed 7h ago but the job has not fired</code>, <code>cron list</code> and the in-chat <code>/cron list</code> label the row <code>Overdue:</code>, the dashboard and the Desktop cron panel (including a Bot's Routines card) show <code>Overdue since</code>, and when the scheduler has stopped ticking <code>status</code> (with the gateway down) and the dashboard Cron page also say when it last ticked. That is the signature of a scheduler that stopped ticking — restart the gateway (<code>hermes gateway restart</code>) so the next tick picks the overdue job up, or run it right away with <code>hermes cron run &lt;id&gt;</code>.</p>
+<p>For a named profile served by the default-profile multiplexer, <code>hermes cron status</code> names that scheduler host and reports the named profile's own heartbeat health. Missing or stale heartbeats point to <code>hermes --profile default gateway restart</code>. <code>cron list</code> and <code>cron create</code> also warn when that heartbeat is missing or stale; <code>cron status</code> additionally checks the last successful tick and reports tick errors.</p>
+<h3 id="gateway-scheduler-behavior">Gateway scheduler behavior</h3>
+<p>On each tick Hermes:</p>
+<ol>
+<li>loads jobs from <code>~/.hermes/cron/jobs.json</code></li>
+<li>checks <code>next_run_at</code> against the current time</li>
+<li>starts a fresh <code>AIAgent</code> session for each due job</li>
+<li>optionally injects one or more attached skills into that fresh session</li>
+<li>runs the prompt to completion</li>
+<li>delivers the final response</li>
+<li>updates run metadata and the next scheduled time</li>
+</ol>
+<p>A file lock at <code>~/.hermes/cron/.tick.lock</code> prevents overlapping scheduler ticks from double-running the same job batch.</p>
+<h3 id="restart-safe-workers-under-systemd">Restart-safe workers under systemd</h3>
+<p>When the gateway runs as a systemd service, each due job is handed to an external worker process launched in a transient user scope (<code>systemd-run --user --scope</code>), so restarting the gateway mid-job does not kill the job. Creating that scope needs a user systemd session; hosts without one (containers, minimal LXCs, a service user without linger) cannot provide it.</p>
+<p>By default cron then <strong>degrades</strong>: the job still runs as a separate external process with the same execution handoff, but without cgroup isolation, so a gateway restart during the job kills it (the execution ledger records that). One warning is logged per gateway process. To fail closed instead — skip the job and record the error on the job row — set:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">require_restart_safe_scope</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>The lasting fix is a user session for the gateway user: <code>sudo loginctl enable-linger &lt;gateway-user&gt;</code> (and <code>XDG_RUNTIME_DIR</code> / <code>DBUS_SESSION_BUS_ADDRESS</code> in the unit for system-level installs), then restart the gateway. Kanban workers always require a scope under the managed gateway regardless of this key: a spawn the host cannot scope is recorded on the card as an infrastructure failure and retried later, never charged to the card (see the <a href="kanban.html#workers-and-systemd-cgroups">Kanban docs</a>).</p>
+<p>The worker is the gateway's own interpreter running <code>python -m cron.scheduler</code>, with the gateway's checkout pinned on its <code>PYTHONPATH</code> (plus any entries the gateway itself was started with), so it imports the same Hermes tree the gateway runs — regardless of the venv's editable-install mapping, the unit's <code>WorkingDirectory</code>, or <code>PYTHONSAFEPATH</code> on the host. A worker that dies before acknowledging the handoff records its own stderr tail in the job's last error and in the execution ledger, so the failing import (or whatever killed it) is named instead of a bare exit code.</p>
+<h3 id="execution-history">Execution history</h3>
+<p>Hermes records each claimed cron attempt in the profile-local
+<code>~/.hermes/cron/executions.db</code> before executor or provider dispatch. Attempts
+move through <code>claimed</code>, <code>running</code>, and one immutable terminal state:
+<code>completed</code>, <code>failed</code>, or <code>unknown</code>. After restart — and before every manual
+<code>hermes cron run</code> / <code>/cron run</code>, so a one-shot invocation with no scheduler
+running heals the ledger too — Hermes marks an abandoned attempt <code>unknown</code> only
+when the original PID and process-start fingerprint prove that its owner is
+gone. Unknown attempts are audit records and are never automatically rerun.</p>
+<p>Inspect recent attempts with <code>hermes cron runs [job-id] --limit 20</code> (alias:
+<code>history</code>). Terminal history is bounded; active attempts are never pruned. The
+ledger is included in quick backups.</p>
+<p>Scheduled attempts also record their exact scheduled instant, separately from
+the time they were claimed. If an old <code>jobs.json</code> snapshot re-arms an occurrence
+that the retained ledger records as completed, Hermes skips that replay and
+re-anchors recurring jobs. This works even when the snapshot predates the
+dispatch stamp or the original run started late. Explicit manual runs do not
+consume a scheduled occurrence's identity.</p>
+<p>This is not an exactly-once side-effect guarantee: legacy rows without an
+identity, pruned history, unavailable ledgers, and interrupted attempts cannot
+prove completion. Restoring the ledger itself to an older backup also removes
+that evidence. External fire callbacks identify the currently accepted store
+claim, not an upstream scheduled slot absent from the callback.</p>
+<h3 id="repeated-failure-review-nudge">Repeated-failure review nudge</h3>
+<p>Each job tracks a <code>failure_streak</code> — consecutive failed runs (delivery
+failures don't count). A run that fails before the agent is reached at all —
+a bad import after a half-applied update, a provider client that cannot be
+constructed — counts and alerts the same as one the agent itself failed. When
+a <em>recurring</em> job's streak reaches the threshold, the failure message
+delivered to chat gains a review nudge telling you the job has failed N runs
+in a row and suggesting you fix, pause (<code>hermes cron pause &lt;job&gt;</code>), or remove
+it. Any successful run resets the streak, and <code>hermes cron list</code> shows the
+streak alongside a failing job's last run. One-shot jobs never nudge.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">failure_nudge_threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span><span class="w">   </span><span class="c1"># default; 0 disables the nudge</span>
+</code></pre></div>
+
+<h3 id="automatic-re-runs-when-the-model-was-unreachable">Automatic re-runs when the model was unreachable</h3>
+<p>A recurring job whose run fails with a transient network or DNS error before
+a single model call was made — the classic case is a fire right after the
+computer wakes, while the VPN or Wi-Fi is still reconnecting — does not sit
+out a whole period. The scheduler re-runs it automatically after <strong>5, 15, and
+30 minutes</strong> (inspired by Claude Cowork's scheduled-task re-runs), then falls
+back to the normal schedule. Because zero API calls were made, the re-run is
+spend-neutral and cannot duplicate any side effect.</p>
+<p>While a re-run is pending, the interim failure notice is suppressed — you get
+the real result when a re-run succeeds, or a normal failure alert once the
+ladder is exhausted. Any run that reaches the model (success or failure)
+resets the ladder. One-shot jobs are excluded: their dispatch accounting is
+at-most-times and a consumed dispatch is never resurrected. Retries never
+fire past the schedule's own next occurrence when that comes sooner.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">retry_unreachable</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># default true; disables the automatic re-runs</span>
+</code></pre></div>
+
+<h3 id="holding-a-job-through-a-closed-provider-usage-window">Holding a job through a closed provider usage window</h3>
+<p>The mirror case: the provider says exactly how long it will stay closed. When
+the scheduler resolves a subscription provider (currently the OpenAI Codex
+usage probe) and the provider reports its usage limit exhausted with a
+<code>retry after &lt;N&gt;s</code> hint (often many hours), and the whole fallback chain is
+unavailable, re-firing a sub-hourly job into that window is guaranteed to fail
+identically on every tick — and to alert every time. A 429 the model API
+returns mid-run is not held this way; it is retried on the normal cadence.</p>
+<p>Instead, the scheduler <strong>parks the job</strong>: the one failure alert says the
+window is closed and that the job is held, <code>next_run_at</code> moves to the first
+scheduled occurrence after the window (<code>quota_hold_until</code> on the job record),
+and nothing fires or alerts until then. Any run that reaches the model clears
+the hold. One-shot jobs are not held.</p>
+<h3 id="failure-incidents-alert-once-remind-on-a-cooldown-acknowledge">Failure incidents: alert once, remind on a cooldown, acknowledge</h3>
+<p>A recurring job that keeps failing with the <em>same</em> error alerts you <strong>once</strong>,
+not on every run. Each failure is recorded as a durable <strong>incident</strong>, keyed by
+the job plus a normalized signature of the error text, in the same per-profile
+ledger database as the execution history; the first failure of a signature is
+always delivered, and repeats are then withheld while the incident is <code>alerted</code>
+(the run is still recorded — <code>hermes cron runs</code> and the failure streak see it,
+only the ping is held back).</p>
+<div class="highlight"><pre><span></span><code><span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">failure_repeat_alert_hours</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">6</span><span class="w">   </span><span class="c1"># still broken after this long → one reminder ping,</span>
+<span class="w">                                  </span><span class="c1"># then silent again; 0 = alert on every failing run</span>
+</code></pre></div>
+
+<p>Anything that changes the picture alerts immediately: a <em>different</em> error mints
+its own incident and pings at once, and a successful run re-arms the signature
+so the same error after a green run alerts again. If the incident ledger cannot
+be read, the ping is delivered rather than swallowed.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>incidents<span class="w">                 </span><span class="c1"># list incidents (newest activity first)</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>incidents<span class="w"> </span>--state<span class="w"> </span>alerted<span class="w"> </span><span class="c1"># filter: detected | alerted | resolved | closed</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>incidents<span class="w"> </span>ack<span class="w"> </span>&lt;id&gt;<span class="w">        </span><span class="c1"># acknowledge — silence this signature for good</span>
+</code></pre></div>
+
+<p>Acknowledging an incident silences the failure ping for that exact signature
+only, reminders included. Nothing else changes: the run history still records
+every failure, the failure streak keeps counting, and the moment the job starts
+failing with a <em>different</em> error a new incident is minted and alerts fire
+again.</p>
+<p>A successful run marks every open incident for that job <code>resolved</code>, so the
+list reflects current health rather than every failure the job ever had. If
+the job later fails with the <em>same</em> error, the resolved incident re-opens as
+<code>detected</code> and you are alerted again. Acknowledged (<code>closed</code>) incidents are
+the exception: a success leaves them alone, and a repeat stays silent.</p>
+<p>Incident lifecycle: <code>detected</code> (failure recorded) → <code>alerted</code> (at least one
+failure ping reached delivery; <code>alerted_at</code> is the latest one and starts the
+reminder cooldown) → <code>resolved</code> (the job ran OK afterwards; re-opens on a
+repeat) or <code>closed</code> (acknowledged; terminal for that signature). Stored error
+text is secret-redacted and truncated before it is written.</p>
+<h3 id="fleet-health-check-hermes-cron-doctor">Fleet health check: <code>hermes cron doctor</code></h3>
+<p><code>hermes cron doctor</code> is a read-only health check over every active job. It prints grouped, per-job issues and exits <code>1</code> while any finding stands, including historical late or catch-up dispatches (<code>0</code> when no findings remain).</p>
+<p>A successful catch-up does not clear the lateness warning; the next on-time dispatch does. A watchdog such as <code>hermes cron doctor || alert</code> can therefore keep alerting for a full schedule interval after the host wakes, even if the catch-up succeeds.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>doctor
+</code></pre></div>
+
+<p>Checks per active job:</p>
+<ul>
+<li>last run failed (<code>last_status</code> not ok, with the recorded error),</li>
+<li>last delivery failed (the output was produced but never reached you),</li>
+<li>last dispatch was late or caught up after a missed schedule (<code>last_dispatch</code>); this warning clears at the next on-time fire,</li>
+<li>a scheduled fire could not reach the runner (<code>last_fire_error</code>), with the recorded timestamp and a shortened reason; this warning clears after a successful run,</li>
+<li><code>next_run_at</code> missing, or parked in the past beyond a 15-minute ticker
+  grace window — the "job is silently not firing" signal (scheduler dead,
+  gateway down, or a wedged fire-claim),</li>
+<li>script missing, not a file, or resolving outside <code>HERMES_HOME/scripts</code>,</li>
+<li><code>no_agent</code> job with no script,</li>
+<li>configured <code>workdir</code> that no longer exists.</li>
+</ul>
+<p>Doctor never mutates jobs or state — it only reports. Pair it with
+<code>hermes cron incidents</code> (durable failure records) and <code>hermes cron runs</code>
+(attempt ledger) when digging into a flagged job.</p>
+<h2 id="delivery-options">Delivery options</h2>
+<p>When scheduling jobs, you specify where the output goes:</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Description</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"origin"</code></td>
+<td>Back to where the job was created</td>
+<td>Default on messaging platforms</td>
+</tr>
+<tr>
+<td><code>"local"</code></td>
+<td>Save to local files only (<code>~/.hermes/cron/output/</code>)</td>
+<td>Default on CLI</td>
+</tr>
+<tr>
+<td><code>"telegram"</code></td>
+<td>Telegram home channel</td>
+<td>Uses <code>TELEGRAM_HOME_CHANNEL</code></td>
+</tr>
+<tr>
+<td><code>"telegram:123456"</code></td>
+<td>Specific Telegram chat by ID</td>
+<td>Direct delivery</td>
+</tr>
+<tr>
+<td><code>"telegram:-100123:17585"</code></td>
+<td>Specific Telegram topic</td>
+<td><code>chat_id:thread_id</code> format</td>
+</tr>
+<tr>
+<td><code>"discord"</code></td>
+<td>Discord home channel</td>
+<td>Uses <code>DISCORD_HOME_CHANNEL</code></td>
+</tr>
+<tr>
+<td><code>"discord:#engineering"</code></td>
+<td>Specific Discord channel</td>
+<td>By channel name</td>
+</tr>
+<tr>
+<td><code>"slack"</code></td>
+<td>Slack home channel</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"whatsapp"</code></td>
+<td>WhatsApp home</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"signal"</code></td>
+<td>Signal</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"matrix"</code></td>
+<td>Matrix home room</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"mattermost"</code></td>
+<td>Mattermost home channel</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"email"</code></td>
+<td>Email</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"sms"</code></td>
+<td>SMS via Twilio</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"homeassistant"</code></td>
+<td>Home Assistant</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"dingtalk"</code></td>
+<td>DingTalk</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"feishu"</code></td>
+<td>Feishu/Lark</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"wecom"</code></td>
+<td>WeCom</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"weixin"</code></td>
+<td>Weixin (WeChat)</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"bluebubbles"</code></td>
+<td>BlueBubbles (iMessage)</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"qqbot"</code></td>
+<td>QQ Bot (Tencent QQ)</td>
+<td></td>
+</tr>
+<tr>
+<td><code>"bot-chat"</code></td>
+<td>This profile's canonical Bot Chat — the bot reads the output and responds</td>
+<td>Machine-local</td>
+</tr>
+<tr>
+<td><code>"bot-chat:research"</code></td>
+<td>Another local profile's Bot Chat</td>
+<td>Validated at create time</td>
+</tr>
+<tr>
+<td><code>"all"</code></td>
+<td>Fan out to every connected home channel</td>
+<td>Resolved at fire time</td>
+</tr>
+<tr>
+<td><code>"telegram,discord"</code></td>
+<td>Fan out to a specific set of channels</td>
+<td>Comma-separated list</td>
+</tr>
+<tr>
+<td><code>"origin,all"</code></td>
+<td>Deliver to the origin <strong>plus</strong> every other connected channel</td>
+<td>Combine any tokens</td>
+</tr>
+</tbody>
+</table>
+<p>The agent's final response is automatically delivered to the configured <code>deliver:</code> target — the agent does not send messages itself, so there is nothing to call in the cron prompt.</p>
+<p>Delivered output is secret-redacted on the way out, on every lane: the platform message, the
+session mirror (payload and the job name spliced around it), and a <code>bot-chat</code> turn. Credential
+shapes (vendor-prefixed API keys, tokens, <code>KEY=value</code> assignments) are masked even when
+<code>security.redact_secrets: false</code> — that setting governs your own logs, not what leaves the
+machine — and a redactor failure replaces the payload rather than sending it unscanned.
+Credential-named URL query parameters are not stripped (magic links and pre-signed URLs are
+legitimate cron output), and user-chosen secrets with no recognisable shape are not detected.
+The run document under <code>cron/output/&lt;job_id&gt;/</code> keeps the agent's response as written.</p>
+<h3 id="delivery-failures-are-a-distinct-status">Delivery failures are a distinct status</h3>
+<p>Execution and delivery are tracked separately. When the agent run succeeds but
+the output never reaches the target (platform 5xx, rate limit, stale session,
+adapter returned no positive evidence of a send), the job records
+<code>last_status: delivery_failed</code> — never a plain <code>ok</code> — with the reason in
+<code>last_delivery_error</code>. <code>hermes cron list</code> shows it in yellow as
+<code>delivery_failed: &lt;reason&gt;</code>, <code>hermes cron doctor</code> reports it as a delivery
+issue, and a manual <code>cronjob run</code> reports <code>success: false</code> with the delivery
+error. A delivery failure does not count toward the job's <code>failure_streak</code>
+(the agent did its job); the next fully successful run returns the status to
+<code>ok</code>.</p>
+<h3 id="bot-chat-delivery-bot-chat">Bot Chat delivery (<code>bot-chat</code>)</h3>
+<p><code>bot-chat</code> delivers the output <strong>into a profile's canonical "Bot Chat" session as a real message</strong>. Unlike every other target — where the recipient is a human reading a channel — the recipient here is the bot itself: it receives the output as an incoming message, acts on anything that needs action, and responds in its chat. Use it when scheduled output should be <em>processed</em>, not just posted.</p>
+<ul>
+<li><code>bot-chat</code> (bare) targets the job's own profile.</li>
+<li><code>bot-chat:&lt;profile&gt;</code> targets another profile <strong>on the same machine</strong>. Names are validated against <code>hermes profile list</code> when the job is created; profiles on other gateways or machines can never be targeted, so same-named profiles across machines are unambiguous.</li>
+<li>Each delivery costs the target bot one full agent turn — mind the schedule frequency.</li>
+<li>Composes with other targets (<code>bot-chat,telegram</code>) but is never included in <code>all</code>.</li>
+<li>If the canonical chat is open in a mailbox-capable Desktop/TUI backend, delivery is <strong>durably queued immediately</strong>, whether the bot is idle or busy. Only that live owner runs the incoming turn; cron does not start a competing CLI writer. If a CLI-only or older unsupported owner holds the chat, cron retains the never-started output under the sending profile's <code>cron/bot_chat_pending/&lt;receipt-id&gt;.json</code>. Later scheduler ticks deliver after that owner releases the chat, in admission order. Deferred work retains its admitted destination home and receipt ID even if the scheduler's launch root changes; a missing/renamed destination is not recreated or resolved to another profile. A <code>transferred</code> pending record points to the live-owner receipt, not a failed turn. Malformed JSON records are retained and logged without blocking other queued outputs. With no owner, the existing <code>hermes chat -c "Bot Chat" --create-if-missing</code> lane remains available (normal session ownership checks still apply). That child uses the exact destination home already checked by cron, including custom roots; inherited <code>HOME</code> or a changed active profile cannot redirect it. A missing destination directory is refused before launch, not recreated. A deferred request is claimed before launching that lane; interruption or an uncertain subprocess result never causes an automatic resend.</li>
+<li>Never-started outputs have no TTL: if an unsupported owner never releases, they remain queued rather than being silently dropped. Receipts retain their payloads indefinitely. An unexpected delivery exception is logged and retained as <code>ambiguous</code>, without stopping sibling deliveries in that drain; claimed/ambiguous attempts are never automatically replayed.</li>
+<li><strong>Queued is not completed.</strong> Cron records receipt IDs and <code>queued</code>/<code>claimed</code> statuses in <code>last_delivery_queued</code>, with delivery outcome <code>queued</code> (neither delivered nor failed). A successful job shows <code>delivery_queued</code>; genuine errors on other targets still take precedence as delivery failures. The bot may complete later. The durable receipt in the target profile's <code>runtime/bot_live_delivery/&lt;receipt-id&gt;.json</code> is authoritative; cron's historical status is not automatically refreshed.</li>
+<li>Rechecking the same execution inspects its existing receipt, even if the owner has disappeared. It never falls back to another writer after acceptance. <code>failed</code>, <code>cancelled</code>, or <code>ambiguous</code> receipts are not automatically replayed; inspect the chat and receipt before intentionally starting new work. Each new cron execution has a distinct delivery ID.</li>
+</ul>
+<h3 id="routing-intent-all">Routing intent (<code>all</code>)</h3>
+<p><code>all</code> lets you ship one cron job to every messaging channel you have configured, without having to enumerate them by name. It is <strong>resolved at fire time</strong>, so a job created before you wired up Telegram will pick up Telegram on the next tick after you set <code>TELEGRAM_HOME_CHANNEL</code>.</p>
+<p>Semantics: <code>all</code> expands to every platform with a configured home channel. Zero is fine; the job simply produces no delivery targets and is recorded as a delivery failure upstream.</p>
+<p><code>all</code> composes with explicit targets. <code>origin,all</code> delivers to the origin chat <em>plus</em> every other connected home channel, de-duplicating by <code>(platform, chat_id, thread_id)</code>.</p>
+<h3 id="telegram-cron-topic-telegram_cron_thread_id">Telegram cron topic (<code>TELEGRAM_CRON_THREAD_ID</code>)</h3>
+<p>When Telegram topic mode is enabled, the root DM is reserved as a system lobby — replies sent there are rebuffed with a lobby reminder and <code>reply_to_message_id</code> is dropped, so you cannot reply to a cron message that landed in the main chat.</p>
+<p>Point cron at a dedicated forum topic instead:</p>
+<ol>
+<li>In Telegram, open the bot DM and create a topic named e.g. <code>Cron</code>. Long-press the topic header → <strong>Copy link</strong>; the trailing integer is the topic's <code>message_thread_id</code>.</li>
+<li>Set <code>TELEGRAM_CRON_THREAD_ID=&lt;that id&gt;</code> in your <code>.env</code>.</li>
+</ol>
+<p>This applies only to cron deliveries. <code>TELEGRAM_HOME_CHANNEL_THREAD_ID</code> (used elsewhere, e.g. restart notifications) is unchanged. Explicit <code>deliver="telegram:chat_id:thread_id"</code> targets continue to win over the env var. Replies to cron messages now arrive in the existing topic session, so you can act on them directly.</p>
+<h3 id="response-wrapping">Response wrapping</h3>
+<p>By default, delivered cron output is wrapped with a header and footer so the recipient knows it came from a scheduled task:</p>
+<div class="highlight"><pre><span></span><code>Cronjob Response: Morning feeds
+-------------
+
+&lt;agent output here&gt;
+
+Note: The agent cannot see this message, and therefore cannot respond to it.
+</code></pre></div>
+
+<p>To deliver the raw agent output without the wrapper, set <code>cron.wrap_response</code> to <code>false</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">wrap_response</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<h3 id="push-notifications-crondeliverynotify">Push notifications (<code>cron.delivery.notify</code>)</h3>
+<p>Cron output is a <em>final</em> delivery, not a progress message, so by default it is
+sent with the platform's notification flag set — on Telegram this means the
+brief triggers a push even when the adapter's notification mode is <code>important</code>
+(which otherwise sends with <code>disable_notification=true</code>, and users report the
+silent brief as "never delivered"). To restore silent deliveries:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">delivery</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">notify</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># default: true</span>
+</code></pre></div>
+
+<p>The flag rides both the text send and any media attachments, so a run never
+pushes for one and stays silent for the other.</p>
+<h3 id="delivery-confirmation-and-the-unverified-state">Delivery confirmation and the <code>UNVERIFIED</code> state</h3>
+<p>A live-adapter delivery is logged as delivered only on positive evidence from
+the adapter: an explicit <code>success</code> that is not a filtered drop
+(<code>delivered: false</code>), plus a <code>message_id</code> or <code>raw_response</code>. A result carrying
+<code>success</code> but neither piece of evidence — the shape Slack, Matrix and
+Mattermost adapters return — is still accepted (it is not proof of failure),
+but the run is recorded on the job as <code>last_delivery_unverified</code> and surfaces
+in <code>hermes cron list</code>:</p>
+<div class="highlight"><pre><span></span><code>⚠ Delivery UNVERIFIED: adapter acked slack:C0123456 without message_id/raw_response
+</code></pre></div>
+
+<p>and in <code>hermes cron doctor</code> as <code>last delivery unverified (...)</code>. The marker is
+cleared by the next run that delivers with evidence. An empty payload (no text
+and no media) is never handed to an adapter; it fails closed and is reported in
+<code>last_delivery_error</code> instead of being logged as delivered.</p>
+<h3 id="continuable-jobs-reply-to-a-cron-delivery">Continuable jobs (reply to a cron delivery)</h3>
+<p>By default a cron delivery is fire-and-forget: the message is sent, but it does
+not live in the chat's conversation history, so if you reply to it the agent
+has no record of what it said. Set a job <strong>continuable</strong> and the delivered brief
+becomes a conversation you can reply into — the agent has the brief in context
+instead of asking "what is Task #2?".</p>
+<p>Opt-in, <strong>default off</strong>. Enable globally in config, or per-job via the <code>cronjob</code>
+tool's <code>attach_to_session</code> (which overrides the global setting for that one job):</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">mirror_delivery</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># set true to make cron deliveries continuable</span>
+</code></pre></div>
+
+<p>Behaviour is <strong>thread-preferred</strong>, scoped to the job's own conversation:</p>
+<ul>
+<li><strong>Thread-capable platforms</strong> (Telegram topics, Discord/Slack/Matrix threads): each
+  delivery opens its own dedicated thread and the brief is seeded into that
+  thread's session, so a reply in-thread continues with full context. A
+  recurring job (e.g. a daily brief) opens a fresh thread per run, keeping each
+  delivery's follow-up discussion isolated.</li>
+<li><strong>DM-only platforms</strong> (WhatsApp, Signal, SMS): no threads exist, so the brief
+  is mirrored into the target DM session instead (the origin DM, or the home DM
+  for fallback and bare-platform jobs) — the DM itself is the continuation surface.</li>
+</ul>
+<p>Only the job's <strong>own conversation</strong> is ever touched:</p>
+<ul>
+<li>the <strong>origin chat</strong> the job was created in;</li>
+<li>the <strong>home-channel fallback</strong> when <code>deliver: origin</code> captured no origin (jobs
+  created by scripts, or from a session on the request/response <code>api_server</code>
+  platform, which cannot receive a delivery) — the
+  user's primary conversation standing in for the origin;</li>
+<li>a job's <strong>single explicit <code>platform:chat</code> target</strong>, but only when the job
+  itself opts in with <code>attach_to_session: true</code> — the job author declares that
+  target a conversation. The global <code>mirror_delivery</code> flag alone never makes an
+  explicitly-addressed chat continuable.</li>
+</ul>
+<p>Broadcast expansions (<code>all</code>) are never made continuable. A user-written bare
+platform name (<code>deliver: slack</code>) addresses that platform's home channel
+deliberately and follows the same rules as the home-channel fallback above.
+After upgrading, existing <code>deliver: &lt;platform&gt;</code> jobs with <code>cron.mirror_delivery: true</code>
+can open a new thread per run on thread-capable platforms. Set <code>attach_to_session: false</code>
+on a job to opt out of this thread-per-run behaviour.</p>
+<p>The mirror is written as a labelled user turn (<code>[Cron delivery: &lt;task name&gt;]</code>), which keeps
+the conversation history alternation-safe across all model providers.</p>
+<h4 id="flat-in-channel-continuation-slack">Flat, in-channel continuation (Slack)</h4>
+<p>The thread-preferred behaviour above mints a dedicated thread on every
+delivery. If you'd rather have a continuable job land <strong>flat in the channel
+timeline</strong> — no thread — set the Slack <strong>continuable surface</strong> to <code>in_channel</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">slack</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">cron_continuable_surface</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">in_channel</span><span class="w">   </span><span class="c1"># default: thread</span>
+<span class="w">  </span><span class="nt">reply_in_thread</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">                 </span><span class="c1"># required pairing (see below)</span>
+<span class="w">  </span><span class="nt">require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">                 </span><span class="c1"># so a plain reply continues the job</span>
+</code></pre></div>
+
+<p>In <code>in_channel</code> mode the brief is delivered as an ordinary top-level channel
+message (no thread is opened), and your reply continues the job via the
+channel's shared session. Three settings work together:</p>
+<ul>
+<li><strong><code>cron_continuable_surface: in_channel</code></strong> — skips thread creation on delivery.</li>
+<li><strong><code>reply_in_thread: false</code></strong> (required) — makes the bot answer your reply
+  <em>flat</em> in the channel and key it to the same whole-channel session the brief
+  was seeded into. Without it the continuation still works but arrives in a
+  thread (it falls back safely to thread-style continuation, never a dropped
+  reply — the gateway logs a warning at startup so you can spot the mismatch).</li>
+<li><strong><code>require_mention: false</code></strong> (or add the channel to <code>free_response_channels</code>)
+  — so you can reply with a plain message; otherwise the bot only wakes when you
+  <code>@</code>-mention it on each reply.</li>
+</ul>
+<p>Because the continuation is the <strong>whole-channel</strong> session, it is shared: other
+chatter in the channel — and a second continuable in-channel job — join the same
+rolling conversation. That is inherent to "flat in a channel" and is the same
+tradeoff <code>reply_in_thread: false</code> users already accept; use the default
+<code>thread</code> surface when you want each delivery's follow-up isolated.</p>
+<p>This is a Slack capability today. Other platforms accept the key but fall back
+to the <code>thread</code> surface (their continuation primitives differ); the choice is
+per-platform, set under each platform's config. It's a gateway-side config flag
+— a <code>/restart</code> picks it up; no Slack app reinstall is needed.</p>
+<div class="admonition adm-note"><p class="adm-title">1:1 DMs</p>
+<p><code>cron_continuable_surface</code> is a <strong>channel</strong> setting — a 1:1 DM has no
+thread-vs-timeline split to choose between (the DM is already flat), so the key
+has no effect there. What governs whether a DM cron delivery is continuable is
+the separate, pre-existing knob <strong><code>slack.dm_top_level_threads_as_sessions</code></strong>:</p>
+<ul>
+<li><strong><code>false</code></strong> — all top-level DMs share one rolling DM session, so a continuable
+  cron brief and your reply land in the <strong>same</strong> session and the job continues in
+  context. This is what you want for continuable cron in a DM.</li>
+<li><strong><code>true</code></strong> (default) — each top-level DM message is its own session, so a reply
+  to a delivered brief starts a <em>fresh</em> session that has no record of the brief.
+  Continuation does not work in this mode (for cron or any other flat delivery).</li>
+</ul>
+<p>So for a continuable cron job delivered to a 1:1 DM, set
+<code>slack.dm_top_level_threads_as_sessions: false</code>. <code>cron_continuable_surface</code> is
+not required (and is ignored) for DMs.</p>
+</div>
+<h3 id="silent-suppression">Silent suppression</h3>
+<p>If the agent's final response contains <code>[SILENT]</code>, delivery is suppressed entirely. The output is still saved locally for audit (in <code>~/.hermes/cron/output/</code>), but no message is sent to the delivery target.</p>
+<p>This is useful for monitoring jobs that should only report when something is wrong:</p>
+<div class="highlight"><pre><span></span><code>Check if nginx is running. If everything is healthy, respond with only [SILENT].
+Otherwise, report the issue.
+</code></pre></div>
+
+<p>Failed jobs always deliver regardless of the <code>[SILENT]</code> marker — only successful runs can be silenced. For quiet monitoring jobs, prompt the agent to reply with only <code>[SILENT]</code> when there is nothing to report.</p>
+<h3 id="declaring-a-failed-run">Declaring a failed run</h3>
+<p>Only runtime failures (exceptions, timeouts, an unreachable model) mark a run as failed. When the agent itself
+finishes its turn but the work did not get done — for example a delegated subagent or a script it ran failed —
+it can declare the run failed by putting <code>[CRON_FAILURE]</code> alone on the <strong>first line</strong> of its response, followed
+by the explanation:</p>
+<div class="highlight"><pre><span></span><code>[CRON_FAILURE]
+The nightly export subagent exited with &quot;disk full&quot;; no report was produced.
+</code></pre></div>
+
+<p>The run is then recorded as failed (<code>last_status</code>, failure streak, <code>hermes cron runs</code> and <code>hermes cron incidents</code>
+all reflect it) and the failure notice is delivered like any other failed run. The full response is still saved
+under <code>~/.hermes/cron/output/</code> for triage. The marker is strict: mentioning or quoting <code>[CRON_FAILURE]</code> anywhere
+else in a report leaves the run successful. Script-only (<code>no_agent</code>) jobs ignore it — a script signals failure
+with a non-zero exit code.</p>
+<h2 id="script-timeout">Script timeout</h2>
+<p>Pre-run scripts (attached via the <code>script</code> parameter) have a default timeout of 3600 seconds (1 hour). This bounds the <strong>script only</strong> — skill-based / LLM-driven jobs run on a separate inactivity budget and are not capped by this value. If your scripts need a different limit, you can change it:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">script_timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1800</span><span class="w">   </span><span class="c1"># 30 minutes</span>
+</code></pre></div>
+
+<p>Or set the <code>HERMES_CRON_SCRIPT_TIMEOUT</code> environment variable. The resolution order is: env var → config.yaml → 3600s default.</p>
+<p>Cron also bounds post-run session and agent-resource cleanup. This happens after the LLM turn returns, so it is separate from the inactivity timeout. The default is 10 seconds per cleanup operation. If a storage or client finalizer stops returning, the scheduler logs an error, releases the job's in-flight guard, and allows later runs to dispatch instead of skipping that job forever.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">cleanup_timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span>
+</code></pre></div>
+
+<p>Set <code>cleanup_timeout_seconds: 0</code> only to restore the legacy unbounded cleanup behavior.</p>
+<h2 id="media-send-timeout">Media send timeout</h2>
+<p>When a cron delivery includes media attachments (a generated PDF, TTS audio, an exported report) sent through a live gateway adapter, each attachment upload is bounded by a timeout — 300 seconds by default. Large files on slow uplinks can need more:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">media_send_timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">600</span><span class="w">   </span><span class="c1"># 10 minutes per attachment</span>
+</code></pre></div>
+
+<p>Or set the <code>HERMES_CRON_MEDIA_SEND_TIMEOUT</code> environment variable. The resolution order is: env var → config.yaml → 300s default. A timed-out attachment is recorded in the job's run status as a partial delivery failure (the text still delivers).</p>
+<h2 id="bot-chat-delivery-timeout">Bot Chat delivery timeout</h2>
+<p>A <code>bot-chat</code> delivery runs a full agent turn in the target bot's chat, so its bound is minutes, not seconds — 600s by default:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">bot_chat_delivery_timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">900</span>
+</code></pre></div>
+
+<p>A timed-out delivery is recorded in <code>last_delivery_error</code>; the bot's turn may still complete on its own.</p>
+<p>The cap bounds the bot's <strong>turn</strong> only. When that turn messages a teammate (<code>message_agent</code>), the delivery process stays alive afterwards — bounded by <code>terminal.oneshot_completion_wait_seconds</code> — so the teammate's reply can land in the Bot Chat; that wait is not part of the delivery and is never counted against, or cut short by, this cap.</p>
+<h2 id="standalone-send-timeout">Standalone send timeout</h2>
+<p>When the live gateway adapter cannot deliver (or no gateway is running), a target is sent through the platform's standalone sender. That send is bounded by a wall-clock timeout — 60 seconds by default — so a transport that is mid-reconnect cannot pin the job run (and a pending restart drain behind it) indefinitely:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">standalone_send_timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">120</span>
+</code></pre></div>
+
+<p>A timed-out send is recorded in <code>last_delivery_error</code> as <code>standalone send to &lt;target&gt; timed out after Ns</code>; the message may still land if the adapter had already accepted it.</p>
+<h2 id="no-agent-mode-script-only-jobs">No-agent mode (script-only jobs)</h2>
+<p>For recurring jobs that don't need LLM reasoning — classic watchdogs, disk/memory alerts, heartbeats, CI pings — pass <code>no_agent=True</code> at creation time. The scheduler runs your script on schedule and delivers its stdout directly, skipping the agent entirely:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;every 5m&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--no-agent<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--script<span class="w"> </span>memory-watchdog.sh<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;memory-watchdog&quot;</span>
+</code></pre></div>
+
+<p>Semantics:</p>
+<ul>
+<li>Script stdout (trimmed) → delivered verbatim as the message.</li>
+<li><strong>Empty stdout → silent tick</strong>, no delivery. This is the watchdog pattern: "only say something when something is wrong".</li>
+<li>Non-zero exit or timeout → an error alert is delivered, so a broken watchdog can't fail silently.</li>
+<li><code>{"wakeAgent": false}</code> on the last line → silent tick (same gate LLM jobs use).</li>
+<li>No tokens, no model, no provider fallback — the job never touches the inference layer.</li>
+</ul>
+<p><code>.sh</code> / <code>.bash</code> files run under <code>bash</code> from <code>PATH</code> when available, otherwise <code>/bin/bash</code> (important on Windows Git Bash). Anything else runs under the current Python interpreter (<code>sys.executable</code>). Scripts must resolve inside <code>$HERMES_HOME/scripts/</code> — relative names, absolute paths, and <code>~</code>-prefixed paths are accepted when the resolved target stays in that directory; paths that escape it are rejected. Subprocess env is sanitized (<code>_sanitize_subprocess_env</code>): provider API credentials and other Hermes-managed secrets are <strong>not</strong> inherited by cron scripts.</p>
+<h4 id="giving-a-script-a-credential">Giving a script a credential</h4>
+<p>A script that must authenticate to an external service (an API token, a service-account key) gets it the same way terminal and <code>execute_code</code> children do — declare the variable name in the owning profile's <code>config.yaml</code> and define the value in that profile's <code>.env</code> (or an external <a href="../secrets.html">secret source</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="nt">terminal</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">env_passthrough</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_SERVICE_TOKEN</span>
+</code></pre></div>
+
+<p>The variable is forwarded into the script's environment with the <strong>owning profile's</strong> value: for a job that belongs to a profile served by a multi-profile gateway or the Desktop/dashboard backend, the value is resolved through that profile's secret scope, never the launch profile's process environment, and that profile's own <code>.env</code> credentials never reach another profile's scripts. Hermes-managed provider credentials (<code>OPENAI_API_KEY</code>, gateway tokens, …) cannot be declared — the sanitizer rejects them. On a single-profile install the script inherits what the gateway's <code>.env</code> put in the process environment, as before. Log presence (<code>set</code>/<code>MISSING</code>), never the value: script output is delivered verbatim.</p>
+<h3 id="the-agent-sets-these-up-for-you">The agent sets these up for you</h3>
+<p>The <code>cronjob</code> tool's schema exposes <code>no_agent</code> to Hermes directly, so you can describe a watchdog in chat and let the agent wire it up:</p>
+<div class="highlight"><pre><span></span><code>Ping me on Telegram if RAM is over 85%, every 5 minutes.
+</code></pre></div>
+
+<p>Hermes will write the check script to <code>~/.hermes/scripts/</code> via <code>write_file</code>, then call:</p>
+<div class="highlight"><pre><span></span><code><span class="n">cronjob</span><span class="p">(</span><span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span> <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;every 5m&quot;</span><span class="p">,</span>
+        <span class="n">script</span><span class="o">=</span><span class="s2">&quot;memory-watchdog.sh&quot;</span><span class="p">,</span> <span class="n">no_agent</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+        <span class="n">deliver</span><span class="o">=</span><span class="s2">&quot;telegram&quot;</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s2">&quot;memory-watchdog&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>It picks <code>no_agent=True</code> automatically when the message content is fully determined by the script (watchdogs, threshold alerts, heartbeats). The same tool also lets the agent pause, resume, edit, and remove jobs — so the whole lifecycle is chat-driven without anyone touching the CLI.</p>
+<p>See the <a href="../../guides/cron-script-only.html">Script-Only Cron Jobs guide</a> for worked examples.</p>
+<h2 id="chaining-jobs-with-context_from">Chaining jobs with <code>context_from</code></h2>
+<p>Cron jobs run in isolated sessions with no memory of previous runs. But sometimes one job's output is exactly what the next job needs. The <code>context_from</code> parameter wires that connection automatically — Job B's prompt gets Job A's most recent output prepended as context at runtime.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Job 1: Collect raw data</span>
+<span class="n">cronjob</span><span class="p">(</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;Fetch the top 10 AI/ML stories from Hacker News. Save them to ~/.hermes/data/briefs/raw.md in markdown format with title, URL, and score.&quot;</span><span class="p">,</span>
+    <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;0 7 * * *&quot;</span><span class="p">,</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;AI News Collector&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># Job 2: Triage — receives Job 1&#39;s output as context</span>
+<span class="c1"># Get Job 1&#39;s ID from: cronjob(action=&quot;list&quot;)</span>
+<span class="n">cronjob</span><span class="p">(</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;Read ~/.hermes/data/briefs/raw.md. Score each story 1–10 for engagement potential and novelty. Output the top 5 to ~/.hermes/data/briefs/ranked.md.&quot;</span><span class="p">,</span>
+    <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;30 7 * * *&quot;</span><span class="p">,</span>
+    <span class="n">context_from</span><span class="o">=</span><span class="s2">&quot;&lt;job1_id&gt;&quot;</span><span class="p">,</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;AI News Triage&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># Job 3: Ship — receives Job 2&#39;s output as context</span>
+<span class="n">cronjob</span><span class="p">(</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;Read ~/.hermes/data/briefs/ranked.md. Write 3 tweet drafts (hook + body + hashtags). Deliver to telegram:7976161601.&quot;</span><span class="p">,</span>
+    <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;0 8 * * *&quot;</span><span class="p">,</span>
+    <span class="n">context_from</span><span class="o">=</span><span class="s2">&quot;&lt;job2_id&gt;&quot;</span><span class="p">,</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;AI News Brief&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><strong>How it works:</strong></p>
+<ul>
+<li>When Job 2 fires, Hermes reads Job 1's most recent output from <code>~/.hermes/cron/output/{job1_id}/*.md</code></li>
+<li>That output is prepended to Job 2's prompt automatically</li>
+<li>Job 2 doesn't need to hardcode "read this file" — it receives the content as context</li>
+<li>The chain can be any length: Job 1 → Job 2 → Job 3 → ...</li>
+</ul>
+<p><strong>What <code>context_from</code> accepts:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Single job ID (string)</td>
+<td><code>context_from="a1b2c3d4"</code></td>
+</tr>
+<tr>
+<td>Multiple job IDs (list)</td>
+<td><code>context_from=["job_a", "job_b"]</code></td>
+</tr>
+</tbody>
+</table>
+<p>Outputs are concatenated in the order listed.</p>
+<p><strong>Continuity: carry the previous run's output</strong></p>
+<p>Set <code>continuity=true</code> and the job injects its <em>own</em> most recent output into each run. Recurring jobs normally start every run with amnesia — a news scout re-reports the same stories, a monitor re-alerts on the same condition. With continuity on, the job wakes up seeing what it reported last time and can dedupe and continue where it left off:</p>
+<div class="highlight"><pre><span></span><code><span class="n">cronjob</span><span class="p">(</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;Scan HN and arXiv for new agent-tooling papers. Report only items NOT already covered in your previous run&#39;s output.&quot;</span><span class="p">,</span>
+    <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;every 6h&quot;</span><span class="p">,</span>
+    <span class="n">continuity</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Agent Tooling Scout&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>The first run has no previous output, so the prompt runs as-is. Silent monitor ticks (<code>no_change</code>), empty output, and <code>wakeAgent=false</code> audit records are skipped when selecting context, so a quiet period preserves the latest substantive output. Audit files remain on disk. Error documents remain eligible to give the next run recovery context; this is not a success-only history filter. On later runs the previous output is prepended with continuity framing ("avoid repeating what was already reported"). It combines freely with upstream jobs (<code>context_from=["&lt;other_job_id&gt;"]</code> plus <code>continuity=true</code>), and <code>continuity=false</code> on update turns it off while preserving other <code>context_from</code> entries. Internally the flag is stored as the reserved <code>self</code> entry in <code>context_from</code>.</p>
+<p>From the CLI: <code>hermes cron create "every 6h" "Scan for news" --continuity</code>, and <code>hermes cron edit &lt;job_id&gt; --continuity</code> / <code>--no-continuity</code> to toggle it on an existing job. The same toggle appears in the dashboard's cron editor and the desktop Bot Mode routine dialog.</p>
+<p><strong>When to use it:</strong></p>
+<ul>
+<li>Multi-stage pipelines (collect → filter → format → deliver)</li>
+<li>Dependent tasks where step N's work depends on step N−1's output</li>
+<li>Fan-out/fan-in patterns where one job aggregates results from several others</li>
+<li>Recurring scouts/monitors that should dedupe against their own previous report (<code>continuity=true</code>)</li>
+</ul>
+<h2 id="provider-recovery">Provider recovery</h2>
+<p>Cron jobs inherit your configured fallback providers and credential pool rotation. If the primary API key is rate-limited or the provider returns an error, the cron agent can:</p>
+<ul>
+<li><strong>Fall back to an alternate provider</strong> if you have <code>fallback_providers</code> (or the legacy <code>fallback_model</code>) configured in <code>config.yaml</code></li>
+<li><strong>Rotate to the next credential</strong> in your <a href="../configuration.html#credential-pool-strategies">credential pool</a> for the same provider</li>
+</ul>
+<p>This means cron jobs that run at high frequency or during peak hours are more resilient — a single rate-limited key won't fail the entire run.</p>
+<h2 id="run-failures-last_error">Run failures (<code>last_error</code>)</h2>
+<p>A failed agent run records a concise <code>last_error</code>, visible in job listings and <code>/cron list</code>
+with credential patterns and URL credentials redacted (including previously stored errors).
+This is separate from <code>last_fire_error</code> (scheduler handoff) and <code>last_delivery_error</code> (delivery).
+Those fields can correctly be empty when the agent itself failed.</p>
+<p>For a connection failure, inspect the run document under <code>cron/output/&lt;job_id&gt;/</code> in the active
+Hermes home. Its <code>## Error</code> section includes the chained traceback, with credential patterns
+and URL credentials redacted. The file uses the existing private output-file permissions;
+traceback locals are not captured. Delivery notices and <code>last_error</code> retain the concise error,
+not the full traceback. Review diagnostics before sharing: redaction is not a guarantee that
+arbitrary application data is non-sensitive.</p>
+<h2 id="missed-scheduled-fires-last_fire_error">Missed scheduled fires (<code>last_fire_error</code>)</h2>
+<p>On hosted (managed-cron) deployments, a scheduled fire travels from the platform scheduler through the dashboard to the gateway's internal API server. If that final hand-off fails — the gateway process is down, or its API-server listener never started — the run never begins, so there is no execution record and no <code>last_status</code> to inspect. The tell-tale shape: the job works every time you trigger it manually, but never auto-fires.</p>
+<p>These misses are stamped on the job record as <code>last_fire_error</code> (timestamp + reason) and surfaced by:</p>
+<ul>
+<li><code>cronjob</code> tool → <code>action: "list"</code> — the <code>last_fire_error</code> field</li>
+<li><code>hermes cron list</code>: a red missed-fire warning under the job</li>
+<li><code>hermes cron doctor</code>: a per-job missed-fire finding that makes the command exit <code>1</code></li>
+<li>The dashboard job view</li>
+</ul>
+<p>The stamp always reflects <strong>current</strong> auto-fire health: it is overwritten by newer misses and cleared automatically by the next successful run. If you see it, the job and its schedule are fine — the gateway side of the fire path needs attention (most commonly, restart the gateway through its supervisor so it loads the full profile environment: <code>hermes gateway restart</code>).</p>
+<h3 id="local-missed-run-policy">Local missed-run policy</h3>
+<p>If the gateway was down (or restarting) when a recurring job's scheduled time
+passed, the job <strong>catches up once</strong> when the scheduler is back: a slot missed
+inside a restart gap fires exactly one time, a slot that already ran before the
+restart is never run again, and a long outage collapses into a single run rather
+than one run per missed slot. Paused jobs never catch up. Each catch-up shows in
+<code>hermes cron list</code> as <code>⚠ late</code> / <code>⚠ catch-up after missed fire</code>.</p>
+<p>To avoid that catch-up load after a planned gateway stop, set:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">catch_up_missed</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># default: true</span>
+</code></pre></div>
+
+<p>Or run <code>hermes config set cron.catch_up_missed false</code>. With this opt-out, a recurring
+job later than its existing grace window (half its period, clamped to 120 seconds–2
+hours) is re-anchored to its next future occurrence without firing now. The skip is
+logged. Jobs inside grace and explicit manual triggers still run normally; if the
+next occurrence cannot be computed, the existing run-once fallback is preserved.
+This does not change one-shot expiry, resume behavior, or the hosted-provider sweep
+below. There is no per-job override.</p>
+<h3 id="misfire-catch-up">Misfire catch-up</h3>
+<p>When an external scheduler provider is active (managed cron on hosted deployments), the gateway also runs a catch-up sweep: a job whose scheduled time passed with no fire delivered — and whose grace window has elapsed — is claimed and run locally, so an outage in the fire hand-off costs minutes instead of the whole day. The sweep is de-duplicated against late scheduler retries by the same store claim used for normal fires.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">misfire_grace_minutes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span><span class="w">   </span><span class="c1"># wait this long for the scheduler&#39;s own retries</span>
+<span class="w">                              </span><span class="c1"># before catching up locally; 0 disables catch-up</span>
+</code></pre></div>
+
+<p>Local (built-in ticker) deployments don't need this — the ticker already picks up past-due jobs on its next tick.</p>
+<h2 id="schedule-formats">Schedule formats</h2>
+<p>The agent's final response is automatically delivered to the job's <code>deliver:</code> target — the agent no longer fires messages itself, so the user-facing content simply goes in the final response. To deliver to <strong>additional or different</strong> targets, list multiple <code>deliver:</code> targets on the cron job (comma-separated, e.g. <code>deliver: "telegram,discord"</code>) rather than having the agent send them.</p>
+<h3 id="relative-delays-one-shot">Relative delays (one-shot)</h3>
+<div class="highlight"><pre><span></span><code>in 30m  → Run once in 30 minutes
+in 2h   → Run once in 2 hours
+in 1d   → Run once in 1 day
+</code></pre></div>
+
+<h3 id="intervals-recurring">Intervals (recurring)</h3>
+<div class="highlight"><pre><span></span><code>30m          → Every 30 minutes (bare durations are recurring)
+every 30m    → Every 30 minutes
+every 2h     → Every 2 hours
+every 1d     → Every day
+every hour   → Every hour (bare unit = 1)
+</code></pre></div>
+
+<h3 id="natural-daytime-schedules-recurring">Natural day/time schedules (recurring)</h3>
+<div class="highlight"><pre><span></span><code>every monday 9am         → Weekly, Mondays at 9:00 AM
+every day at 9am         → Daily at 9:00 AM
+weekdays at 9am          → Weekdays at 9:00 AM
+weekends at 10am         → Saturdays and Sundays at 10:00 AM
+daily at 7am             → Daily at 7:00 AM
+monday, wednesday at 9am → Mondays and Wednesdays at 9:00 AM
+</code></pre></div>
+
+<p>Times accept <code>9am</code>, <code>9:30pm</code>, <code>14:00</code>, bare 24-hour hours (<code>at 7</code>), <code>noon</code>, and <code>midnight</code>. These forms compile to cron expressions internally (they require the <code>croniter</code> package, installed by default).</p>
+<h3 id="cron-expressions">Cron expressions</h3>
+<div class="highlight"><pre><span></span><code>0 9 * * *       → Daily at 9:00 AM
+0 9 * * 1-5     → Weekdays at 9:00 AM
+0 9 * * MON-FRI → Weekdays at 9:00 AM (named weekdays/months accepted)
+0 */6 * * *     → Every 6 hours
+30 8 1 * *      → First of every month at 8:30 AM
+0 0 * * 0       → Every Sunday at midnight
+</code></pre></div>
+
+<h3 id="iso-timestamps">ISO timestamps</h3>
+<div class="highlight"><pre><span></span><code>2026-03-15T09:00:00    → One-time at March 15, 2026 9:00 AM
+</code></pre></div>
+
+<h2 id="repeat-behavior">Repeat behavior</h2>
+<table>
+<thead>
+<tr>
+<th>Schedule type</th>
+<th>Default repeat</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>One-shot (<code>in 30m</code>, timestamp)</td>
+<td>1</td>
+<td>Runs once</td>
+</tr>
+<tr>
+<td>Interval (<code>every 2h</code>)</td>
+<td>forever</td>
+<td>Runs until removed</td>
+</tr>
+<tr>
+<td>Cron expression</td>
+<td>forever</td>
+<td>Runs until removed</td>
+</tr>
+</tbody>
+</table>
+<p>You can override it:</p>
+<div class="highlight"><pre><span></span><code><span class="n">cronjob</span><span class="p">(</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+    <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;every 2h&quot;</span><span class="p">,</span>
+    <span class="n">repeat</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h2 id="managing-jobs-programmatically">Managing jobs programmatically</h2>
+<p>The agent-facing API is one tool:</p>
+<div class="highlight"><pre><span></span><code><span class="n">cronjob</span><span class="p">(</span><span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span>
+<span class="n">cronjob</span><span class="p">(</span><span class="n">action</span><span class="o">=</span><span class="s2">&quot;list&quot;</span><span class="p">)</span>
+<span class="n">cronjob</span><span class="p">(</span><span class="n">action</span><span class="o">=</span><span class="s2">&quot;update&quot;</span><span class="p">,</span> <span class="n">job_id</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">)</span>
+<span class="n">cronjob</span><span class="p">(</span><span class="n">action</span><span class="o">=</span><span class="s2">&quot;pause&quot;</span><span class="p">,</span> <span class="n">job_id</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">)</span>
+<span class="n">cronjob</span><span class="p">(</span><span class="n">action</span><span class="o">=</span><span class="s2">&quot;resume&quot;</span><span class="p">,</span> <span class="n">job_id</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">)</span>
+<span class="n">cronjob</span><span class="p">(</span><span class="n">action</span><span class="o">=</span><span class="s2">&quot;run&quot;</span><span class="p">,</span> <span class="n">job_id</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">)</span>
+<span class="n">cronjob</span><span class="p">(</span><span class="n">action</span><span class="o">=</span><span class="s2">&quot;remove&quot;</span><span class="p">,</span> <span class="n">job_id</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>For <code>update</code>, pass <code>skills=[]</code> to remove all attached skills.</p>
+<h3 id="manual-runs-are-asynchronous">Manual runs are asynchronous</h3>
+<p><code>cronjob(action="run")</code> fires the job immediately <strong>in the background</strong> (like
+<code>delegate_task</code>): the tool call returns at once with a handle, and the job's
+outcome — success/failure, delivery target, next scheduled run, and an output
+excerpt — re-enters the conversation as a new message when the run finishes.
+The agent (and you) can keep working in the meantime, and a job that is
+already mid-run is refused with "already running" instead of double-firing.</p>
+<p>You can also pass <code>prompt</code> with <code>action="run"</code> to inject transient per-run
+context:</p>
+<div class="highlight"><pre><span></span><code><span class="n">cronjob</span><span class="p">(</span><span class="n">action</span><span class="o">=</span><span class="s2">&quot;run&quot;</span><span class="p">,</span> <span class="n">job_id</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;CONTEXT: focus on the EU region today&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>The context is appended to the job's stored prompt under a <code>## Run Context</code>
+header for that single fire only — it is never persisted to the job
+definition, and it passes the same prompt-injection scan as stored prompts.</p>
+<p>Runtimes that can't receive detached results (one-shot <code>hermes -z</code>, <code>hermes
+cron run</code> from the CLI, cron child sessions, Kanban workers) fall back to
+synchronous execution automatically.</p>
+<h2 id="toolsets-available-to-cron-jobs">Toolsets available to cron jobs</h2>
+<p>Cron runs each job in a fresh agent session with no chat platform attached. By default the cron agent gets <strong>the toolset you configured for the <code>cron</code> platform in <code>hermes tools</code></strong> — not the CLI default, not everything under the sun.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>tools
+<span class="c1"># → pick the &quot;cron&quot; platform in the curses UI</span>
+<span class="c1"># → toggle toolsets on/off just like you would for Telegram/Discord/etc.</span>
+</code></pre></div>
+
+<p>Tighter per-job control is available via the <code>enabled_toolsets</code> field on <code>cronjob.create</code> (or on an existing job via <code>cronjob.update</code>):</p>
+<div class="highlight"><pre><span></span><code>cronjob(action=&quot;create&quot;, name=&quot;weekly-news-summary&quot;,
+        schedule=&quot;every sunday 9am&quot;,
+        enabled_toolsets=[&quot;web&quot;, &quot;file&quot;],      # just web + file, no terminal/browser/etc.
+        prompt=&quot;Summarize this week&#39;s AI news: ...&quot;)
+</code></pre></div>
+
+<p>When <code>enabled_toolsets</code> is set on a job it wins; otherwise the <code>hermes tools</code> cron-platform config wins; otherwise Hermes falls back to the built-in defaults. If the cron-platform toolset config cannot be read at all (for example a malformed <code>platform_toolsets</code> block in <code>config.yaml</code>), the run fails with a recorded error instead of quietly running with every tool — check <code>hermes cron list</code> / <code>hermes cron doctor</code>. This matters for cost control: carrying <code>browser</code>, <code>delegation</code> into every tiny "fetch news" job bloats the tool-schema prompt on every LLM call.</p>
+<p>If the job drives a site you're logged into, the login has to be in place before the run — a scheduled tick has nobody to answer a prompt. <a href="browser.html#scheduled-and-unattended-runs">Scheduled and unattended runs</a> covers that setup.</p>
+<h3 id="skipping-the-agent-entirely-wakeagent">Skipping the agent entirely: <code>wakeAgent</code></h3>
+<p>If your cron job attaches a pre-check script (via <code>script=</code>), the script can decide at runtime whether Hermes should even invoke the agent. Emit a final stdout line of the form:</p>
+<div class="highlight"><pre><span></span><code>{&quot;wakeAgent&quot;: false}
+</code></pre></div>
+
+<p>…and cron skips the agent run entirely for this tick. Useful for frequent polls (every 1–5 min) that only need to wake the LLM when state actually changed — otherwise you pay for zero-content agent turns over and over.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># pre-check script</span>
+
+<span class="n">latest</span> <span class="o">=</span> <span class="n">fetch_latest_issue_count</span><span class="p">()</span>
+<span class="n">prev</span> <span class="o">=</span> <span class="n">read_state</span><span class="p">(</span><span class="s2">&quot;issue_count&quot;</span><span class="p">)</span>
+<span class="k">if</span> <span class="n">latest</span> <span class="o">==</span> <span class="n">prev</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;wakeAgent&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">}))</span>   <span class="c1"># skip this tick</span>
+    <span class="n">sys</span><span class="o">.</span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">write_state</span><span class="p">(</span><span class="s2">&quot;issue_count&quot;</span><span class="p">,</span> <span class="n">latest</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;wakeAgent&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;new_issues&quot;</span><span class="p">:</span> <span class="n">latest</span> <span class="o">-</span> <span class="n">prev</span><span class="p">}}))</span>
+</code></pre></div>
+
+<p>When <code>wakeAgent</code> is omitted, the default is <code>true</code> (wake the agent as usual).</p>
+<h4 id="recipes-cheap-pre-run-gates">Recipes: cheap pre-run gates</h4>
+<p>The <code>wakeAgent</code> gate gives you a $0 way to decide whether a scheduled job should spend any LLM tokens at all. Three patterns cover most use cases.</p>
+<p><strong>File-change gate</strong> — only run when a watched file has new content since the last successful tick. The scheduler records each job's <code>last_run_at</code>; compare it against the file's mtime.</p>
+<div class="highlight"><pre><span></span><code><span class="ch">#!/bin/bash</span>
+<span class="c1"># ~/.hermes/scripts/feed-changed.sh</span>
+<span class="nv">FEED</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/data/feed.json&quot;</span>
+<span class="nv">STATE</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.hermes/scripts/.feed-changed.last&quot;</span>
+<span class="nb">test</span><span class="w"> </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FEED</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">{</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;{&quot;wakeAgent&quot;: false}&#39;</span><span class="p">;</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">0</span><span class="p">;</span><span class="w"> </span><span class="o">}</span>
+<span class="nv">mtime</span><span class="o">=</span><span class="k">$(</span>stat<span class="w"> </span>-c<span class="w"> </span>%Y<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FEED</span><span class="s2">&quot;</span><span class="k">)</span>
+<span class="nv">last</span><span class="o">=</span><span class="k">$(</span>cat<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$STATE</span><span class="s2">&quot;</span><span class="w"> </span><span class="m">2</span>&gt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="m">0</span><span class="k">)</span>
+<span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$mtime</span><span class="s2">&quot;</span><span class="w"> </span>-le<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$last</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;{&quot;wakeAgent&quot;: false}&#39;</span>
+<span class="k">else</span>
+<span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$mtime</span><span class="s2">&quot;</span><span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$STATE</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;{&quot;wakeAgent&quot;: true}&#39;</span>
+<span class="k">fi</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>cronjob(action=&quot;create&quot;, name=&quot;process-feed&quot;,
+        schedule=&quot;every 30m&quot;,
+        script=&quot;feed-changed.sh&quot;,
+        prompt=&quot;A new ~/data/feed.json has landed. Summarize what changed.&quot;)
+</code></pre></div>
+
+<p><strong>External-flag gate</strong> — only run when some other process has signalled readiness (e.g. a deploy hook drops a file, a CI job sets a value in your state store).</p>
+<div class="highlight"><pre><span></span><code><span class="ch">#!/bin/bash</span>
+<span class="c1"># ~/.hermes/scripts/flag-ready.sh</span>
+<span class="k">if</span><span class="w"> </span><span class="nb">test</span><span class="w"> </span>-f<span class="w"> </span>~/.hermes/cache/scratch/new-data-ready<span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">  </span>rm<span class="w"> </span>-f<span class="w"> </span>~/.hermes/cache/scratch/new-data-ready
+<span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;{&quot;wakeAgent&quot;: true}&#39;</span>
+<span class="k">else</span>
+<span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;{&quot;wakeAgent&quot;: false}&#39;</span>
+<span class="k">fi</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>cronjob(action=&quot;create&quot;, name=&quot;nightly-analysis&quot;,
+        schedule=&quot;0 9 * * *&quot;,
+        script=&quot;flag-ready.sh&quot;,
+        prompt=&quot;Run the nightly analysis over today&#39;s batch.&quot;)
+</code></pre></div>
+
+<p><strong>SQL-count gate</strong> — only run when there are new rows to process in your own database. The script can also pass the count through to the agent via <code>context</code>, so the agent knows how much it's looking at without re-querying.</p>
+<div class="highlight"><pre><span></span><code><span class="ch">#!/usr/bin/env python</span>
+<span class="c1"># ~/.hermes/scripts/new-rows.py</span>
+
+<span class="n">conn</span> <span class="o">=</span> <span class="n">sqlite3</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="s2">&quot;/home/me/data/app.db&quot;</span><span class="p">)</span>
+<span class="n">n</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+    <span class="s2">&quot;SELECT COUNT(*) FROM messages WHERE ts &gt; strftime(&#39;</span><span class="si">%s</span><span class="s2">&#39;,&#39;now&#39;,&#39;-2 hours&#39;)&quot;</span>
+<span class="p">)</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span>
+<span class="k">if</span> <span class="n">n</span> <span class="o">&lt;</span> <span class="mi">1</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;wakeAgent&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">}))</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;wakeAgent&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;new_rows&quot;</span><span class="p">:</span> <span class="n">n</span><span class="p">}}))</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>cronjob(action=&quot;create&quot;, name=&quot;summarize-new-msgs&quot;,
+        schedule=&quot;every 2h&quot;,
+        script=&quot;new-rows.py&quot;,
+        prompt=&quot;Summarize the new messages from the last 2 hours.&quot;)
+</code></pre></div>
+
+<p>The same pattern works for any data source you can query from a script — Postgres, an HTTP API, your own state store — without baking a SQL evaluator into the cron subsystem.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Hermes's own <code>~/.hermes/state.db</code> is an internal schema that changes between releases. Don't query it from a pre-run gate — point at your own database or feed instead.</p>
+</div>
+<p>Credit: this recipe set was prompted by @iankar8's exploration in <a href="https://github.com/NousResearch/hermes-agent/pull/2654" class="ext" target="_blank" rel="noopener">#2654</a>, which proposed adding sql/file/command triggers as a parallel mechanism. The <code>script</code> + <code>wakeAgent</code> gate already covers all three cases at $0, so the work landed as documentation instead.</p>
+<h3 id="chaining-jobs-context_from">Chaining jobs: <code>context_from</code></h3>
+<p>A cron job can consume the most recent successful output of one or more other jobs by listing their names (or IDs) in <code>context_from</code>:</p>
+<div class="highlight"><pre><span></span><code>cronjob(action=&quot;create&quot;, name=&quot;daily-digest&quot;,
+        schedule=&quot;every day 7am&quot;,
+        context_from=[&quot;ai-news-fetch&quot;, &quot;github-prs-fetch&quot;],
+        prompt=&quot;Write the daily digest using the outputs above.&quot;)
+</code></pre></div>
+
+<p>The referenced jobs' most recent completed outputs are injected above the prompt as context for this run. Each upstream entry must be a valid job ID or name (see <code>cronjob action="list"</code>). Note: chaining reads the <em>most recent completed</em> output — it does not wait for upstream jobs that are running in the same tick.</p>
+<h2 id="job-storage">Job storage</h2>
+<p>Jobs are stored in <code>~/.hermes/cron/jobs.json</code>. Output from job runs is saved to <code>~/.hermes/cron/output/{job_id}/{timestamp}.md</code>.</p>
+<p>Job definitions are plain JSON on disk: they survive <code>hermes update</code>, gateway restarts, and machine reboots. A job that was mid-run during a restart is marked <code>unknown</code> in the execution ledger — it is not automatically retried, but the job's next scheduled tick fires normally. See <a href="#execution-history">Execution history</a> for details.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Ask the agent to manage jobs through the <code>cronjob</code> tool, <code>hermes cron edit</code>, or <code>/cron</code> — not by patching <code>jobs.json</code> directly. Direct edits can fail silently when <a href="../security.html#file-write-safety">file write safety</a> blocks the path (for example when <code>HERMES_WRITE_SAFE_ROOT</code> is set), and the <a href="../configuration.html#file-mutation-verifier">file-mutation verifier</a> footer is the authoritative signal that nothing was saved.</p>
+</div>
+<p>Jobs may store <code>model</code> and <code>provider</code> as <code>null</code>. When those fields are omitted, Hermes resolves them at execution time from the global configuration. They only appear in the job record when a per-job override is set.</p>
+<p>The storage uses atomic file writes so interrupted writes do not leave a partially written job file behind.</p>
+<h2 id="self-contained-prompts-still-matter">Self-contained prompts still matter</h2>
+<div class="admonition adm-warning"><p class="adm-title">Important</p>
+<p>Cron jobs run in a completely fresh agent session. The prompt must contain everything the agent needs that is not already provided by attached skills.</p>
+</div>
+<p><strong>BAD:</strong> <code>"Check on that server issue"</code></p>
+<p><strong>GOOD:</strong> <code>"SSH into server 192.168.1.100 as user 'deploy', check if nginx is running with 'systemctl status nginx', and verify https://example.com returns HTTP 200."</code></p>
+<h2 id="security">Security</h2>
+<p>Scheduled task prompts are scanned for prompt-injection and credential-exfiltration patterns at creation and update time. Prompts containing invisible Unicode tricks, SSH backdoor attempts, or obvious secret-exfiltration payloads are blocked.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/cron</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#what-cron-can-do-now">What cron can do now</a></li>
+<li class="lvl2"><a href="#creating-scheduled-tasks">Creating scheduled tasks</a></li>
+<li class="lvl3"><a href="#in-chat-with-cron">In chat with /cron</a></li>
+<li class="lvl3"><a href="#from-the-standalone-cli">From the standalone CLI</a></li>
+<li class="lvl3"><a href="#through-natural-conversation">Through natural conversation</a></li>
+<li class="lvl2"><a href="#pre-dispatch-configuration-validation">Pre-dispatch configuration validation</a></li>
+<li class="lvl2"><a href="#moving-unpinned-jobs-to-a-new-global-default">Moving unpinned jobs to a new global default</a></li>
+<li class="lvl2"><a href="#skill-backed-cron-jobs">Skill-backed cron jobs</a></li>
+<li class="lvl3"><a href="#single-skill">Single skill</a></li>
+<li class="lvl3"><a href="#multiple-skills">Multiple skills</a></li>
+<li class="lvl2"><a href="#running-a-job-inside-a-project-directory">Running a job inside a project directory</a></li>
+<li class="lvl2"><a href="#editing-jobs">Editing jobs</a></li>
+<li class="lvl3"><a href="#chat">Chat</a></li>
+<li class="lvl3"><a href="#standalone-cli">Standalone CLI</a></li>
+<li class="lvl2"><a href="#lifecycle-actions">Lifecycle actions</a></li>
+<li class="lvl3"><a href="#chat_1">Chat</a></li>
+<li class="lvl3"><a href="#standalone-cli_1">Standalone CLI</a></li>
+<li class="lvl3"><a href="#pausing-everything-hermes-pause">Pausing everything: hermes pause</a></li>
+<li class="lvl3"><a href="#creating-a-job-paused-safe-canary">Creating a job paused (safe canary)</a></li>
+<li class="lvl2"><a href="#agent-managed-scheduling-cron-jobs-that-manage-cron-jobs">Agent-managed scheduling (cron jobs that manage cron jobs)</a></li>
+<li class="lvl2"><a href="#how-it-works">How it works</a></li>
+<li class="lvl3"><a href="#gateway-scheduler-behavior">Gateway scheduler behavior</a></li>
+<li class="lvl3"><a href="#restart-safe-workers-under-systemd">Restart-safe workers under systemd</a></li>
+<li class="lvl3"><a href="#execution-history">Execution history</a></li>
+<li class="lvl3"><a href="#repeated-failure-review-nudge">Repeated-failure review nudge</a></li>
+<li class="lvl3"><a href="#automatic-re-runs-when-the-model-was-unreachable">Automatic re-runs when the model was unreachable</a></li>
+<li class="lvl3"><a href="#holding-a-job-through-a-closed-provider-usage-window">Holding a job through a closed provider usage window</a></li>
+<li class="lvl3"><a href="#failure-incidents-alert-once-remind-on-a-cooldown-acknowledge">Failure incidents: alert once, remind on a cooldown, acknowledge</a></li>
+<li class="lvl3"><a href="#fleet-health-check-hermes-cron-doctor">Fleet health check: hermes cron doctor</a></li>
+<li class="lvl2"><a href="#delivery-options">Delivery options</a></li>
+<li class="lvl3"><a href="#delivery-failures-are-a-distinct-status">Delivery failures are a distinct status</a></li>
+<li class="lvl3"><a href="#bot-chat-delivery-bot-chat">Bot Chat delivery (bot-chat)</a></li>
+<li class="lvl3"><a href="#routing-intent-all">Routing intent (all)</a></li>
+<li class="lvl3"><a href="#telegram-cron-topic-telegram_cron_thread_id">Telegram cron topic (TELEGRAM_CRON_THREAD_ID)</a></li>
+<li class="lvl3"><a href="#response-wrapping">Response wrapping</a></li>
+<li class="lvl3"><a href="#push-notifications-crondeliverynotify">Push notifications (cron.delivery.notify)</a></li>
+<li class="lvl3"><a href="#delivery-confirmation-and-the-unverified-state">Delivery confirmation and the UNVERIFIED state</a></li>
+<li class="lvl3"><a href="#continuable-jobs-reply-to-a-cron-delivery">Continuable jobs (reply to a cron delivery)</a></li>
+<li class="lvl3"><a href="#silent-suppression">Silent suppression</a></li>
+<li class="lvl3"><a href="#declaring-a-failed-run">Declaring a failed run</a></li>
+<li class="lvl2"><a href="#script-timeout">Script timeout</a></li>
+<li class="lvl2"><a href="#media-send-timeout">Media send timeout</a></li>
+<li class="lvl2"><a href="#bot-chat-delivery-timeout">Bot Chat delivery timeout</a></li>
+<li class="lvl2"><a href="#standalone-send-timeout">Standalone send timeout</a></li>
+<li class="lvl2"><a href="#no-agent-mode-script-only-jobs">No-agent mode (script-only jobs)</a></li>
+<li class="lvl4"><a href="#giving-a-script-a-credential">Giving a script a credential</a></li>
+<li class="lvl3"><a href="#the-agent-sets-these-up-for-you">The agent sets these up for you</a></li>
+<li class="lvl2"><a href="#chaining-jobs-with-context_from">Chaining jobs with context_from</a></li>
+<li class="lvl2"><a href="#provider-recovery">Provider recovery</a></li>
+<li class="lvl2"><a href="#run-failures-last_error">Run failures (last_error)</a></li>
+<li class="lvl2"><a href="#missed-scheduled-fires-last_fire_error">Missed scheduled fires (last_fire_error)</a></li>
+<li class="lvl3"><a href="#local-missed-run-policy">Local missed-run policy</a></li>
+<li class="lvl3"><a href="#misfire-catch-up">Misfire catch-up</a></li>
+<li class="lvl2"><a href="#schedule-formats">Schedule formats</a></li>
+<li class="lvl3"><a href="#relative-delays-one-shot">Relative delays (one-shot)</a></li>
+<li class="lvl3"><a href="#intervals-recurring">Intervals (recurring)</a></li>
+<li class="lvl3"><a href="#natural-daytime-schedules-recurring">Natural day/time schedules (recurring)</a></li>
+<li class="lvl3"><a href="#cron-expressions">Cron expressions</a></li>
+<li class="lvl3"><a href="#iso-timestamps">ISO timestamps</a></li>
+<li class="lvl2"><a href="#repeat-behavior">Repeat behavior</a></li>
+<li class="lvl2"><a href="#managing-jobs-programmatically">Managing jobs programmatically</a></li>
+<li class="lvl3"><a href="#manual-runs-are-asynchronous">Manual runs are asynchronous</a></li>
+<li class="lvl2"><a href="#toolsets-available-to-cron-jobs">Toolsets available to cron jobs</a></li>
+<li class="lvl3"><a href="#skipping-the-agent-entirely-wakeagent">Skipping the agent entirely: wakeAgent</a></li>
+<li class="lvl3"><a href="#chaining-jobs-context_from">Chaining jobs: context_from</a></li>
+<li class="lvl2"><a href="#job-storage">Job storage</a></li>
+<li class="lvl2"><a href="#self-contained-prompts-still-matter">Self-contained prompts still matter</a></li>
+<li class="lvl2"><a href="#security">Security</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

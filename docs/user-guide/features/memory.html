@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Persistent Memory · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/memory</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="persistent-memory">Persistent Memory</h1>
+<p>Hermes Agent has bounded, curated memory that persists across sessions. This lets it remember your preferences, your projects, your environment, and things it has learned.</p>
+<h2 id="how-it-works">How It Works</h2>
+<p>Two files make up the agent's memory:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Purpose</th>
+<th>Char Limit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>MEMORY.md</strong></td>
+<td>Agent's personal notes — environment facts, conventions, things learned</td>
+<td>2,200 chars (~800 tokens)</td>
+</tr>
+<tr>
+<td><strong>USER.md</strong></td>
+<td>User profile — your preferences, communication style, expectations</td>
+<td>1,375 chars (~500 tokens)</td>
+</tr>
+</tbody>
+</table>
+<p>Both are stored in <code>~/.hermes/memories/</code> and are injected into the system prompt as a frozen snapshot at session start. The agent manages its own memory via the <code>memory</code> tool — it can add, replace, or remove entries.</p>
+<div class="admonition adm-caution"><p class="adm-title">One agent per Hermes home</p>
+<p>Don't point two agent processes at the same Hermes home directory. Memory writes are automatic and load back into the system prompt at session start, so two writers sharing one home will compound each other's entries into state neither of them (nor you) authored. Memory is scoped per <a href="../profiles.html">profile</a> by design — give a second agent its own profile, and if they need shared memory, use an <a href="memory-providers.html">external memory provider</a> instead.</p>
+</div>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>Character limits keep memory focused. Memory does <strong>not</strong> auto-compact: when a
+write would exceed the limit, the <code>memory</code> tool returns an error instead of
+silently dropping entries. The agent then makes room itself — consolidating or
+removing entries in the same turn before retrying (see <a href="#what-happens-when-memory-is-full">What Happens When Memory
+is Full</a>). Note that <code>replace</code> is also bound
+by the limit: swapping an entry for a longer one can still overflow, so the new
+content must be shortened (or another entry removed) to fit.</p>
+</div>
+<h2 id="how-memory-appears-in-the-system-prompt">How Memory Appears in the System Prompt</h2>
+<p>At the start of every session, memory entries are loaded from disk and rendered into the system prompt as a frozen block:</p>
+<div class="highlight"><pre><span></span><code>══════════════════════════════════════════════
+MEMORY (your personal notes) [67% — 1,474/2,200 chars]
+══════════════════════════════════════════════
+User&#39;s project is a Rust web service at ~/code/myapi using Axum + SQLx
+§
+This machine runs Ubuntu 22.04, has Docker and Podman installed
+§
+User prefers concise responses, dislikes verbose explanations
+</code></pre></div>
+
+<p>The format includes:
+- A header showing which store (MEMORY or USER PROFILE)
+- Usage percentage and character counts so the agent knows capacity
+- Individual entries separated by <code>§</code> (section sign) delimiters
+- Entries can be multiline</p>
+<p><strong>Frozen snapshot pattern:</strong> The system prompt injection is captured once at session start and never changes mid-session. This is intentional — it preserves the LLM's prefix cache for performance. When the agent adds/removes memory entries during a session, the changes are persisted to disk immediately but won't appear in the system prompt until the next session starts. Tool responses always show the live state.</p>
+<h2 id="memory-needs-session-boundaries">Memory Needs Session Boundaries</h2>
+<p>The whole memory system is built around the moment a session <strong>ends</strong>: <code>MEMORY.md</code> and <code>USER.md</code> carry the essentials into the next session, and <code>session_search</code> fills the gaps once the old context is gone. Inside a single session none of that machinery has a reason to run — everything important is still in the live context, so the agent rarely consults <code>session_search</code> and mostly compacts memory entries instead of curating them.</p>
+<p>This matters on messaging platforms (Telegram, Discord, etc.), where a chat is deliberately <a href="../sessions.html#session-continuity">one continuous session</a> that survives restarts, gateway crashes, and machine reboots. Shutting the machine down overnight does <strong>not</strong> end the session — the next message picks it up exactly where it left off. If you never reset, a chat can run for weeks as a single session: convenient, but it grows expensive (compaction runs repeatedly over an ever-longer history) and the learning loop of <em>forget → recall from memory → search past sessions</em> almost never gets to fire. Fresh memory entries also stay invisible to the running session because of the frozen snapshot above.</p>
+<p><strong>Practice:</strong> run <code>/new</code> at natural boundaries — a finished task, a change of topic, the start of a day. Each boundary is when memory pays off: the agent re-reads the updated <code>MEMORY.md</code>/<code>USER.md</code> snapshot, starts from a cheap short context, and reaches for <code>session_search</code> when it actually needs history. On the CLI this mostly takes care of itself (every invocation is a new session); on gateways the boundary is yours to create.</p>
+<h2 id="memory-tool-actions">Memory Tool Actions</h2>
+<p>The agent uses the <code>memory</code> tool with these actions:</p>
+<ul>
+<li><strong>add</strong> — Add a new memory entry</li>
+<li><strong>replace</strong> — Replace an existing entry with updated content (uses substring matching via <code>old_text</code>)</li>
+<li><strong>remove</strong> — Remove an entry that's no longer relevant (uses substring matching via <code>old_text</code>)</li>
+</ul>
+<p>There is no <code>read</code> action — memory content is automatically injected into the system prompt at session start. The agent sees its memories as part of its conversation context.</p>
+<h3 id="substring-matching">Substring Matching</h3>
+<p>The <code>replace</code> and <code>remove</code> actions use short unique substring matching — you don't need the full entry text. The <code>old_text</code> parameter just needs to be a unique substring that identifies exactly one entry:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># If memory contains &quot;User prefers dark mode in all editors&quot;</span>
+<span class="n">memory</span><span class="p">(</span><span class="n">action</span><span class="o">=</span><span class="s2">&quot;replace&quot;</span><span class="p">,</span> <span class="n">target</span><span class="o">=</span><span class="s2">&quot;memory&quot;</span><span class="p">,</span>
+       <span class="n">old_text</span><span class="o">=</span><span class="s2">&quot;dark mode&quot;</span><span class="p">,</span>
+       <span class="n">content</span><span class="o">=</span><span class="s2">&quot;User prefers light mode in VS Code, dark mode in terminal&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>If the substring matches multiple entries, an error is returned asking for a more specific match.</p>
+<h2 id="two-targets-explained">Two Targets Explained</h2>
+<h3 id="memory--agents-personal-notes"><code>memory</code> — Agent's Personal Notes</h3>
+<p>For information the agent needs to remember about the environment, workflows, and lessons learned:</p>
+<ul>
+<li>Environment facts (OS, tools, project structure)</li>
+<li>Project conventions and configuration</li>
+<li>Tool quirks and workarounds discovered</li>
+<li>Completed task diary entries</li>
+<li>Skills and techniques that worked</li>
+</ul>
+<h3 id="user--user-profile"><code>user</code> — User Profile</h3>
+<p>For information about the user's identity, preferences, and communication style:</p>
+<ul>
+<li>Name, role, timezone</li>
+<li>Communication preferences (concise vs detailed, format preferences)</li>
+<li>Pet peeves and things to avoid</li>
+<li>Workflow habits</li>
+<li>Technical skill level</li>
+</ul>
+<h2 id="what-to-save-vs-skip">What to Save vs Skip</h2>
+<h3 id="save-these-proactively">Save These (Proactively)</h3>
+<p>The agent saves automatically — you don't need to ask. It saves when it learns:</p>
+<ul>
+<li><strong>User preferences:</strong> "I prefer TypeScript over JavaScript" → save to <code>user</code></li>
+<li><strong>Environment facts:</strong> "This server runs Debian 12 with PostgreSQL 16" → save to <code>memory</code></li>
+<li><strong>Corrections:</strong> "Don't use <code>sudo</code> for Docker commands, user is in docker group" → save to <code>memory</code></li>
+<li><strong>Conventions:</strong> "Project uses tabs, 120-char line width, Google-style docstrings" → save to <code>memory</code></li>
+<li><strong>Completed work:</strong> "Migrated database from MySQL to PostgreSQL on 2026-01-15" → save to <code>memory</code></li>
+<li><strong>Explicit requests:</strong> "Remember that my API key rotation happens monthly" → save to <code>memory</code></li>
+</ul>
+<h3 id="skip-these">Skip These</h3>
+<ul>
+<li><strong>Trivial/obvious info:</strong> "User asked about Python" — too vague to be useful</li>
+<li><strong>Easily re-discovered facts:</strong> "Python 3.12 supports f-string nesting" — can web search this</li>
+<li><strong>Raw data dumps:</strong> Large code blocks, log files, data tables — too big for memory</li>
+<li><strong>Session-specific ephemera:</strong> Temporary file paths, one-off debugging context</li>
+<li><strong>Information already in context files:</strong> SOUL.md and AGENTS.md content</li>
+</ul>
+<h2 id="capacity-management">Capacity Management</h2>
+<p>Memory has strict character limits to keep system prompts bounded:</p>
+<table>
+<thead>
+<tr>
+<th>Store</th>
+<th>Limit</th>
+<th>Typical entries</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>memory</td>
+<td>2,200 chars</td>
+<td>8-15 entries</td>
+</tr>
+<tr>
+<td>user</td>
+<td>1,375 chars</td>
+<td>5-10 entries</td>
+</tr>
+</tbody>
+</table>
+<h3 id="what-happens-when-memory-is-full">What Happens When Memory is Full</h3>
+<p>When you try to add an entry that would exceed the limit, the tool returns an error:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;error&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Memory at 2,100/2,200 chars. Adding this entry (250 chars) would exceed the limit. Consolidate now: use &#39;replace&#39; to merge overlapping entries into shorter ones or &#39;remove&#39; stale or less important entries (see current_entries below), then retry this add — all in this turn.&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;current_entries&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;...&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;usage&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2,100/2,200&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The agent should then:
+1. Read the current entries (shown in the error response)
+2. Identify entries that can be removed or consolidated
+3. Use <code>replace</code> to merge related entries into shorter versions
+4. Then <code>add</code> the new entry</p>
+<p><strong>Best practice:</strong> When memory is above 80% capacity (visible in the system prompt header), consolidate entries before adding new ones. For example, merge three separate "project uses X" entries into one comprehensive project description entry.</p>
+<h3 id="practical-examples-of-good-memory-entries">Practical Examples of Good Memory Entries</h3>
+<p><strong>Compact, information-dense entries work best:</strong></p>
+<div class="highlight"><pre><span></span><code># Good: Packs multiple related facts
+User runs macOS 14 Sonoma, uses Homebrew, has Docker Desktop and Podman. Shell: zsh with oh-my-zsh. Editor: VS Code with Vim keybindings.
+
+# Good: Specific, actionable convention
+Project ~/code/api uses Go 1.22, sqlc for DB queries, chi router. Run tests with &#39;make test&#39;. CI via GitHub Actions.
+
+# Good: Lesson learned with context
+The staging server (10.0.1.50) needs SSH port 2222, not 22. Key is at ~/.ssh/staging_ed25519.
+
+# Bad: Too vague
+User has a project.
+
+# Bad: Too verbose
+On January 5th, 2026, the user asked me to look at their project which is
+located at ~/code/api. I discovered it uses Go version 1.22 and...
+</code></pre></div>
+
+<h2 id="duplicate-prevention">Duplicate Prevention</h2>
+<p>The memory system automatically rejects exact duplicate entries. If you try to add content that already exists, it returns success with a "no duplicate added" message.</p>
+<h2 id="security-scanning">Security Scanning</h2>
+<p>Memory entries are scanned for injection and exfiltration patterns before being accepted, since they're injected into the system prompt. Content matching threat patterns (prompt injection, credential exfiltration, SSH backdoors) or containing invisible Unicode characters is blocked.</p>
+<h2 id="session-search">Session Search</h2>
+<p>Beyond MEMORY.md and USER.md, the agent can search its past conversations using the <code>session_search</code> tool:</p>
+<ul>
+<li>All CLI and messaging sessions are stored in SQLite (<code>~/.hermes/state.db</code>) with FTS5 full-text search</li>
+<li>Search queries return actual messages from the DB — no LLM summarization, no truncation</li>
+<li>The agent can find things it discussed weeks ago, even if they're not in its active memory</li>
+<li>The agent can also scroll forward/backward inside any session it finds</li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>sessions<span class="w"> </span>list<span class="w">    </span><span class="c1"># Browse past sessions</span>
+</code></pre></div>
+
+<p>See <a href="../sessions.html#session-search-tool">Session Search Tool</a> for the three calling shapes (discovery / scroll / browse) and the response format.</p>
+<h3 id="session_search-vs-memory">session_search vs memory</h3>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Persistent Memory</th>
+<th>Session Search</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Capacity</strong></td>
+<td>~1,300 tokens total</td>
+<td>Unlimited (all sessions)</td>
+</tr>
+<tr>
+<td><strong>Speed</strong></td>
+<td>Instant (in system prompt)</td>
+<td>~20ms FTS5 query, ~1ms scroll</td>
+</tr>
+<tr>
+<td><strong>Cost</strong></td>
+<td>Token cost in every prompt</td>
+<td>Free — no LLM calls</td>
+</tr>
+<tr>
+<td><strong>Use case</strong></td>
+<td>Key facts always available</td>
+<td>Finding specific past conversations</td>
+</tr>
+<tr>
+<td><strong>Management</strong></td>
+<td>Manually curated by agent</td>
+<td>Automatic — all sessions stored</td>
+</tr>
+<tr>
+<td><strong>Token cost</strong></td>
+<td>Fixed per session (~1,300 tokens)</td>
+<td>On-demand (searched when needed)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Memory</strong> is for critical facts that should always be in context. <strong>Session search</strong> is for "did we discuss X last week?" queries where the agent needs to recall specifics from past conversations.</p>
+<h2 id="learning-journey-journey">Learning Journey (<code>/journey</code>)</h2>
+<p>The learning journey is a timeline view of everything Hermes has learned — saved skills and memory entries plotted over time (oldest at top, newest at bottom), with a playable "constellation" scrubber that replays the build-up. The same graph data drives three surfaces:</p>
+<ul>
+<li><strong>Classic CLI / standalone</strong> — <code>hermes journey</code> (aliases: <code>hermes learning</code>, <code>hermes memory-graph</code>) renders the timeline in the terminal. Flags: <code>--play</code> animates the build-up (<code>--fps</code> to tune it), <code>--width</code>/<code>--height</code> override the render size, <code>--no-color</code> disables color, and <code>--json</code> dumps the raw graph payload.</li>
+<li><strong>TUI</strong> — <code>/journey</code> (aliases: <code>/learning</code>, <code>/memory-graph</code>) opens the timeline as an overlay.</li>
+<li><strong>Desktop app</strong> — <code>/journey</code> opens the Star Map / memory-graph panel, an interactive visual of the same nodes.</li>
+</ul>
+<p>A skill appears on the timeline as soon as it has a learning signal: it was created in this profile (a <code>/learn</code> result or a foreground <code>skill_manage</code> create), created by the background review, or used at least once. Bundled skills and hand-written skills that have never been used stay out of the timeline.</p>
+<p>Beyond viewing, the journey is also where you <strong>prune and correct</strong> what Hermes has learned:</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hermes journey list</code></td>
+<td>List node ids — skill names and <code>memory:&lt;source&gt;:&lt;index&gt;</code> ids for memory chunks.</td>
+</tr>
+<tr>
+<td><code>hermes journey delete &lt;node&gt; [-y]</code></td>
+<td>Delete a node. Skills are <strong>archived</strong> (restorable), memory chunks are removed. <code>-y</code> skips the confirmation.</td>
+</tr>
+<tr>
+<td><code>hermes journey edit &lt;node&gt;</code></td>
+<td>Open the node's content (a skill's <code>SKILL.md</code> or the memory chunk) in <code>$EDITOR</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>The same <code>list</code> / <code>delete &lt;id&gt;</code> / <code>edit &lt;id&gt;</code> subcommands work from the in-chat <code>/journey</code> command on the CLI, and the desktop panel offers edit/delete on nodes directly.</p>
+<h2 id="configuration">Configuration</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># In ~/.hermes/config.yaml</span>
+<span class="nt">memory</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">memory_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">user_profile_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">memory_char_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2200</span><span class="w">   </span><span class="c1"># ~800 tokens</span>
+<span class="w">  </span><span class="nt">user_char_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1375</span><span class="w">     </span><span class="c1"># ~500 tokens</span>
+<span class="w">  </span><span class="nt">write_approval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">     </span><span class="c1"># false = write freely (default) | true = require approval</span>
+</code></pre></div>
+
+<p>Setting <strong>both</strong> <code>memory_enabled</code> and <code>user_profile_enabled</code> to <code>false</code> turns the
+built-in stores off completely: the <code>memory</code> tool is dropped from the schema and
+its guidance block is dropped from the system prompt, so the model is never told
+about a tool it cannot use. An external provider set via <code>memory.provider</code>
+(Hindsight, Mem0, Honcho, …) is unaffected and keeps its own tools — use this
+when you want a third-party memory backend <em>instead of</em> the built-in files.
+Listing <code>memory</code> under <code>agent.disabled_toolsets</code> is the heavier switch: it hides
+external provider tools too.</p>
+<p>With only <code>memory_enabled: false</code> (user profile still on), the tool stays —
+it backs the profile store — but the system prompt swaps the full memory
+guidance for a narrower profile-only block. The tool schema advertises only the
+<code>user</code> target, and direct or staged writes to disabled <code>MEMORY.md</code> are rejected.
+The inverse configuration advertises only <code>memory</code> and rejects <code>USER.md</code> writes.</p>
+<h2 id="controlling-memory-writes-write_approval">Controlling memory writes (<code>write_approval</code>)</h2>
+<p>By default the agent saves memory freely — including from the background
+self-improvement review that runs after a turn. If you'd rather approve saves
+first, set <code>memory.write_approval: true</code>. It's a simple on/off gate applied to
+<strong>both</strong> foreground turns and the background review:</p>
+<table>
+<thead>
+<tr>
+<th><code>write_approval</code></th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>false</code> (default)</td>
+<td>Write freely — the gate is off (the pre-gate behaviour).</td>
+</tr>
+<tr>
+<td><code>true</code></td>
+<td>Require approval before anything is saved. In the interactive CLI, foreground writes prompt you inline (entries are small enough to read in full). Everywhere else — messaging platforms, scripts, and the background self-improvement review — writes are <strong>staged</strong> for review with <code>/memory pending</code>.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>To turn memory off entirely (not just gate it), set both <code>memory_enabled: false</code> and <code>user_profile_enabled: false</code>. When both built-in stores are disabled, the built-in <code>memory</code> tool is automatically hidden.</p>
+</blockquote>
+<p>Review staged writes from the CLI or any messaging platform:</p>
+<div class="highlight"><pre><span></span><code>/memory pending             # list staged memory writes (auto ones tagged [auto])
+/memory approve &lt;id&gt;        # apply one (or &#39;all&#39;)
+/memory reject &lt;id&gt;         # drop one (or &#39;all&#39;)
+/memory approval on         # turn the gate on (or &#39;off&#39;) and persist it
+</code></pre></div>
+
+<p>This is the answer to "the agent saved a wrong assumption about me": set
+<code>write_approval: true</code>, and every save — especially the unprompted background
+ones — waits for your yes/no before it ever enters your profile.</p>
+<h2 id="background-review-notifications-displaymemory_notifications">Background review notifications (<code>display.memory_notifications</code>)</h2>
+<p>After a turn, the background self-improvement review may quietly save a memory
+or update a skill. This is Hermes' consent-aware learning loop: repeated
+corrections and durable workflow lessons become compact memory entries or
+procedural skills, while <code>write_approval</code> can stage those writes for review
+before they affect future sessions. By default it surfaces a short
+<code>💾 Memory updated</code> line in chat so you know it happened. Control how chatty
+that is:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">display</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">memory_notifications</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">on</span><span class="w">    </span><span class="c1"># off | on (default) | verbose</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>off</code></td>
+<td>No chat notification. The review still runs and still writes — you just don't see a line for it.</td>
+</tr>
+<tr>
+<td><code>on</code> (default)</td>
+<td>Generic line, e.g. <code>💾 Memory updated</code>, <code>💾 Skill 'foo' patched</code>.</td>
+</tr>
+<tr>
+<td><code>verbose</code></td>
+<td>Includes a compact preview of what changed, e.g. <code>💾 Memory ➕ User prefers terse replies</code> or a <code>"old" → "new"</code> skill diff snippet.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>This only governs the <strong>gateway</strong> chat notification. The review itself, and
+writes to your memory/skill stores, are unaffected by this setting. Set it
+per-platform via <code>display.platforms.&lt;platform&gt;.memory_notifications</code>.</p>
+</blockquote>
+<p>Successful skill batches name each applied operation in both <code>on</code> and <code>verbose</code>
+mode, including supporting-file writes/removals and skill deletion. Staged writes
+awaiting approval and rolled-back batches are not reported as completed changes.
+Batch summaries use the applied results rather than assuming requested writes ran.</p>
+<h2 id="running-the-review-on-a-cheaper-model-auxiliarybackground_review">Running the review on a cheaper model (<code>auxiliary.background_review</code>)</h2>
+<p>The review runs on your <strong>main chat model</strong> by default, replaying the
+conversation — which is already warm in the prompt cache, so it's cheap cache
+reads. On an expensive main model you can run the review on a cheaper model
+instead:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">background_review</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">google/gemini-3-flash-preview</span><span class="w">   </span><span class="c1"># auto (default) = main chat model</span>
+</code></pre></div>
+
+<p>When you point it at a model <strong>different</strong> from your main one, the review runs
+there for substantially lower cost (~3–5× in benchmarks). Because a different
+model can't reuse your main model's prompt cache anyway, the fork automatically
+replays a compact <strong>digest</strong> of the conversation (recent turns verbatim + a
+summary of older ones) rather than the full transcript — minimizing what it
+writes to the new cache. Capture holds: in testing, memory capture was
+identical and skill capture near-identical to the main-model review.</p>
+<p>Leave it at <code>auto</code> (or set it to your main model) and nothing changes — the
+review keeps running on the main model with the full warm-cache replay.</p>
+<h3 id="same-model-review-reasoning">Same-model review reasoning</h3>
+<p>A review using the same model as the parent <strong>always inherits the parent's reasoning effort</strong>. Setting <code>auxiliary.background_review.reasoning_effort</code> does not override it, whether the route is <code>auto</code> or explicitly selects the parent provider/model.</p>
+<p>Reasoning settings, the system prompt, the full conversation snapshot, and tool definitions stay byte-identical to the parent at fork birth so the review can reuse its prompt-cache prefix. Changing only the review's thinking level would break that parity. There is no independent-effort switch for same-model reviews.</p>
+<p>To reduce review work without changing the main conversation's effort, adjust <code>memory.nudge_interval</code> / <code>skills.creation_nudge_interval</code>, disable automatic reviews as described below, or route reviews to a different model. A different-model route uses a digest and does not share the parent's warm prefix; on that route <code>auxiliary.background_review.reasoning_effort</code> IS honored (unset = the routed provider's default). A one-time warning is printed when the key is set but the review stays on the main model. These frequency and routing controls do not decouple same-model reasoning.</p>
+<h3 id="disabling-automatic-reviews-enabled">Disabling automatic reviews (<code>enabled</code>)</h3>
+<p>The review fork can burn a meaningful share of total tokens on busy hosts.
+Operators can disable it without zeroing nudge intervals:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">background_review</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">              </span><span class="c1"># false = skip automatic post-turn forks</span>
+</code></pre></div>
+
+<p>With <code>enabled: false</code>, automatic post-turn forks do not spawn; manual
+<code>/refine</code> still works.</p>
+<h3 id="capping-review-cost-max_input_tokens">Capping review cost (<code>max_input_tokens</code>)</h3>
+<p>The review loop replays the conversation on every provider request it makes,
+so a single review can multiply input tokens across its tool iterations.
+<code>max_input_tokens</code> caps the SUM of replayed input tokens for one review; the
+loop stops before crossing it. <code>&lt;= 0</code> means unlimited.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">background_review</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">max_input_tokens</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">48000</span><span class="w">  </span><span class="c1"># &lt;= 0 = unlimited</span>
+</code></pre></div>
+
+<p>When the key is unset, the budget is derived from the review model's resolved
+context window: 75% of the window, capped at 600,000 tokens — so it also binds
+on small local models (a 65,536-token model gets 49,152), where a fixed
+cloud-scale default would never bite. If the window cannot be resolved, a
+conservative 120,000-token fallback applies. Note the key lives under
+<code>auxiliary:</code>; a top-level <code>background_review:</code> block is not read.</p>
+<p>Fork usage is persisted in <code>session_model_usage</code> with <code>task='background_review'</code>
+and a completion line is written to <code>agent.log</code>
+(<code>Background review complete: thread=bg-review calls=… in=… out=… result=…</code>).</p>
+<h3 id="allowing-a-narrowly-scoped-extra-review-tool-extra_tools">Allowing a narrowly scoped extra review tool (<code>extra_tools</code>)</h3>
+<p>Background review can use memory, skill-management, and read-only file tools
+by default. If a profile provides another tool that is safe for unattended
+review, opt it in by name:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">background_review</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">extra_tools</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">propose_shared_memory</span>
+</code></pre></div>
+
+<p>The tool must already be available to the parent agent; this setting only adds
+it to the review fork's runtime whitelist. It does not enable arbitrary tools,
+and tools not listed here remain denied. Keep the list narrow and prefer tools
+that stage a proposal for human review rather than applying external or
+destructive changes directly. The default is an empty list.</p>
+<h3 id="local-models-reviews-wait-for-an-idle-gpu-defer">Local models: reviews wait for an idle GPU (<code>defer</code>)</h3>
+<p>On a cloud provider the review finishes in seconds and runs alongside
+whatever you do next. When the review's runtime is the <strong>managed local
+llama-server</strong> (Settings → Local models), the same fork occupies the GPU your
+next prompt needs — for minutes on a large model — and sending a new prompt
+cancels it, discarding the learning. So on the managed local runtime, reviews
+are <strong>deferred by default</strong>: queued at turn end and executed once the machine
+has been quiet for a short settle window. Nothing about the review itself
+changes — same model, same full-transcript replay, same writes — only the
+execution moment moves.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">background_review</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">defer</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">auto</span><span class="w">            </span><span class="c1"># auto (default) | never</span>
+<span class="w">    </span><span class="nt">defer_max_age_s</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1800</span><span class="w">  </span><span class="c1"># run a queued review anyway after this long</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>auto</code> (default)</td>
+<td>Reviews whose runtime resolves to the managed local server are queued and run at idle; every other runtime (cloud, external servers) spawns immediately as before.</td>
+</tr>
+<tr>
+<td><code>never</code></td>
+<td>Old behavior everywhere: spawn immediately at turn end, even on the managed local GPU.</td>
+</tr>
+</tbody>
+</table>
+<p>Queued reviews coalesce per session (a newer turn's snapshot replaces the
+older one — the review replays the whole conversation, so nothing is lost),
+a review preempted by a new prompt is re-queued instead of discarded, and a
+review that has waited longer than <code>defer_max_age_s</code> runs even if the machine
+never goes idle. Explicit <code>/refine</code> always runs immediately. The queue is
+in-memory: reviews still pending when the app exits are dropped, same as an
+in-flight fork would have been.</p>
+<h2 id="controlling-skill-writes-skillswrite_approval">Controlling skill writes (<code>skills.write_approval</code>)</h2>
+<p>Skills use the same on/off gate, but the review UX differs because a
+<code>SKILL.md</code> is far too large to read in a chat bubble:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">skills</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">write_approval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">     </span><span class="c1"># false = write freely (default) | true = require approval</span>
+</code></pre></div>
+
+<p>When <code>write_approval: true</code>, skill writes (create / edit / patch / write_file /
+delete) always <strong>stage</strong> regardless of origin. You review the one-line gist
+inline, but the full diff stays out-of-band:</p>
+<div class="highlight"><pre><span></span><code>/skills pending             # list staged skill writes + a one-line gist each
+/skills diff &lt;id&gt;           # full unified diff (best viewed in CLI or dashboard)
+/skills approve &lt;id&gt;        # apply it (or &#39;all&#39;)
+/skills reject &lt;id&gt;         # drop it (or &#39;all&#39;)
+/skills approval on         # turn the gate on (or &#39;off&#39;) and persist it
+</code></pre></div>
+
+<p>On a messaging platform, approve a skill from its gist + metadata, or open
+<code>/skills diff</code> on the CLI / dashboard / the staged file under
+<code>~/.hermes/pending/skills/&lt;id&gt;.json</code> when you want to read the whole change.
+Full details in <a href="skills.html#gating-agent-skill-writes-skillswrite_approval">Gating agent skill writes</a>.</p>
+<h2 id="external-memory-providers">External Memory Providers</h2>
+<p>For deeper, persistent memory that goes beyond MEMORY.md and USER.md, Hermes ships with 8 external memory provider plugins — including Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, and Supermemory.</p>
+<p>External providers run <strong>alongside</strong> built-in memory (never replacing it) and add capabilities like knowledge graphs, semantic search, automatic fact extraction, and cross-session user modeling.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>memory<span class="w"> </span>setup<span class="w">      </span><span class="c1"># pick a provider and configure it</span>
+hermes<span class="w"> </span>memory<span class="w"> </span>status<span class="w">     </span><span class="c1"># check what&#39;s active</span>
+</code></pre></div>
+
+<p>See the <a href="memory-providers.html">Memory Providers</a> guide for full details on each provider, setup instructions, and comparison.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/memory</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-it-works">How It Works</a></li>
+<li class="lvl2"><a href="#how-memory-appears-in-the-system-prompt">How Memory Appears in the System Prompt</a></li>
+<li class="lvl2"><a href="#memory-needs-session-boundaries">Memory Needs Session Boundaries</a></li>
+<li class="lvl2"><a href="#memory-tool-actions">Memory Tool Actions</a></li>
+<li class="lvl3"><a href="#substring-matching">Substring Matching</a></li>
+<li class="lvl2"><a href="#two-targets-explained">Two Targets Explained</a></li>
+<li class="lvl3"><a href="#memory--agents-personal-notes">memory — Agent&#x27;s Personal Notes</a></li>
+<li class="lvl3"><a href="#user--user-profile">user — User Profile</a></li>
+<li class="lvl2"><a href="#what-to-save-vs-skip">What to Save vs Skip</a></li>
+<li class="lvl3"><a href="#save-these-proactively">Save These (Proactively)</a></li>
+<li class="lvl3"><a href="#skip-these">Skip These</a></li>
+<li class="lvl2"><a href="#capacity-management">Capacity Management</a></li>
+<li class="lvl3"><a href="#what-happens-when-memory-is-full">What Happens When Memory is Full</a></li>
+<li class="lvl3"><a href="#practical-examples-of-good-memory-entries">Practical Examples of Good Memory Entries</a></li>
+<li class="lvl2"><a href="#duplicate-prevention">Duplicate Prevention</a></li>
+<li class="lvl2"><a href="#security-scanning">Security Scanning</a></li>
+<li class="lvl2"><a href="#session-search">Session Search</a></li>
+<li class="lvl3"><a href="#session_search-vs-memory">session_search vs memory</a></li>
+<li class="lvl2"><a href="#learning-journey-journey">Learning Journey (/journey)</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl2"><a href="#controlling-memory-writes-write_approval">Controlling memory writes (write_approval)</a></li>
+<li class="lvl2"><a href="#background-review-notifications-displaymemory_notifications">Background review notifications (display.memory_notifications)</a></li>
+<li class="lvl2"><a href="#running-the-review-on-a-cheaper-model-auxiliarybackground_review">Running the review on a cheaper model (auxiliary.background_review)</a></li>
+<li class="lvl3"><a href="#same-model-review-reasoning">Same-model review reasoning</a></li>
+<li class="lvl3"><a href="#disabling-automatic-reviews-enabled">Disabling automatic reviews (enabled)</a></li>
+<li class="lvl3"><a href="#capping-review-cost-max_input_tokens">Capping review cost (max_input_tokens)</a></li>
+<li class="lvl3"><a href="#allowing-a-narrowly-scoped-extra-review-tool-extra_tools">Allowing a narrowly scoped extra review tool (extra_tools)</a></li>
+<li class="lvl3"><a href="#local-models-reviews-wait-for-an-idle-gpu-defer">Local models: reviews wait for an idle GPU (defer)</a></li>
+<li class="lvl2"><a href="#controlling-skill-writes-skillswrite_approval">Controlling skill writes (skills.write_approval)</a></li>
+<li class="lvl2"><a href="#external-memory-providers">External Memory Providers</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

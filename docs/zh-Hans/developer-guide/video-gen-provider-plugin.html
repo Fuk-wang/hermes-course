@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>视频生成 Provider 插件 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/video-gen-provider-plugin</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="构建视频生成-provider-插件">构建视频生成 Provider 插件</h1>
+<p>视频生成 provider 插件注册一个后端，用于处理所有 <code>video_generate</code> 工具调用。内置 provider（xAI、FAL）以插件形式提供。将目录放入 <code>plugins/video_gen/&lt;name&gt;/</code> 即可添加新 provider 或覆盖内置 provider。</p>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>视频生成与<a href="image-gen-provider-plugin.html">图像生成 Provider 插件</a>几乎一一对应——如果你已构建过图像生成后端，对其结构应已了然于胸。主要区别在于：<code>capabilities()</code> 方法用于声明模态（modality）/宽高比/时长，以及路由约定（传入 <code>image_url</code> 则使用图生视频，省略则使用文生视频——provider 在内部选择正确的端点）。</p>
+</div>
+<h2 id="统一接口一个工具两种模态">统一接口（一个工具，两种模态）</h2>
+<p><code>video_generate</code> 工具通过一个参数暴露两种模态：</p>
+<ul>
+<li><strong>文生视频（Text-to-video）</strong> — 仅传入 <code>prompt</code>。Provider 路由至其文生视频端点。</li>
+<li><strong>图生视频（Image-to-video）</strong> — 同时传入 <code>prompt</code> 和 <code>image_url</code>。Provider 路由至其图生视频端点。</li>
+</ul>
+<p>编辑和扩展功能有意不在支持范围内。大多数后端不支持这些功能，且不一致性会迫使 agent 的工具描述中出现针对各后端的说明文字。</p>
+<h2 id="发现机制">发现机制</h2>
+<p>Hermes 在三个位置扫描视频生成后端：</p>
+<ol>
+<li><strong>内置</strong> — <code>&lt;repo&gt;/plugins/video_gen/&lt;name&gt;/</code>（通过 <code>kind: backend</code> 自动加载）</li>
+<li><strong>用户</strong> — <code>~/.hermes/plugins/video_gen/&lt;name&gt;/</code>（通过 <code>plugins.enabled</code> 选择启用）</li>
+<li><strong>Pip</strong> — 声明了 <code>hermes_agent.plugins</code> 入口点的包</li>
+</ol>
+<p>每个插件的 <code>register(ctx)</code> 函数调用 <code>ctx.register_video_gen_provider(...)</code>。活跃 provider 由 <code>config.yaml</code> 中的 <code>video_gen.provider</code> 指定；<code>hermes tools</code> → Video Generation 引导用户完成选择。与 <code>image_generate</code> 不同，此处没有内置的遗留后端——每个 provider 都是插件。</p>
+<h2 id="目录结构">目录结构</h2>
+<div class="highlight"><pre><span></span><code>plugins/video_gen/my-backend/
+├── __init__.py      # VideoGenProvider 子类 + register()
+└── plugin.yaml      # 包含 kind: backend 的清单文件
+</code></pre></div>
+
+<h2 id="videogenprovider-abc">VideoGenProvider ABC</h2>
+<p>继承 <code>agent.video_gen_provider.VideoGenProvider</code>。必须实现：<code>name</code> 属性和 <code>generate()</code> 方法。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/video_gen/my-backend/__init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.video_gen_provider</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">VideoGenProvider</span><span class="p">,</span>
+    <span class="n">error_response</span><span class="p">,</span>
+    <span class="n">success_response</span><span class="p">,</span>
+<span class="p">)</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyVideoGenProvider</span><span class="p">(</span><span class="n">VideoGenProvider</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;my-backend&quot;</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">display_name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;My Backend&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_available</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MY_API_KEY&quot;</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">list_models</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]:</span>
+        <span class="c1"># Each entry is a model FAMILY — a name the user picks once.</span>
+        <span class="c1"># Your provider&#39;s generate() routes within the family based on</span>
+        <span class="c1"># whether image_url was passed.</span>
+        <span class="k">return</span> <span class="p">[</span>
+            <span class="p">{</span>
+                <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;fast&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;display&quot;</span><span class="p">:</span> <span class="s2">&quot;Fast&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;speed&quot;</span><span class="p">:</span> <span class="s2">&quot;~30s&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;strengths&quot;</span><span class="p">:</span> <span class="s2">&quot;Cheapest tier&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;price&quot;</span><span class="p">:</span> <span class="s2">&quot;$0.05/s&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;modalities&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="s2">&quot;image&quot;</span><span class="p">],</span>  <span class="c1"># advisory</span>
+            <span class="p">},</span>
+        <span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">default_model</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="s2">&quot;fast&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">capabilities</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">&quot;modalities&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="s2">&quot;image&quot;</span><span class="p">],</span>
+            <span class="s2">&quot;aspect_ratios&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;16:9&quot;</span><span class="p">,</span> <span class="s2">&quot;9:16&quot;</span><span class="p">],</span>
+            <span class="s2">&quot;resolutions&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;720p&quot;</span><span class="p">,</span> <span class="s2">&quot;1080p&quot;</span><span class="p">],</span>
+            <span class="s2">&quot;min_duration&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+            <span class="s2">&quot;max_duration&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+            <span class="s2">&quot;supports_audio&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span>
+            <span class="s2">&quot;supports_negative_prompt&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+            <span class="s2">&quot;max_reference_images&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_setup_schema</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;My Backend&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;badge&quot;</span><span class="p">:</span> <span class="s2">&quot;paid&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;tag&quot;</span><span class="p">:</span> <span class="s2">&quot;Short description shown in `hermes tools`&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;env_vars&quot;</span><span class="p">:</span> <span class="p">[</span>
+                <span class="p">{</span>
+                    <span class="s2">&quot;key&quot;</span><span class="p">:</span> <span class="s2">&quot;MY_API_KEY&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;prompt&quot;</span><span class="p">:</span> <span class="s2">&quot;My Backend API key&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="s2">&quot;https://mybackend.example.com/keys&quot;</span><span class="p">,</span>
+                <span class="p">},</span>
+            <span class="p">],</span>
+        <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">generate</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">prompt</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">model</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">image_url</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">reference_image_urls</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">duration</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">aspect_ratio</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;16:9&quot;</span><span class="p">,</span>
+        <span class="n">resolution</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;720p&quot;</span><span class="p">,</span>
+        <span class="n">negative_prompt</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">audio</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">bool</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">seed</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>  <span class="c1"># always ignore unknown kwargs for forward-compat</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="c1"># ROUTE: image_url presence picks the endpoint.</span>
+        <span class="k">if</span> <span class="n">image_url</span><span class="p">:</span>
+            <span class="n">endpoint</span> <span class="o">=</span> <span class="s2">&quot;my-backend/image-to-video&quot;</span>
+            <span class="n">modality_used</span> <span class="o">=</span> <span class="s2">&quot;image&quot;</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">endpoint</span> <span class="o">=</span> <span class="s2">&quot;my-backend/text-to-video&quot;</span>
+            <span class="n">modality_used</span> <span class="o">=</span> <span class="s2">&quot;text&quot;</span>
+
+        <span class="c1"># ... call your API ...</span>
+
+        <span class="k">return</span> <span class="n">success_response</span><span class="p">(</span>
+            <span class="n">video</span><span class="o">=</span><span class="s2">&quot;https://your-cdn/output.mp4&quot;</span><span class="p">,</span>
+            <span class="n">model</span><span class="o">=</span><span class="n">model</span> <span class="ow">or</span> <span class="s2">&quot;fast&quot;</span><span class="p">,</span>
+            <span class="n">prompt</span><span class="o">=</span><span class="n">prompt</span><span class="p">,</span>
+            <span class="n">modality</span><span class="o">=</span><span class="n">modality_used</span><span class="p">,</span>
+            <span class="n">aspect_ratio</span><span class="o">=</span><span class="n">aspect_ratio</span><span class="p">,</span>
+            <span class="n">duration</span><span class="o">=</span><span class="n">duration</span> <span class="ow">or</span> <span class="mi">5</span><span class="p">,</span>
+            <span class="n">provider</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+        <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_video_gen_provider</span><span class="p">(</span><span class="n">MyVideoGenProvider</span><span class="p">())</span>
+</code></pre></div>
+
+<h2 id="插件清单">插件清单</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/video_gen/my-backend/plugin.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-backend</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;My</span><span class="nv"> </span><span class="s">video</span><span class="nv"> </span><span class="s">generation</span><span class="nv"> </span><span class="s">backend&quot;</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backend</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_API_KEY</span>
+</code></pre></div>
+
+<h2 id="video_generate-参数模式"><code>video_generate</code> 参数模式</h2>
+<p>该工具在所有后端中使用统一的参数模式。Provider 忽略其不支持的参数。</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>prompt</code></td>
+<td>文本指令（必填）</td>
+</tr>
+<tr>
+<td><code>image_url</code></td>
+<td>设置时 → 图生视频；省略时 → 文生视频</td>
+</tr>
+<tr>
+<td><code>reference_image_urls</code></td>
+<td>风格/角色参考图（取决于 provider）</td>
+</tr>
+<tr>
+<td><code>duration</code></td>
+<td>秒数——provider 会进行截断</td>
+</tr>
+<tr>
+<td><code>aspect_ratio</code></td>
+<td><code>"16:9"</code>、<code>"9:16"</code>、<code>"1:1"</code> 等——provider 会进行截断</td>
+</tr>
+<tr>
+<td><code>resolution</code></td>
+<td><code>"480p"</code> / <code>"540p"</code> / <code>"720p"</code> / <code>"1080p"</code>——provider 会进行截断</td>
+</tr>
+<tr>
+<td><code>negative_prompt</code></td>
+<td>需要避免的内容（仅 Pixverse/Kling 支持）</td>
+</tr>
+<tr>
+<td><code>audio</code></td>
+<td>原生音频（Veo3 / Pixverse 定价层级）</td>
+</tr>
+<tr>
+<td><code>seed</code></td>
+<td>可复现性</td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td>覆盖当前活跃的模型/系列</td>
+</tr>
+</tbody>
+</table>
+<p>Provider 的 <code>capabilities()</code> 声明上述哪些参数会被实际处理。Agent 在工具描述中看到的是当前活跃后端的能力信息，当用户通过 <code>hermes tools</code> 切换后端时会动态重建。</p>
+<h2 id="模型系列与端点路由fal-模式">模型系列与端点路由（FAL 模式）</h2>
+<p>当你的后端每个"模型"对应多个端点时——例如 FAL，其中每个系列（Veo 3.1、Pixverse v6、Kling O3）都有 <code>/text-to-video</code> 和 <code>/image-to-video</code> 两个 URL——将每个<strong>系列</strong>表示为一个目录条目。你的 <code>generate()</code> 根据是否传入 <code>image_url</code> 来选择正确的端点：</p>
+<div class="highlight"><pre><span></span><code><span class="n">FAMILIES</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;veo3.1&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;text_endpoint&quot;</span><span class="p">:</span> <span class="s2">&quot;fal-ai/veo3.1&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;image_endpoint&quot;</span><span class="p">:</span> <span class="s2">&quot;fal-ai/veo3.1/image-to-video&quot;</span><span class="p">,</span>
+        <span class="c1"># ... family-specific capability flags ...</span>
+    <span class="p">},</span>
+<span class="p">}</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">generate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">prompt</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">image_url</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">family_id</span><span class="p">,</span> <span class="n">family</span> <span class="o">=</span> <span class="n">_resolve_family</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+    <span class="n">endpoint</span> <span class="o">=</span> <span class="n">family</span><span class="p">[</span><span class="s2">&quot;image_endpoint&quot;</span><span class="p">]</span> <span class="k">if</span> <span class="n">image_url</span> <span class="k">else</span> <span class="n">family</span><span class="p">[</span><span class="s2">&quot;text_endpoint&quot;</span><span class="p">]</span>
+    <span class="c1"># ... build payload from family&#39;s declared capability flags, call endpoint ...</span>
+</code></pre></div>
+
+<p>用户在 <code>hermes tools</code> 中只需选择一次 <code>veo3.1</code>。Agent 无需关心端点——它只负责传入（或不传入）<code>image_url</code>。</p>
+<h2 id="选择优先级">选择优先级</h2>
+<p>针对每个实例的模型配置（参见 <code>plugins/video_gen/fal/__init__.py</code>）：</p>
+<ol>
+<li>工具调用中的 <code>model=</code> 关键字参数</li>
+<li><code>&lt;PROVIDER&gt;_VIDEO_MODEL</code> 环境变量</li>
+<li><code>config.yaml</code> 中的 <code>video_gen.&lt;provider&gt;.model</code></li>
+<li><code>config.yaml</code> 中的 <code>video_gen.model</code>（当其值为你的某个 ID 时）</li>
+<li>Provider 的 <code>default_model()</code></li>
+</ol>
+<h2 id="响应结构">响应结构</h2>
+<p><code>success_response()</code> 和 <code>error_response()</code> 生成每个后端返回的标准 dict 结构。请使用它们——不要手动构造 dict。</p>
+<p>成功响应的键：<code>success</code>、<code>video</code>（URL 或绝对路径）、<code>model</code>、<code>prompt</code>、<code>modality</code>（<code>"text"</code> 或 <code>"image"</code>）、<code>aspect_ratio</code>、<code>duration</code>、<code>provider</code>，以及 <code>extra</code>。</p>
+<p>错误响应的键：<code>success</code>、<code>video</code>（None）、<code>error</code>、<code>error_type</code>、<code>model</code>、<code>prompt</code>、<code>aspect_ratio</code>、<code>provider</code>。</p>
+<h2 id="产物保存位置">产物保存位置</h2>
+<p>如果你的后端返回 base64 数据，使用 <code>save_b64_video()</code> 将其写入 <code>$HERMES_HOME/cache/videos/</code>。对于通过后续 HTTP 请求获取的原始字节，使用 <code>save_bytes_video()</code>。否则直接返回上游 URL——gateway 在交付时会解析远程 URL。</p>
+<h2 id="测试">测试</h2>
+<p>在 <code>tests/plugins/video_gen/test_&lt;name&gt;_plugin.py</code> 下添加冒烟测试。xAI 和 FAL 的测试展示了标准模式——注册、验证目录、分别在传入和不传入 <code>image_url</code> 的情况下测试路由，并断言在缺少认证时返回干净的错误响应。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/video-gen-provider-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#统一接口一个工具两种模态">统一接口（一个工具，两种模态）</a></li>
+<li class="lvl2"><a href="#发现机制">发现机制</a></li>
+<li class="lvl2"><a href="#目录结构">目录结构</a></li>
+<li class="lvl2"><a href="#videogenprovider-abc">VideoGenProvider ABC</a></li>
+<li class="lvl2"><a href="#插件清单">插件清单</a></li>
+<li class="lvl2"><a href="#video_generate-参数模式">video_generate 参数模式</a></li>
+<li class="lvl2"><a href="#模型系列与端点路由fal-模式">模型系列与端点路由（FAL 模式）</a></li>
+<li class="lvl2"><a href="#选择优先级">选择优先级</a></li>
+<li class="lvl2"><a href="#响应结构">响应结构</a></li>
+<li class="lvl2"><a href="#产物保存位置">产物保存位置</a></li>
+<li class="lvl2"><a href="#测试">测试</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

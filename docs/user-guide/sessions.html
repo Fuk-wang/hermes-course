@@ -1,0 +1,1112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sessions · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/sessions</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="sessions">Sessions</h1>
+<p>Hermes Agent automatically saves every conversation as a session. Sessions enable conversation resume, cross-session search, and full conversation history management.</p>
+<h2 id="how-sessions-work">How Sessions Work</h2>
+<p>Every conversation — whether from the CLI, Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, or any other messaging platform — is stored as a session with full message history. Sessions are tracked in:</p>
+<ol>
+<li><strong>SQLite database</strong> (<code>~/.hermes/state.db</code>) — structured session metadata with FTS5 full-text search, plus full message history</li>
+</ol>
+<p>The SQLite database stores:
+- Session ID, source platform, user ID
+- <strong>Session title</strong> (unique, human-readable name)
+- Model name and configuration
+- System prompt snapshot
+- Full message history (role, content, tool calls, tool results)
+- Token counts (input/output)
+- Timestamps (started_at, ended_at)
+- Parent session ID (for compression-triggered session splitting)</p>
+<h3 id="what-counts-toward-context">What Counts Toward Context</h3>
+<p>Hermes stores session history so it can resume conversations, but it does not
+keep re-sending every byte it has ever handled. On each turn, the model sees
+the selected system prompt, the current conversation window, and any content
+Hermes explicitly injects for that turn.</p>
+<p>Media attachments are handled as turn-scoped inputs:</p>
+<ul>
+<li>Images may be attached natively to the next model call, or pre-analyzed into
+  a text description when the active model does not support native vision.</li>
+<li>Audio is transcribed into text when speech-to-text is configured.</li>
+<li>Text documents can have their extracted text included; other document types
+  are usually represented by a saved local path and a short note.</li>
+<li>Attachment paths and extracted/derived text can appear in the transcript, but
+  the raw image, audio, or binary file bytes are not repeatedly copied into
+  future prompts.</li>
+</ul>
+<p>For example, if a user sends an image and asks Hermes to make a meme from it,
+Hermes may inspect that image once with vision and run an image-processing
+script. Future turns do not automatically carry the original JPEG in context.
+They carry only whatever was written into the conversation, such as the user's
+request, a short image description, a local cache path, or the final assistant
+response.</p>
+<p>The most common cause of context growth is not the media file itself. It is
+verbose text: pasted transcripts, full logs, large tool outputs, long diffs,
+repeated status reports, and detailed proof dumps. Prefer summaries, file
+paths, focused excerpts, and tool-backed lookups over copying large artifacts
+into chat.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Use <code>/compress</code> when a session gets long, <code>/new</code> for a fresh thread, and
+<code>hermes sessions prune</code> only when you want to delete old ended sessions from
+storage. If <code>state.db</code> has simply grown large, start with the non-destructive
+option first: <code>hermes sessions optimize</code> merges FTS5 index segments and
+VACUUMs the database without touching any session data. Compression reduces the active context; it is not a privacy delete.
+Pass a name to <code>/new</code> (e.g. <code>/new payments-refactor</code>) to set the new session's
+initial title up front — useful for finding it later with <code>/resume &lt;name&gt;</code> or
+in the <code>/sessions</code> picker.</p>
+</div>
+<h3 id="session-sources">Session Sources</h3>
+<p>Each session is tagged with its source platform:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cli</code></td>
+<td>Interactive CLI (<code>hermes</code> or <code>hermes chat</code>)</td>
+</tr>
+<tr>
+<td><code>oneshot</code></td>
+<td>Finite non-interactive runs: <code>hermes chat --oneshot -q</code>, <code>-Q</code>, <code>hermes -z</code>, and <code>-q</code> on non-TTY stdio. Hidden from the TUI, Desktop and dashboard session pickers (like <code>kanban</code> and <code>tool</code>), even when launched from inside a TUI or Desktop session — the run inherits that transport's environment but is not that conversation. Still counts as CLI history: <code>hermes -c</code> / <code>--resume latest</code> continue the last one-shot, and <code>hermes sessions list</code> shows it. An explicit <code>--source &lt;tag&gt;</code> always wins (<code>hermes chat -q --source tui</code> is stored as <code>tui</code>).</td>
+</tr>
+<tr>
+<td><code>telegram</code></td>
+<td>Telegram messenger</td>
+</tr>
+<tr>
+<td><code>discord</code></td>
+<td>Discord server/DM</td>
+</tr>
+<tr>
+<td><code>slack</code></td>
+<td>Slack workspace</td>
+</tr>
+<tr>
+<td><code>whatsapp</code></td>
+<td>WhatsApp messenger</td>
+</tr>
+<tr>
+<td><code>signal</code></td>
+<td>Signal messenger</td>
+</tr>
+<tr>
+<td><code>matrix</code></td>
+<td>Matrix rooms and DMs</td>
+</tr>
+<tr>
+<td><code>mattermost</code></td>
+<td>Mattermost channels</td>
+</tr>
+<tr>
+<td><code>email</code></td>
+<td>Email (IMAP/SMTP)</td>
+</tr>
+<tr>
+<td><code>sms</code></td>
+<td>SMS via Twilio</td>
+</tr>
+<tr>
+<td><code>dingtalk</code></td>
+<td>DingTalk messenger</td>
+</tr>
+<tr>
+<td><code>feishu</code></td>
+<td>Feishu/Lark messenger</td>
+</tr>
+<tr>
+<td><code>wecom</code></td>
+<td>WeCom (WeChat Work)</td>
+</tr>
+<tr>
+<td><code>weixin</code></td>
+<td>Weixin (personal WeChat)</td>
+</tr>
+<tr>
+<td><code>bluebubbles</code></td>
+<td>Apple iMessage via BlueBubbles macOS server</td>
+</tr>
+<tr>
+<td><code>qqbot</code></td>
+<td>QQ Bot (Tencent QQ) via Official API v2</td>
+</tr>
+<tr>
+<td><code>homeassistant</code></td>
+<td>Home Assistant conversation</td>
+</tr>
+<tr>
+<td><code>webhook</code></td>
+<td>Incoming webhooks</td>
+</tr>
+<tr>
+<td><code>api-server</code></td>
+<td>API server requests</td>
+</tr>
+<tr>
+<td><code>acp</code></td>
+<td>ACP editor integration</td>
+</tr>
+<tr>
+<td><code>cron</code></td>
+<td>Scheduled cron jobs</td>
+</tr>
+<tr>
+<td><code>batch</code></td>
+<td>Batch processing runs</td>
+</tr>
+<tr>
+<td><code>kanban</code></td>
+<td>Kanban dispatcher workers (read on the board, hidden from session pickers)</td>
+</tr>
+<tr>
+<td><code>tool</code></td>
+<td>Third-party integrations (<code>--source tool</code>), hidden from session pickers</td>
+</tr>
+</tbody>
+</table>
+<p>A session compressed mid-conversation continues under the same source: the compression child of a <code>--source tool</code> or <code>oneshot</code> run is tagged the same way, so it inherits the same picker visibility.</p>
+<h2 id="cli-session-resume">CLI Session Resume</h2>
+<p>Resume previous conversations from the CLI using <code>--continue</code> or <code>--resume</code>:</p>
+<h3 id="continue-last-session">Continue Last Session</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Resume the most recent CLI session</span>
+hermes<span class="w"> </span>--continue
+hermes<span class="w"> </span>-c
+
+<span class="c1"># Or with the chat subcommand</span>
+hermes<span class="w"> </span>chat<span class="w"> </span>--continue
+hermes<span class="w"> </span>chat<span class="w"> </span>-c
+</code></pre></div>
+
+<p>This looks up the most recent <code>cli</code> session from the SQLite database and loads its full conversation history.</p>
+<h4 id="per-terminal-continue">Per-Terminal Continue</h4>
+<p>A bare <code>-c</code> is terminal-aware: each CLI session drops a small breadcrumb file under <code>~/.hermes/terminal-sessions/</code> keyed by the terminal it runs in (tty device, tmux pane, kitty window, wezterm pane, Zellij pane, Windows Terminal session, ...). When you run <code>hermes -c</code> again in the <em>same</em> terminal, Hermes resumes that terminal's own session — so two panes side by side each continue their own conversation instead of both grabbing the globally most-recent one. If there's no breadcrumb for the terminal (first use, deleted session, or a stale breadcrumb older than 30 days), <code>-c</code> falls back to the most-recent-session behavior. <code>-c "name"</code> and <code>--resume</code> are unaffected. Disable with <code>session.terminal_continue: false</code> in <code>config.yaml</code>.</p>
+<h3 id="resume-by-name">Resume by Name</h3>
+<p>If you've given a session a title (see <a href="#session-naming">Session Naming</a> below), you can resume it by name:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Resume a named session</span>
+hermes<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;my project&quot;</span>
+
+<span class="c1"># If there are lineage variants (my project, my project #2, my project #3),</span>
+<span class="c1"># this automatically resumes the most recent one</span>
+hermes<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;my project&quot;</span><span class="w">   </span><span class="c1"># → resumes &quot;my project #3&quot;</span>
+</code></pre></div>
+
+<h3 id="resume-specific-session">Resume Specific Session</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Resume a specific session by ID</span>
+hermes<span class="w"> </span>--resume<span class="w"> </span>20250305_091523_a1b2c3d4
+hermes<span class="w"> </span>-r<span class="w"> </span>20250305_091523_a1b2c3d4
+
+<span class="c1"># Resume by title</span>
+hermes<span class="w"> </span>--resume<span class="w"> </span><span class="s2">&quot;refactoring auth&quot;</span>
+
+<span class="c1"># Resume the most recent session — same lookup as -c</span>
+hermes<span class="w"> </span>--resume<span class="w"> </span>latest
+
+<span class="c1"># Or with the chat subcommand</span>
+hermes<span class="w"> </span>chat<span class="w"> </span>--resume<span class="w"> </span>20250305_091523_a1b2c3d4
+</code></pre></div>
+
+<p>Session IDs are shown when you exit a CLI session, and can be found with <code>hermes sessions list</code>.</p>
+<div class="admonition adm-note"><p class="adm-title">Note</p>
+<p><code>latest</code> is a reserved keyword for <code>--resume</code>. A session literally titled "latest" is still reachable by its ID or via <code>-c latest</code> (title match).</p>
+</div>
+<h3 id="resume-in-a-specific-directory">Resume in a Specific Directory</h3>
+<p>Pass <code>--in &lt;dir&gt;</code> to change into a directory before starting or resuming. Combined with <code>--resume latest</code> (or <code>-c</code>), the most recent session for that directory's workspace is picked — no need to <code>cd</code> first or remember session IDs:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Resume the latest session that belongs to ./my-project</span>
+hermes<span class="w"> </span>--resume<span class="w"> </span>latest<span class="w"> </span>--in<span class="w"> </span>./my-project
+
+<span class="c1"># Works with the TUI too</span>
+hermes<span class="w"> </span>--tui<span class="w"> </span>--resume<span class="w"> </span>latest<span class="w"> </span>--in<span class="w"> </span>./my-project
+</code></pre></div>
+
+<p><code>--in</code> also pins the session to that directory: the resumed session's recorded working directory is not restored (as if <code>--no-restore-cwd</code> were passed).</p>
+<h3 id="resume-restores-the-working-directory">Resume Restores the Working Directory</h3>
+<p>Resuming a CLI session also <code>cd</code>s back into the session's recorded working directory (its git repo root or project dir), so the conversation picks up in the workspace it belonged to. If you'd rather stay where you are, pass <code>--no-restore-cwd</code>:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>--resume<span class="w"> </span>20250305_091523_a1b2c3<span class="w"> </span>--no-restore-cwd
+</code></pre></div>
+
+<p>A <code>↪ restored workspace dir: …</code> line confirms the switch. Restore failures never break the resume itself.</p>
+<h3 id="filtering-sessions-by-workspace">Filtering Sessions by Workspace</h3>
+<p><code>hermes sessions list</code> accepts <code>--workspace &lt;needle&gt;</code> to show only sessions whose workspace key (git repo root, else cwd) matches — by path substring or exact directory basename:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>sessions<span class="w"> </span>list<span class="w"> </span>--workspace<span class="w"> </span>my-project
+hermes<span class="w"> </span>sessions<span class="w"> </span>list<span class="w"> </span>--workspace<span class="w"> </span>~/code/hermes-agent
+</code></pre></div>
+
+<h3 id="conversation-recap-on-resume">Conversation Recap on Resume</h3>
+<p>When you resume a session, Hermes displays a compact recap of the previous conversation in a styled panel before the input prompt:</p>
+<p><img className="docs-terminal-figure" src={useBaseUrl('/img/docs/session-recap.svg')} alt="Stylized preview of the Previous Conversation recap panel shown when resuming a Hermes session." /></p>
+<p className="docs-figure-caption">Resume mode shows a compact recap panel with recent user and assistant turns before returning you to the live prompt.</p>
+
+<p>The recap:
+- Shows <strong>user messages</strong> (gold <code>●</code>) and <strong>assistant responses</strong> (green <code>◆</code>)
+- <strong>Truncates</strong> long messages (300 chars for user, 200 chars / 3 lines for assistant)
+- <strong>Collapses tool calls</strong> to a count with tool names (e.g., <code>[3 tool calls: terminal, web_search]</code>)
+- <strong>Hides</strong> system messages, tool results, and internal reasoning
+- <strong>Caps</strong> at the last 10 exchanges with a "... N earlier messages ..." indicator
+- Uses <strong>dim styling</strong> to distinguish from the active conversation</p>
+<p>To disable the recap and keep the minimal one-liner behavior, set in <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">display</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">resume_display</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">minimal</span><span class="w">   </span><span class="c1"># default: full</span>
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Session IDs follow the format <code>YYYYMMDD_HHMMSS_&lt;hex&gt;</code> — CLI/TUI sessions use a 6-char hex suffix (e.g. <code>20250305_091523_a1b2c3</code>), gateway sessions use an 8-char suffix (e.g. <code>20250305_091523_a1b2c3d4</code>). You can resume by ID (full or unique prefix) or by title — both work with <code>-c</code> and <code>-r</code>.</p>
+</div>
+<h2 id="cross-platform-handoff">Cross-Platform Handoff</h2>
+<p>Use <code>/handoff &lt;platform&gt;</code> from a CLI session to transfer the live conversation to a messaging platform's home channel. The agent picks up exactly where the CLI left off — same session id, full role-aware transcript, tool calls and all.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Inside a CLI session</span>
+/handoff<span class="w"> </span>telegram
+</code></pre></div>
+
+<p>What happens:</p>
+<ol>
+<li>The CLI validates that <code>&lt;platform&gt;</code> is enabled and has a home channel set (run <code>/sethome</code> from the destination chat once to configure it).</li>
+<li>The CLI marks the session pending and <strong>block-polls the gateway</strong>. It refuses if the agent is mid-turn — wait for the current response to finish first.</li>
+<li>The gateway watcher claims the handoff and asks the destination adapter for a fresh thread:</li>
+<li><strong>Telegram</strong> — opens a new forum topic (DM topics if Bot API 9.4+ Topics mode is enabled in the chat, or a forum supergroup topic).</li>
+<li><strong>Discord</strong> — creates a 1440-min auto-archive thread under the home text channel.</li>
+<li><strong>Slack</strong> — posts a seed message and uses its <code>ts</code> as the thread anchor.</li>
+<li><strong>Matrix</strong> — posts a seed message and uses its event id as the thread root (<code>m.thread</code> relation).</li>
+<li><strong>WhatsApp / Signal / SMS</strong> — no native threads, falls back to the home channel directly.</li>
+<li>The gateway re-binds the destination key to your existing CLI session id, then forges a synthetic user turn asking the agent to confirm and summarize. The reply lands in the new thread.</li>
+<li>When the gateway acknowledges success, the CLI prints a <code>/resume</code> hint and exits cleanly:</li>
+</ol>
+<p><code>↻ Handoff complete. The session is now active on telegram.
+     Resume it on this CLI later with: /resume my-session-title</code></p>
+<ol>
+<li>From that point, the conversation lives on the platform. Reply in the new thread — anyone authorized in that channel shares the same session, and any later real user message in the thread joins seamlessly because thread sessions key without <code>user_id</code>.</li>
+</ol>
+<p><strong>Resume back to CLI:</strong> when you want to come back to a desktop, just run <code>/resume &lt;title&gt;</code> (or <code>hermes -r "&lt;title&gt;"</code> from the shell) and pick up where the platform left off.</p>
+<p><strong>Failure modes:</strong>
+- No home channel configured → CLI refuses with a <code>/sethome</code> hint.
+- Gateway not running (nothing ever claims the request) → CLI times out at 60s with a clear message and your CLI session stays intact.
+- Slow transfer: once the gateway claims the handoff it replays your full session through a real agent turn, which can take a few minutes on long sessions. The CLI shows "Still transferring..." heartbeats and waits up to 15 minutes — it never misreports a slow transfer as "gateway not running".
+- Thread creation fails (permissions, topics-mode off) → falls back to the home channel directly and still completes; no thread isolation but the handoff itself works.
+- <code>adapter.send</code> fails (rate limit, transient API error) → handoff marked failed with the reason; the row clears so you can retry.</p>
+<p><strong>Limitation worth knowing:</strong> for non-thread-capable platforms with multi-user group home channels, the synthetic turn keys as a DM-style session. This works for self-DM home channels (the typical setup) but isn't ideal for genuinely shared group chats. Threading covers Telegram / Discord / Slack / Matrix — by far the common case — so most setups never hit this.</p>
+<h2 id="session-naming">Session Naming</h2>
+<p>Give sessions human-readable titles so you can find and resume them easily.</p>
+<h3 id="auto-generated-titles">Auto-Generated Titles</h3>
+<p>Hermes automatically generates a short descriptive title (3–7 words) for each session after the first exchange. This runs in a background thread using a fast auxiliary model, so it adds no latency. You'll see auto-generated titles when browsing sessions with <code>hermes sessions list</code> or <code>hermes sessions browse</code>.</p>
+<p>Auto-titling only fires once per session and is skipped if you've already set a title manually.</p>
+<h3 id="setting-a-title-manually">Setting a Title Manually</h3>
+<p>Use the <code>/title</code> slash command inside any chat session (CLI or gateway):</p>
+<div class="highlight"><pre><span></span><code>/title my research project
+</code></pre></div>
+
+<p>The title is applied immediately. If the session hasn't been created in the database yet (e.g., you run <code>/title</code> before sending your first message), it's queued and applied once the session starts.</p>
+<p>You can also rename existing sessions from the command line:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>sessions<span class="w"> </span>rename<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span><span class="s2">&quot;refactoring auth module&quot;</span>
+</code></pre></div>
+
+<h3 id="title-rules">Title Rules</h3>
+<ul>
+<li><strong>Unique</strong> — no two sessions can share the same title</li>
+<li><strong>Max 100 characters</strong> — keeps listing output clean</li>
+<li><strong>Sanitized</strong> — control characters, zero-width chars, and RTL overrides are stripped automatically</li>
+<li><strong>Normal Unicode is fine</strong> — emoji, CJK, accented characters all work</li>
+</ul>
+<h3 id="auto-lineage-on-compression">Auto-Lineage on Compression</h3>
+<p>When a session's context is compressed (manually via <code>/compress</code> or automatically), Hermes creates a new continuation session. If the original had a title, the new session automatically gets a numbered title:</p>
+<div class="highlight"><pre><span></span><code>&quot;my project&quot; → &quot;my project #2&quot; → &quot;my project #3&quot;
+</code></pre></div>
+
+<p>When you resume by name (<code>hermes -c "my project"</code>), it automatically picks the most recent session in the lineage.</p>
+<h3 id="title-in-messaging-platforms">/title in Messaging Platforms</h3>
+<p>The <code>/title</code> command works in all gateway platforms (Telegram, Discord, Slack, WhatsApp):</p>
+<ul>
+<li><code>/title My Research</code> — set the session title</li>
+<li><code>/title</code> — show the current title</li>
+</ul>
+<h2 id="session-management-commands">Session Management Commands</h2>
+<p>Hermes provides a full set of session management commands via <code>hermes sessions</code>:</p>
+<h3 id="list-sessions">List Sessions</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># List recent sessions (default: last 20)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>list
+
+<span class="c1"># Filter by platform</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>list<span class="w"> </span>--source<span class="w"> </span>telegram
+
+<span class="c1"># Show more sessions</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>list<span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span>
+</code></pre></div>
+
+<p>When more sessions exist than <code>--limit</code> allows, the listing ends with a <code>… more not shown (use --limit N to see more)</code> footer, so a capped page is never mistaken for the full list.</p>
+<p>When sessions have titles, the output shows titles, previews, and relative timestamps:</p>
+<div class="highlight"><pre><span></span><code>Title                  Preview                                  Last Active   ID
+────────────────────────────────────────────────────────────────────────────────────────────────
+refactoring auth       Help me refactor the auth module please   2h ago        20250305_091523_a
+my project #3          Can you check the test failures?          yesterday     20250304_143022_e
+—                      What&#39;s the weather in Las Vegas?          3d ago        20250303_101500_f
+</code></pre></div>
+
+<p>When no sessions have titles, a simpler format is used:</p>
+<div class="highlight"><pre><span></span><code>Preview                                            Last Active   Src    ID
+──────────────────────────────────────────────────────────────────────────────────────
+Help me refactor the auth module please             2h ago        cli    20250305_091523_a
+What&#39;s the weather in Las Vegas?                    3d ago        tele   20250303_101500_f
+</code></pre></div>
+
+<h3 id="export-sessions">Export Sessions</h3>
+<p><code>hermes sessions export</code> is one surface for every export format, selected with <code>--format</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Output</th>
+<th>Use it for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>jsonl</code> (default)</td>
+<td>one JSON object per session</td>
+<td>backups, machine round-trip</td>
+</tr>
+<tr>
+<td><code>md</code> / <code>qmd</code></td>
+<td>one Markdown/Quarto file per session + manifest</td>
+<td>readable archives, notes</td>
+</tr>
+<tr>
+<td><code>html</code></td>
+<td>single self-contained page (sidebar for multi-session)</td>
+<td>sharing, browsing</td>
+</tr>
+<tr>
+<td><code>trace</code></td>
+<td>Claude Code JSONL</td>
+<td>HF Agent Trace Viewer, <code>--upload</code></td>
+</tr>
+</tbody>
+</table>
+<p>Plus <code>--only user-prompts</code> for a prompts-only view (jsonl or md).</p>
+<p>All formats share the same selection knobs: <code>--session-id</code> for one session, or the full <code>prune</code>/<code>archive</code> filter set for bulk — <code>--older-than</code> / <code>--newer-than</code> / <code>--before</code> / <code>--after</code> (durations like <code>5h</code>/<code>2d</code>/<code>1w</code>, bare days, or ISO timestamps), <code>--source</code>, <code>--title</code>, <code>--model</code>, <code>--provider</code>, <code>--cwd</code>, <code>--min/--max-messages</code>, <code>--min/--max-tokens</code>, <code>--min/--max-cost</code>, <code>--min/--max-tool-calls</code>, <code>--user</code>, <code>--chat-id</code>, <code>--chat-type</code>, <code>--branch</code>, <code>--end-reason</code>. <code>--dry-run</code> previews the match set without writing. <code>--redact</code> scrubs secrets (API keys, tokens, credentials) from exported content on any format — recommended for anything you plan to share. Note: bulk filters match <em>ended</em> sessions; unfiltered <code>export</code> dumps everything, including active ones.</p>
+<h4 id="jsonl-default">JSONL (default)</h4>
+<div class="highlight"><pre><span></span><code><span class="c1"># Export all sessions to a JSONL file</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>backup.jsonl
+
+<span class="c1"># Export sessions from a specific platform</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>telegram-history.jsonl<span class="w"> </span>--source<span class="w"> </span>telegram
+
+<span class="c1"># Export a single session</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>session.jsonl<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4
+
+<span class="c1"># Point at a directory (existing, or ending in /) and the file is named for you:</span>
+<span class="c1"># ~/exports/hermes_session_20250305_091523_a1b2c3d4.jsonl</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>~/exports/<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4
+
+<span class="c1"># Redact API keys/tokens/credentials from the exported content</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>backup.jsonl<span class="w"> </span>--redact
+</code></pre></div>
+
+<p>Exported files contain one JSON object per line with full session metadata and all messages.</p>
+<p>Each record also carries a <code>timings</code> block derived from the message timestamps, so a reader of an export attached to a bug report can tell a single long model gap from many small tool round-trips without reconstructing it by hand. It holds only ids, roles, counts and durations — <code>wall_clock_ms</code>, <code>largest_gap_ms</code>, <code>role_counts</code>, <code>tool_calls_emitted</code> and per-message <code>intervals</code> — never prompt text, tool arguments or results, so it survives <code>--redact</code> unchanged. Hermes does not persist a model/tool stopwatch, so <code>complete</code> is always <code>false</code>; when a session has no timestamped messages, <code>available</code> is <code>false</code> and <code>unavailable_reason</code> says why. The block is rebuilt on every export and ignored (and not counted toward size limits) on import.</p>
+<h4 id="html">HTML</h4>
+<p><code>--format html</code> writes a single self-contained HTML file — no remote dependencies — with styled message bubbles, collapsible tool output, and (for multi-session exports) a sidebar to switch between sessions:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># One session as a standalone HTML page</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>html<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>transcript.html
+
+<span class="c1"># All Telegram sessions from the last week in one file, secrets redacted</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>html<span class="w"> </span>--newer-than<span class="w"> </span>1w<span class="w"> </span>--source<span class="w"> </span>telegram<span class="w"> </span>--redact<span class="w"> </span>archive.html
+</code></pre></div>
+
+<h4 id="prompts-only">Prompts Only</h4>
+<p><code>--only user-prompts</code> exports just the prompts you wrote — no assistant replies, tool output, or system context. Useful for building prompt libraries or reviewing what you asked:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># One JSONL record per prompt (session id, index, timestamp, text)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>prompts.jsonl<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--only<span class="w"> </span>user-prompts
+
+<span class="c1"># Markdown, straight to stdout</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>-<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--only<span class="w"> </span>user-prompts<span class="w"> </span>--format<span class="w"> </span>md
+</code></pre></div>
+
+<p>Works with <code>--format jsonl</code> (default) or <code>md</code>, honors the same filters for bulk export, and combines with <code>--redact</code>.</p>
+<h4 id="traces-hf-agent-trace-viewer">Traces (HF Agent Trace Viewer)</h4>
+<p><code>--format trace</code> emits Claude Code JSONL — the transcript shape the Hugging Face Hub auto-detects for its <a href="https://huggingface.co/docs/hub/agent-traces" class="ext" target="_blank" rel="noopener">Agent Trace Viewer</a>. Write it locally, or add <code>--upload</code> to push it to your own private <code>hermes-traces</code> dataset (reads <code>HF_TOKEN</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Trace of the most recent session, to stdout</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>trace
+
+<span class="c1"># One session to a local trace file</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>trace<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>trace.jsonl
+
+<span class="c1"># Upload straight to your private HF traces dataset</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>trace<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--upload
+</code></pre></div>
+
+<p>Trace exports are secret-redacted by default (they're meant to leave the machine); <code>--no-redact</code> opts out after manual review. <code>--upload</code> is private unless <code>--public</code>. Bulk trace export with filters writes one <code>&lt;id&gt;.trace.jsonl</code> per session.</p>
+<h4 id="markdown--qmd">Markdown / QMD</h4>
+<p>Pass <code>--format md</code> or <code>--format qmd</code> when you want a readable, file-based archive before hiding or deleting old sessions. Markdown/QMD exports write one file per session into a directory (default: <code>~/.hermes/session-exports</code>).</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Export one session to Markdown</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>md<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4
+
+<span class="c1"># Export a compression lineage as one logical document</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>md<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--lineage<span class="w"> </span>logical
+
+<span class="c1"># Preview ended sessions older than 90 days without writing files</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>md<span class="w"> </span>--older-than<span class="w"> </span><span class="m">90</span><span class="w"> </span>--dry-run
+
+<span class="c1"># Export ended Telegram sessions older than 2 weeks to QMD files</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>qmd<span class="w"> </span>--older-than<span class="w"> </span>2w<span class="w"> </span>--source<span class="w"> </span>telegram
+
+<span class="c1"># Export long Claude sessions, secrets redacted</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>md<span class="w"> </span>--model<span class="w"> </span>sonnet<span class="w"> </span>--min-messages<span class="w"> </span><span class="m">50</span><span class="w"> </span>--redact
+
+<span class="c1"># Only after verification, export and delete one explicitly named session</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>md<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--delete-after-verified<span class="w"> </span>--yes
+</code></pre></div>
+
+<p>Markdown/QMD export writes one <code>.md</code> or <code>.qmd</code> file per exported session plus a <code>manifest.jsonl</code> with the file path, message count, lineage ids, and SHA-256. Bulk export requires at least one filter; a bare bulk export is refused. <code>--delete-after-verified</code> is intentionally limited to <code>--session-id</code> and requires <code>--yes</code>. Because deleting a parent session also removes its delegate/subagent sessions, this mode exports and verifies each delegate in a separate file before deleting anything. If the delegate set changes during export, deletion is refused. <code>--redact</code> scrubs secrets (API keys, tokens, credentials) from message content and tool output before writing — recommended for any export you plan to share.</p>
+<h3 id="delete-a-session">Delete a Session</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Delete a specific session (with confirmation)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>delete<span class="w"> </span>20250305_091523_a1b2c3d4
+
+<span class="c1"># Delete without confirmation</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>delete<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--yes
+</code></pre></div>
+
+<h3 id="rename-a-session">Rename a Session</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Set or change a session&#39;s title</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>rename<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span><span class="s2">&quot;debugging auth flow&quot;</span>
+
+<span class="c1"># Multi-word titles don&#39;t need quotes in the CLI</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>rename<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>debugging<span class="w"> </span>auth<span class="w"> </span>flow
+</code></pre></div>
+
+<p>If the title is already in use by another session, an error is shown.</p>
+<h3 id="pin-a-session">Pin a Session</h3>
+<p>Pinning sets a durable "keep" flag: pinned sessions are exempt from the
+<code>sessions.auto_archive</code> stale sweep and always appear in listings. It is the
+same flag the Desktop sidebar's Pinned section uses — pin from either surface
+and both see it.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Pin one or more sessions (unique ID prefixes work)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>pin<span class="w"> </span>20250305_091523_a1b2c3d4
+hermes<span class="w"> </span>sessions<span class="w"> </span>pin<span class="w"> </span><span class="m">20250305</span><span class="w"> </span><span class="m">20250306</span>
+
+<span class="c1"># Remove the pin</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>unpin<span class="w"> </span>20250305_091523_a1b2c3d4
+
+<span class="c1"># List pinned sessions</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>pinned
+
+<span class="c1"># Machine-readable output, e.g. for a nightly backup of your pin set</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>pinned<span class="w"> </span>--json<span class="w"> </span>&gt;<span class="w"> </span>pinned-sessions.json
+</code></pre></div>
+
+<h3 id="prune-old-sessions">Prune Old Sessions</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Delete ended sessions inactive for 90 days (default)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune
+
+<span class="c1"># Custom age threshold — bare numbers are days</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--older-than<span class="w"> </span><span class="m">30</span>
+
+<span class="c1"># Durations work too: 5h, 30m, 2d, 1w</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--older-than<span class="w"> </span>12h
+
+<span class="c1"># Delete only a specific time window (e.g. a batch of test sessions</span>
+<span class="c1"># created in the last 5 hours)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--newer-than<span class="w"> </span>5h
+
+<span class="c1"># Explicit window with absolute timestamps</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--after<span class="w"> </span><span class="s2">&quot;2026-07-05 09:00&quot;</span><span class="w"> </span>--before<span class="w"> </span><span class="s2">&quot;2026-07-05 14:30&quot;</span>
+
+<span class="c1"># Only prune sessions from a specific platform (all ages — any filter</span>
+<span class="c1"># disables the implicit 90-day default)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--source<span class="w"> </span>telegram
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--source<span class="w"> </span>cron<span class="w"> </span>--older-than<span class="w"> </span><span class="m">60</span><span class="w">   </span><span class="c1"># add a time flag to narrow</span>
+
+<span class="c1"># More filters — all AND together</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--newer-than<span class="w"> </span>5h<span class="w"> </span>--title<span class="w"> </span><span class="s2">&quot;smoke test&quot;</span><span class="w">   </span><span class="c1"># title substring</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--older-than<span class="w"> </span><span class="m">30</span><span class="w"> </span>--max-messages<span class="w"> </span><span class="m">3</span><span class="w">        </span><span class="c1"># tiny sessions</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--cwd<span class="w"> </span>~/scratch<span class="w"> </span>--end-reason<span class="w"> </span><span class="k">done</span><span class="w">       </span><span class="c1"># by cwd / end reason</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--model<span class="w"> </span>gpt-5<span class="w"> </span>--older-than<span class="w"> </span>1w<span class="w">           </span><span class="c1"># by model (substring)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--provider<span class="w"> </span>openrouter<span class="w"> </span>--older-than<span class="w"> </span><span class="m">60</span><span class="w">   </span><span class="c1"># by billing provider</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--branch<span class="w"> </span>feature/old-experiment<span class="w">         </span><span class="c1"># by git branch</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--user<span class="w"> </span><span class="m">12345678</span><span class="w"> </span>--chat-type<span class="w"> </span>group<span class="w">       </span><span class="c1"># by messaging origin</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--max-tokens<span class="w"> </span><span class="m">500</span><span class="w"> </span>--older-than<span class="w"> </span><span class="m">7</span><span class="w">         </span><span class="c1"># by token usage</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--max-cost<span class="w"> </span><span class="m">0</span>.01<span class="w"> </span>--max-tool-calls<span class="w"> </span><span class="m">0</span><span class="w">      </span><span class="c1"># cheap, tool-less runs</span>
+
+<span class="c1"># Preview what would be deleted, without deleting anything</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--newer-than<span class="w"> </span>5h<span class="w"> </span>--dry-run
+
+<span class="c1"># Skip confirmation</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--older-than<span class="w"> </span><span class="m">30</span><span class="w"> </span>--yes
+</code></pre></div>
+
+<p>Time values (<code>--older-than</code>, <code>--newer-than</code>, <code>--before</code>, <code>--after</code>) accept a
+duration (<code>5h</code>, <code>30m</code>, <code>2d</code>, <code>1w</code>), a bare number of days, or an ISO
+timestamp (<code>2026-07-05</code>, <code>2026-07-05 14:30</code>). <code>--older-than</code>/<code>--before</code> set
+the upper bound; <code>--newer-than</code>/<code>--after</code> set the lower bound. The
+<code>--older-than</code>/<code>--newer-than</code> pair uses last activity — the freshest of live
+activity, latest message, or session start — while <code>--before</code>/<code>--after</code>
+explicitly use session start time. Combine either pair for a window.</p>
+<p>Attribute filters: <code>--source</code> (platform, exact), <code>--title</code> / <code>--model</code> /
+<code>--branch</code> (case-insensitive substring), <code>--provider</code> (billing provider,
+exact), <code>--end-reason</code>, <code>--user</code>, <code>--chat-id</code>, <code>--chat-type</code> (exact),
+<code>--cwd</code> (path prefix), plus numeric bounds <code>--min/--max-messages</code>,
+<code>--min/--max-tokens</code> (input+output), <code>--min/--max-cost</code> (USD, actual falling
+back to estimated), and <code>--min/--max-tool-calls</code>. Using any filter disables
+the implicit 90-day default, so <code>hermes sessions prune --source cron</code> or
+<code>--model gpt-4o</code> matches all ages — add a time flag to narrow it. Only a
+completely bare <code>hermes sessions prune</code> keeps the 90-day cutoff. Every
+non-<code>--yes</code> run shows the match count plus the oldest and newest matching
+session before asking for confirmation.</p>
+<p>Archived sessions are skipped by default; pass <code>--include-archived</code> to
+delete them too.</p>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>Pruning only deletes <strong>ended</strong> sessions (sessions that have been explicitly ended or auto-reset). Active sessions are never pruned.</p>
+</div>
+<h3 id="bulk-archive-sessions">Bulk-Archive Sessions</h3>
+<p>If you want sessions out of your listings without deleting anything,
+<code>hermes sessions archive</code> takes the same filters as <code>prune</code> but soft-hides
+matching sessions instead (sets the same archived flag as archiving a single
+session from the Desktop/Dashboard UI — messages and search stay intact):</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Archive everything from the last 5 hours (e.g. 75 CI smoke-test sessions)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>archive<span class="w"> </span>--newer-than<span class="w"> </span>5h
+
+<span class="c1"># Archive by title substring, preview first</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>archive<span class="w"> </span>--title<span class="w"> </span><span class="s2">&quot;dry run&quot;</span><span class="w"> </span>--dry-run
+hermes<span class="w"> </span>sessions<span class="w"> </span>archive<span class="w"> </span>--title<span class="w"> </span><span class="s2">&quot;dry run&quot;</span><span class="w"> </span>--yes
+</code></pre></div>
+
+<p>At least one filter is required — a bare <code>hermes sessions archive</code> refuses to
+archive your entire history. Archived sessions are hidden from
+<code>hermes sessions list</code> and <code>/resume</code> but remain in the database and can be
+unarchived from the Desktop/Dashboard session list.</p>
+<h3 id="session-statistics">Session Statistics</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>sessions<span class="w"> </span>stats
+</code></pre></div>
+
+<p>Output:</p>
+<div class="highlight"><pre><span></span><code>Total sessions: 142
+Total messages: 3847
+  cli: 89 sessions
+  telegram: 38 sessions
+  discord: 15 sessions
+Database size: 12.4 MB
+</code></pre></div>
+
+<p>For deeper analytics — token usage, cost estimates, tool breakdown, and activity patterns — use <a href="../reference/cli-commands.html#hermes-insights"><code>hermes insights</code></a>.</p>
+<h3 id="repair-stranded-gateway-sessions">Repair Stranded Gateway Sessions</h3>
+<p>If a gateway conversation ever "jumps back in time" after a restart — resuming
+a days-old topic as though recent messages never happened — the live
+conversation may be stranded in a session row that lost its routing identity
+(the damage class fixed in the v0.21 session-continuity work; current versions
+prevent it by construction and self-heal at runtime).</p>
+<p><code>hermes sessions repair-routing</code> finds message-bearing session rows with no
+routing identity and re-attaches each one to the conversation it continues —
+but only when the evidence is unambiguous:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Report only — shows each orphan, the proposed adoption, and the evidence</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>repair-routing
+
+<span class="c1"># Perform the adoptions (stop the gateway first — a running gateway holds</span>
+<span class="c1"># the old routing in memory and would write it back over the repair)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>repair-routing<span class="w"> </span>--apply
+
+<span class="c1"># Widen/narrow the contiguity window (default 900 seconds)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>repair-routing<span class="w"> </span>--max-gap-seconds<span class="w"> </span><span class="m">300</span>
+</code></pre></div>
+
+<p>Evidence rules:</p>
+<ul>
+<li><strong>lineage</strong> — the orphan's <code>parent_session_id</code> points at a keyed row of the
+  same platform (a recorded fact; no time window applies)</li>
+<li><strong>contiguity</strong> — exactly one keyed row of the same platform fell quiet
+  within the window of the orphan's start</li>
+</ul>
+<p>Anything ambiguous (two candidate predecessors, two orphans claiming the same
+predecessor) is reported with a reason and left untouched — a wrong adoption
+would splice one conversation into another chat. The superseded row is retired
+under <code>superseded_by_repair</code>, so restart recovery can never resurrect it.</p>
+<p>Repair is deliberately <strong>not automatic</strong>: if the chat has since built up a
+second history, choosing which thread it continues is your call. The stranded
+conversation stays readable via <code>/resume</code> and session search either way —
+routing is the only thing the repair changes. Back up first
+(<code>cp ~/.hermes/state.db ~/.hermes/state.db.bak</code>).</p>
+<h3 id="repair-state-crossed-between-profiles">Repair State Crossed Between Profiles</h3>
+<p>Every profile owns one <code>state.db</code>, and every gateway session key names the
+profile that owns the conversation (<code>agent:main:…</code> for the default profile,
+<code>agent:&lt;name&gt;:…</code> for a named one). Older releases could leave the two
+disagreeing — a named profile's rows written into the default store, a child
+session inheriting from another profile's row, a routing row copied into the
+wrong store, a Telegram topic or <code>/voice</code> setting saved without the bot's
+profile. Current versions put new state in the right place; <code>hermes sessions
+repair-profiles</code> settles what is already crossed.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Report only — every store is scanned, nothing is written</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>repair-profiles
+
+<span class="c1"># Perform the repairs (stop the gateway first; a snapshot of every store is taken)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>repair-profiles<span class="w"> </span>--apply
+
+<span class="c1"># Machine-readable report</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>repair-profiles<span class="w"> </span>--json
+</code></pre></div>
+
+<p>What it finds and does:</p>
+<table>
+<thead>
+<tr>
+<th>Finding</th>
+<th>Repair</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>profile_name</code> disagrees with the row's own session key</td>
+<td>relabel from the key</td>
+</tr>
+<tr>
+<td>rows sitting in another profile's store</td>
+<td>move (with all messages) to the owning profile's store</td>
+</tr>
+<tr>
+<td><code>parent_session_id</code> pointing at another profile's row</td>
+<td>sever the link; the row's own identity is kept</td>
+</tr>
+<tr>
+<td>routing rows outside the default store (under multiplexing)</td>
+<td>move to the default store; an existing row there wins</td>
+</tr>
+<tr>
+<td>routing rows / <code>sessions.json</code> entries for a profile that no longer exists</td>
+<td>delete</td>
+</tr>
+<tr>
+<td>Telegram topic bindings and voice-mode entries missing their bot's profile</td>
+<td>relabel from the sessions that hold the chat</td>
+</tr>
+</tbody>
+</table>
+<p>Two cases are reported but never repaired without being told what they are:
+rows keyed to a profile that does not exist (create the profile, or
+<code>hermes profile migrate-identity &lt;old&gt; &lt;new&gt;</code>), and <code>agent:main:…</code> rows inside
+a named profile's store. The latter are either the history of a gateway that
+used to run standalone for that profile (<code>--legacy-main rekey</code> gives them the
+profile's namespace) or default-profile chats that leaked in under a scoped
+write (<code>--legacy-main move</code> sends them to the default store) — the rows
+themselves cannot tell the two apart.</p>
+<p><code>--apply</code> refuses while a gateway owns any of the stores (it holds the routing
+index in memory and would write it back), and is safe to re-run: a second run
+finds nothing.</p>
+<h2 id="importing-sessions-from-claude-code-and-codex-cli">Importing Sessions from Claude Code and Codex CLI</h2>
+<p>Started a conversation in another agent CLI? You can pull it into Hermes and
+continue it here. Hermes reads Claude Code's session logs
+(<code>~/.claude/projects/</code>, or <code>$CLAUDE_CONFIG_DIR/projects/</code> when Claude Code's
+config dir is relocated) and Codex CLI's rollouts (<code>~/.codex/sessions/</code>, or
+<code>$CODEX_HOME/sessions/</code>) — the foreign files are only read, never modified.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Interactive picker across both tools, newest first</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>import
+
+<span class="c1"># Limit to one tool, or point at a specific file</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>import<span class="w"> </span>--from<span class="w"> </span>claude
+hermes<span class="w"> </span>sessions<span class="w"> </span>import<span class="w"> </span>--from<span class="w"> </span>codex<span class="w"> </span>~/.codex/sessions/2026/08/15/rollout-....jsonl
+
+<span class="c1"># Import-and-resume in one step</span>
+hermes<span class="w"> </span>--resume<span class="w"> </span>@claude
+hermes<span class="w"> </span>--resume<span class="w"> </span>@codex
+</code></pre></div>
+
+<p><code>hermes sessions import</code> creates a new Hermes session titled
+<code>Imported from Claude Code: &lt;first user message&gt;</code> (or Codex CLI) and prints
+the id plus a ready-to-paste <code>hermes --resume &lt;id&gt;</code> command.
+<code>--resume @claude</code> / <code>--resume @codex</code> show the same picker and drop you
+straight into the imported conversation.</p>
+<p><strong>Hermes Desktop</strong> has the same importer in the command palette (<strong>Import
+session</strong>). It lists the logs on the machine the
+connected backend runs on — not the computer running the app — shows a
+read-only preview, and <strong>Continue in Hermes</strong> copies the conversation into the
+selected profile. Browsing never writes to your session store, importing never
+touches the source file, and importing the same log twice opens the existing
+copy instead of making another.</p>
+<p>What carries over: the ordered user/assistant conversation, with tool
+activity condensed to short <code>[ran tool: …]</code> notes inside assistant turns.
+System prompts, injected context, reasoning traces, and raw tool output are
+left behind — the import is a clean transcript, not a byte-for-byte replay.</p>
+<h2 id="session-search-tool">Session Search Tool</h2>
+<p>The agent has a built-in <code>session_search</code> tool that performs full-text search across all past conversations using SQLite's FTS5 engine — and lets the agent scroll through any session it finds. It makes no LLM calls and returns views of actual messages from the DB rather than generating summaries.</p>
+<h3 id="four-calling-shapes">Four calling shapes</h3>
+<p>The tool infers what you want from which arguments you set. There's no <code>mode</code> parameter.</p>
+<p><strong>1. Discovery — pass <code>query</code>:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="n">session_search</span><span class="p">(</span><span class="n">query</span><span class="o">=</span><span class="s2">&quot;auth refactor&quot;</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Runs FTS5, dedupes hits by session lineage, and returns the top N sessions. Discovery uses adaptive detail by default: the highest-ranked result includes its full context window and bookends, while lower-ranked results stay compact. Pass <code>detail="full"</code> to fully hydrate every result.</p>
+<p>Each result carries:</p>
+<ul>
+<li><code>session_id</code>, <code>title</code>, <code>when</code>, <code>source</code></li>
+<li><code>snippet</code> — FTS5-highlighted match excerpt</li>
+<li><code>detail</code> — <code>full</code> or <code>compact</code></li>
+<li><code>bookend_start</code> / <code>bookend_end</code> — first/last 3 user+assistant messages for full results; empty lists for compact results</li>
+<li><code>messages</code> — ±5 messages around the FTS5 match for full results; only the flagged anchor message for compact results</li>
+<li><code>match_message_id</code>, <code>messages_before</code>, <code>messages_after</code></li>
+</ul>
+<p>The top result reconstructs goal → match → resolution immediately. If another compact result looks more promising, use its session and message IDs with the scroll shape. Typical wall time is tens of milliseconds on a real session DB.</p>
+<p><strong>2. Scroll — pass <code>session_id</code> + <code>around_message_id</code>:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="n">session_search</span><span class="p">(</span><span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;20260510_174648_805cc2&quot;</span><span class="p">,</span> <span class="n">around_message_id</span><span class="o">=</span><span class="mi">590803</span><span class="p">,</span> <span class="n">window</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Returns a window of ±<code>window</code> messages centered on the anchor. No FTS5, no bookends — just the slice. Use after a discovery call when you need more context than the ±5 default window.</p>
+<ul>
+<li>To scroll <strong>forward</strong>: pass <code>messages[-1].id</code> back as <code>around_message_id</code></li>
+<li>To scroll <strong>backward</strong>: pass <code>messages[0].id</code> back as <code>around_message_id</code></li>
+<li>The boundary message appears in both windows as an orientation marker</li>
+<li>When <code>messages_before</code> or <code>messages_after</code> is less than <code>window</code>, you're at the start or end of the session</li>
+</ul>
+<p>Typical wall time: 1–2ms per scroll call.</p>
+<p><strong>3. Read — pass <code>session_id</code> without an anchor:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="n">session_search</span><span class="p">(</span><span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;20260510_174648_805cc2&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Returns the whole session, or a bounded head/tail view for large sessions. This shape is also used to resolve an <code>@session:&lt;profile&gt;/&lt;id&gt;</code> link.</p>
+<p><strong>4. Browse — no args:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="n">session_search</span><span class="p">()</span>
+</code></pre></div>
+
+<p>Returns recent sessions chronologically (titles, previews, timestamps). Useful when the user asks "what was I working on" without naming a topic.</p>
+<h3 id="fts5-query-syntax">FTS5 query syntax</h3>
+<p>The keyword mode supports standard FTS5 query syntax:</p>
+<ul>
+<li>Simple keywords: <code>docker deployment</code> (FTS5 defaults to AND)</li>
+<li>Phrases: <code>"exact phrase"</code></li>
+<li>Boolean: <code>docker OR kubernetes</code>, <code>python NOT java</code></li>
+<li>Prefix: <code>deploy*</code></li>
+</ul>
+<h3 id="optional-parameters">Optional parameters</h3>
+<ul>
+<li><code>sort</code> — <code>newest</code> or <code>oldest</code>, on top of FTS5 ranking. Omit for relevance-only ordering (the default; suitable for exploratory recall). Use <code>newest</code> for "where did we leave X" questions, <code>oldest</code> for "how did X start" questions.</li>
+<li><code>detail</code> — <code>adaptive</code> (default) fully hydrates only the top discovery result; <code>full</code> hydrates every discovery result.</li>
+<li><code>role_filter</code> — comma-separated roles to include. Discovery defaults to <code>user,assistant</code> (tool output is usually noise). Pass <code>user,assistant,tool</code> to include tool output (debugging tool behaviour) or <code>tool</code> to search tool output only.</li>
+</ul>
+<h3 id="when-its-used">When It's Used</h3>
+<p>The agent is prompted to use session search automatically:</p>
+<blockquote>
+<p><em>"When the user references something from a past conversation or you suspect relevant prior context exists, use session_search to recall it before asking them to repeat themselves."</em></p>
+</blockquote>
+<p>Typical triggers: "we did this before", "remember when", "last time", "as I mentioned", or any reference to a project/person/concept that isn't in the current window.</p>
+<h2 id="per-platform-session-tracking">Per-Platform Session Tracking</h2>
+<h3 id="gateway-sessions">Gateway Sessions</h3>
+<p>On messaging platforms, sessions are keyed by a deterministic session key built from the message source:</p>
+<table>
+<thead>
+<tr>
+<th>Chat Type</th>
+<th>Default Key Format</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Telegram DM</td>
+<td><code>agent:main:telegram:dm:&lt;chat_id&gt;</code></td>
+<td>One session per DM chat</td>
+</tr>
+<tr>
+<td>Discord DM</td>
+<td><code>agent:main:discord:dm:&lt;chat_id&gt;</code></td>
+<td>One session per DM chat</td>
+</tr>
+<tr>
+<td>WhatsApp DM</td>
+<td><code>agent:main:whatsapp:dm:&lt;canonical_identifier&gt;</code></td>
+<td>One session per DM user (LID/phone aliases collapse to one identity when mapping exists)</td>
+</tr>
+<tr>
+<td>Group chat</td>
+<td><code>agent:main:&lt;platform&gt;:group:&lt;chat_id&gt;:&lt;user_id&gt;</code></td>
+<td>Per-user inside the group when the platform exposes a user ID</td>
+</tr>
+<tr>
+<td>Group thread/topic</td>
+<td><code>agent:main:&lt;platform&gt;:group:&lt;chat_id&gt;:&lt;thread_id&gt;</code></td>
+<td>Shared session for all thread participants (default). Per-user with <code>thread_sessions_per_user: true</code>.</td>
+</tr>
+<tr>
+<td>Channel</td>
+<td><code>agent:main:&lt;platform&gt;:channel:&lt;chat_id&gt;:&lt;user_id&gt;</code></td>
+<td>Per-user inside the channel when the platform exposes a user ID</td>
+</tr>
+</tbody>
+</table>
+<p>When Hermes cannot get a participant identifier for a shared chat, it falls back to one shared session for that room.</p>
+<h3 id="shared-vs-isolated-group-sessions">Shared vs Isolated Group Sessions</h3>
+<p>By default, Hermes uses <code>group_sessions_per_user: true</code> in <code>config.yaml</code>. That means:</p>
+<ul>
+<li>Alice and Bob can both talk to Hermes in the same Discord channel without sharing transcript history</li>
+<li>one user's long tool-heavy task does not pollute another user's context window</li>
+<li>a running turn is keyed to the sender that started it, but <code>/stop</code> still reaches it — see below</li>
+</ul>
+<p><code>/stop</code> means "stop what is running in this chat": it first tries the caller's own session key,
+then any live turn in this chat — other participants' runs in the caller's own thread included —
+authorization-gated, and never another room, workspace or profile. So an idle Alice's <code>/stop</code> can
+end a turn Bob (or a bot) started in the room she is in. A <code>/stop</code> sent from <em>inside</em> a thread is
+narrower: it reaches runs belonging to that thread and a room-wide run that carries no thread slot
+(the rolling-DM shape), but never another thread of the same channel and never a peer's per-sender
+top-level run.</p>
+<p>If you want one shared "room brain" instead, set:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>That reverts groups/channels to a single shared session per room, which preserves shared conversational context but also shares token costs, interrupt state, and context growth.</p>
+<h3 id="session-continuity">Session continuity</h3>
+<p>Gateway conversations do not reset after inactivity or at a daily boundary. Use <code>/new</code>
+or <code>/reset</code> for an explicit new conversation; context compression remains automatic.
+Legacy <code>session_reset</code> settings, reset-policy overrides and reset-timer environment
+variables are ignored. Cached agents may be released to reclaim resources without
+replacing the durable conversation. Restart-recovery freshness limits automatic
+continuation, not the history loaded when you send a message.</p>
+<h3 id="session-hygiene-why-you-should-still-run-new">Session hygiene: why you should still run <code>/new</code></h3>
+<p>Because gateway conversations never expire on their own, it is easy to run one
+session for weeks. That works, but it quietly defeats the learning loop and
+inflates costs:</p>
+<ul>
+<li><strong>Memory only pays off at boundaries.</strong> <code>MEMORY.md</code> / <code>USER.md</code> are injected
+  at session start, and <code>session_search</code> exists to recall what fell out of
+  context. In a never-ending session everything is still <em>in</em> context, so the
+  agent has no reason to consult memory — the "self-learning" machinery barely
+  runs. Memory distillation (the save before reset) also only happens when a
+  session actually ends.</li>
+<li><strong>Cost grows with history.</strong> Compression keeps a long session functional,
+  but every turn still carries a large (compacted) prefix. A fresh session
+  with distilled memory is almost always cheaper than a month-old thread.</li>
+</ul>
+<p>Practical rule: end a session when you finish a task or topic. Run <code>/new</code>
+(optionally named, e.g. <code>/new payments-refactor</code>) at natural stopping points —
+daily or per-project both work. Before the reset, ask the agent to "remember
+anything worth keeping" if the work surfaced durable preferences or
+procedures; it saves memories and skills from the expiring session
+automatically, but an explicit nudge helps. Restarting the machine or the
+gateway is <strong>not</strong> a boundary — the same session resumes.</p>
+<p>See <a href="features/memory.html">Memory</a> for what gets carried across boundaries.</p>
+<h3 id="continuity-after-crashes-and-restarts">Continuity After Crashes and Restarts</h3>
+<p>A gateway chat is designed to be <strong>one continuous session</strong> — compacted
+repeatedly as it grows — until you explicitly run <code>/new</code> (or <code>/reset</code>). This
+holds across gateway crashes, restarts, and updates:</p>
+<ul>
+<li>Session identity (routing key, chat, origin) is written <strong>atomically</strong> when
+  the session row is created, on every creation path (<code>/new</code>, first message,
+  <code>/branch</code> children). If that write ever fails, the very next turn's routing
+  refresh repairs the row automatically.</li>
+<li>After a restart, the gateway re-resolves each chat to the session with the
+  most recent <strong>actual activity</strong> — an older, stale row can never win over the
+  conversation you were actually having.</li>
+<li>Recovery <strong>respects <code>/new</code> boundaries</strong>: if the most recent event for a chat
+  is an intentional reset, recovery starts fresh rather than reaching behind
+  the reset to resurrect an older session. Elapsed time alone never prevents
+  recovery of a durable conversation.</li>
+</ul>
+<h2 id="storage-locations">Storage Locations</h2>
+<table>
+<thead>
+<tr>
+<th>What</th>
+<th>Path</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SQLite database</td>
+<td><code>~/.hermes/state.db</code></td>
+<td>All session metadata + messages with FTS5</td>
+</tr>
+<tr>
+<td>Gateway messages</td>
+<td><code>~/.hermes/state.db</code></td>
+<td>SQLite — canonical store for all session messages</td>
+</tr>
+<tr>
+<td>Gateway routing index</td>
+<td><code>gateway_routing</code> table in <code>~/.hermes/state.db</code></td>
+<td>Maps session keys to active session IDs (origin metadata, expiry flags)</td>
+</tr>
+<tr>
+<td>Legacy routing mirror</td>
+<td><code>~/.hermes/sessions/sessions.json</code></td>
+<td>Backward-compat mirror of the routing index, written when <code>gateway.write_sessions_json: true</code> (the default)</td>
+</tr>
+</tbody>
+</table>
+<p>The SQLite database uses WAL mode for concurrent readers and a single writer, which suits the gateway's multi-platform architecture well.</p>
+<div class="admonition adm-warning"><p class="adm-title">`sessions.json` is not the session list</p>
+<p>The gateway routing index lives in the <code>gateway_routing</code> table inside
+<code>state.db</code>; <code>~/.hermes/sessions/sessions.json</code> is a <strong>legacy mirror</strong> of it,
+kept for backward compatibility (disable with
+<code>gateway.write_sessions_json: false</code>). It maps messaging session keys
+(<code>agent:main:&lt;platform&gt;:...</code>) to active session IDs.
+It only ever contains gateway/messaging entries, so if you run a messaging
+platform you'll see only those (e.g. <code>agent:main:whatsapp:dm:...</code>).</p>
+<p>This is <strong>expected</strong> and does <strong>not</strong> mean your CLI sessions are missing.
+<code>hermes sessions list</code>, <code>/sessions</code>, and the dashboard all read <code>state.db</code>,
+which holds <strong>every</strong> session (CLI, TUI, and gateway). The <code>/save</code> snapshots
+under <code>~/.hermes/sessions/saved/*.json</code> are convenience exports, not the index.</p>
+<p>If CLI sessions genuinely don't appear in <code>hermes sessions list</code>, the cause is
+<code>state.db</code> not receiving them — run <code>hermes sessions repair</code> and watch for a
+<code>⚠ Session store unavailable</code> warning at CLI startup, which means SQLite
+persistence failed for that run.</p>
+</div>
+<div class="admonition adm-note"><p class="adm-title">Legacy JSONL transcripts</p>
+<p>Sessions created before state.db became canonical may have leftover
+<code>*.jsonl</code> files in <code>~/.hermes/sessions/</code>. They are no longer written or
+read by Hermes. Safe to delete after verifying the corresponding session
+exists in state.db.</p>
+</div>
+<h3 id="database-schema">Database Schema</h3>
+<p>Key tables in <code>state.db</code>:</p>
+<ul>
+<li><strong>sessions</strong> — session metadata (id, source, user_id, model, title, timestamps, token counts). Titles have a unique index (NULL titles allowed, only non-NULL must be unique).</li>
+<li><strong>messages</strong> — full message history (role, content, tool_calls, tool_name, token_count)</li>
+<li><strong>messages_fts</strong> — FTS5 virtual table for full-text search across message content</li>
+</ul>
+<h2 id="session-expiry-and-cleanup">Session Expiry and Cleanup</h2>
+<h3 id="automatic-cleanup">Automatic Cleanup</h3>
+<ul>
+<li>Gateway conversations persist across inactivity; use <code>/new</code> or <code>/reset</code> for an explicit boundary</li>
+<li>Before reset, the agent saves memories and skills from the expiring session</li>
+<li>Auto-pruning (<strong>on by default</strong> since #54189): when <code>sessions.auto_prune</code> is <code>true</code>, ended sessions inactive for <code>sessions.retention_days</code> (default 90) are pruned at CLI/gateway/cron startup</li>
+<li>After a prune that actually removed rows, <code>state.db</code> is <code>VACUUM</code>ed to reclaim disk space only when <strong>both</strong> gates pass: at least <code>sessions.min_vacuum_interval_days</code> (default 30) have elapsed since the last successful <code>VACUUM</code>, <strong>and</strong> more than 25% of the file's pages are reclaimable (<code>PRAGMA freelist_count / page_count</code>). A dense database never pays for a full rewrite to reclaim a few MB (SQLite does not shrink the file on plain DELETE)</li>
+<li>Pruning runs at most once per <code>sessions.min_interval_hours</code> (default 24); the last-run timestamp is tracked inside <code>state.db</code> itself so it's shared across every Hermes process in the same <code>HERMES_HOME</code></li>
+</ul>
+<p>Without pruning, <code>state.db</code> grows without bound — multi-GB files within weeks were reported on gateway + cron installs. If you would rather keep every ended session forever (the pre-#54189 behavior), turn it off in <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">sessions</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">auto_prune</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">         </span><span class="c1"># default is true — set false to keep all history</span>
+<span class="w">  </span><span class="nt">retention_days</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">90</span><span class="w">        </span><span class="c1"># keep ended sessions active within this window</span>
+<span class="w">  </span><span class="nt">vacuum_after_prune</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">  </span><span class="c1"># reclaim disk space after a pruning sweep</span>
+<span class="w">  </span><span class="nt">min_vacuum_interval_days</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span><span class="w"> </span><span class="c1"># don&#39;t rewrite the DB more often than this</span>
+<span class="w">  </span><span class="nt">min_interval_hours</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">24</span><span class="w">    </span><span class="c1"># don&#39;t re-run the sweep more often than this</span>
+</code></pre></div>
+
+<p>Existing installs that already set any of these keys explicitly keep their
+values; only unset keys pick up the new defaults.</p>
+<p>Only <strong>ended</strong> sessions are ever deleted. Active sessions are never auto-pruned,
+regardless of age. Ended sessions are aged from their last activity — the
+freshest of live activity, latest message, or session start — so a long-lived
+conversation used recently is not deleted merely because it began before the
+retention window.</p>
+<p><strong>Stale open sessions from automation.</strong> Some producers — cron jobs, kanban
+workers, subagents, one-shot CLI runs — can die without ever marking their
+session ended, and pruning only deletes <em>ended</em> rows. To keep those from
+accumulating forever, each auto-prune pass also <em>closes</em> open sessions from
+those state-owned sources (<code>cli</code>, <code>cron</code>, <code>kanban</code>, <code>acp</code>, <code>api_server</code>,
+<code>subagent</code>, <code>tool</code>, plus the <code>recovered</code> placeholders that
+<code>hermes sessions recover</code> synthesizes for orphaned messages) whose last
+activity is older than <code>retention_days</code>
+(<code>end_reason: startup_orphan_reap</code>). Closing is non-destructive — the
+session stays resumable — and the row is aged from its close, so it is only
+deleted by a <em>later</em> pass after a further full retention window. Messaging
+platform sessions (Telegram, Discord, …), TUI/desktop sessions, pinned
+sessions, and sessions with a live turn or compression in progress are
+never closed by this sweep.</p>
+<h3 id="oversized-transcript-guards">Oversized-Transcript Guards</h3>
+<p>Two limits stop a runaway transcript from being loaded into memory all at once
+(both default to <code>20000</code> active messages; <code>0</code> disables the guard):</p>
+<div class="highlight"><pre><span></span><code><span class="nt">sessions</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">max_resume_messages</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">20000</span><span class="w">   </span><span class="c1"># interactive resume (CLI / TUI / Desktop)</span>
+<span class="w">  </span><span class="nt">max_export_messages</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">20000</span><span class="w">   </span><span class="c1"># one-shot in-memory export of a single session</span>
+</code></pre></div>
+
+<p><code>max_resume_messages</code> bounds <strong>what the resume actually loads</strong>, not the whole
+history of the conversation:</p>
+<ul>
+<li>A plain interactive resume (CLI <code>--resume</code>, the TUI) materializes the full
+  compression lineage — every compacted segment plus the live tip — so it is
+  bounded across the lineage.</li>
+<li>Desktop's cold resume pages the transcript over REST and only holds the live
+  tip segment in memory, so it is bounded by the tip alone. A long-lived chat
+  that has been compacted many times (dozens of segments, tens of thousands of
+  archived rows behind a small tip) is exactly what compression is meant to
+  produce and opens normally; its footer message count reflects the stored
+  lineage, not the live prompt.</li>
+</ul>
+<p>When a resume is refused the client receives error code <code>4130</code> with the count
+and the scope it was measured against (<code>across its lineage</code> or
+<code>in its tip segment</code>). <code>hermes sessions export</code> still works for such sessions.</p>
+<h3 id="manual-cleanup">Manual Cleanup</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Prune sessions older than 90 days</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune
+
+<span class="c1"># Delete a specific session</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>delete<span class="w"> </span>&lt;session_id&gt;
+
+<span class="c1"># Export before pruning (backup)</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>backup.jsonl
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--older-than<span class="w"> </span><span class="m">30</span><span class="w"> </span>--yes
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Auto-prune is <strong>on by default</strong>: ended sessions that have been inactive for <code>sessions.retention_days</code> (default 90) are removed at startup, and active sessions are never touched (see <a href="#automatic-cleanup">Automatic Cleanup</a> above). Session history powers <code>session_search</code> recall across past conversations, so if you want to keep every ended session forever, set <code>sessions.auto_prune: false</code> in <code>config.yaml</code>, or raise <code>retention_days</code>. With auto-prune off, <code>hermes sessions prune</code> remains available for one-off cleanup (observed failure mode without any pruning: a 384 MB <code>state.db</code> with ~1000 sessions slowing down FTS5 inserts and <code>/resume</code> listing).</p>
+</div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/sessions</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-sessions-work">How Sessions Work</a></li>
+<li class="lvl3"><a href="#what-counts-toward-context">What Counts Toward Context</a></li>
+<li class="lvl3"><a href="#session-sources">Session Sources</a></li>
+<li class="lvl2"><a href="#cli-session-resume">CLI Session Resume</a></li>
+<li class="lvl3"><a href="#continue-last-session">Continue Last Session</a></li>
+<li class="lvl3"><a href="#resume-by-name">Resume by Name</a></li>
+<li class="lvl3"><a href="#resume-specific-session">Resume Specific Session</a></li>
+<li class="lvl3"><a href="#resume-in-a-specific-directory">Resume in a Specific Directory</a></li>
+<li class="lvl3"><a href="#resume-restores-the-working-directory">Resume Restores the Working Directory</a></li>
+<li class="lvl3"><a href="#filtering-sessions-by-workspace">Filtering Sessions by Workspace</a></li>
+<li class="lvl3"><a href="#conversation-recap-on-resume">Conversation Recap on Resume</a></li>
+<li class="lvl2"><a href="#cross-platform-handoff">Cross-Platform Handoff</a></li>
+<li class="lvl2"><a href="#session-naming">Session Naming</a></li>
+<li class="lvl3"><a href="#auto-generated-titles">Auto-Generated Titles</a></li>
+<li class="lvl3"><a href="#setting-a-title-manually">Setting a Title Manually</a></li>
+<li class="lvl3"><a href="#title-rules">Title Rules</a></li>
+<li class="lvl3"><a href="#auto-lineage-on-compression">Auto-Lineage on Compression</a></li>
+<li class="lvl3"><a href="#title-in-messaging-platforms">/title in Messaging Platforms</a></li>
+<li class="lvl2"><a href="#session-management-commands">Session Management Commands</a></li>
+<li class="lvl3"><a href="#list-sessions">List Sessions</a></li>
+<li class="lvl3"><a href="#export-sessions">Export Sessions</a></li>
+<li class="lvl3"><a href="#delete-a-session">Delete a Session</a></li>
+<li class="lvl3"><a href="#rename-a-session">Rename a Session</a></li>
+<li class="lvl3"><a href="#pin-a-session">Pin a Session</a></li>
+<li class="lvl3"><a href="#prune-old-sessions">Prune Old Sessions</a></li>
+<li class="lvl3"><a href="#bulk-archive-sessions">Bulk-Archive Sessions</a></li>
+<li class="lvl3"><a href="#session-statistics">Session Statistics</a></li>
+<li class="lvl3"><a href="#repair-stranded-gateway-sessions">Repair Stranded Gateway Sessions</a></li>
+<li class="lvl3"><a href="#repair-state-crossed-between-profiles">Repair State Crossed Between Profiles</a></li>
+<li class="lvl2"><a href="#importing-sessions-from-claude-code-and-codex-cli">Importing Sessions from Claude Code and Codex CLI</a></li>
+<li class="lvl2"><a href="#session-search-tool">Session Search Tool</a></li>
+<li class="lvl3"><a href="#four-calling-shapes">Four calling shapes</a></li>
+<li class="lvl3"><a href="#fts5-query-syntax">FTS5 query syntax</a></li>
+<li class="lvl3"><a href="#optional-parameters">Optional parameters</a></li>
+<li class="lvl3"><a href="#when-its-used">When It&#x27;s Used</a></li>
+<li class="lvl2"><a href="#per-platform-session-tracking">Per-Platform Session Tracking</a></li>
+<li class="lvl3"><a href="#gateway-sessions">Gateway Sessions</a></li>
+<li class="lvl3"><a href="#shared-vs-isolated-group-sessions">Shared vs Isolated Group Sessions</a></li>
+<li class="lvl3"><a href="#session-continuity">Session continuity</a></li>
+<li class="lvl3"><a href="#session-hygiene-why-you-should-still-run-new">Session hygiene: why you should still run /new</a></li>
+<li class="lvl3"><a href="#continuity-after-crashes-and-restarts">Continuity After Crashes and Restarts</a></li>
+<li class="lvl2"><a href="#storage-locations">Storage Locations</a></li>
+<li class="lvl3"><a href="#database-schema">Database Schema</a></li>
+<li class="lvl2"><a href="#session-expiry-and-cleanup">Session Expiry and Cleanup</a></li>
+<li class="lvl3"><a href="#automatic-cleanup">Automatic Cleanup</a></li>
+<li class="lvl3"><a href="#oversized-transcript-guards">Oversized-Transcript Guards</a></li>
+<li class="lvl3"><a href="#manual-cleanup">Manual Cleanup</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

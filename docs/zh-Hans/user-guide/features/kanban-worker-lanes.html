@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kanban worker lanes（工作者通道） · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/features/kanban-worker-lanes</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="kanban-worker-lanes工作者通道">Kanban worker lanes（工作者通道）</h1>
+<p><strong>worker lane</strong>（工作者通道）是 kanban 调度器可以将任务路由到的一类进程。每个通道都有一个标识（assignee 字符串）、一个生成机制，以及一份关于生成后必须如何处理任务的契约。</p>
+<p>本页即为该契约，面向两类读者：</p>
+<ul>
+<li><strong>运维人员</strong>：选择将哪些通道接入看板（创建哪些 profile，使用哪些 assignee）。</li>
+<li><strong>插件/集成作者</strong>：希望添加新的通道形态（封装 Codex / Claude Code / OpenCode 的 CLI worker、容器化审查 worker、通过 API 拉取任务的非 Hermes 服务）。</li>
+</ul>
+<p>如果你编写的是 worker 代码本身——即运行在通道<em>内部</em>的 agent——kanban 生命周期与参考细节会自动注入到 worker 的系统提示中（<a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py" class="ext" target="_blank" rel="noopener"><code>agent/prompt_builder.py</code></a> 中的 <code>KANBAN_GUIDANCE</code> 块）。</p>
+<h2 id="层级结构">层级结构</h2>
+<div class="highlight"><pre><span></span><code>Hermes Kanban  =  规范的任务生命周期 + 审计追踪
+Worker lane    =  某张已分配卡片的实现执行器
+Reviewer       =  人工或人工代理，负责把关&quot;完成&quot;状态
+GitHub PR      =  可上游的产物（可选，适用于代码通道）
+</code></pre></div>
+
+<p>Hermes Kanban 拥有生命周期的真实状态——<code>ready</code> → <code>running</code> → <code>review</code> / <code>blocked</code> / <code>done</code> / <code>archived</code>。Worker lane 执行工作，但从不拥有该真实状态；它们所做的一切都通过 <code>kanban_*</code> 工具回流至 kanban 内核（对于非 Hermes 外部 worker，则通过 API）。Reviewer 负责把关从"代码变更已写入"到"任务完成"的转换。</p>
+<h2 id="通道需提供的内容">通道需提供的内容</h2>
+<p>要成为 kanban worker lane，集成必须提供三项内容：</p>
+<h3 id="1-assignee-字符串">1. assignee 字符串</h3>
+<p>调度器将 <code>task.assignee</code> 与 Hermes profile 名称（默认通道形态）或已注册的不可生成标识符（插件通道形态——见下文<a href="../../../user-guide/features/kanban-worker-lanes.html#adding-an-external-cli-worker-lane" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">添加外部 CLI worker 通道</a>）进行匹配。assignee 无法解析的任务将保留在 <code>ready</code> 状态，并记录 <code>skipped_nonspawnable</code> 事件，以便看板运维人员修复；它们不会被静默丢弃，也不会由任意回退逻辑执行。</p>
+<h3 id="2-生成机制">2. 生成机制</h3>
+<p>对于 Hermes profile 通道，调度器的 <code>_default_spawn</code> 会在任务固定的工作区内运行 <code>hermes -p &lt;assignee&gt; chat -q &lt;prompt&gt;</code>（或当 <code>hermes</code> shim 不在 <code>$PATH</code> 时使用等效的模块形式），并设置以下环境变量：</p>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>携带内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>HERMES_KANBAN_TASK</code></td>
+<td>worker 正在操作的任务 id</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_DB</code></td>
+<td>每个看板 SQLite 文件的绝对路径</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_BOARD</code></td>
+<td>看板 slug</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_WORKSPACES_ROOT</code></td>
+<td>看板工作区树的根目录</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_WORKSPACE</code></td>
+<td><em>本</em>任务工作区的绝对路径</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_RUN_ID</code></td>
+<td>当前运行的 id（用于生命周期门控）</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_CLAIM_LOCK</code></td>
+<td>claim 锁字符串（<code>&lt;host&gt;:&lt;pid&gt;:&lt;uuid&gt;</code>）</td>
+</tr>
+<tr>
+<td><code>HERMES_PROFILE</code></td>
+<td>worker 自身的 profile 名称（用于 <code>kanban_comment</code> 作者归因）</td>
+</tr>
+<tr>
+<td><code>HERMES_TENANT</code></td>
+<td>租户命名空间（如果任务有的话）</td>
+</tr>
+</tbody>
+</table>
+<p>对于非 Hermes 通道（通过插件注册），插件提供自己的 <code>spawn_fn</code> 可调用对象，接收 <code>task</code>、<code>workspace</code> 和 <code>board</code>，并返回可选的 pid 用于崩溃检测。</p>
+<h3 id="3-生命周期终止器">3. 生命周期终止器</h3>
+<p>每次 claim 必须以以下之一结束：</p>
+<ul>
+<li><code>kanban_complete(summary=..., metadata=...)</code> — 任务成功，状态切换为 <code>done</code>。</li>
+<li><code>kanban_request_review(summary=..., metadata=..., reviewer=...)</code> — 同卡实现进入一等审查。默认由内置 <code>sdlc-review</code> skill 启动 reviewer；reviewer 可用 <code>kanban_complete</code> 批准、用 <code>kanban_request_changes</code> 退回原 implementer，或仅在真正需要外部介入时 block。</li>
+<li><code>kanban_block(reason=...)</code> — 任务等待人工输入，状态切换为 <code>blocked</code>。调度器在 <code>kanban_unblock</code> 运行时重新生成。</li>
+<li>worker 进程退出而未调用任何工具。内核回收该进程并发出 <code>crashed</code>（PID 已消亡）、<code>gave_up</code>（连续失败断路器触发）或 <code>timed_out</code>（超过 max_runtime）。这是失败路径；健康的 worker 不会在此结束。</li>
+</ul>
+<p>kanban 内核强制要求每次运行恰好由其中一项终止。既未调用任何终止工具又正常退出的 worker 将被视为崩溃。</p>
+<h2 id="输出与审查交接">输出与审查交接</h2>
+<p>代码变更任务必须按照任务图选择审查模型：</p>
+<ul>
+<li><strong>同卡审查：</strong>调用 <code>kanban_request_review(summary=..., metadata=..., reviewer=...)</code>。任务进入 <code>review</code>，不会触碰 block 循环计数。默认情况下，调度器使用内置 <code>sdlc-review</code> skill 启动 reviewer。Reviewer 用 <code>kanban_complete</code> 批准，用 <code>kanban_request_changes(reason=...)</code> 关闭审查 run 并将任务退回原 implementer，或只在真正需要外部决策时 block。</li>
+<li><strong>预先创建的下游 review/QA/release 卡：</strong><code>kanban_show</code> 会列出 child ID；选择终止动作前，先用 <code>kanban_show(task_id=...)</code> 检查这些卡。如果 child 是下游 review/QA/release 阶段，implementation 阶段必须调用 <code>kanban_complete</code>。子卡只有在父卡为 <code>done</code>/<code>archived</code> 后才能启动。不要再请求同卡审查，也不要用 <code>review-required:</code> sticky-block 父卡，否则会让下游通道卡死或重复。</li>
+<li><strong>纯人工审查看板：</strong>设置 <code>kanban.review_dispatch: false</code>。任务会停在 <code>review</code>，直到人工批准，或通过 <code>reopen-review</code>/仪表盘退回 <code>ready</code>/<code>todo</code>。</li>
+</ul>
+<p>两种审查模型都在生命周期转换本身携带结构化 <code>summary</code> 和 <code>metadata</code>。这些字段会持久保存，因此不得写入 secret、token 或原始 PII。</p>
+<p>自动注入的 <code>KANBAN_GUIDANCE</code> 同时说明两种任务图、同卡审查循环、<code>kanban_complete</code> 和真正外部阻塞所用的 <code>kanban_block</code>。</p>
+<h2 id="日志与审计追踪">日志与审计追踪</h2>
+<p>调度器将每个任务的 worker stdout/stderr 写入 <code>&lt;board-root&gt;/logs/&lt;task_id&gt;.log</code>。日志可通过 kanban 元数据进行审计：</p>
+<ul>
+<li><code>task_runs</code> 行携带 <code>log_path</code>、退出码（如有）、摘要和元数据。</li>
+<li><code>task_events</code> 行携带每次状态转换（<code>promoted</code>、<code>claimed</code>、<code>heartbeat</code>、<code>completed</code>、<code>blocked</code>、<code>review_requested</code>、<code>changes_requested</code>、<code>review_reopened</code>、<code>gave_up</code>、<code>crashed</code>、<code>timed_out</code>、<code>reclaimed</code>、<code>claim_extended</code>）。</li>
+<li><code>kanban_show</code> 同时返回两者，因此 reviewer（或后续 worker）读取任务时无需访问仪表板即可获得完整历史。</li>
+</ul>
+<p>仪表板以摘要、元数据块和退出状态徽章渲染运行历史。CLI 用户可运行 <code>hermes kanban tail &lt;task_id&gt;</code> 实时跟踪，或运行 <code>hermes kanban runs &lt;task_id&gt;</code> 查看历史尝试列表。</p>
+<h2 id="现有通道形态">现有通道形态</h2>
+<h3 id="hermes-profile-通道默认">Hermes profile 通道（默认）</h3>
+<p>当前所有 kanban worker 采用的形态：assignee 是 profile 名称，调度器生成 <code>hermes -p &lt;profile&gt;</code>，worker 会自动获得注入的 <code>KANBAN_GUIDANCE</code> 系统提示块，并使用 <code>kanban_*</code> 工具终止运行。除定义 profile 外无需任何额外配置。</p>
+<p>为你的 fleet 创建 profile 时，选择与你希望 orchestrator 路由到的<em>角色</em>相匹配的名称。orchestrator（如果存在）通过 <code>hermes profile list</code> 发现你的 profile 名称——系统不假设固定的名单（orchestrator 侧的契约也是注入的 <code>KANBAN_GUIDANCE</code> 的一部分）。</p>
+<h3 id="orchestrator-profile-通道">Orchestrator profile 通道</h3>
+<p>profile 通道的特化形态：orchestrator 是一个 Hermes profile，其工具集包含 <code>kanban</code>，但排除了用于实现的 <code>terminal</code> / <code>file</code> / <code>code</code> / <code>web</code>。其职责是通过 <code>kanban_create</code> + <code>kanban_link</code> 将高层目标分解为子任务，然后退出。orchestrator skill 编码了反诱惑规则。</p>
+<h2 id="添加外部-cli-worker-通道">添加外部 CLI worker 通道</h2>
+<p>将非 Hermes CLI 工具（Codex CLI、Claude Code CLI、OpenCode CLI、本地编码模型运行器等）接入 kanban worker 通道<em>尚未形成成熟路径</em>。调度器的 spawn 函数是可插拔的（<code>spawn_fn</code> 是 <code>dispatch_once</code> 的参数），插件可以为非 Hermes assignee 注册自己的 <code>spawn_fn</code>，但周边集成工作——将 CLI 的退出码封装为 <code>kanban_complete</code> / <code>kanban_block</code> 调用、将 CLI 的工作区/沙箱约定映射到调度器的 <code>HERMES_KANBAN_WORKSPACE</code> 环境变量、处理认证和每个 CLI 的策略——仍是每个集成各自的设计工作。</p>
+<p>如果你考虑添加 CLI 通道，请提交一个 issue，描述具体的 CLI 以及你希望实现的工作流。上述契约是任何此类通道必须满足的约束；实现形态（每个 CLI 一个插件，还是通过配置参数化的通用 CLI 运行器插件）尚未确定。</p>
+<p>相关历史 issue 为 <a href="https://github.com/NousResearch/hermes-agent/issues/19931" class="ext" target="_blank" rel="noopener">#19931</a>，以及已关闭未合并的 Codex 专项 PR <a href="https://github.com/NousResearch/hermes-agent/pull/19924" class="ext" target="_blank" rel="noopener">#19924</a>——这些描述了原始架构提案，但未落地运行器。</p>
+<h2 id="调度器处理的失败模式">调度器处理的失败模式</h2>
+<p>通道作者无需重新实现以下逻辑：</p>
+<ul>
+<li><strong>Claim TTL 过期</strong> — 已 claim 但从未心跳/完成/阻塞的 worker 在 <code>DEFAULT_CLAIM_TTL_SECONDS</code>（默认 15 分钟）后被回收——但仅当 worker 进程确实已死亡时。存活的 worker（慢速模型在一次无工具调用的 LLM 调用中耗时 20 分钟以上）会获得 claim <em>延期</em>而非被终止；只有 PID 已消亡时才会被回收。</li>
+<li><strong>Worker 崩溃</strong> — 宿主本地 PID 已消失的 worker 由 <code>detect_crashed_workers</code> 检测并回收；任务的 <code>consecutive_failures</code> 递增，断路器触发时可能自动阻塞。</li>
+<li><strong>运行级重试</strong> — 任务重试时（post-block、post-crash、post-reclaim），worker 可在终止工具上使用 <code>expected_run_id</code> 参数，在自身运行已被取代时快速失败。</li>
+<li><strong>每任务最大运行时间</strong> — <code>task.max_runtime_seconds</code> 对每次运行的挂钟时间进行硬性限制，与 PID 存活状态无关。可捕获真正死锁的 worker——否则存活 PID 延期机制会让其持续运行。</li>
+<li><strong>滞留任务检测</strong> — assignee 在 <code>kanban.stranded_threshold_seconds</code>（默认 30 分钟）内始终未产生 claim 的 ready 任务，会在 <code>hermes kanban diagnostics</code> 中显示为 <code>stranded_in_ready</code> 警告。严重程度在 2 倍阈值时升级为 error，在 6 倍时升级为 critical。可通过单一信号捕获拼写错误的 assignee、已删除的 profile 以及宕机的外部 worker 池——与标识无关，无需维护每个看板的白名单。</li>
+<li><strong>旧版审查依赖死锁</strong> —— 如果父卡以 <code>review-required:</code> sticky-block，而直接子卡仍因依赖停在 <code>todo</code>，系统会立即产生 <code>review_dependency_deadlock</code> error。该诊断只读：它建议完成已经结束的阶段或解除错误依赖，不会自动删除用户的 block。</li>
+</ul>
+<h2 id="相关资源">相关资源</h2>
+<ul>
+<li><a href="kanban.html">Kanban 概览</a> — 面向用户的介绍。</li>
+<li><a href="kanban-tutorial.html">Kanban 教程</a> — 开启仪表板的完整演练。</li>
+<li><a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py" class="ext" target="_blank" rel="noopener"><code>KANBAN_GUIDANCE</code></a> — 注入到每个 kanban worker 系统提示中的 worker + orchestrator 生命周期。</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/features/kanban-worker-lanes</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#层级结构">层级结构</a></li>
+<li class="lvl2"><a href="#通道需提供的内容">通道需提供的内容</a></li>
+<li class="lvl3"><a href="#1-assignee-字符串">1. assignee 字符串</a></li>
+<li class="lvl3"><a href="#2-生成机制">2. 生成机制</a></li>
+<li class="lvl3"><a href="#3-生命周期终止器">3. 生命周期终止器</a></li>
+<li class="lvl2"><a href="#输出与审查交接">输出与审查交接</a></li>
+<li class="lvl2"><a href="#日志与审计追踪">日志与审计追踪</a></li>
+<li class="lvl2"><a href="#现有通道形态">现有通道形态</a></li>
+<li class="lvl3"><a href="#hermes-profile-通道默认">Hermes profile 通道（默认）</a></li>
+<li class="lvl3"><a href="#orchestrator-profile-通道">Orchestrator profile 通道</a></li>
+<li class="lvl2"><a href="#添加外部-cli-worker-通道">添加外部 CLI worker 通道</a></li>
+<li class="lvl2"><a href="#调度器处理的失败模式">调度器处理的失败模式</a></li>
+<li class="lvl2"><a href="#相关资源">相关资源</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

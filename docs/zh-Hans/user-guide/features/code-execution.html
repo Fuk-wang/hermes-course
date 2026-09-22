@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>代码执行 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/features/code-execution</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="代码执行程序化工具调用">代码执行（程序化工具调用）</h1>
+<p><code>execute_code</code> 工具允许 agent 编写调用 Hermes 工具的 Python 脚本，将多步骤工作流压缩至单次 LLM 对话轮次。脚本在 agent 宿主机的子进程中运行，通过 Unix 域套接字 RPC 与 Hermes 通信。</p>
+<h2 id="工作原理">工作原理</h2>
+<ol>
+<li>Agent 编写使用 <code>from hermes_tools import ...</code> 的 Python 脚本</li>
+<li>Hermes 生成带有 RPC 函数的 <code>hermes_tools.py</code> 存根模块</li>
+<li>Hermes 打开 Unix 域套接字并启动 RPC 监听线程</li>
+<li>脚本在子进程中运行——工具调用通过套接字传回 Hermes</li>
+<li>只有脚本的 <code>print()</code> 输出会返回给 LLM；中间工具结果不会进入上下文窗口</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="c1"># The agent can write scripts like:</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">hermes_tools</span><span class="w"> </span><span class="kn">import</span> <span class="n">web_search</span><span class="p">,</span> <span class="n">web_extract</span>
+
+<span class="n">results</span> <span class="o">=</span> <span class="n">web_search</span><span class="p">(</span><span class="s2">&quot;Python 3.13 features&quot;</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">results</span><span class="p">[</span><span class="s2">&quot;data&quot;</span><span class="p">][</span><span class="s2">&quot;web&quot;</span><span class="p">]:</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">web_extract</span><span class="p">([</span><span class="n">r</span><span class="p">[</span><span class="s2">&quot;url&quot;</span><span class="p">]])</span>
+    <span class="c1"># ... filter and process ...</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">summary</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>脚本内可用工具：</strong> <code>web_search</code>、<code>web_extract</code>、<code>read_file</code>、<code>write_file</code>、<code>search_files</code>、<code>patch</code>、<code>terminal</code>（仅前台模式）。</p>
+<h2 id="agent-何时使用此功能">Agent 何时使用此功能</h2>
+<p>当存在以下情况时，agent 会使用 <code>execute_code</code>：</p>
+<ul>
+<li><strong>3 次及以上工具调用</strong>，且调用之间包含处理逻辑</li>
+<li>批量数据过滤或条件分支</li>
+<li>对结果进行循环处理</li>
+</ul>
+<p>核心优势：中间工具结果不会进入上下文窗口——只有最终的 <code>print()</code> 输出会返回，大幅降低 token 用量。</p>
+<h2 id="实际示例">实际示例</h2>
+<h3 id="数据处理流水线">数据处理流水线</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">hermes_tools</span><span class="w"> </span><span class="kn">import</span> <span class="n">search_files</span><span class="p">,</span> <span class="n">read_file</span>
+
+<span class="c1"># Find all config files and extract database settings</span>
+<span class="n">matches</span> <span class="o">=</span> <span class="n">search_files</span><span class="p">(</span><span class="s2">&quot;database&quot;</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="s2">&quot;.&quot;</span><span class="p">,</span> <span class="n">file_glob</span><span class="o">=</span><span class="s2">&quot;*.yaml&quot;</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">20</span><span class="p">)</span>
+<span class="n">configs</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">for</span> <span class="n">match</span> <span class="ow">in</span> <span class="n">matches</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;matches&quot;</span><span class="p">,</span> <span class="p">[]):</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">read_file</span><span class="p">(</span><span class="n">match</span><span class="p">[</span><span class="s2">&quot;path&quot;</span><span class="p">])</span>
+    <span class="n">configs</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;file&quot;</span><span class="p">:</span> <span class="n">match</span><span class="p">[</span><span class="s2">&quot;path&quot;</span><span class="p">],</span> <span class="s2">&quot;preview&quot;</span><span class="p">:</span> <span class="n">content</span><span class="p">[</span><span class="s2">&quot;content&quot;</span><span class="p">][:</span><span class="mi">200</span><span class="p">]})</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">configs</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">2</span><span class="p">))</span>
+</code></pre></div>
+
+<h3 id="多步骤网络调研">多步骤网络调研</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">hermes_tools</span><span class="w"> </span><span class="kn">import</span> <span class="n">web_search</span><span class="p">,</span> <span class="n">web_extract</span>
+
+<span class="c1"># Search, extract, and summarize in one turn</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">web_search</span><span class="p">(</span><span class="s2">&quot;Rust async runtime comparison 2025&quot;</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+<span class="n">summaries</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">results</span><span class="p">[</span><span class="s2">&quot;data&quot;</span><span class="p">][</span><span class="s2">&quot;web&quot;</span><span class="p">]:</span>
+    <span class="n">page</span> <span class="o">=</span> <span class="n">web_extract</span><span class="p">([</span><span class="n">r</span><span class="p">[</span><span class="s2">&quot;url&quot;</span><span class="p">]])</span>
+    <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">page</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;results&quot;</span><span class="p">,</span> <span class="p">[]):</span>
+        <span class="k">if</span> <span class="n">p</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;content&quot;</span><span class="p">):</span>
+            <span class="n">summaries</span><span class="o">.</span><span class="n">append</span><span class="p">({</span>
+                <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="n">r</span><span class="p">[</span><span class="s2">&quot;title&quot;</span><span class="p">],</span>
+                <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="n">r</span><span class="p">[</span><span class="s2">&quot;url&quot;</span><span class="p">],</span>
+                <span class="s2">&quot;excerpt&quot;</span><span class="p">:</span> <span class="n">p</span><span class="p">[</span><span class="s2">&quot;content&quot;</span><span class="p">][:</span><span class="mi">500</span><span class="p">]</span>
+            <span class="p">})</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">summaries</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">2</span><span class="p">))</span>
+</code></pre></div>
+
+<h3 id="批量文件重构">批量文件重构</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">hermes_tools</span><span class="w"> </span><span class="kn">import</span> <span class="n">search_files</span><span class="p">,</span> <span class="n">read_file</span><span class="p">,</span> <span class="n">patch</span>
+
+<span class="c1"># Find all Python files using deprecated API and fix them</span>
+<span class="n">matches</span> <span class="o">=</span> <span class="n">search_files</span><span class="p">(</span><span class="s2">&quot;old_api_call&quot;</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="s2">&quot;src/&quot;</span><span class="p">,</span> <span class="n">file_glob</span><span class="o">=</span><span class="s2">&quot;*.py&quot;</span><span class="p">)</span>
+<span class="n">fixed</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="k">for</span> <span class="n">match</span> <span class="ow">in</span> <span class="n">matches</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;matches&quot;</span><span class="p">,</span> <span class="p">[]):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">patch</span><span class="p">(</span>
+        <span class="n">path</span><span class="o">=</span><span class="n">match</span><span class="p">[</span><span class="s2">&quot;path&quot;</span><span class="p">],</span>
+        <span class="n">old_string</span><span class="o">=</span><span class="s2">&quot;old_api_call(&quot;</span><span class="p">,</span>
+        <span class="n">new_string</span><span class="o">=</span><span class="s2">&quot;new_api_call(&quot;</span><span class="p">,</span>
+        <span class="n">replace_all</span><span class="o">=</span><span class="kc">True</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="s2">&quot;error&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="nb">str</span><span class="p">(</span><span class="n">result</span><span class="p">):</span>
+        <span class="n">fixed</span> <span class="o">+=</span> <span class="mi">1</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Fixed </span><span class="si">{</span><span class="n">fixed</span><span class="si">}</span><span class="s2"> files out of </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">matches</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;matches&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">[]))</span><span class="si">}</span><span class="s2"> matches&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="构建与测试流水线">构建与测试流水线</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">hermes_tools</span><span class="w"> </span><span class="kn">import</span> <span class="n">terminal</span><span class="p">,</span> <span class="n">read_file</span>
+
+<span class="c1"># Run tests, parse results, and report</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">terminal</span><span class="p">(</span><span class="s2">&quot;cd /project &amp;&amp; python -m pytest --tb=short -q 2&gt;&amp;1&quot;</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">120</span><span class="p">)</span>
+<span class="n">output</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;output&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span>
+
+<span class="c1"># Parse test output</span>
+<span class="n">passed</span> <span class="o">=</span> <span class="n">output</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s2">&quot; passed&quot;</span><span class="p">)</span>
+<span class="n">failed</span> <span class="o">=</span> <span class="n">output</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s2">&quot; failed&quot;</span><span class="p">)</span>
+<span class="n">errors</span> <span class="o">=</span> <span class="n">output</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s2">&quot; error&quot;</span><span class="p">)</span>
+
+<span class="n">report</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;passed&quot;</span><span class="p">:</span> <span class="n">passed</span><span class="p">,</span>
+    <span class="s2">&quot;failed&quot;</span><span class="p">:</span> <span class="n">failed</span><span class="p">,</span>
+    <span class="s2">&quot;errors&quot;</span><span class="p">:</span> <span class="n">errors</span><span class="p">,</span>
+    <span class="s2">&quot;exit_code&quot;</span><span class="p">:</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;exit_code&quot;</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">),</span>
+    <span class="s2">&quot;summary&quot;</span><span class="p">:</span> <span class="n">output</span><span class="p">[</span><span class="o">-</span><span class="mi">500</span><span class="p">:]</span> <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">output</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">500</span> <span class="k">else</span> <span class="n">output</span>
+<span class="p">}</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">report</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">2</span><span class="p">))</span>
+</code></pre></div>
+
+<h2 id="执行模式">执行模式</h2>
+<p><code>execute_code</code> 有两种执行模式，通过 <code>~/.hermes/config.yaml</code> 中的 <code>code_execution.mode</code> 控制：</p>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>工作目录</th>
+<th>Python 解释器</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>project</code></strong>（默认）</td>
+<td>会话的工作目录（与 <code>terminal()</code> 相同）</td>
+<td>活跃的 <code>VIRTUAL_ENV</code> / <code>CONDA_PREFIX</code> python，回退至 Hermes 自身的 python</td>
+</tr>
+<tr>
+<td><code>strict</code></td>
+<td>与用户项目隔离的临时暂存目录</td>
+<td><code>sys.executable</code>（Hermes 自身的 python）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>何时保持 <code>project</code> 模式：</strong> 当你希望 <code>import pandas</code>、<code>from my_project import foo</code> 或 <code>open(".env")</code> 等相对路径与 <code>terminal()</code> 中的行为一致时。这几乎是你始终想要的模式。</p>
+<p><strong>何时切换至 <code>strict</code> 模式：</strong> 当你需要最大可复现性时——希望无论用户激活哪个 venv，每次会话都使用相同的解释器，并且希望脚本与项目目录隔离（避免通过相对路径意外读取项目文件）。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">code_execution</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">project</span><span class="w">   </span><span class="c1"># or &quot;strict&quot;</span>
+</code></pre></div>
+
+<p><code>project</code> 模式的回退行为：若 <code>VIRTUAL_ENV</code> / <code>CONDA_PREFIX</code> 未设置、已损坏或指向低于 3.8 的 Python，解析器会干净地回退至 <code>sys.executable</code>——agent 始终有可用的解释器。</p>
+<p>两种模式的安全关键不变量完全相同：</p>
+<ul>
+<li>环境变量清理（API key、token、凭据默认被剥离）</li>
+<li>工具白名单（脚本不能递归调用 <code>execute_code</code>、<code>delegate_task</code> 或 MCP 工具）</li>
+<li>资源限制（超时、stdout 上限、工具调用上限）</li>
+</ul>
+<p>切换模式只改变脚本的运行位置和使用的解释器，不改变脚本可见的凭据或可调用的工具。</p>
+<h2 id="资源限制">资源限制</h2>
+<table>
+<thead>
+<tr>
+<th>资源</th>
+<th>限制</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>超时</strong></td>
+<td>5 分钟（300 秒）</td>
+<td>脚本先收到 SIGTERM，5 秒宽限期后收到 SIGKILL</td>
+</tr>
+<tr>
+<td><strong>Stdout</strong></td>
+<td>50 KB</td>
+<td>输出截断并附加 <code>[output truncated at 50KB]</code> 提示</td>
+</tr>
+<tr>
+<td><strong>Stderr</strong></td>
+<td>10 KB</td>
+<td>非零退出时包含在输出中，用于调试</td>
+</tr>
+<tr>
+<td><strong>工具调用</strong></td>
+<td>每次执行 50 次</td>
+<td>达到上限时返回错误</td>
+</tr>
+</tbody>
+</table>
+<p>所有限制均可通过 <code>config.yaml</code> 配置：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># In ~/.hermes/config.yaml</span>
+<span class="nt">code_execution</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">project</span><span class="w">      </span><span class="c1"># project (default) | strict</span>
+<span class="w">  </span><span class="nt">timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span><span class="w">       </span><span class="c1"># Max seconds per script (default: 300)</span>
+<span class="w">  </span><span class="nt">max_tool_calls</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">50</span><span class="w"> </span><span class="c1"># Max tool calls per execution (default: 50)</span>
+</code></pre></div>
+
+<h2 id="脚本内工具调用的工作方式">脚本内工具调用的工作方式</h2>
+<p>当脚本调用 <code>web_search("query")</code> 等函数时：</p>
+<ol>
+<li>调用被序列化为 JSON，通过 Unix 域套接字发送至父进程</li>
+<li>父进程通过标准 <code>handle_function_call</code> 处理器进行分发</li>
+<li>结果通过套接字发回</li>
+<li>函数返回解析后的结果</li>
+</ol>
+<p>这意味着脚本内的工具调用与普通工具调用行为完全一致——相同的速率限制、相同的错误处理、相同的能力。唯一的限制是 <code>terminal()</code> 仅支持前台模式（不支持 <code>background</code> 或 <code>pty</code> 参数）。</p>
+<h2 id="错误处理">错误处理</h2>
+<p>脚本失败时，agent 会收到结构化的错误信息：</p>
+<ul>
+<li><strong>非零退出码</strong>：stderr 包含在输出中，agent 可看到完整的 traceback</li>
+<li><strong>超时</strong>：脚本被终止，agent 看到 <code>"Script timed out after 300s and was killed."</code></li>
+<li><strong>中断</strong>：若用户在执行期间发送新消息，脚本被终止，agent 看到 <code>[execution interrupted — user sent a new message]</code></li>
+<li><strong>工具调用上限</strong>：达到 50 次调用上限后，后续工具调用返回错误消息</li>
+</ul>
+<p>响应始终包含 <code>status</code>（success/error/timeout/interrupted）、<code>output</code>、<code>tool_calls_made</code> 和 <code>duration_seconds</code>。</p>
+<h2 id="安全性">安全性</h2>
+<div class="admonition adm-danger"><p class="adm-title">安全模型</p>
+<p>子进程在<strong>最小化环境</strong>中运行。API key、token 和凭据默认被剥离。脚本只能通过 RPC 通道访问工具——除非显式允许，否则无法从环境变量中读取密钥。</p>
+</div>
+<p>名称中包含 <code>KEY</code>、<code>TOKEN</code>、<code>SECRET</code>、<code>PASSWORD</code>、<code>CREDENTIAL</code>、<code>PASSWD</code> 或 <code>AUTH</code> 的环境变量会被排除。只有安全的系统变量（<code>PATH</code>、<code>HOME</code>、<code>LANG</code>、<code>SHELL</code>、<code>PYTHONPATH</code>、<code>VIRTUAL_ENV</code> 等）会被传递。</p>
+<h3 id="skill-环境变量透传">Skill 环境变量透传</h3>
+<p>当 skill 在其 frontmatter 中声明 <code>required_environment_variables</code> 时，这些变量会在 skill 加载后<strong>自动透传</strong>至 <code>execute_code</code> 和 <code>terminal</code> 子进程。这使 skill 可以使用其声明的 API key，而不会削弱任意代码的安全态势。</p>
+<p>对于非 skill 场景，可在 <code>config.yaml</code> 中显式添加变量白名单：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">terminal</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">env_passthrough</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_CUSTOM_KEY</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ANOTHER_TOKEN</span>
+</code></pre></div>
+
+<p>详情参见<a href="../security.html#environment-variable-passthrough">安全指南</a>。</p>
+<p>Hermes 始终将脚本和自动生成的 <code>hermes_tools.py</code> RPC 存根写入临时暂存目录，执行完成后清理。在 <code>strict</code> 模式下，脚本也在该目录中<em>运行</em>；在 <code>project</code> 模式下，脚本在会话的工作目录中运行（暂存目录保留在 <code>PYTHONPATH</code> 中以确保导入正常解析）。子进程在独立的进程组中运行，以便在超时或中断时干净地终止。</p>
+<h2 id="execute_code-与-terminal-对比">execute_code 与 terminal 对比</h2>
+<table>
+<thead>
+<tr>
+<th>使用场景</th>
+<th>execute_code</th>
+<th>terminal</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>调用之间含逻辑的多步骤工作流</td>
+<td>✅</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>简单 shell 命令</td>
+<td>❌</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>过滤/处理大量工具输出</td>
+<td>✅</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>运行构建或测试套件</td>
+<td>❌</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>对搜索结果进行循环处理</td>
+<td>✅</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>交互式/后台进程</td>
+<td>❌</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>需要环境变量中的 API key</td>
+<td>⚠️ 仅通过<a href="../security.html#environment-variable-passthrough">透传</a></td>
+<td>✅（大多数可透传）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>经验法则：</strong> 需要在调用之间含逻辑地程序化调用 Hermes 工具时，使用 <code>execute_code</code>。运行 shell 命令、构建和进程时，使用 <code>terminal</code>。</p>
+<h2 id="平台支持">平台支持</h2>
+<p>代码执行依赖 Unix 域套接字，仅在 <strong>Linux 和 macOS</strong> 上可用。在 Windows 上会自动禁用——agent 回退至常规的顺序工具调用。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/features/code-execution</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#工作原理">工作原理</a></li>
+<li class="lvl2"><a href="#agent-何时使用此功能">Agent 何时使用此功能</a></li>
+<li class="lvl2"><a href="#实际示例">实际示例</a></li>
+<li class="lvl3"><a href="#数据处理流水线">数据处理流水线</a></li>
+<li class="lvl3"><a href="#多步骤网络调研">多步骤网络调研</a></li>
+<li class="lvl3"><a href="#批量文件重构">批量文件重构</a></li>
+<li class="lvl3"><a href="#构建与测试流水线">构建与测试流水线</a></li>
+<li class="lvl2"><a href="#执行模式">执行模式</a></li>
+<li class="lvl2"><a href="#资源限制">资源限制</a></li>
+<li class="lvl2"><a href="#脚本内工具调用的工作方式">脚本内工具调用的工作方式</a></li>
+<li class="lvl2"><a href="#错误处理">错误处理</a></li>
+<li class="lvl2"><a href="#安全性">安全性</a></li>
+<li class="lvl3"><a href="#skill-环境变量透传">Skill 环境变量透传</a></li>
+<li class="lvl2"><a href="#execute_code-与-terminal-对比">execute_code 与 terminal 对比</a></li>
+<li class="lvl2"><a href="#平台支持">平台支持</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

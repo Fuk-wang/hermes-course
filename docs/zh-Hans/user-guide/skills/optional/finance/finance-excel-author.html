@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Excel Author · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/optional/finance/finance-excel-author</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="excel-author">Excel Author</h1>
+<p>使用 openpyxl 无头构建可审计的 Excel 工作簿——蓝/黑/绿单元格约定、公式优先于硬编码、命名范围、余额检查、敏感性表格。适用于财务模型、审计输出、对账。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>可选——通过 <code>hermes skills install official/finance/excel-author</code> 安装</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>optional-skills/finance/excel-author</code></td>
+</tr>
+<tr>
+<td>版本</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>作者</td>
+<td>Anthropic（由 Nous Research 改编）</td>
+</tr>
+<tr>
+<td>许可证</td>
+<td>Apache-2.0</td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>标签</td>
+<td><code>excel</code>, <code>openpyxl</code>, <code>finance</code>, <code>spreadsheet</code>, <code>modeling</code></td>
+</tr>
+<tr>
+<td>相关 skill</td>
+<td><a href="../../../../../user-guide/skills/optional/finance/finance-pptx-author.html"><code>pptx-author</code></a>、<a href="../../../../../user-guide/skills/optional/finance/finance-dcf-model.html"><code>dcf-model</code></a>、<a href="../../../../../user-guide/skills/optional/finance/finance-comps-analysis.html"><code>comps-analysis</code></a>、<a href="../../../../../user-guide/skills/optional/finance/finance-lbo-model.html"><code>lbo-model</code></a>、<a href="../../../../../user-guide/skills/optional/finance/finance-3-statement-model.html"><code>3-statement-model</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时看到的指令内容。</p>
+</div>
+<h1 id="excel-author_1">excel-author</h1>
+<p>使用 <code>openpyxl</code> 在磁盘上生成 .xlsx 文件。遵循以下银行级约定，使模型可审计、灵活，并可由构建者以外的人审阅。</p>
+<p>改编自 Anthropic 在 <a href="https://github.com/anthropics/financial-services" class="ext" target="_blank" rel="noopener">anthropics/financial-services</a> 仓库中的 <code>xlsx-author</code> 和 <code>audit-xls</code> skill。原版中的 MCP / Office-JS / Cowork 相关分支已去除——本 skill 假设使用无头 Python。</p>
+<h2 id="输出约定">输出约定</h2>
+<ul>
+<li>写入 <code>./out/&lt;name&gt;.xlsx</code>。如果 <code>./out/</code> 不存在则创建。</li>
+<li>在最终消息中返回相对路径，以便下游工具获取。</li>
+<li>每个文件对应一个逻辑模型。除非明确要求，否则不向已有工作簿追加内容。</li>
+</ul>
+<h2 id="安装">安装</h2>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;openpyxl&gt;=3.0&quot;</span>
+</code></pre></div>
+
+<h2 id="核心约定不可更改">核心约定（不可更改）</h2>
+<h3 id="蓝黑绿单元格颜色">蓝/黑/绿单元格颜色</h3>
+<ul>
+<li><strong>蓝色</strong>（<code>Font(color="0000FF")</code>）——人工输入的硬编码值。收入驱动因素、WACC 输入、终值增长率、市场数据。</li>
+<li><strong>黑色</strong>（默认）——公式。每个派生单元格均为实时 Excel 公式。</li>
+<li><strong>绿色</strong>（<code>Font(color="006100")</code>）——链接到另一张工作表或外部文件。</li>
+</ul>
+<p>审阅者可以扫描工作表，立即区分假设值与计算值。</p>
+<h3 id="公式优先于硬编码">公式优先于硬编码</h3>
+<p>每个计算单元格必须是公式字符串，绝不能是在 Python 中计算后粘贴的数值。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 错误——潜在的隐性 bug</span>
+<span class="n">ws</span><span class="p">[</span><span class="s2">&quot;D20&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">revenue_prior_year</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="n">growth</span><span class="p">)</span>
+
+<span class="c1"># 正确——用户更改假设时自动联动</span>
+<span class="n">ws</span><span class="p">[</span><span class="s2">&quot;D20&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;=D19*(1+$B$8)&quot;</span>
+</code></pre></div>
+
+<p>唯一允许硬编码的数字：
+1. 原始历史输入（实际收入、报告 EBITDA 等）
+2. 用户需要调整的假设驱动因素（增长率、WACC 输入、终值 g）
+3. 当前市场数据（股价、债务余额）——需在单元格注释中注明来源和日期</p>
+<p>如果你发现自己在 Python 中计算值并写入结果，请停下来。</p>
+<h3 id="跨工作表引用使用命名范围">跨工作表引用使用命名范围</h3>
+<p>对从另一张工作表、演示文稿或备忘录引用的任何数值，使用命名范围。</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">openpyxl.workbook.defined_name</span><span class="w"> </span><span class="kn">import</span> <span class="n">DefinedName</span>
+<span class="n">wb</span><span class="o">.</span><span class="n">defined_names</span><span class="p">[</span><span class="s2">&quot;WACC&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">DefinedName</span><span class="p">(</span><span class="s2">&quot;WACC&quot;</span><span class="p">,</span> <span class="n">attr_text</span><span class="o">=</span><span class="s2">&quot;Inputs!$C$8&quot;</span><span class="p">)</span>
+<span class="c1"># 然后在其他地方：</span>
+<span class="n">calc</span><span class="p">[</span><span class="s2">&quot;D30&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;=D29/WACC&quot;</span>
+</code></pre></div>
+
+<h3 id="余额检查标签页">余额检查标签页</h3>
+<p>包含一个 <code>Checks</code> 标签页，汇总所有内容并显示 TRUE/FALSE：
+- 资产负债表平衡（资产 = 负债 + 权益）
+- 现金流与资产负债表上的期间现金变动一致
+- 分部加总与合并总计一致
+- 计算范围内无游离硬编码</p>
+<p>示例：</p>
+<div class="highlight"><pre><span></span><code><span class="n">checks</span> <span class="o">=</span> <span class="n">wb</span><span class="o">.</span><span class="n">create_sheet</span><span class="p">(</span><span class="s2">&quot;Checks&quot;</span><span class="p">)</span>
+<span class="n">checks</span><span class="p">[</span><span class="s2">&quot;A2&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;BS balances&quot;</span>
+<span class="n">checks</span><span class="p">[</span><span class="s2">&quot;B2&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;=IS!D20-IS!D21-IS!D22&quot;</span>
+<span class="n">checks</span><span class="p">[</span><span class="s2">&quot;C2&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;=ABS(B2)&lt;0.01&quot;</span>  <span class="c1"># TRUE/FALSE</span>
+</code></pre></div>
+
+<h3 id="每个硬编码输入均添加单元格注释">每个硬编码输入均添加单元格注释</h3>
+<p>在创建单元格时同步添加注释，不要事后补充。</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">openpyxl.comments</span><span class="w"> </span><span class="kn">import</span> <span class="n">Comment</span>
+<span class="n">ws</span><span class="p">[</span><span class="s2">&quot;C2&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">1_250_000_000</span>
+<span class="n">ws</span><span class="p">[</span><span class="s2">&quot;C2&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">font</span> <span class="o">=</span> <span class="n">Font</span><span class="p">(</span><span class="n">color</span><span class="o">=</span><span class="s2">&quot;0000FF&quot;</span><span class="p">)</span>
+<span class="n">ws</span><span class="p">[</span><span class="s2">&quot;C2&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">comment</span> <span class="o">=</span> <span class="n">Comment</span><span class="p">(</span><span class="s2">&quot;Source: 10-K FY2024, p.47, revenue line&quot;</span><span class="p">,</span> <span class="s2">&quot;analyst&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>格式：<code>Source: [系统/文档], [日期], [参考], [URL（如适用）]</code>。</p>
+<p>绝不推迟标注来源。绝不写 <code>TODO: add source</code>。</p>
+<h2 id="骨架典型财务模型">骨架：典型财务模型</h2>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">openpyxl</span><span class="w"> </span><span class="kn">import</span> <span class="n">Workbook</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">openpyxl.styles</span><span class="w"> </span><span class="kn">import</span> <span class="n">Font</span><span class="p">,</span> <span class="n">PatternFill</span><span class="p">,</span> <span class="n">Alignment</span><span class="p">,</span> <span class="n">Border</span><span class="p">,</span> <span class="n">Side</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">openpyxl.comments</span><span class="w"> </span><span class="kn">import</span> <span class="n">Comment</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">openpyxl.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_column_letter</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+<span class="n">BLUE</span> <span class="o">=</span> <span class="n">Font</span><span class="p">(</span><span class="n">color</span><span class="o">=</span><span class="s2">&quot;0000FF&quot;</span><span class="p">)</span>
+<span class="n">BLACK</span> <span class="o">=</span> <span class="n">Font</span><span class="p">(</span><span class="n">color</span><span class="o">=</span><span class="s2">&quot;000000&quot;</span><span class="p">)</span>
+<span class="n">GREEN</span> <span class="o">=</span> <span class="n">Font</span><span class="p">(</span><span class="n">color</span><span class="o">=</span><span class="s2">&quot;006100&quot;</span><span class="p">)</span>
+<span class="n">BOLD</span> <span class="o">=</span> <span class="n">Font</span><span class="p">(</span><span class="n">bold</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">HEADER_FILL</span> <span class="o">=</span> <span class="n">PatternFill</span><span class="p">(</span><span class="s2">&quot;solid&quot;</span><span class="p">,</span> <span class="n">fgColor</span><span class="o">=</span><span class="s2">&quot;1F4E79&quot;</span><span class="p">)</span>
+<span class="n">HEADER_FONT</span> <span class="o">=</span> <span class="n">Font</span><span class="p">(</span><span class="n">color</span><span class="o">=</span><span class="s2">&quot;FFFFFF&quot;</span><span class="p">,</span> <span class="n">bold</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="n">wb</span> <span class="o">=</span> <span class="n">Workbook</span><span class="p">()</span>
+
+<span class="c1"># --- Inputs 标签页 ---</span>
+<span class="n">inp</span> <span class="o">=</span> <span class="n">wb</span><span class="o">.</span><span class="n">active</span>
+<span class="n">inp</span><span class="o">.</span><span class="n">title</span> <span class="o">=</span> <span class="s2">&quot;Inputs&quot;</span>
+<span class="n">inp</span><span class="p">[</span><span class="s2">&quot;A1&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;MARKET DATA &amp; KEY INPUTS&quot;</span>
+<span class="n">inp</span><span class="p">[</span><span class="s2">&quot;A1&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">font</span> <span class="o">=</span> <span class="n">HEADER_FONT</span>
+<span class="n">inp</span><span class="p">[</span><span class="s2">&quot;A1&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">fill</span> <span class="o">=</span> <span class="n">HEADER_FILL</span>
+<span class="n">inp</span><span class="o">.</span><span class="n">merge_cells</span><span class="p">(</span><span class="s2">&quot;A1:C1&quot;</span><span class="p">)</span>
+
+<span class="n">inp</span><span class="p">[</span><span class="s2">&quot;B3&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;Revenue FY2024&quot;</span>
+<span class="n">inp</span><span class="p">[</span><span class="s2">&quot;C3&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">1_250_000_000</span>
+<span class="n">inp</span><span class="p">[</span><span class="s2">&quot;C3&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">font</span> <span class="o">=</span> <span class="n">BLUE</span>
+<span class="n">inp</span><span class="p">[</span><span class="s2">&quot;C3&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">comment</span> <span class="o">=</span> <span class="n">Comment</span><span class="p">(</span><span class="s2">&quot;Source: 10-K FY2024 p.47&quot;</span><span class="p">,</span> <span class="s2">&quot;model&quot;</span><span class="p">)</span>
+
+<span class="n">inp</span><span class="p">[</span><span class="s2">&quot;B4&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;Growth Rate&quot;</span>
+<span class="n">inp</span><span class="p">[</span><span class="s2">&quot;C4&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="mf">0.12</span>
+<span class="n">inp</span><span class="p">[</span><span class="s2">&quot;C4&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">font</span> <span class="o">=</span> <span class="n">BLUE</span>
+
+<span class="c1"># --- 计算标签页 ---</span>
+<span class="n">calc</span> <span class="o">=</span> <span class="n">wb</span><span class="o">.</span><span class="n">create_sheet</span><span class="p">(</span><span class="s2">&quot;DCF&quot;</span><span class="p">)</span>
+<span class="n">calc</span><span class="p">[</span><span class="s2">&quot;B2&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;Projected Revenue&quot;</span>
+<span class="n">calc</span><span class="p">[</span><span class="s2">&quot;C2&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;=Inputs!C3*(1+Inputs!C4)&quot;</span>   <span class="c1"># 公式，黑色</span>
+
+<span class="c1"># --- 检查标签页 ---</span>
+<span class="n">chk</span> <span class="o">=</span> <span class="n">wb</span><span class="o">.</span><span class="n">create_sheet</span><span class="p">(</span><span class="s2">&quot;Checks&quot;</span><span class="p">)</span>
+<span class="n">chk</span><span class="p">[</span><span class="s2">&quot;A2&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;BS balances&quot;</span>
+<span class="n">chk</span><span class="p">[</span><span class="s2">&quot;B2&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;=ABS(BS!D20-BS!D21-BS!D22)&lt;0.01&quot;</span>
+
+<span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./out&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">wb</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">&quot;./out/model.xlsx&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="带合并单元格的节标题">带合并单元格的节标题</h2>
+<p>openpyxl 特性：合并时，在左上角单元格设置值，并单独对整个范围设置样式。</p>
+<div class="highlight"><pre><span></span><code><span class="n">ws</span><span class="p">[</span><span class="s2">&quot;A7&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;CASH FLOW PROJECTION&quot;</span>
+<span class="n">ws</span><span class="p">[</span><span class="s2">&quot;A7&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">font</span> <span class="o">=</span> <span class="n">HEADER_FONT</span>
+<span class="n">ws</span><span class="o">.</span><span class="n">merge_cells</span><span class="p">(</span><span class="s2">&quot;A7:H7&quot;</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">col</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">9</span><span class="p">):</span>  <span class="c1"># A..H</span>
+    <span class="n">ws</span><span class="o">.</span><span class="n">cell</span><span class="p">(</span><span class="n">row</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span> <span class="n">column</span><span class="o">=</span><span class="n">col</span><span class="p">)</span><span class="o">.</span><span class="n">fill</span> <span class="o">=</span> <span class="n">HEADER_FILL</span>
+</code></pre></div>
+
+<h2 id="敏感性表格">敏感性表格</h2>
+<p>用循环构建，不要对每个单元格硬编码公式。规则：</p>
+<ul>
+<li><strong>奇数行/列数</strong>（5×5 或 7×7）——保证存在真正的中心单元格。</li>
+<li><strong>中心单元格 = 基准情景。</strong> 中间行/列的标题必须等于模型实际的 WACC 和终值 g，使中心输出等于基准情景隐含股价。这是合理性检验。</li>
+<li><strong>高亮中心单元格</strong>，使用中蓝色填充（<code>"BDD7EE"</code>）并加粗。</li>
+<li>每个单元格均填入完整的重新计算公式——绝不使用近似值。</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="c1"># 5x5 WACC（行）x 终值增长率（列）敏感性</span>
+<span class="n">wacc_axis</span> <span class="o">=</span> <span class="p">[</span><span class="mf">0.08</span><span class="p">,</span> <span class="mf">0.085</span><span class="p">,</span> <span class="mf">0.09</span><span class="p">,</span> <span class="mf">0.095</span><span class="p">,</span> <span class="mf">0.10</span><span class="p">]</span>        <span class="c1"># 中间行 = 基准 9.0%</span>
+<span class="n">term_axis</span> <span class="o">=</span> <span class="p">[</span><span class="mf">0.02</span><span class="p">,</span> <span class="mf">0.025</span><span class="p">,</span> <span class="mf">0.03</span><span class="p">,</span> <span class="mf">0.035</span><span class="p">,</span> <span class="mf">0.04</span><span class="p">]</span>        <span class="c1"># 中间列 = 基准 3.0%</span>
+
+<span class="n">start_row</span> <span class="o">=</span> <span class="mi">40</span>
+<span class="n">ws</span><span class="o">.</span><span class="n">cell</span><span class="p">(</span><span class="n">row</span><span class="o">=</span><span class="n">start_row</span><span class="p">,</span> <span class="n">column</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="s2">&quot;Implied Share Price ($)&quot;</span>
+<span class="n">ws</span><span class="o">.</span><span class="n">cell</span><span class="p">(</span><span class="n">row</span><span class="o">=</span><span class="n">start_row</span><span class="p">,</span> <span class="n">column</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">font</span> <span class="o">=</span> <span class="n">BOLD</span>
+
+<span class="k">for</span> <span class="n">j</span><span class="p">,</span> <span class="n">g</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">term_axis</span><span class="p">):</span>
+    <span class="n">ws</span><span class="o">.</span><span class="n">cell</span><span class="p">(</span><span class="n">row</span><span class="o">=</span><span class="n">start_row</span><span class="o">+</span><span class="mi">1</span><span class="p">,</span> <span class="n">column</span><span class="o">=</span><span class="mi">2</span><span class="o">+</span><span class="n">j</span><span class="p">)</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="n">g</span>
+    <span class="n">ws</span><span class="o">.</span><span class="n">cell</span><span class="p">(</span><span class="n">row</span><span class="o">=</span><span class="n">start_row</span><span class="o">+</span><span class="mi">1</span><span class="p">,</span> <span class="n">column</span><span class="o">=</span><span class="mi">2</span><span class="o">+</span><span class="n">j</span><span class="p">)</span><span class="o">.</span><span class="n">font</span> <span class="o">=</span> <span class="n">BLUE</span>
+
+<span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">w</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">wacc_axis</span><span class="p">):</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">start_row</span> <span class="o">+</span> <span class="mi">2</span> <span class="o">+</span> <span class="n">i</span>
+    <span class="n">ws</span><span class="o">.</span><span class="n">cell</span><span class="p">(</span><span class="n">row</span><span class="o">=</span><span class="n">r</span><span class="p">,</span> <span class="n">column</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="n">w</span>
+    <span class="n">ws</span><span class="o">.</span><span class="n">cell</span><span class="p">(</span><span class="n">row</span><span class="o">=</span><span class="n">r</span><span class="p">,</span> <span class="n">column</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">font</span> <span class="o">=</span> <span class="n">BLUE</span>
+    <span class="k">for</span> <span class="n">j</span><span class="p">,</span> <span class="n">g</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">term_axis</span><span class="p">):</span>
+        <span class="n">c</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">+</span> <span class="n">j</span>
+        <span class="c1"># 完整 DCF 重新计算公式（此处为简化示意）。</span>
+        <span class="c1"># 在实际模型中，此处引用完整的预测区块。</span>
+        <span class="n">ws</span><span class="o">.</span><span class="n">cell</span><span class="p">(</span><span class="n">row</span><span class="o">=</span><span class="n">r</span><span class="p">,</span> <span class="n">column</span><span class="o">=</span><span class="n">c</span><span class="p">)</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="sa">f</span><span class="s2">&quot;=SUMPRODUCT(FCF_range,1/(1+</span><span class="si">{</span><span class="n">w</span><span class="si">}</span><span class="s2">)^year_offset) + &quot;</span>
+            <span class="sa">f</span><span class="s2">&quot;FCF_terminal*(1+</span><span class="si">{</span><span class="n">g</span><span class="si">}</span><span class="s2">)/(</span><span class="si">{</span><span class="n">w</span><span class="si">}</span><span class="s2">-</span><span class="si">{</span><span class="n">g</span><span class="si">}</span><span class="s2">)/(1+</span><span class="si">{</span><span class="n">w</span><span class="si">}</span><span class="s2">)^terminal_year&quot;</span>
+        <span class="p">)</span>
+
+<span class="c1"># 高亮中心单元格（基准情景）</span>
+<span class="n">center</span> <span class="o">=</span> <span class="n">ws</span><span class="o">.</span><span class="n">cell</span><span class="p">(</span><span class="n">row</span><span class="o">=</span><span class="n">start_row</span><span class="o">+</span><span class="mi">2</span><span class="o">+</span><span class="nb">len</span><span class="p">(</span><span class="n">wacc_axis</span><span class="p">)</span><span class="o">//</span><span class="mi">2</span><span class="p">,</span>
+                 <span class="n">column</span><span class="o">=</span><span class="mi">2</span><span class="o">+</span><span class="nb">len</span><span class="p">(</span><span class="n">term_axis</span><span class="p">)</span><span class="o">//</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">center</span><span class="o">.</span><span class="n">fill</span> <span class="o">=</span> <span class="n">PatternFill</span><span class="p">(</span><span class="s2">&quot;solid&quot;</span><span class="p">,</span> <span class="n">fgColor</span><span class="o">=</span><span class="s2">&quot;BDD7EE&quot;</span><span class="p">)</span>
+<span class="n">center</span><span class="o">.</span><span class="n">font</span> <span class="o">=</span> <span class="n">BOLD</span>
+</code></pre></div>
+
+<h2 id="交付前重新计算">交付前重新计算</h2>
+<p>openpyxl 写入公式字符串但不计算结果。Excel 打开时会重新计算，但下游消费者（自动检查脚本、CI）需要已计算的值。</p>
+<p>交付前运行 LibreOffice 或专用重新计算步骤：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># LibreOffice 无头重新计算</span>
+libreoffice<span class="w"> </span>--headless<span class="w"> </span>--calc<span class="w"> </span>--convert-to<span class="w"> </span>xlsx<span class="w"> </span>./out/model.xlsx<span class="w"> </span>--outdir<span class="w"> </span>./out/
+</code></pre></div>
+
+<p>或使用 Python 重新计算辅助工具（参见本 skill 中的 <code>scripts/recalc.py</code>）。</p>
+<h2 id="模型布局规划">模型布局规划</h2>
+<p>在编写任何公式之前：
+1. 定义所有节的行位置
+2. 写入所有标题和标签
+3. 写入所有节分隔符和空行
+4. 然后使用锁定的行位置编写公式</p>
+<p>这可以避免在公式写入后插入标题行导致所有下游引用偏移的级联公式损坏问题。</p>
+<h2 id="与用户逐步验证">与用户逐步验证</h2>
+<p>对于大型模型（DCF、三表模型、LBO），在继续之前停下来向用户展示中间产物。在构建下游敏感性表格之前发现错误的利润率假设，可以节省一小时。</p>
+<p>检查点模式：
+- Inputs 区块完成后→展示原始输入，确认后再进行预测
+- 收入预测完成后→确认顶线收入和增长率
+- FCF 构建完成后→确认完整的计划表
+- WACC 完成后→确认输入
+- 估值完成后→确认权益桥接
+- 然后构建敏感性表格</p>
+<h2 id="不适用场景">不适用场景</h2>
+<ul>
+<li>用户在实时 Excel 会话中且有 Office MCP 可用——直接操作其实时工作簿。</li>
+<li>纯表格数据导出且无公式——使用 <code>csv</code> 或 <code>pandas.to_excel</code> 更简单。</li>
+<li>具有大量交互性的仪表板/图表——使用专业 BI 工具。</li>
+</ul>
+<h2 id="致谢">致谢</h2>
+<p>蓝/黑/绿约定、公式优先于硬编码、命名范围、敏感性规则等约定，改编自 Anthropic 的 Claude for Financial Services 插件套件，采用 Apache-2.0 许可证。原始地址：https://github.com/anthropics/financial-services/tree/main/plugins/vertical-plugins/financial-analysis/skills/xlsx-author</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/optional/finance/finance-excel-author</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#输出约定">输出约定</a></li>
+<li class="lvl2"><a href="#安装">安装</a></li>
+<li class="lvl2"><a href="#核心约定不可更改">核心约定（不可更改）</a></li>
+<li class="lvl3"><a href="#蓝黑绿单元格颜色">蓝/黑/绿单元格颜色</a></li>
+<li class="lvl3"><a href="#公式优先于硬编码">公式优先于硬编码</a></li>
+<li class="lvl3"><a href="#跨工作表引用使用命名范围">跨工作表引用使用命名范围</a></li>
+<li class="lvl3"><a href="#余额检查标签页">余额检查标签页</a></li>
+<li class="lvl3"><a href="#每个硬编码输入均添加单元格注释">每个硬编码输入均添加单元格注释</a></li>
+<li class="lvl2"><a href="#骨架典型财务模型">骨架：典型财务模型</a></li>
+<li class="lvl2"><a href="#带合并单元格的节标题">带合并单元格的节标题</a></li>
+<li class="lvl2"><a href="#敏感性表格">敏感性表格</a></li>
+<li class="lvl2"><a href="#交付前重新计算">交付前重新计算</a></li>
+<li class="lvl2"><a href="#模型布局规划">模型布局规划</a></li>
+<li class="lvl2"><a href="#与用户逐步验证">与用户逐步验证</a></li>
+<li class="lvl2"><a href="#不适用场景">不适用场景</a></li>
+<li class="lvl2"><a href="#致谢">致谢</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

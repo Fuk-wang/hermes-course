@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tensorrt Llm — 使用 NVIDIA TensorRT 优化 LLM 推理以实现最大吞吐量和最低延迟 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/optional/mlops/mlops-tensorrt-llm</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="tensorrt-llm">Tensorrt Llm</h1>
+<p>使用 NVIDIA TensorRT 优化 LLM 推理，实现最大吞吐量和最低延迟。适用于在 NVIDIA GPU（A100/H100）上进行生产部署、需要比 PyTorch 快 10-100 倍的推理速度，或需要使用量化（FP8/INT4）、in-flight batching（动态批处理）和多 GPU 扩展来服务模型的场景。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>可选 — 通过 <code>hermes skills install official/mlops/tensorrt-llm</code> 安装</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>optional-skills/mlops/tensorrt-llm</code></td>
+</tr>
+<tr>
+<td>版本</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>作者</td>
+<td>Orchestra Research</td>
+</tr>
+<tr>
+<td>许可证</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>依赖项</td>
+<td><code>tensorrt-llm</code>, <code>torch</code></td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos</td>
+</tr>
+<tr>
+<td>标签</td>
+<td><code>Inference Serving</code>, <code>TensorRT-LLM</code>, <code>NVIDIA</code>, <code>Inference Optimization</code>, <code>High Throughput</code>, <code>Low Latency</code>, <code>Production</code>, <code>FP8</code>, <code>INT4</code>, <code>In-Flight Batching</code>, <code>Multi-GPU</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 skill 激活时 agent 所看到的指令内容。</p>
+</div>
+<h1 id="tensorrt-llm_1">TensorRT-LLM</h1>
+<p>NVIDIA 的开源库，用于在 NVIDIA GPU 上以最先进的性能优化 LLM 推理。</p>
+<h2 id="何时使用-tensorrt-llm">何时使用 TensorRT-LLM</h2>
+<p><strong>在以下情况下使用 TensorRT-LLM：</strong>
+- 在 NVIDIA GPU（A100、H100、GB200）上部署
+- 需要最大吞吐量（Llama 3 上 24,000+ tokens/sec）
+- 实时应用需要低延迟
+- 使用量化模型（FP8、INT4、FP4）
+- 跨多个 GPU 或节点扩展</p>
+<p><strong>在以下情况下改用 vLLM：</strong>
+- 需要更简单的设置和 Python 优先的 API
+- 希望使用 PagedAttention 而无需 TensorRT 编译
+- 使用 AMD GPU 或非 NVIDIA 硬件</p>
+<p><strong>在以下情况下改用 llama.cpp：</strong>
+- 在 CPU 或 Apple Silicon 上部署
+- 需要无 NVIDIA GPU 的边缘部署
+- 希望使用更简单的 GGUF 量化格式</p>
+<h2 id="快速开始">快速开始</h2>
+<h3 id="安装">安装</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Docker（推荐）</span>
+docker<span class="w"> </span>pull<span class="w"> </span>nvidia/tensorrt_llm:latest
+
+<span class="c1"># pip 安装</span>
+pip<span class="w"> </span>install<span class="w"> </span><span class="nv">tensorrt_llm</span><span class="o">==</span><span class="m">1</span>.2.0rc3
+
+<span class="c1"># 需要 CUDA 13.0.0、TensorRT 10.13.2、Python 3.10-3.12</span>
+</code></pre></div>
+
+<h3 id="基本推理">基本推理</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">tensorrt_llm</span><span class="w"> </span><span class="kn">import</span> <span class="n">LLM</span><span class="p">,</span> <span class="n">SamplingParams</span>
+
+<span class="c1"># 初始化模型</span>
+<span class="n">llm</span> <span class="o">=</span> <span class="n">LLM</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;meta-llama/Meta-Llama-3-8B&quot;</span><span class="p">)</span>
+
+<span class="c1"># 配置采样参数</span>
+<span class="n">sampling_params</span> <span class="o">=</span> <span class="n">SamplingParams</span><span class="p">(</span>
+    <span class="n">max_tokens</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span>
+    <span class="n">temperature</span><span class="o">=</span><span class="mf">0.7</span><span class="p">,</span>
+    <span class="n">top_p</span><span class="o">=</span><span class="mf">0.9</span>
+<span class="p">)</span>
+
+<span class="c1"># 生成</span>
+<span class="n">prompts</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;Explain quantum computing&quot;</span><span class="p">]</span>
+<span class="n">outputs</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="n">prompts</span><span class="p">,</span> <span class="n">sampling_params</span><span class="p">)</span>
+
+<span class="k">for</span> <span class="n">output</span> <span class="ow">in</span> <span class="n">outputs</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">output</span><span class="o">.</span><span class="n">text</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="使用-trtllm-serve-提供服务">使用 trtllm-serve 提供服务</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 启动服务器（自动下载和编译模型）</span>
+trtllm-serve<span class="w"> </span>meta-llama/Meta-Llama-3-8B<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--tp_size<span class="w"> </span><span class="m">4</span><span class="w"> </span><span class="se">\ </span><span class="w">             </span><span class="c1"># 张量并行（4 个 GPU）</span>
+<span class="w">    </span>--max_batch_size<span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--max_num_tokens<span class="w"> </span><span class="m">4096</span>
+
+<span class="c1"># 客户端请求</span>
+curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/v1/chat/completions<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;model&quot;: &quot;meta-llama/Meta-Llama-3-8B&quot;,</span>
+<span class="s1">    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}],</span>
+<span class="s1">    &quot;temperature&quot;: 0.7,</span>
+<span class="s1">    &quot;max_tokens&quot;: 100</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h2 id="核心特性">核心特性</h2>
+<h3 id="性能优化">性能优化</h3>
+<ul>
+<li><strong>In-flight batching</strong>：生成过程中的动态批处理</li>
+<li><strong>Paged KV cache</strong>：高效内存管理</li>
+<li><strong>Flash Attention</strong>：优化的注意力计算核</li>
+<li><strong>量化</strong>：FP8、INT4、FP4，推理速度提升 2-4 倍</li>
+<li><strong>CUDA graphs</strong>：降低内核启动开销</li>
+</ul>
+<h3 id="并行化">并行化</h3>
+<ul>
+<li><strong>张量并行（TP）</strong>：跨 GPU 拆分模型</li>
+<li><strong>流水线并行（PP）</strong>：按层分布</li>
+<li><strong>专家并行</strong>：用于混合专家（Mixture-of-Experts）模型</li>
+<li><strong>多节点</strong>：扩展至单机以外</li>
+</ul>
+<h3 id="高级特性">高级特性</h3>
+<ul>
+<li><strong>推测解码（Speculative decoding）</strong>：使用草稿模型加速生成</li>
+<li><strong>LoRA serving</strong>：高效多适配器部署</li>
+<li><strong>分离式服务（Disaggregated serving）</strong>：预填充与生成分离</li>
+</ul>
+<h2 id="常见模式">常见模式</h2>
+<h3 id="量化模型fp8">量化模型（FP8）</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">tensorrt_llm</span><span class="w"> </span><span class="kn">import</span> <span class="n">LLM</span>
+
+<span class="c1"># 加载 FP8 量化模型（速度提升 2 倍，内存减少 50%）</span>
+<span class="n">llm</span> <span class="o">=</span> <span class="n">LLM</span><span class="p">(</span>
+    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;meta-llama/Meta-Llama-3-70B&quot;</span><span class="p">,</span>
+    <span class="n">dtype</span><span class="o">=</span><span class="s2">&quot;fp8&quot;</span><span class="p">,</span>
+    <span class="n">max_num_tokens</span><span class="o">=</span><span class="mi">8192</span>
+<span class="p">)</span>
+
+<span class="c1"># 推理方式与之前相同</span>
+<span class="n">outputs</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">([</span><span class="s2">&quot;Summarize this article...&quot;</span><span class="p">])</span>
+</code></pre></div>
+
+<h3 id="多-gpu-部署">多 GPU 部署</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 跨 8 个 GPU 的张量并行</span>
+<span class="n">llm</span> <span class="o">=</span> <span class="n">LLM</span><span class="p">(</span>
+    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;meta-llama/Meta-Llama-3-405B&quot;</span><span class="p">,</span>
+    <span class="n">tensor_parallel_size</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span>
+    <span class="n">dtype</span><span class="o">=</span><span class="s2">&quot;fp8&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="批量推理">批量推理</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 高效处理 100 个 prompt</span>
+<span class="n">prompts</span> <span class="o">=</span> <span class="p">[</span><span class="sa">f</span><span class="s2">&quot;Question </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">: ...&quot;</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">100</span><span class="p">)]</span>
+
+<span class="n">outputs</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span>
+    <span class="n">prompts</span><span class="p">,</span>
+    <span class="n">sampling_params</span><span class="o">=</span><span class="n">SamplingParams</span><span class="p">(</span><span class="n">max_tokens</span><span class="o">=</span><span class="mi">200</span><span class="p">)</span>
+<span class="p">)</span>
+
+<span class="c1"># 自动 in-flight batching 以实现最大吞吐量</span>
+</code></pre></div>
+
+<h2 id="性能基准">性能基准</h2>
+<p><strong>Meta Llama 3-8B</strong>（H100 GPU）：
+- 吞吐量：24,000 tokens/sec
+- 延迟：每 token 约 10ms
+- 对比 PyTorch：<strong>快 100 倍</strong></p>
+<p><strong>Llama 3-70B</strong>（8× A100 80GB）：
+- FP8 量化：比 FP16 快 2 倍
+- 内存：FP8 减少 50%</p>
+<h2 id="支持的模型">支持的模型</h2>
+<ul>
+<li><strong>LLaMA 系列</strong>：Llama 2、Llama 3、CodeLlama</li>
+<li><strong>GPT 系列</strong>：GPT-2、GPT-J、GPT-NeoX</li>
+<li><strong>Qwen</strong>：Qwen、Qwen2、QwQ</li>
+<li><strong>DeepSeek</strong>：DeepSeek-V2、DeepSeek-V3</li>
+<li><strong>Mixtral</strong>：Mixtral-8x7B、Mixtral-8x22B</li>
+<li><strong>视觉模型</strong>：LLaVA、Phi-3-vision</li>
+<li><strong>100+ 模型</strong>，可在 HuggingFace 上获取</li>
+</ul>
+<h2 id="参考文档">参考文档</h2>
+<ul>
+<li><strong><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/tensorrt-llm/references/optimization.md" class="ext" target="_blank" rel="noopener">优化指南</a></strong> — 量化、批处理、KV cache 调优</li>
+<li><strong><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/tensorrt-llm/references/multi-gpu.md" class="ext" target="_blank" rel="noopener">多 GPU 配置</a></strong> — 张量/流水线并行、多节点</li>
+<li><strong><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/tensorrt-llm/references/serving.md" class="ext" target="_blank" rel="noopener">服务指南</a></strong> — 生产部署、监控、自动扩缩容</li>
+</ul>
+<h2 id="资源">资源</h2>
+<ul>
+<li><strong>文档</strong>：https://nvidia.github.io/TensorRT-LLM/</li>
+<li><strong>GitHub</strong>：https://github.com/NVIDIA/TensorRT-LLM</li>
+<li><strong>模型</strong>：https://huggingface.co/models?library=tensorrt_llm</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/optional/mlops/mlops-tensorrt-llm</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#何时使用-tensorrt-llm">何时使用 TensorRT-LLM</a></li>
+<li class="lvl2"><a href="#快速开始">快速开始</a></li>
+<li class="lvl3"><a href="#安装">安装</a></li>
+<li class="lvl3"><a href="#基本推理">基本推理</a></li>
+<li class="lvl3"><a href="#使用-trtllm-serve-提供服务">使用 trtllm-serve 提供服务</a></li>
+<li class="lvl2"><a href="#核心特性">核心特性</a></li>
+<li class="lvl3"><a href="#性能优化">性能优化</a></li>
+<li class="lvl3"><a href="#并行化">并行化</a></li>
+<li class="lvl3"><a href="#高级特性">高级特性</a></li>
+<li class="lvl2"><a href="#常见模式">常见模式</a></li>
+<li class="lvl3"><a href="#量化模型fp8">量化模型（FP8）</a></li>
+<li class="lvl3"><a href="#多-gpu-部署">多 GPU 部署</a></li>
+<li class="lvl3"><a href="#批量推理">批量推理</a></li>
+<li class="lvl2"><a href="#性能基准">性能基准</a></li>
+<li class="lvl2"><a href="#支持的模型">支持的模型</a></li>
+<li class="lvl2"><a href="#参考文档">参考文档</a></li>
+<li class="lvl2"><a href="#资源">资源</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

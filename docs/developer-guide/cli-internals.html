@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLI Internals · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/cli-internals</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="cli-internals">CLI Internals</h1>
+<p>Companion to <code>hermes_cli/AGENTS.md</code> (the rules) — this page holds the longer explanations.</p>
+<h2 id="update-pipeline">Update pipeline</h2>
+<p>The stage-by-stage contract (<code>plan → snapshot → apply → restart-per-kind → verify → report</code>) and the
+field failure each stage guards are documented in <code>hermes_cli/AGENTS.md</code>; user-facing behaviour
+(receipts, <code>--plan</code>, snapshot modes) is in <a href="../getting-started/updating.html">Updating</a>.</p>
+<p>The systemd blunt-restart fallback waits for the unit's <code>TimeoutStopUSec</code> plus
+<code>TimeoutStartUSec</code>, with 15 seconds of client-side slack. It reads the target unit
+in the same manager scope as the restart; both the initial attempt and retry use
+this budget, including the catch-up restart after an interrupted update.
+A start after a graceful drain uses only the start budget plus slack.
+A missing, unparseable, or infinite phase limit falls back to 90 seconds
+for that phase, keeping unattended updates bounded. Timing out the <code>systemctl</code>
+client does <strong>not</strong> cancel the manager's transaction. Custom multi-command stop
+chains or <code>EXTEND_TIMEOUT_USEC</code> can still outlast this estimate; a real timeout
+remains an incomplete restart, and successful commands still require the existing
+service-health and fleet-version verification. Raw numeric <code>*USec</code> values are
+microseconds, while formatted values use systemd's fixed units, including days,
+weeks, months and years. The combined timeout is capped below the native signed
+32-bit millisecond poll limit (with rounding headroom), so exceptionally long
+unit limits cannot overflow subprocess polling. Zero/unknown/infinite phase
+limits use the bounded fallback. This does not change active-turn drain settings.</p>
+<h2 id="process-identity-never-infer-it-from-argv-substrings">Process identity: never infer it from argv substrings</h2>
+<p>The bug class behind ~10 fleet-update issues (#90778, #87594, #78089, #76129, #91964, ...):
+classifying a process by <code>"serve" in cmdline</code> or similar. <code>kanban --preserve-cache</code> contains
+"serve"; a flag VALUE can equal a subcommand (<code>-m dashboard serve</code>); truncated cmdlines hide the real
+subcommand. Rules:</p>
+<ul>
+<li>Use the canonical matchers: <code>gateway.status.looks_like_gateway_command_line</code> (gateway run),
+  <code>hermes_cli.update_cmd._hermes_holder_subcommand</code> (top-level subcommand of any Hermes argv). Never
+  hand-roll token scans.</li>
+<li>Flag sets must be DERIVED from the parser (<code>_holder_value_flags()</code> introspects
+  <code>build_top_level_parser()</code>), never hand-written lists — they drift.</li>
+<li>Never blanket-exclude ancestors from process scans: when <code>/update</code> runs as the gateway's child, a
+  gateway ancestor must stay visible to the pause machinery (#87594). Exclude interactive ancestry,
+  carve out gateway-shaped ancestors.</li>
+<li>Match on FULL cmdlines; truncate only at display time (#78089).</li>
+<li>Before adding any new scan heuristic, read #92091 — the gateway control socket replaces scans as
+  the primary coordination mechanism; scans are the fallback layer for old/crashed processes.</li>
+</ul>
+<h2 id="skin-engine--what-skins-customize">Skin engine — what skins customize</h2>
+<table>
+<thead>
+<tr>
+<th>Element</th>
+<th>Skin key</th>
+<th>Used by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Banner panel border / title / section headers / dim / body</td>
+<td><code>colors.banner_border</code>, <code>banner_title</code>, <code>banner_accent</code>, <code>banner_dim</code>, <code>banner_text</code></td>
+<td><code>banner.py</code></td>
+</tr>
+<tr>
+<td>Response box border</td>
+<td><code>colors.response_border</code></td>
+<td><code>cli.py</code></td>
+</tr>
+<tr>
+<td>Spinner faces (waiting / thinking)</td>
+<td><code>spinner.waiting_faces</code>, <code>spinner.thinking_faces</code></td>
+<td><code>display.py</code></td>
+</tr>
+<tr>
+<td>Spinner verbs / wings (optional)</td>
+<td><code>spinner.thinking_verbs</code>, <code>spinner.wings</code></td>
+<td><code>display.py</code></td>
+</tr>
+<tr>
+<td>Tool output prefix / per-tool emojis</td>
+<td><code>tool_prefix</code>, <code>tool_emojis</code></td>
+<td><code>display.py</code> → <code>get_tool_emoji()</code></td>
+</tr>
+<tr>
+<td>Agent name / welcome / response label / prompt symbol</td>
+<td><code>branding.agent_name</code>, <code>welcome</code>, <code>response_label</code>, <code>prompt_symbol</code></td>
+<td><code>banner.py</code>, <code>cli.py</code></td>
+</tr>
+</tbody>
+</table>
+<p>Built-in skins (<code>_BUILTIN_SKINS</code> in <code>hermes_cli/skin_engine.py</code>): <code>default</code> (classic gold/kawaii),
+<code>ares</code> (crimson/bronze with custom spinner wings), <code>mono</code> (grayscale), <code>slate</code> (cool blue). Add a
+built-in as a dict entry <code>{"name", "description", "colors", "spinner", "branding", "tool_prefix"}</code>.
+User skins are <code>~/.hermes/skins/&lt;name&gt;.yaml</code> with the same keys, activated with <code>/skin &lt;name&gt;</code> or
+<code>display.skin: &lt;name&gt;</code>; the full YAML template is in the
+<a href="../user-guide/features/skins.html">Skins &amp; Themes</a> user guide.</p>
+<h2 id="profiles-multi-instance-support">Profiles: multi-instance support</h2>
+<p>Hermes supports profiles — fully isolated instances, each with its own <code>HERMES_HOME</code> (config, API
+keys, memory, sessions, skills, gateway). For single-profile commands (<code>hermes -p x &lt;cmd&gt;</code>),
+<code>_apply_profile_override()</code> in <code>hermes_cli/main.py</code> sets <code>HERMES_HOME</code> before any module imports, so
+every <code>get_hermes_home()</code> reference scopes to the active profile. The multiplex gateway and the
+Desktop/dashboard <code>serve</code> backend serve several profiles from one process instead: the active
+profile is a contextvar override bound per activity, <code>os.environ["HERMES_HOME"]</code> stays the launch
+profile's, and a module-level constant derived from the home freezes to that launch profile (see
+<a href="gateway-internals.html#multiplexed-profiles">Gateway Internals § Multiplexed profiles</a>). Profile
+operations are HOME-anchored (<code>_get_profiles_root()</code> returns
+<code>Path.home() / ".hermes" / "profiles"</code>, not <code>get_hermes_home() / "profiles"</code>) so
+<code>hermes -p coder profile list</code> sees all profiles regardless of which one is active — intentional.
+Profile-safe coding rules are in the root <code>AGENTS.md</code>; multiplex secret-scope rules in
+<code>gateway/AGENTS.md</code>.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/cli-internals</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#update-pipeline">Update pipeline</a></li>
+<li class="lvl2"><a href="#process-identity-never-infer-it-from-argv-substrings">Process identity: never infer it from argv substrings</a></li>
+<li class="lvl2"><a href="#skin-engine--what-skins-customize">Skin engine — what skins customize</a></li>
+<li class="lvl2"><a href="#profiles-multi-instance-support">Profiles: multi-instance support</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

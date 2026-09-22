@@ -1,0 +1,1041 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skills System · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/skills</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="skills-system">Skills System</h1>
+<p>Skills are on-demand knowledge documents the agent can load when needed. They follow a <strong>progressive disclosure</strong> pattern to minimize token usage and are compatible with the <a href="https://agentskills.io/specification" class="ext" target="_blank" rel="noopener">agentskills.io</a> open standard.</p>
+<p>All skills live in <strong><code>~/.hermes/skills/</code></strong> — the primary directory and source of truth. On fresh install, bundled skills are copied from the repo. Hub-installed and agent-created skills also go here. The agent can modify or delete any skill.</p>
+<p>You can also point Hermes at <strong>external skill directories</strong> — additional folders scanned alongside the local one. See <a href="#external-skill-directories">External Skill Directories</a> below.</p>
+<p>See also:</p>
+<ul>
+<li><a href="../../reference/skills-catalog.html">Bundled Skills Catalog</a></li>
+<li><a href="../../reference/optional-skills-catalog.html">Official Optional Skills Catalog</a></li>
+</ul>
+<h2 id="starting-with-a-blank-slate">Starting with a blank slate</h2>
+<p>By default every profile is seeded with the bundled skill catalog, and each <code>hermes update</code> adds any newly bundled skills. If you want a profile with <strong>no bundled skills</strong> — and that stays empty across updates — you have two paths:</p>
+<p><strong>At install time</strong> (applies to the default <code>~/.hermes</code> profile):</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-fsSL<span class="w"> </span>https://hermes-agent.nousresearch.com/install.sh<span class="w"> </span><span class="p">|</span><span class="w"> </span>bash<span class="w"> </span>-s<span class="w"> </span>--<span class="w"> </span>--no-skills
+</code></pre></div>
+
+<p><strong>At profile-create time</strong> (named profiles):</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>research<span class="w"> </span>--no-skills
+</code></pre></div>
+
+<p><strong>On an already-installed profile</strong> (default or named), toggle it at runtime:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>opt-out<span class="w">            </span><span class="c1"># stop future seeding — nothing on disk is touched</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>opt-out<span class="w"> </span>--remove<span class="w">   </span><span class="c1"># also delete UNMODIFIED bundled skills (confirms first)</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>opt-in<span class="w"> </span>--sync<span class="w">      </span><span class="c1"># undo: remove the marker and re-seed now</span>
+</code></pre></div>
+
+<p>All three paths write a <code>.no-bundled-skills</code> marker into the profile directory. While the marker is present, the installer, <code>hermes update</code>, and any skill sync all skip bundled-skill seeding for that profile. Delete the marker (or run <code>hermes skills opt-in</code>) to re-enable.</p>
+<div class="admonition adm-note"><p class="adm-title">Safe by default</p>
+<p><code>hermes skills opt-out</code> only stops <em>future</em> seeding — it never deletes anything already on disk. The optional <code>--remove</code> flag deletes bundled skills <strong>only</strong> when they are unmodified (byte-identical to the version Hermes installed). Skills you have edited, skills installed from the hub, and skills you wrote yourself are always kept.</p>
+</div>
+<h2 id="using-skills">Using Skills</h2>
+<p>Every installed skill is automatically available as a slash command:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># In the CLI or any messaging platform:</span>
+/gif-search<span class="w"> </span>funny<span class="w"> </span>cats
+/axolotl<span class="w"> </span><span class="nb">help</span><span class="w"> </span>me<span class="w"> </span>fine-tune<span class="w"> </span>Llama<span class="w"> </span><span class="m">3</span><span class="w"> </span>on<span class="w"> </span>my<span class="w"> </span>dataset
+/github-pr-workflow<span class="w"> </span>create<span class="w"> </span>a<span class="w"> </span>PR<span class="w"> </span><span class="k">for</span><span class="w"> </span>the<span class="w"> </span>auth<span class="w"> </span>refactor
+/songsee<span class="w"> </span>analyze<span class="w"> </span>the<span class="w"> </span>frequency<span class="w"> </span>spread<span class="w"> </span>of<span class="w"> </span>this<span class="w"> </span>mix
+
+<span class="c1"># Just the skill name loads it and lets the agent ask what you need:</span>
+/excalidraw
+</code></pre></div>
+
+<h3 id="stacking-multiple-skills-in-one-command">Stacking multiple skills in one command</h3>
+<p>You can invoke several skills in a single message by chaining slash commands
+at the start — every leading <code>/skill</code> token (up to 5) is loaded, and the rest
+becomes your instruction:</p>
+<div class="highlight"><pre><span></span><code>/github-pr-workflow<span class="w"> </span>/test-driven-development<span class="w"> </span>fix<span class="w"> </span>issue<span class="w"> </span><span class="c1">#123 and open a PR</span>
+</code></pre></div>
+
+<p>Parsing stops at the first token that isn't an installed skill, so arguments
+that happen to start with <code>/</code> (like file paths) are never swallowed:</p>
+<div class="highlight"><pre><span></span><code>/ocr-and-documents<span class="w"> </span>~/.hermes/cache/scratch/scan.pdf<span class="w"> </span>extract<span class="w"> </span>the<span class="w"> </span>tables<span class="w">   </span><span class="c1"># loads one skill; ~/.hermes/cache/scratch/scan.pdf is the argument</span>
+</code></pre></div>
+
+<p>For combinations you use repeatedly, prefer a <a href="#skill-bundles">skill bundle</a> —
+same effect under one short command.</p>
+<p>(Plan mode works the same way but is a built-in command now: <code>/plan [request]</code> tells Hermes to inspect context if needed, write a markdown implementation plan instead of executing the task, and save the result under <code>.hermes/plans/</code> relative to the active workspace/backend working directory.)</p>
+<p>You can also interact with skills through natural conversation:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>chat<span class="w"> </span>--toolsets<span class="w"> </span>skills<span class="w"> </span>-q<span class="w"> </span><span class="s2">&quot;What skills do you have?&quot;</span>
+hermes<span class="w"> </span>chat<span class="w"> </span>--toolsets<span class="w"> </span>skills<span class="w"> </span>-q<span class="w"> </span><span class="s2">&quot;Show me the axolotl skill&quot;</span>
+</code></pre></div>
+
+<h2 id="learning-a-skill-from-sources-learn">Learning a skill from sources (<code>/learn</code>)</h2>
+<p><code>/learn</code> is the fast way to turn something you already know — or a pile of
+reference material — into a reusable skill, without hand-writing the
+<code>SKILL.md</code>. It is open-ended: point it at <em>anything you can describe</em> and the
+agent gathers the material with the tools it already has, then authors a skill
+that follows the <a href="#skillmd-format">house authoring standards</a> (≤60-char
+description, the standard section order, Hermes-tool framing, no invented
+commands).</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># A local SDK or doc directory — read with read_file / search_files</span>
+/learn<span class="w"> </span>the<span class="w"> </span>REST<span class="w"> </span>client<span class="w"> </span><span class="k">in</span><span class="w"> </span>~/projects/acme-sdk,<span class="w"> </span>focus<span class="w"> </span>on<span class="w"> </span>auth<span class="w"> </span>+<span class="w"> </span>pagination
+
+<span class="c1"># An online doc page — fetched with web_extract</span>
+/learn<span class="w"> </span>https://docs.example.com/api/quickstart
+
+<span class="c1"># The workflow you just walked the agent through in this conversation</span>
+/learn<span class="w"> </span>how<span class="w"> </span>I<span class="w"> </span>just<span class="w"> </span>deployed<span class="w"> </span>the<span class="w"> </span>staging<span class="w"> </span>server
+
+<span class="c1"># Pasted notes / a described procedure</span>
+/learn<span class="w"> </span>filing<span class="w"> </span>an<span class="w"> </span>expense:<span class="w"> </span>open<span class="w"> </span>the<span class="w"> </span>portal,<span class="w"> </span>New<span class="w"> </span>&gt;<span class="w"> </span>Expense,<span class="w"> </span>attach<span class="w"> </span>the<span class="w"> </span>receipt,<span class="w"> </span>submit
+
+<span class="c1"># A whole book, paper stack, or large docs corpus — becomes a knowledge-base skill</span>
+/learn<span class="w"> </span>~/books/designing-data-intensive-applications.pdf
+</code></pre></div>
+
+<h3 id="large-sources-become-knowledge-base-skills">Large sources become knowledge-base skills</h3>
+<p>When the source is a book, a stack of papers, a spec, or a large docs folder,
+the agent doesn't cram it into one file or reduce it to a lossy summary.
+Instead it authors an <strong>expansive knowledge-base skill</strong>: a lean <code>SKILL.md</code>
+carrying the source's core mental models plus an index, with one distilled
+file per chapter or topic under <code>references/</code> (plus a glossary or cheatsheet
+when the source earns them). Reference files cost nothing until a question
+needs one — the agent loads them on demand with <code>skill_view</code>, so query cost
+stays proportional to the answer, not the source. Re-running <code>/learn</code> with new
+material on the same topic folds it into the existing skill rather than
+creating a duplicate.</p>
+<p>The distillation synthesizes structure — frameworks, definitions, decision
+rules, anti-patterns — and never reproduces passages of the source text.</p>
+<p>Because the live agent does the sourcing, <code>/learn</code> works the same in the CLI,
+the messaging gateway, the TUI, and the dashboard — and on any terminal backend
+(local, Docker, remote), since there is no separate ingestion engine. In the
+<strong>dashboard</strong>, the Skills page has a <strong>Learn a skill</strong> button that opens a panel
+with a directory field, a URL field, and an open-ended text box; it composes a
+<code>/learn</code> request and runs it in chat.</p>
+<p>There is no model-tool footprint: <code>/learn</code> builds a standards-guided prompt and
+hands it to the agent as a normal turn. The agent saves the result with the
+<code>skill_manage</code> tool, so the <a href="#gating-agent-skill-writes-skillswrite_approval">write-approval gate</a>
+applies if you have it on.</p>
+<h2 id="progressive-disclosure">Progressive Disclosure</h2>
+<p>Skills use a token-efficient loading pattern:</p>
+<div class="highlight"><pre><span></span><code>Level 0: skills_list()           → [{name, description, category}, ...]   (~3k tokens)
+Level 1: skill_view(name)        → Full content + metadata       (varies)
+Level 2: skill_view(name, path)  → Specific reference file       (varies)
+</code></pre></div>
+
+<p>The agent only loads the full skill content when it actually needs it.</p>
+<h2 id="skillmd-format">SKILL.md Format</h2>
+<div class="highlight"><pre><span></span><code>---
+name: my-skill
+description: Brief description of what this skill does
+version: 1.0.0
+platforms: [macos, linux]     # Optional — restrict to specific OS platforms
+metadata:
+  hermes:
+    tags: [python, automation]
+    category: devops
+    fallback_for_toolsets: [web]    # Optional — conditional activation (see below)
+    requires_toolsets: [terminal]   # Optional — conditional activation (see below)
+    config:                          # Optional — config.yaml settings
+<span class="w">      </span><span class="k">-</span><span class="w"> </span>key: my.setting
+        description: &quot;What this controls&quot;
+        default: &quot;value&quot;
+<span class="gu">        prompt: &quot;Prompt for setup&quot;</span>
+<span class="gu">---</span>
+
+<span class="gh"># Skill Title</span>
+
+<span class="gu">## When to Use</span>
+Trigger conditions for this skill.
+
+<span class="gu">## Procedure</span>
+<span class="k">1.</span> Step one
+<span class="k">2.</span> Step two
+
+<span class="gu">## Pitfalls</span>
+<span class="k">-</span><span class="w"> </span>Known failure modes and fixes
+
+<span class="gu">## Verification</span>
+How to confirm it worked.
+</code></pre></div>
+
+<h3 id="platform-specific-skills">Platform-Specific Skills</h3>
+<p>Skills can restrict themselves to specific operating systems using the <code>platforms</code> field:</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Matches</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>macos</code></td>
+<td>macOS (Darwin)</td>
+</tr>
+<tr>
+<td><code>linux</code></td>
+<td>Linux</td>
+</tr>
+<tr>
+<td><code>windows</code></td>
+<td>Windows</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">macos</span><span class="p p-Indicator">]</span><span class="w">            </span><span class="c1"># macOS only (e.g., iMessage, Apple Reminders, FindMy)</span>
+<span class="nt">platforms</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">macos</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">linux</span><span class="p p-Indicator">]</span><span class="w">     </span><span class="c1"># macOS and Linux</span>
+</code></pre></div>
+
+<p>When set, the skill is automatically hidden from the system prompt, <code>skills_list()</code>, and slash commands on incompatible platforms. If omitted, the skill loads on all platforms.</p>
+<h2 id="skill-output-and-media-delivery">Skill output and media delivery</h2>
+<p>When a skill response (or any agent response) includes a bare absolute path to a media file — for example <code>/home/user/screenshots/diagram.png</code> — the gateway auto-detects it, strips it from the visible text, and delivers the file natively to the user's chat (Telegram photo, Discord attachment, etc.) instead of leaving the raw path in the message.</p>
+<p>For audio specifically, the <code>[[audio_as_voice]]</code> directive promotes audio files to native voice-message bubbles on platforms that support them (Telegram, WhatsApp).</p>
+<h3 id="forcing-document-style-delivery-as_document">Forcing document-style delivery: <code>[[as_document]]</code></h3>
+<p>Sometimes you want the <strong>opposite</strong> of inline preview: you want the file delivered as a downloadable attachment, not a re-compressed image bubble. The classic example is a high-resolution screenshot or chart — Telegram's <code>sendPhoto</code> recompresses it to ~200 KB at 1280 px, destroying readability. A 1-2 MB PNG sent via <code>sendDocument</code> keeps the original bytes intact.</p>
+<p>If a response (or any text inside it — typically the last line) contains the literal directive <code>[[as_document]]</code>, every media path extracted from that response is delivered as a document/file attachment rather than an image bubble:</p>
+<div class="highlight"><pre><span></span><code>Here is your rendered chart:
+
+/home/user/.hermes/cache/chart-q4-2025.png
+
+[[as_document]]
+</code></pre></div>
+
+<p>The directive is stripped before delivery, so users never see it. Granularity is intentionally all-or-nothing per response: emit <code>[[as_document]]</code> once and every image path in the same response is delivered as a document. This mirrors the scope of <code>[[audio_as_voice]]</code>.</p>
+<p>Use it from a skill when:</p>
+<ul>
+<li>You produce screenshots or charts the user needs as files (for editing in another tool, archiving, sharing intact).</li>
+<li>The default lossy preview would obscure detail (small text, pixel-accurate diagrams, color-sensitive renders).</li>
+</ul>
+<p>Platforms without a separate document path (e.g. SMS) fall back to whatever attachment mechanism they have.</p>
+<h3 id="conditional-activation-fallback-skills">Conditional Activation (Fallback Skills)</h3>
+<p>Skills can automatically show or hide themselves based on which tools are available in the current session. This is most useful for <strong>fallback skills</strong> — free or local alternatives that should only appear when a premium tool is unavailable.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">fallback_for_toolsets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">web</span><span class="p p-Indicator">]</span><span class="w">      </span><span class="c1"># Show ONLY when these toolsets are unavailable</span>
+<span class="w">    </span><span class="nt">requires_toolsets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">terminal</span><span class="p p-Indicator">]</span><span class="w">     </span><span class="c1"># Show ONLY when these toolsets are available</span>
+<span class="w">    </span><span class="nt">fallback_for_tools</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">web_search</span><span class="p p-Indicator">]</span><span class="w">  </span><span class="c1"># Show ONLY when these specific tools are unavailable</span>
+<span class="w">    </span><span class="nt">requires_tools</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">terminal</span><span class="p p-Indicator">]</span><span class="w">        </span><span class="c1"># Show ONLY when these specific tools are available</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fallback_for_toolsets</code></td>
+<td>Skill is <strong>hidden</strong> when the listed toolsets are available. Shown when they're missing.</td>
+</tr>
+<tr>
+<td><code>fallback_for_tools</code></td>
+<td>Same, but checks individual tools instead of toolsets.</td>
+</tr>
+<tr>
+<td><code>requires_toolsets</code></td>
+<td>Skill is <strong>hidden</strong> when the listed toolsets are unavailable. Shown when they're present.</td>
+</tr>
+<tr>
+<td><code>requires_tools</code></td>
+<td>Same, but checks individual tools.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Example:</strong> The built-in <code>duckduckgo-search</code> skill uses <code>fallback_for_toolsets: [web]</code>. When you have <code>FIRECRAWL_API_KEY</code> set, the web toolset is available and the agent uses <code>web_search</code> — the DuckDuckGo skill stays hidden. If the API key is missing, the web toolset is unavailable and the DuckDuckGo skill automatically appears as a fallback.</p>
+<p>Skills without any conditional fields behave exactly as before — they're always shown.</p>
+<h2 id="secure-setup-on-load">Secure Setup on Load</h2>
+<p>Skills can declare required environment variables without disappearing from discovery:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">required_environment_variables</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">TENOR_API_KEY</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Tenor API key</span>
+<span class="w">    </span><span class="nt">help</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Get a key from https://developers.google.com/tenor</span>
+<span class="w">    </span><span class="nt">required_for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">full functionality</span>
+</code></pre></div>
+
+<p>When a missing value is encountered, Hermes asks for it securely only when the skill is actually loaded in the local CLI. You can skip setup and keep using the skill. Messaging surfaces never ask for secrets in chat — they tell you to use <code>hermes setup</code> or <code>~/.hermes/.env</code> locally instead.</p>
+<p>Once set, declared env vars are <strong>automatically passed through</strong> to <code>execute_code</code> and <code>terminal</code> sandboxes — the skill's scripts can use <code>$TENOR_API_KEY</code> directly. For non-skill env vars, use the <code>terminal.env_passthrough</code> config option. See <a href="../security.html#environment-variable-passthrough">Environment Variable Passthrough</a> for details.</p>
+<h3 id="skill-config-settings">Skill Config Settings</h3>
+<p>Skills can also declare non-secret config settings (paths, preferences) stored in <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">config</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">myplugin.path</span>
+<span class="w">        </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Path to the plugin data directory</span>
+<span class="w">        </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;~/myplugin-data&quot;</span>
+<span class="w">        </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Plugin data directory path</span>
+</code></pre></div>
+
+<p>Settings are stored under <code>skills.config</code> in your config.yaml. <code>hermes config migrate</code> prompts for unconfigured settings, and <code>hermes config show</code> displays them. When a skill loads, its resolved config values are injected into the context so the agent knows the configured values automatically.</p>
+<p>See <a href="../configuration.html#skill-settings">Skill Settings</a> and <a href="../../developer-guide/creating-skills.html#config-settings-configyaml">Creating Skills — Config Settings</a> for details.</p>
+<h2 id="skill-directory-structure">Skill Directory Structure</h2>
+<div class="highlight"><pre><span></span><code>~/.hermes/skills/                  # Single source of truth
+├── mlops/                         # Category directory
+│   ├── axolotl/
+│   │   ├── SKILL.md               # Main instructions (required)
+│   │   ├── references/            # Additional docs
+│   │   ├── templates/             # Output formats
+│   │   ├── scripts/               # Helper scripts callable from the skill
+│   │   ├── examples/              # Referenced example outputs
+│   │   └── assets/                # Supplementary files
+│   └── vllm/
+│       └── SKILL.md
+├── devops/
+│   └── deploy-k8s/                # Agent-created skill
+│       ├── SKILL.md
+│       └── references/
+├── .hub/                          # Skills Hub state
+│   ├── lock.json
+│   ├── quarantine/
+│   └── audit.log
+└── .bundled_manifest              # Tracks seeded bundled skills
+</code></pre></div>
+
+<p>Third-party URL and GitHub installs include <code>SKILL.md</code> plus the exact local
+files it references under <code>references/</code>, <code>templates/</code>, <code>scripts/</code>, <code>assets/</code>,
+and <code>examples/</code>. Unreferenced repository files are not copied. Hermes scans the
+complete quarantined bundle and records the source URL, exact content hash,
+scanner version, findings, timestamp, and fresh-or-cached status in
+<code>skills/.hub/lock.json</code>.</p>
+<h3 id="advisory-skillevaluator-scan">Advisory SkillEvaluator scan</h3>
+<p>In addition to the built-in security scanner (which enforces the install
+policy above), Hermes can run <a href="https://github.com/NVIDIA/SkillEvaluator" class="ext" target="_blank" rel="noopener">NVIDIA SkillEvaluator</a>
+Tier 1 checks on every hub install as a second opinion. Tier 1 is
+deterministic and keyless — PII detection (leaked emails, personal paths,
+connection strings), unicode-smuggling detection, script lint, license
+compliance, and a static security scan via
+<a href="https://github.com/NVIDIA/SkillSpector" class="ext" target="_blank" rel="noopener">NVIDIA SkillSpector</a>.</p>
+<p>The scan is <strong>advisory only</strong>: findings are printed with file and line
+before the install confirmation, and the install continues. Findings that
+look like real credentials (private keys, cloud access keys, tokens,
+credentialed connection strings) are highlighted in red so you can review
+the flagged lines before deciding. PII-class findings are informational —
+the upstream scanner has known false-positive classes (e.g.
+<code>git@github.com</code> SSH syntax, documentation example emails), so they never
+block anything.</p>
+<p>To enable it, install the optional scanner binaries (the second one powers
+the <code>security</code> check; without it that check simply reports "not run"):</p>
+<div class="highlight"><pre><span></span><code>uv<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>--python<span class="w"> </span><span class="m">3</span>.13<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git@v0.1.0&quot;</span>
+uv<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;git+https://github.com/NVIDIA/SkillSpector.git@v2.9.5&quot;</span>
+</code></pre></div>
+
+<p>Without the binary on PATH the scan is silently skipped. To turn it off
+entirely:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">skills</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">tier1_advisory</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>The dashboard's Browse-hub scan button returns the same advisory data in
+its response (<code>tier1</code> field) alongside the built-in scanner's verdict.</p>
+<h2 id="external-skill-directories">External Skill Directories</h2>
+<p>If you maintain skills outside of Hermes — for example, a shared <code>~/.agents/skills/</code> directory used by multiple AI tools — you can tell Hermes to scan those directories too.</p>
+<p>Add <code>external_dirs</code> under the <code>skills</code> section in <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">skills</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">external_dirs</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.agents/skills</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/home/shared/team-skills</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${SKILLS_REPO}/skills</span>
+</code></pre></div>
+
+<p>Paths support <code>~</code> expansion and <code>${VAR}</code> environment variable substitution.</p>
+<h3 id="how-it-works">How it works</h3>
+<ul>
+<li><strong>Create locally, update in place</strong>: New agent-created skills are written to <code>~/.hermes/skills/</code> (or <code>skills.create_dir</code> when configured — see below). Existing skills are modified where they are found, including skills under <code>external_dirs</code>, when the agent uses <code>skill_manage</code> actions such as <code>patch</code> (targeted or full rewrite), <code>write_file</code>, <code>remove_file</code>, or <code>delete</code>.</li>
+<li><strong>External dirs are not a write-protection boundary</strong>: If an external skill directory is writable by the Hermes process, agent-managed skill updates can change files in that directory. Use filesystem permissions or a separate profile/toolset setup if shared external skills must stay read-only.</li>
+<li><strong>Local precedence</strong>: If the same skill name exists in both the local dir and an external dir, the local version wins.</li>
+<li><strong>Full integration</strong>: External skills appear in the system prompt index, <code>skills_list</code>, <code>skill_view</code>, and as <code>/skill-name</code> slash commands — no different from local skills.</li>
+<li><strong>Non-existent paths are silently skipped</strong>: If a configured directory doesn't exist, Hermes ignores it without errors. Useful for optional shared directories that may not be present on every machine.</li>
+</ul>
+<h3 id="example">Example</h3>
+<div class="highlight"><pre><span></span><code>~/.hermes/skills/               # Local (primary, read-write)
+├── devops/deploy-k8s/
+│   └── SKILL.md
+└── mlops/axolotl/
+    └── SKILL.md
+
+~/.agents/skills/               # External (shared, mutable if writable)
+├── my-custom-workflow/
+│   └── SKILL.md
+└── team-conventions/
+    └── SKILL.md
+</code></pre></div>
+
+<p>All four skills appear in your skill index. If you create a new skill called <code>my-custom-workflow</code> locally, it shadows the external version.</p>
+<h2 id="redirecting-skill-creation-skillscreate_dir">Redirecting Skill Creation (<code>skills.create_dir</code>)</h2>
+<p>By default the agent writes new skills to the profile-local <code>~/.hermes/skills/</code>. If you want agent-created skills to land somewhere else — a shared "brain" directory, a git-tracked repo, or a fleet-wide skills volume — set <code>create_dir</code> under the <code>skills</code> section:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">skills</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">create_dir</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/opt/brain/skills</span>
+</code></pre></div>
+
+<p>What this changes:</p>
+<ul>
+<li><strong><code>skill_manage</code> create writes there.</strong> New skills (including category subdirectories) are created under <code>create_dir</code> instead of the local skills dir. The directory is created on first write if it doesn't exist.</li>
+<li><strong>The agent's instructions follow the config.</strong> Every agent-facing instruction that names the skill-creation path — the <code>skill_manage</code> tool description and related prompt text — dynamically renders the configured directory, so the agent is told to create skills there. No system-prompt overrides or filesystem tricks needed.</li>
+<li><strong>The directory is fully integrated.</strong> Skills under <code>create_dir</code> are scanned alongside the local dir: they appear in the skill index, <code>skills_list</code>, <code>skill_view</code>, slash commands, and can be patched or deleted like any local skill.</li>
+<li><strong>Everything else stays local.</strong> Existing skills are still modified in place wherever they live; bundled skill sync, the hub, and the curator keep operating on the profile-local dir.</li>
+</ul>
+<p>Paths support <code>~</code> expansion and <code>${VAR}</code> substitution; relative paths resolve against your Hermes home. Setting <code>create_dir</code> to the local skills dir is the same as leaving it unset.</p>
+<h2 id="project-local-skills">Project-Local Skills</h2>
+<p>Repos can carry their own skills, active only for sessions started inside that project — the same pattern other agent harnesses use for repo-local configuration. When you launch Hermes inside a git checkout, it looks for skills in:</p>
+<div class="highlight"><pre><span></span><code>&lt;project-root&gt;/.hermes/skills/    # Hermes-native location
+&lt;project-root&gt;/.agents/skills/    # cross-tool convention (shared with other agent CLIs)
+</code></pre></div>
+
+<p>The project root is the nearest ancestor directory containing <code>.git</code> (worktrees and submodules count).</p>
+<h3 id="trusting-a-project">Trusting a project</h3>
+<p>Skills are procedure documents the agent follows, so Hermes does <strong>not</strong> auto-load them from arbitrary cloned repos. The first time you run Hermes in a repo with project skills, the banner shows a notice:</p>
+<div class="highlight"><pre><span></span><code>◆ 3 project skill(s) found in /home/you/myproject but not loaded — run `hermes skills trust` to enable them.
+</code></pre></div>
+
+<p>Trust the repo once (from inside it, or by passing the path):</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>trust<span class="w">             </span><span class="c1"># trust the current repo</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>trust<span class="w"> </span>~/myproject<span class="w"> </span><span class="c1"># or explicitly</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>untrust<span class="w">           </span><span class="c1"># revoke</span>
+</code></pre></div>
+
+<p>Trusted roots are stored in <code>skills.trusted_project_dirs</code> in <code>~/.hermes/config.yaml</code>. Set <code>skills.project_discovery: false</code> to turn the feature off entirely (no scanning, no notices).</p>
+<h3 id="precedence">Precedence</h3>
+<p>Project skills are the <strong>highest-precedence tier</strong>: <code>project → local (~/.hermes/skills/) → external_dirs</code>. A project skill named <code>deploy</code> overrides a same-named profile or bundled skill for sessions inside that repo — that's the point: vendored repo skills win on their home turf, without touching your global profile. Project skills are tagged <code>[project]</code> in the agent's skill index so provenance stays visible.</p>
+<p>Like external dirs, project skill directories are treated as repo-owned: autonomous skill maintenance (the curator) never modifies them, and new agent-created skills always go to <code>~/.hermes/skills/</code>.</p>
+<h3 id="scan-time-quarantine">Scan-time quarantine</h3>
+<p>Trust is a repo-level decision, but a repo's skill content changes with every <code>git pull</code>. To close that gap, every project skill is scanned with the same security scanner used for Skills Hub installs before it enters the index. A skill whose scan verdict is <strong>dangerous</strong> (prompt-injection directives, credential-exfiltration commands, hidden-text tricks) is quarantined: it does not appear in the skill index, <code>skills_list</code>, slash commands, and refuses to load by name with an explanatory error. Scans are content-hash cached under <code>~/.hermes/cache/project_skill_scans/</code> (never inside your repo) and re-run automatically when the skill's content changes.</p>
+<h3 id="non-interactive-surfaces-cron-api-acp">Non-interactive surfaces (cron, API, ACP)</h3>
+<p>Cron jobs and other non-interactive surfaces inherit your interactive trust decision — they never prompt and never auto-trust. The project root resolves from the surface's working directory (a cron job's <code>workdir</code>, via the same mechanism the terminal tool uses). A cron job whose <code>workdir</code> is inside a repo you previously trusted loads that repo's project skills; a job in an untrusted or undecided repo loads none.</p>
+<p>In the TUI and Desktop the project root follows each <strong>session's workspace</strong> (the directory shown in the sidebar / set with the workspace picker), so starting <code>hermes --tui</code> inside a trusted repo registers its project skills as slash commands even when <code>terminal.cwd</code> is left at the default placeholder <code>.</code>; two sessions open in two repos each see their own.</p>
+<h2 id="skill-bundles">Skill Bundles</h2>
+<p>Skill bundles are tiny YAML files that group several skills under a single slash command. When you run <code>/&lt;bundle-name&gt;</code>, every skill listed in the bundle loads at once — useful when a particular task always benefits from the same set of skills together.</p>
+<h3 id="quick-example">Quick example</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Create a bundle for backend feature work</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>create<span class="w"> </span>backend-dev<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>github-code-review<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>test-driven-development<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>github-pr-workflow<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;Backend feature work — review, test, PR workflow&quot;</span>
+</code></pre></div>
+
+<p>Then in the CLI or any gateway platform:</p>
+<div class="highlight"><pre><span></span><code>/backend-dev refactor the auth middleware
+</code></pre></div>
+
+<p>The agent receives all three skills loaded into one user message, with any text after the slash command attached as a user instruction.</p>
+<h3 id="yaml-schema">YAML schema</h3>
+<p>Bundles live in <strong><code>~/.hermes/skill-bundles/&lt;slug&gt;.yaml</code></strong> and look like this:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backend-dev</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Backend feature work — review, test, PR workflow.</span>
+<span class="nt">skills</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">github-code-review</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">test-driven-development</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">github-pr-workflow</span>
+<span class="nt">instruction</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">  </span><span class="no">Always start by writing failing tests, then implement.</span>
+<span class="w">  </span><span class="no">Open the PR through the standard workflow with co-author tags.</span>
+</code></pre></div>
+
+<p>Fields:
+- <code>name</code> (optional — defaults to the filename stem) — the bundle's display name. Normalized to a hyphen slug for the slash command (<code>Backend Dev</code> → <code>/backend-dev</code>).
+- <code>description</code> (optional) — short text shown in <code>/bundles</code> and <code>hermes bundles list</code>.
+- <code>skills</code> (required, non-empty list) — skill names or paths relative to your skills directory. Use the same identifier you'd pass to <code>/&lt;skill-name&gt;</code>.
+- <code>instruction</code> (optional) — extra guidance prepended to the loaded skill content. Useful for codifying "how we always use these together."</p>
+<h3 id="managing-bundles">Managing bundles</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># List all installed bundles</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>list
+
+<span class="c1"># Inspect one bundle</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>show<span class="w"> </span>backend-dev
+
+<span class="c1"># Create a bundle interactively (omit --skill flags to enter them one per line)</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>create<span class="w"> </span>research
+
+<span class="c1"># Overwrite an existing bundle</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>create<span class="w"> </span>backend-dev<span class="w"> </span>--skill<span class="w"> </span>...<span class="w"> </span>--force
+
+<span class="c1"># Delete a bundle</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>delete<span class="w"> </span>backend-dev
+
+<span class="c1"># Re-scan ~/.hermes/skill-bundles/ and report changes</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>reload
+</code></pre></div>
+
+<p>From inside a chat session, <code>/bundles</code> lists every installed bundle and its skills.</p>
+<h3 id="behavior">Behavior</h3>
+<ul>
+<li><strong>Bundles take precedence over individual skills</strong> when slugs collide. If you name a bundle <code>research</code> and you also have a skill called <code>research</code>, <code>/research</code> invokes the bundle. This is intentional — you opted into the bundle by naming it.</li>
+<li><strong>Missing skills are skipped, not fatal.</strong> If a bundle lists <code>skill-foo</code> and you haven't installed it, the bundle still loads the skills that do resolve, and the agent gets a note listing what was skipped.</li>
+<li><strong>Bundles work in every surface</strong> — interactive CLI, TUI, dashboard chat, and every gateway platform (Telegram, Discord, Slack, …) — because dispatch is centralized in the same place as individual skill commands.</li>
+<li><strong>Bundles do not invalidate the prompt cache.</strong> They generate a fresh user message at invocation time, the same way <code>/&lt;skill-name&gt;</code> does — no system prompt mutation.</li>
+</ul>
+<h3 id="when-bundles-beat-installing-each-skill-manually">When bundles beat installing each skill manually</h3>
+<p>Use a bundle when:
+- You always pair the same skills for a recurring task (<code>/backend-dev</code>, <code>/release-prep</code>, <code>/incident-response</code>).
+- You want a one-character-shorter mental model than typing several <code>/skill</code> invocations in a row.
+- You want to ship a team-wide "task profile" by checking the bundle YAML into a shared dotfiles repo and symlinking it into <code>~/.hermes/skill-bundles/</code>.</p>
+<p>A bundle is just a YAML alias — it doesn't install skills for you. The skills themselves must already be present (in <code>~/.hermes/skills/</code> or an external skill directory). Otherwise the bundle invocation just skips the missing ones.</p>
+<h2 id="agent-managed-skills-skill_manage-tool">Agent-Managed Skills (skill_manage tool)</h2>
+<p>The agent can create, update, and delete its own skills via the <code>skill_manage</code> tool. This is the agent's <strong>procedural memory</strong> — when it figures out a non-trivial workflow, it saves the approach as a skill for future reuse.</p>
+<p>Skills and memory work together in the self-improvement loop: memory stores
+small durable facts that should always be in context, while skills store longer
+procedures that should load only when relevant. The background review can
+suggest or stage skill changes after a session, but the write-approval gate
+below lets you require human review before those changes land.</p>
+<h3 id="when-the-agent-creates-skills">When the Agent Creates Skills</h3>
+<p>The system prompt asks the agent to record a non-trivial workflow with <code>skill_manage</code> for
+future reuse. In practice that covers:</p>
+<ul>
+<li>When it worked out a multi-step workflow worth repeating</li>
+<li>When it hit errors or dead ends and found the working path</li>
+<li>When the user corrected its approach</li>
+</ul>
+<h3 id="what-a-skill-entry-looks-like">What a skill entry looks like</h3>
+<p>A skill is the instructions for doing a class of task the most efficient and correct
+way, to your specifications: the procedure in order, the commands and tool calls that
+work, how you want the result to look, and the pitfalls that cost time. Whether written
+in a foreground turn, by the background review, or by the curator's consolidation pass,
+it captures <strong>lessons, not logs</strong>: a pitfall is a generalizable rule plus one clause of
+<em>why</em> (the mechanism), attached to the step it affects, stated once. Incident narration, PR or
+issue numbers, dates, and quoted chat are not skill content; the rule has to stand
+without the story behind it. Always-on rules live in <code>SKILL.md</code> itself; <code>references/</code>
+holds a small set of files named by topic (a decision table, a recipe, provider quirks),
+extended in place rather than accumulated one file per session. Skills also do not
+restate what is already loaded every turn (the repo's <code>AGENTS.md</code>, tool schemas).</p>
+<p><code>skill_manage</code> runs an advisory linter on <code>create</code> and on <code>references/</code> writes and
+returns its findings in the tool result. Two rules exist specifically for this shape:
+<code>incident-log-shape</code> (a body dense in PR/issue numbers) and <code>references-sprawl</code> (more
+than 60 reference files). They warn; they never block a write.</p>
+<h3 id="actions">Actions</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Use for</th>
+<th>Key params</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>create</code></td>
+<td>New skill from scratch</td>
+<td><code>name</code>, <code>content</code> (full SKILL.md), optional <code>category</code></td>
+</tr>
+<tr>
+<td><code>patch</code></td>
+<td>Targeted fixes (preferred)</td>
+<td><code>name</code>, <code>old_string</code>, <code>new_string</code></td>
+</tr>
+<tr>
+<td><code>patch</code> with <code>content</code></td>
+<td>Major structural rewrites (replaces the whole SKILL.md; <code>edit</code> is the legacy alias)</td>
+<td><code>name</code>, <code>content</code></td>
+</tr>
+<tr>
+<td><code>delete</code></td>
+<td>Remove a skill entirely</td>
+<td><code>name</code></td>
+</tr>
+<tr>
+<td><code>write_file</code></td>
+<td>Add/update supporting files</td>
+<td><code>name</code>, <code>file_path</code>, <code>file_content</code></td>
+</tr>
+<tr>
+<td><code>remove_file</code></td>
+<td>Remove a supporting file</td>
+<td><code>name</code>, <code>file_path</code></td>
+</tr>
+</tbody>
+</table>
+<p>Each action is advertised as its own shape: the text slot belongs to one action only
+(<code>content</code> → create / full rewrite, <code>new_string</code> → targeted patch, <code>file_content</code> →
+write_file). An op that carries another action's slot — e.g. <code>file_content</code> on a
+<code>create</code> — is invalid against the tool schema (grammar-constrained local backends never
+emit it) and, if it arrives anyway, is rejected <strong>before any op in the batch is
+applied</strong>, with an error naming the key the text sits in and where to move it.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>The targeted <code>patch</code> is preferred for updates — it's more token-efficient than a full rewrite because only the changed text appears in the tool call.</p>
+</div>
+<h3 id="gating-agent-skill-writes-skillswrite_approval">Gating agent skill writes (<code>skills.write_approval</code>)</h3>
+<p>By default the agent writes skills freely — including from the <a href="memory.html#controlling-memory-writes-write_approval">background
+self-improvement review</a>
+that runs after a turn. If you'd rather approve every skill write first
+(small models that misjudge what they learned, secure environments, or just
+wanting eyes on the self-improvement loop), turn on the write-approval gate:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">skills</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">write_approval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">     </span><span class="c1"># false = write freely (default) | true = require approval</span>
+</code></pre></div>
+
+<p>When <code>write_approval: true</code>, every <code>skill_manage</code> write (create / edit /
+patch / delete / write_file / remove_file) is <strong>staged</strong> instead of committed —
+a SKILL.md is too large to review inline, so staging applies regardless of
+whether the write came from a foreground turn or the background review.
+Staged writes survive restarts under <code>~/.hermes/pending/skills/</code> and are
+reviewed with the same familiar approve/deny flow as dangerous commands:</p>
+<div class="highlight"><pre><span></span><code>/skills pending             # list staged skill writes + a one-line gist each
+/skills diff &lt;id&gt;           # full unified diff (best viewed in CLI or dashboard)
+/skills approve &lt;id&gt;        # apply it (or &#39;all&#39;)
+/skills reject &lt;id&gt;         # drop it (or &#39;all&#39;)
+/skills approval on         # turn the gate on (or &#39;off&#39;) and persist it
+</code></pre></div>
+
+<p>The review surface works in the interactive CLI and on messaging platforms
+(diff output is truncated for chat bubbles — read the full diff on the CLI or
+in the pending JSON file). Memory writes have the same gate under
+<code>memory.write_approval</code> — see <a href="memory.html#controlling-memory-writes-write_approval">Controlling memory writes</a>.</p>
+<blockquote>
+<p>The separate <code>skills.guard_agent_created</code> setting is a content scanner
+(dangerous-pattern heuristics), not an approval gate — the two are
+independent. See <a href="../configuration.html#guard-on-agent-created-skill-writes">Guard on agent-created skill writes</a>.</p>
+</blockquote>
+<h2 id="skills-hub">Skills Hub</h2>
+<p>Browse, search, install, and manage skills from online registries, <code>skills.sh</code>, direct well-known skill endpoints, and official optional skills.</p>
+<p>Unfiltered searches (CLI, TUI, and the dashboard) are answered from a cached centralized index that covers the external registries. That index is rebuilt periodically, so when it has no match for your query Hermes also asks <code>skills.sh</code>, ClawHub, LobeHub and well-known endpoints directly — a skill published minutes ago still shows up. That extra pass gets at most 8 seconds of the search budget, so a slow registry cannot turn a miss into a long wait. Custom GitHub taps are not part of that fallback (search them with <code>--source github</code>, or via the index once it catches up), and provider filters such as <code>--source nvidia</code> do not trigger it (those registries carry no provider data).</p>
+<h3 id="common-commands">Common commands</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>browse<span class="w">                              </span><span class="c1"># Browse all hub skills (official first)</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>browse<span class="w"> </span>--source<span class="w"> </span>official<span class="w">            </span><span class="c1"># Browse only official optional skills</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>kubernetes<span class="w">                   </span><span class="c1"># Search all sources</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>react<span class="w"> </span>--source<span class="w"> </span>skills-sh<span class="w">     </span><span class="c1"># Search the skills.sh directory</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>https://mintlify.com/docs<span class="w"> </span>--source<span class="w"> </span>well-known
+hermes<span class="w"> </span>skills<span class="w"> </span>inspect<span class="w"> </span>openai/skills/k8s<span class="w">           </span><span class="c1"># Preview before installing</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>openai/skills/k8s<span class="w">           </span><span class="c1"># Install with security scan</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>official/security/1password
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>skills-sh/vercel-labs/json-render/json-render-react<span class="w"> </span>--force
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>well-known:https://mintlify.com/docs/.well-known/skills/mintlify
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>https://sharethis.chat/SKILL.md<span class="w">              </span><span class="c1"># Direct URL (+ referenced support files)</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>https://example.com/SKILL.md<span class="w"> </span>--name<span class="w"> </span>my-skill<span class="w"> </span><span class="c1"># Override name when frontmatter has none</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>list<span class="w"> </span>--source<span class="w"> </span>hub<span class="w">                   </span><span class="c1"># List hub-installed skills</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>check<span class="w">                               </span><span class="c1"># Check installed hub skills for upstream updates</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>update<span class="w">                              </span><span class="c1"># Reinstall hub skills with upstream changes when needed</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>audit<span class="w">                               </span><span class="c1"># Re-scan all hub skills for security</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>uninstall<span class="w"> </span>k8s<span class="w">                       </span><span class="c1"># Remove a hub skill</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>reset<span class="w"> </span>google-workspace<span class="w">              </span><span class="c1"># Un-stick a bundled skill from &quot;user-modified&quot; (see below)</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>reset<span class="w"> </span>google-workspace<span class="w"> </span>--restore<span class="w">    </span><span class="c1"># Also restore the bundled version, deleting your local edits</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>publish<span class="w"> </span>skills/my-skill<span class="w"> </span>--to<span class="w"> </span>github<span class="w"> </span>--repo<span class="w"> </span>owner/repo
+hermes<span class="w"> </span>skills<span class="w"> </span>snapshot<span class="w"> </span><span class="nb">export</span><span class="w"> </span>setup.json<span class="w">          </span><span class="c1"># Export skill config</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>add<span class="w"> </span>myorg/skills-repo<span class="w">           </span><span class="c1"># Add a custom GitHub source</span>
+</code></pre></div>
+
+<h3 id="supported-hub-sources">Supported hub sources</h3>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Example</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>official</code></td>
+<td><code>official/security/1password</code></td>
+<td>Optional skills shipped with Hermes.</td>
+</tr>
+<tr>
+<td><code>skills-sh</code></td>
+<td><code>skills-sh/vercel-labs/agent-skills/vercel-react-best-practices</code></td>
+<td>Searchable via <code>hermes skills search &lt;query&gt; --source skills-sh</code>. Hermes resolves alias-style skills when the skills.sh slug differs from the repo folder.</td>
+</tr>
+<tr>
+<td><code>well-known</code></td>
+<td><code>well-known:https://mintlify.com/docs/.well-known/skills/mintlify</code></td>
+<td>Skills served directly from <code>/.well-known/skills/index.json</code> on a website. Search using the site or docs URL.</td>
+</tr>
+<tr>
+<td><code>url</code></td>
+<td><code>https://sharethis.chat/SKILL.md</code></td>
+<td>Direct HTTP(S) URL to <code>SKILL.md</code> plus explicitly referenced support files. Name resolution: frontmatter → URL slug → interactive prompt → <code>--name</code> flag.</td>
+</tr>
+<tr>
+<td><code>github</code></td>
+<td><code>openai/skills/k8s</code></td>
+<td>Direct GitHub repo/path installs and custom taps.</td>
+</tr>
+<tr>
+<td><code>clawhub</code>, <code>lobehub</code>, <code>browse-sh</code></td>
+<td>Source-specific identifiers</td>
+<td>Community or marketplace integrations.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="integrated-hubs-and-registries">Integrated hubs and registries</h3>
+<p>Hermes currently integrates with these skills ecosystems and discovery sources:</p>
+<h4 id="1-official-optional-skills-official">1. Official optional skills (<code>official</code>)</h4>
+<p>These are maintained in the Hermes repository itself and install with built-in trust.</p>
+<ul>
+<li>Catalog: <a href="../../reference/optional-skills-catalog.html">Official Optional Skills Catalog</a></li>
+<li>Source in repo: <code>optional-skills/</code></li>
+<li>Example:</li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>browse<span class="w"> </span>--source<span class="w"> </span>official
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>official/security/1password
+</code></pre></div>
+
+<h4 id="2-skillssh-skills-sh">2. skills.sh (<code>skills-sh</code>)</h4>
+<p>This is Vercel's public skills directory. Hermes can search it directly, inspect skill detail pages, resolve alias-style slugs, and install from the underlying source repo.</p>
+<ul>
+<li>Directory: <a href="https://skills.sh/" class="ext" target="_blank" rel="noopener">skills.sh</a></li>
+<li>CLI/tooling repo: <a href="https://github.com/vercel-labs/skills" class="ext" target="_blank" rel="noopener">vercel-labs/skills</a></li>
+<li>Official Vercel skills repo: <a href="https://github.com/vercel-labs/agent-skills" class="ext" target="_blank" rel="noopener">vercel-labs/agent-skills</a></li>
+<li>Example:</li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>react<span class="w"> </span>--source<span class="w"> </span>skills-sh
+hermes<span class="w"> </span>skills<span class="w"> </span>inspect<span class="w"> </span>skills-sh/vercel-labs/json-render/json-render-react
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>skills-sh/vercel-labs/json-render/json-render-react<span class="w"> </span>--force
+</code></pre></div>
+
+<h4 id="3-well-known-skill-endpoints-well-known">3. Well-known skill endpoints (<code>well-known</code>)</h4>
+<p>This is URL-based discovery from sites that publish <code>/.well-known/skills/index.json</code>. It is not a single centralized hub — it is a web discovery convention.</p>
+<ul>
+<li>Example live endpoint: <a href="https://mintlify.com/docs/.well-known/skills/index.json" class="ext" target="_blank" rel="noopener">Mintlify docs skills index</a></li>
+<li>Reference server implementation: <a href="https://github.com/vercel-labs/skills-handler" class="ext" target="_blank" rel="noopener">vercel-labs/skills-handler</a></li>
+<li>Example:</li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>https://mintlify.com/docs<span class="w"> </span>--source<span class="w"> </span>well-known
+hermes<span class="w"> </span>skills<span class="w"> </span>inspect<span class="w"> </span>well-known:https://mintlify.com/docs/.well-known/skills/mintlify
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>well-known:https://mintlify.com/docs/.well-known/skills/mintlify
+</code></pre></div>
+
+<h4 id="4-direct-github-skills-github">4. Direct GitHub skills (<code>github</code>)</h4>
+<p>Hermes can install directly from GitHub repositories and GitHub-based taps. This is useful when you already know the repo/path or want to add your own custom source repo.</p>
+<p>Default taps (browsable without any setup):
+- <a href="https://github.com/openai/skills" class="ext" target="_blank" rel="noopener">openai/skills</a>
+- <a href="https://github.com/anthropics/skills" class="ext" target="_blank" rel="noopener">anthropics/skills</a>
+- <a href="https://github.com/huggingface/skills" class="ext" target="_blank" rel="noopener">huggingface/skills</a>
+- <a href="https://github.com/NVIDIA/skills" class="ext" target="_blank" rel="noopener">NVIDIA/skills</a> — NVIDIA-verified skills (signed <code>skill.oms.sig</code> + governance <code>skill-card.md</code>)
+- <a href="https://github.com/garrytan/gstack" class="ext" target="_blank" rel="noopener">garrytan/gstack</a>
+- <a href="https://github.com/K-Dense-AI/scientific-agent-skills" class="ext" target="_blank" rel="noopener">K-Dense-AI/scientific-agent-skills</a> and <a href="https://github.com/synthetic-sciences/openscience" class="ext" target="_blank" rel="noopener">synthetic-sciences/openscience</a> — ~480 scientific research skills (bioinformatics, chemistry, physics, ML training, scholarly tooling), grouped under one <code>science</code> category. Community trust: every install is security-scanned. Many wrap third-party tools with their own licenses (some GPL; KEGG requires a commercial license for non-academic use) — check each skill's prerequisites.</p>
+<ul>
+<li>Example:</li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>openai/skills/k8s
+hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>add<span class="w"> </span>myorg/skills-repo
+</code></pre></div>
+
+<p><strong>Category groupings (<code>skills.sh.json</code>).</strong> A GitHub tap may ship a
+<code>skills.sh.json</code> file at its repo root following the
+<a href="https://skills.sh/schemas/skills.sh.schema.json" class="ext" target="_blank" rel="noopener">skills.sh schema</a>. Its
+<code>groupings</code> (each with a <code>title</code> and a list of skill names) are read at index
+time and become the category labels shown in the
+<a href="https://hermes-agent.nousresearch.com/docs" class="ext" target="_blank" rel="noopener">Skills Hub</a> page — instead of a
+tag-derived guess. This is generic: any tap that ships the file gets real
+categorization, no Hermes-side changes required.</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;$schema&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://skills.sh/schemas/skills.sh.schema.json&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;groupings&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Inference AI&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;skills&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;dynamo-recipe-runner&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;dynamo-router-sla&quot;</span><span class="p">]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Decision Optimization&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;skills&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;cuopt-developer&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;cuopt-install&quot;</span><span class="p">]</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h4 id="5-clawhub-clawhub">5. ClawHub (<code>clawhub</code>)</h4>
+<p>A third-party skills marketplace integrated as a community source.</p>
+<ul>
+<li>Site: <a href="https://clawhub.ai/" class="ext" target="_blank" rel="noopener">clawhub.ai</a></li>
+<li>Hermes source id: <code>clawhub</code></li>
+</ul>
+<h4 id="6-lobehub-lobehub">6. LobeHub (<code>lobehub</code>)</h4>
+<p>Hermes can search and convert agent entries from LobeHub's public catalog into installable Hermes skills.</p>
+<ul>
+<li>Site: <a href="https://lobehub.com/" class="ext" target="_blank" rel="noopener">LobeHub</a></li>
+<li>Public agents index: <a href="https://chat-agents.lobehub.com/" class="ext" target="_blank" rel="noopener">chat-agents.lobehub.com</a></li>
+<li>Backing repo: <a href="https://github.com/lobehub/lobe-chat-agents" class="ext" target="_blank" rel="noopener">lobehub/lobe-chat-agents</a></li>
+<li>Hermes source id: <code>lobehub</code></li>
+</ul>
+<h4 id="7-browsesh-browse-sh">7. browse.sh (<code>browse-sh</code>)</h4>
+<p>Hermes integrates with <a href="https://browse.sh" class="ext" target="_blank" rel="noopener">browse.sh</a>, Browserbase's catalog of 200+ site-specific browser-automation SKILL.md files (Airbnb, Amazon, arXiv, 12306.cn, Etsy, Xero, and many more). Each skill describes how to drive one website end-to-end and is suitable for use with Hermes' browser tools and any browser-automation skills you already have installed.</p>
+<ul>
+<li>Site: <a href="https://browse.sh/" class="ext" target="_blank" rel="noopener">browse.sh</a></li>
+<li>Catalog API: <code>https://browse.sh/api/skills</code></li>
+<li>Hermes source id: <code>browse-sh</code></li>
+<li>Trust level: <code>community</code></li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>airbnb<span class="w"> </span>--source<span class="w"> </span>browse-sh
+hermes<span class="w"> </span>skills<span class="w"> </span>inspect<span class="w"> </span>browse-sh/airbnb.com/search-listings-ddgioa
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>browse-sh/airbnb.com/search-listings-ddgioa
+</code></pre></div>
+
+<p>Identifiers use the form <code>browse-sh/&lt;hostname&gt;/&lt;task-id&gt;</code> and match the slug exposed by the browse.sh catalog. Content is resolved through the per-skill detail endpoint (<code>/api/skills/&lt;slug&gt;</code> → <code>skillMdUrl</code>), not through the catalog's GitHub <code>sourceUrl</code>.</p>
+<h4 id="8-direct-url-url">8. Direct URL (<code>url</code>)</h4>
+<p>Install <code>SKILL.md</code> directly from any HTTP(S) URL — useful when an author hosts a skill on their own site (no hub listing, no GitHub path to type). Hermes also fetches explicitly referenced files under <code>references/</code>, <code>templates/</code>, <code>scripts/</code>, <code>assets/</code>, and <code>examples/</code>, then scans and installs the complete bundle.</p>
+<ul>
+<li>Hermes source id: <code>url</code></li>
+<li>Identifier: the URL itself (no prefix needed)</li>
+<li>Scope: <code>SKILL.md</code> plus exact referenced support files in the allowlisted directories. Hermes does not enumerate or copy unrelated files from the host.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>https://sharethis.chat/SKILL.md
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>https://example.com/my-skill/SKILL.md<span class="w"> </span>--category<span class="w"> </span>productivity
+</code></pre></div>
+
+<p>Name resolution, in order:
+1. <code>name:</code> field in the SKILL.md YAML frontmatter (recommended — every well-formed skill has one).
+2. Parent directory name from the URL path (e.g. <code>.../my-skill/SKILL.md</code> → <code>my-skill</code>, or <code>.../my-skill.md</code> → <code>my-skill</code>), when it's a valid identifier (<code>^[a-z][a-z0-9_-]*$</code>).
+3. Interactive prompt on a terminal with a TTY.
+4. On non-interactive surfaces (the <code>/skills install</code> slash command inside the TUI, gateway platforms, scripts), a clean error pointing at the <code>--name</code> override.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Frontmatter has no name and the URL slug is unhelpful — supply one:</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>https://example.com/SKILL.md<span class="w"> </span>--name<span class="w"> </span>sharethis-chat
+
+<span class="c1"># Or inside a chat session:</span>
+/skills<span class="w"> </span>install<span class="w"> </span>https://example.com/SKILL.md<span class="w"> </span>--name<span class="w"> </span>sharethis-chat
+</code></pre></div>
+
+<p>Trust level is always <code>community</code> — the same security scan runs as for every other source. The URL is stored as the install identifier, so <code>hermes skills update</code> re-fetches from the same URL automatically when you want to refresh.</p>
+<h3 id="security-scanning-and---force">Security scanning and <code>--force</code></h3>
+<p>All hub-installed skills go through a <strong>security scanner</strong> that checks for data exfiltration, prompt injection, destructive commands, supply-chain signals, and other threats.</p>
+<p><code>hermes skills inspect ...</code> now also surfaces upstream metadata when available:
+- repo URL
+- skills.sh detail page URL
+- install command
+- weekly installs
+- upstream security audit statuses
+- well-known index/endpoint URLs</p>
+<p>Use <code>--force</code> when you have reviewed a third-party skill and want to override a non-dangerous policy block:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>skills-sh/anthropics/skills/pdf<span class="w"> </span>--force
+</code></pre></div>
+
+<p>Important behavior:
+- <code>--force</code> can override policy blocks for caution/warn-style findings.
+- <code>--force</code> does <strong>not</strong> override a <code>dangerous</code> scan verdict.
+- Official optional skills (<code>official/...</code>) are treated as built-in trust and do not show the third-party warning panel.</p>
+<h3 id="trust-levels">Trust levels</h3>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>Source</th>
+<th>Policy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>builtin</code></td>
+<td>Ships with Hermes</td>
+<td>Always trusted</td>
+</tr>
+<tr>
+<td><code>official</code></td>
+<td><code>optional-skills/</code> in the repo</td>
+<td>Built-in trust, no third-party warning</td>
+</tr>
+<tr>
+<td><code>trusted</code></td>
+<td>Trusted registries/repos such as <code>openai/skills</code>, <code>anthropics/skills</code>, <code>huggingface/skills</code>, <code>NVIDIA/skills</code></td>
+<td>More permissive policy than community sources</td>
+</tr>
+<tr>
+<td><code>community</code></td>
+<td>Everything else (<code>skills.sh</code>, well-known endpoints, custom GitHub repos, most marketplaces)</td>
+<td>Non-dangerous findings can be overridden with <code>--force</code>; <code>dangerous</code> verdicts stay blocked</td>
+</tr>
+</tbody>
+</table>
+<h3 id="update-lifecycle">Update lifecycle</h3>
+<p>The hub now tracks enough provenance to re-check upstream copies of installed skills:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>check<span class="w">          </span><span class="c1"># Report which installed hub skills changed upstream</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>update<span class="w">         </span><span class="c1"># Reinstall only the skills with updates available</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>update<span class="w"> </span>react<span class="w">   </span><span class="c1"># Update one specific installed hub skill</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>update<span class="w"> </span>react<span class="w"> </span>--force<span class="w">   </span><span class="c1"># Overwrite a skill you&#39;ve edited locally</span>
+</code></pre></div>
+
+<p>This uses the stored source identifier plus the current upstream bundle content hash to detect drift.</p>
+<p>Checks skip network requests for missing or non-directory installs (<code>orphaned</code>) and unsafe or unresolvable recorded paths (<code>invalid_install</code>). Missing-directory entries can be removed with <code>hermes skills uninstall &lt;name&gt;</code>; invalid paths require inspecting and repairing the active profile's <code>skills/.hub/lock.json</code> before retrying. No entries are removed automatically.</p>
+<p>Valid installs continue to use their source adapter’s existing synchronous fetch and transport timeouts. There is no strict total deadline for an update check: an unreachable or slow source for an existing install can still delay later entries.</p>
+<p>Skills you have edited locally (the on-disk content no longer matches the hash recorded at install time) are <strong>skipped</strong> by <code>hermes skills update</code> so your changes are never silently overwritten. Pass <code>--force</code> to replace them with the upstream version anyway.</p>
+<div class="admonition adm-tip"><p class="adm-title">GitHub rate limits</p>
+<p>Skills hub operations use the GitHub API, which has a rate limit of 60 requests/hour for unauthenticated users. If you see rate-limit errors during install or search, set <code>GITHUB_TOKEN</code> in your <code>.env</code> file to increase the limit to 5,000 requests/hour. The error message includes an actionable hint when this happens.</p>
+</div>
+<h3 id="publishing-a-custom-skill-tap">Publishing a custom skill tap</h3>
+<p>If you want to share a curated set of skills — for your team, your org, or publicly — you can publish them as a <strong>tap</strong>: a GitHub repository other Hermes users add with <code>hermes skills tap add &lt;owner/repo&gt;</code>. No server, no registry sign-up, no release pipeline. Just a directory of <code>SKILL.md</code> files.</p>
+<h4 id="repo-layout">Repo layout</h4>
+<p>A tap is any GitHub repo (public or private — private needs <code>GITHUB_TOKEN</code>) laid out like this:</p>
+<div class="highlight"><pre><span></span><code>owner/repo
+├── skills/                       # default path; configurable per-tap
+│   ├── my-workflow/
+│   │   ├── SKILL.md              # required
+│   │   ├── references/           # optional supporting files
+│   │   ├── templates/
+│   │   └── scripts/
+│   ├── another-skill/
+│   │   └── SKILL.md
+│   └── third-skill/
+│       └── SKILL.md
+└── README.md                     # optional but helpful
+</code></pre></div>
+
+<p>Rules:
+- Each skill lives in its own directory under the tap's root path (default <code>skills/</code>).
+- The directory name becomes the skill's install slug.
+- Each skill directory must contain a <code>SKILL.md</code> with standard <a href="#skillmd-format">SKILL.md frontmatter</a> (<code>name</code>, <code>description</code>, plus optional <code>metadata.hermes.tags</code>, <code>version</code>, <code>author</code>, <code>platforms</code>, <code>metadata.hermes.config</code>).
+- Subdirectories like <code>references/</code>, <code>templates/</code>, <code>scripts/</code>, <code>assets/</code> are downloaded alongside <code>SKILL.md</code> at install time.
+- Skills whose directory name starts with <code>.</code> or <code>_</code> are ignored.</p>
+<p>Hermes discovers skills by listing every subdirectory of the tap path and probing each for <code>SKILL.md</code>.</p>
+<h4 id="minimal-tap-example">Minimal tap example</h4>
+<div class="highlight"><pre><span></span><code>my-org/hermes-skills
+└── skills/
+    └── deploy-runbook/
+        └── SKILL.md
+</code></pre></div>
+
+<p><code>skills/deploy-runbook/SKILL.md</code>:</p>
+<div class="highlight"><pre><span></span><code>---
+name: deploy-runbook
+description: Our deployment runbook — services, rollback, Slack channels
+version: 1.0.0
+author: My Org Platform Team
+metadata:
+  hermes:
+<span class="gu">    tags: [deployment, runbook, internal]</span>
+<span class="gu">---</span>
+
+<span class="gh"># Deploy Runbook</span>
+
+Step 1: ...
+</code></pre></div>
+
+<p>After pushing that to GitHub, any Hermes user can subscribe and install:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>add<span class="w"> </span>my-org/hermes-skills
+hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>deploy
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>my-org/hermes-skills/deploy-runbook
+</code></pre></div>
+
+<h4 id="non-default-paths">Non-default paths</h4>
+<p>If your skills don't live under <code>skills/</code> (common when you're adding a <code>skills/</code> subtree to an existing project), edit the tap entry in <code>~/.hermes/skills/.hub/taps.json</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;taps&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;repo&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-org/platform-docs&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;internal/skills/&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The <code>hermes skills tap add</code> CLI defaults new taps to <code>path: "skills/"</code>; edit the file directly if you need a different path. <code>hermes skills tap list</code> shows the effective path per tap.</p>
+<h4 id="installing-individual-skills-directly-without-adding-a-tap">Installing individual skills directly (without adding a tap)</h4>
+<p>Users can also install a single skill from any public GitHub repo without adding the whole repo as a tap:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>owner/repo/skills/my-workflow
+</code></pre></div>
+
+<p>Useful when you want to share one skill without asking the user to subscribe to your whole registry.</p>
+<h4 id="trust-levels-for-taps">Trust levels for taps</h4>
+<p>New taps are assigned <code>community</code> trust by default. Skills installed from them run through the standard security scan and show the third-party warning panel on first install. If your org or a widely-trusted source should get higher trust, add its repo to <code>TRUSTED_REPOS</code> in <code>tools/skills_guard.py</code> (requires a Hermes core PR).</p>
+<h4 id="tap-management">Tap management</h4>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>list<span class="w">                                </span><span class="c1"># show all configured taps</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>add<span class="w"> </span>myorg/skills-repo<span class="w">               </span><span class="c1"># add (default path: skills/)</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>remove<span class="w"> </span>myorg/skills-repo<span class="w">            </span><span class="c1"># remove</span>
+</code></pre></div>
+
+<p>Inside a running session:</p>
+<div class="highlight"><pre><span></span><code>/skills tap list
+/skills tap add myorg/skills-repo
+/skills tap remove myorg/skills-repo
+</code></pre></div>
+
+<p>Taps are stored in <code>~/.hermes/skills/.hub/taps.json</code> (created on demand).</p>
+<h2 id="bundled-skill-updates-hermes-skills-reset">Bundled skill updates (<code>hermes skills reset</code>)</h2>
+<p>Hermes ships with a set of bundled skills in <code>skills/</code> inside the repo. On install and on every <code>hermes update</code>, a sync pass copies those into <code>~/.hermes/skills/</code> and records a manifest at <code>~/.hermes/skills/.bundled_manifest</code> mapping each skill name to the content hash at the time it was synced (the <strong>origin hash</strong>).</p>
+<p>On each sync, Hermes recomputes the hash of your local copy and compares it to the origin hash:</p>
+<ul>
+<li><strong>Unchanged</strong> → safe to pull upstream changes, copy the new bundled version in, record the new origin hash.</li>
+<li><strong>Changed</strong> → treated as <strong>user-modified</strong> and skipped forever, so your edits never get stomped.</li>
+</ul>
+<p>Generated runtime caches inside a skill (<code>__pycache__/</code>, <code>.pytest_cache/</code>, <code>.mypy_cache/</code>, <code>.ruff_cache/</code>, and a <code>.pyc</code> sitting next to its <code>.py</code>) are not part of the hash, so running a skill's helper script never marks it user-modified or hides it from <code>hermes skills list-modified</code> / <code>diff</code>.</p>
+<p>The protection is good, but it has one sharp edge. If you edit a bundled skill and then later want to abandon your changes and go back to the bundled version by just copy-pasting from <code>~/.hermes/hermes-agent/skills/</code>, the manifest still holds the <em>old</em> origin hash from whenever the last successful sync ran. Your fresh copy-paste contents (current bundled hash) won't match that stale origin hash, so sync keeps flagging it as user-modified.</p>
+<p><code>hermes skills reset</code> is the escape hatch:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Safe: clears the manifest entry for this skill. Your current copy is preserved,</span>
+<span class="c1"># but the next sync re-baselines against it so future updates work normally.</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>reset<span class="w"> </span>google-workspace
+
+<span class="c1"># Full restore: also deletes your local copy and re-copies the current bundled</span>
+<span class="c1"># version. Use this when you want the pristine upstream skill back.</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>reset<span class="w"> </span>google-workspace<span class="w"> </span>--restore
+
+<span class="c1"># Non-interactive (e.g. in scripts or TUI mode) — skip the --restore confirmation.</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>reset<span class="w"> </span>google-workspace<span class="w"> </span>--restore<span class="w"> </span>--yes
+</code></pre></div>
+
+<p>The same command works in chat as a slash command:</p>
+<div class="highlight"><pre><span></span><code>/skills reset google-workspace
+/skills reset google-workspace --restore
+</code></pre></div>
+
+<div class="admonition adm-note"><p class="adm-title">Profiles</p>
+<p>Each profile has its own <code>.bundled_manifest</code> under its own <code>HERMES_HOME</code>, so <code>hermes -p coder skills reset &lt;name&gt;</code> only affects that profile.</p>
+</div>
+<h3 id="slash-commands-inside-chat">Slash commands (inside chat)</h3>
+<p>All the same commands work with <code>/skills</code>:</p>
+<div class="highlight"><pre><span></span><code>/skills browse
+/skills search react --source skills-sh
+/skills search https://mintlify.com/docs --source well-known
+/skills inspect skills-sh/vercel-labs/json-render/json-render-react
+/skills install openai/skills/skill-creator --force
+/skills check
+/skills update
+/skills reset google-workspace
+/skills list
+</code></pre></div>
+
+<p>Official optional skills still use identifiers like <code>official/security/1password</code> and <code>official/migration/openclaw-migration</code>.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/skills</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#starting-with-a-blank-slate">Starting with a blank slate</a></li>
+<li class="lvl2"><a href="#using-skills">Using Skills</a></li>
+<li class="lvl3"><a href="#stacking-multiple-skills-in-one-command">Stacking multiple skills in one command</a></li>
+<li class="lvl2"><a href="#learning-a-skill-from-sources-learn">Learning a skill from sources (/learn)</a></li>
+<li class="lvl3"><a href="#large-sources-become-knowledge-base-skills">Large sources become knowledge-base skills</a></li>
+<li class="lvl2"><a href="#progressive-disclosure">Progressive Disclosure</a></li>
+<li class="lvl2"><a href="#skillmd-format">SKILL.md Format</a></li>
+<li class="lvl3"><a href="#platform-specific-skills">Platform-Specific Skills</a></li>
+<li class="lvl2"><a href="#skill-output-and-media-delivery">Skill output and media delivery</a></li>
+<li class="lvl3"><a href="#forcing-document-style-delivery-as_document">Forcing document-style delivery: [[as_document]]</a></li>
+<li class="lvl3"><a href="#conditional-activation-fallback-skills">Conditional Activation (Fallback Skills)</a></li>
+<li class="lvl2"><a href="#secure-setup-on-load">Secure Setup on Load</a></li>
+<li class="lvl3"><a href="#skill-config-settings">Skill Config Settings</a></li>
+<li class="lvl2"><a href="#skill-directory-structure">Skill Directory Structure</a></li>
+<li class="lvl3"><a href="#advisory-skillevaluator-scan">Advisory SkillEvaluator scan</a></li>
+<li class="lvl2"><a href="#external-skill-directories">External Skill Directories</a></li>
+<li class="lvl3"><a href="#how-it-works">How it works</a></li>
+<li class="lvl3"><a href="#example">Example</a></li>
+<li class="lvl2"><a href="#redirecting-skill-creation-skillscreate_dir">Redirecting Skill Creation (skills.create_dir)</a></li>
+<li class="lvl2"><a href="#project-local-skills">Project-Local Skills</a></li>
+<li class="lvl3"><a href="#trusting-a-project">Trusting a project</a></li>
+<li class="lvl3"><a href="#precedence">Precedence</a></li>
+<li class="lvl3"><a href="#scan-time-quarantine">Scan-time quarantine</a></li>
+<li class="lvl3"><a href="#non-interactive-surfaces-cron-api-acp">Non-interactive surfaces (cron, API, ACP)</a></li>
+<li class="lvl2"><a href="#skill-bundles">Skill Bundles</a></li>
+<li class="lvl3"><a href="#quick-example">Quick example</a></li>
+<li class="lvl3"><a href="#yaml-schema">YAML schema</a></li>
+<li class="lvl3"><a href="#managing-bundles">Managing bundles</a></li>
+<li class="lvl3"><a href="#behavior">Behavior</a></li>
+<li class="lvl3"><a href="#when-bundles-beat-installing-each-skill-manually">When bundles beat installing each skill manually</a></li>
+<li class="lvl2"><a href="#agent-managed-skills-skill_manage-tool">Agent-Managed Skills (skill_manage tool)</a></li>
+<li class="lvl3"><a href="#when-the-agent-creates-skills">When the Agent Creates Skills</a></li>
+<li class="lvl3"><a href="#what-a-skill-entry-looks-like">What a skill entry looks like</a></li>
+<li class="lvl3"><a href="#actions">Actions</a></li>
+<li class="lvl3"><a href="#gating-agent-skill-writes-skillswrite_approval">Gating agent skill writes (skills.write_approval)</a></li>
+<li class="lvl2"><a href="#skills-hub">Skills Hub</a></li>
+<li class="lvl3"><a href="#common-commands">Common commands</a></li>
+<li class="lvl3"><a href="#supported-hub-sources">Supported hub sources</a></li>
+<li class="lvl3"><a href="#integrated-hubs-and-registries">Integrated hubs and registries</a></li>
+<li class="lvl3"><a href="#security-scanning-and---force">Security scanning and --force</a></li>
+<li class="lvl3"><a href="#trust-levels">Trust levels</a></li>
+<li class="lvl3"><a href="#update-lifecycle">Update lifecycle</a></li>
+<li class="lvl3"><a href="#publishing-a-custom-skill-tap">Publishing a custom skill tap</a></li>
+<li class="lvl2"><a href="#bundled-skill-updates-hermes-skills-reset">Bundled skill updates (hermes skills reset)</a></li>
+<li class="lvl3"><a href="#slash-commands-inside-chat">Slash commands (inside chat)</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

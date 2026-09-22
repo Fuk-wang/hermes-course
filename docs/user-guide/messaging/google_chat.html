@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Google Chat · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/messaging/google_chat</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="google-chat-setup">Google Chat Setup</h1>
+<p>Connect Hermes Agent to Google Chat as a bot. The integration uses Cloud Pub/Sub
+pull subscriptions for inbound events and the Chat REST API for outbound messages.
+Equivalent ergonomics to Slack Socket Mode or Telegram long-polling: your Hermes
+process does not need a public URL, a tunnel, or a TLS certificate. It connects,
+authenticates, and listens on a subscription — the same way a Telegram bot listens
+on a token.</p>
+<blockquote>
+<p>Run <code>hermes gateway setup</code> and pick <strong>Google Chat</strong> for a guided walk-through.</p>
+</blockquote>
+<div class="admonition adm-note"><p class="adm-title">Workspace edition</p>
+<p>Google Chat is part of Google Workspace. You can use this integration with a
+personal Workspace (<code>@yourdomain.com</code> registered through Google) or a work
+Workspace where you have the Admin rights to publish an app. Gmail-only accounts
+cannot host Chat apps.</p>
+</div>
+<h2 id="overview">Overview</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Libraries</strong></td>
+<td><code>google-cloud-pubsub</code>, <code>google-api-python-client</code>, <code>google-auth</code></td>
+</tr>
+<tr>
+<td><strong>Inbound transport</strong></td>
+<td>Cloud Pub/Sub pull subscription (no public endpoint)</td>
+</tr>
+<tr>
+<td><strong>Outbound transport</strong></td>
+<td>Chat REST API (<code>chat.googleapis.com</code>)</td>
+</tr>
+<tr>
+<td><strong>Authentication</strong></td>
+<td>Service Account JSON with <code>roles/pubsub.subscriber</code> on the subscription</td>
+</tr>
+<tr>
+<td><strong>User identification</strong></td>
+<td>Chat resource names (<code>users/{id}</code>) + email</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="step-1-create-or-pick-a-gcp-project">Step 1: Create or pick a GCP project</h2>
+<p>You need a Google Cloud project to host the Pub/Sub topic. If you don't have one,
+create it at <a href="https://console.cloud.google.com" class="ext" target="_blank" rel="noopener">console.cloud.google.com</a> —
+personal accounts get a free tier that easily covers bot traffic.</p>
+<p>Note the project ID (e.g., <code>my-chat-bot-123</code>). You'll use it in every subsequent
+step.</p>
+<hr />
+<h2 id="step-2-enable-two-apis">Step 2: Enable two APIs</h2>
+<p>In the console, go to <strong>APIs &amp; Services → Library</strong> and enable:</p>
+<ul>
+<li><strong>Google Chat API</strong></li>
+<li><strong>Cloud Pub/Sub API</strong></li>
+</ul>
+<p>Both are free for the volumes a personal bot generates.</p>
+<hr />
+<h2 id="step-3-create-a-service-account">Step 3: Create a Service Account</h2>
+<p><strong>IAM &amp; Admin → Service Accounts → Create Service Account.</strong></p>
+<ul>
+<li>Name: <code>hermes-chat-bot</code></li>
+<li>Skip the "Grant this service account access to project" step. IAM on the specific
+  subscription is all you need — do <strong>NOT</strong> grant project-level Pub/Sub roles.</li>
+</ul>
+<p>After creation, open the SA, go to <strong>Keys → Add Key → Create new key → JSON</strong> and
+download the file. Save it somewhere only Hermes can read (e.g.,
+<code>~/.hermes/google-chat-sa.json</code>, <code>chmod 600</code>).</p>
+<div class="admonition adm-caution"><p class="adm-title">There is NO &quot;Chat Bot Caller&quot; role</p>
+<p>A common mistake is to search for a Chat-specific IAM role and grant it at the
+project level. That role doesn't exist. Chat bot authority comes from being
+installed in a space, not from IAM. All your SA needs is Pub/Sub subscriber on
+the subscription you create in the next step.</p>
+</div>
+<hr />
+<h2 id="step-4-create-the-pubsub-topic-and-subscription">Step 4: Create the Pub/Sub topic and subscription</h2>
+<p><strong>Pub/Sub → Topics → Create topic.</strong></p>
+<ul>
+<li>Topic ID: <code>hermes-chat-events</code></li>
+<li>Leave the defaults for everything else.</li>
+</ul>
+<p>After creation, the topic's detail page has a <strong>Subscriptions</strong> tab. Create one:</p>
+<ul>
+<li>Subscription ID: <code>hermes-chat-events-sub</code></li>
+<li>Delivery type: <strong>Pull</strong></li>
+<li>Message retention: <strong>7 days</strong> (so backlog survives a hermes restart)</li>
+<li>Leave the rest default.</li>
+</ul>
+<hr />
+<h2 id="step-5-iam-binding-on-the-topic-critical">Step 5: IAM binding on the topic (critical)</h2>
+<p>On the <strong>topic</strong> (not the subscription), add an IAM principal:</p>
+<ul>
+<li>Principal: <code>chat-api-push@system.gserviceaccount.com</code></li>
+<li>Role: <code>Pub/Sub Publisher</code></li>
+</ul>
+<p>Without this, Google Chat cannot publish events to your topic and your bot will
+never receive anything.</p>
+<hr />
+<h2 id="step-6-iam-binding-on-the-subscription">Step 6: IAM binding on the subscription</h2>
+<p>On the <strong>subscription</strong>, add your own Service Account as a principal:</p>
+<ul>
+<li>Principal: <code>hermes-chat-bot@&lt;your-project&gt;.iam.gserviceaccount.com</code></li>
+<li>Role: <code>Pub/Sub Subscriber</code></li>
+</ul>
+<p>Also grant <code>Pub/Sub Viewer</code> on the same subscription — Hermes calls
+<code>subscription.get()</code> at startup as a reachability check.</p>
+<hr />
+<h2 id="step-7-configure-the-chat-app">Step 7: Configure the Chat app</h2>
+<p>Go to <strong>APIs &amp; Services → Google Chat API → Configuration</strong>.</p>
+<ul>
+<li><strong>App name</strong>: whatever you want users to see ("Hermes" is reasonable).</li>
+<li><strong>Avatar URL</strong>: any public PNG (Google has some defaults).</li>
+<li><strong>Description</strong>: a short sentence shown in the app directory.</li>
+<li><strong>Functionality</strong>: enable <strong>Receive 1:1 messages</strong> and <strong>Join spaces and group
+  conversations</strong>.</li>
+<li><strong>Connection settings</strong>: select <strong>Cloud Pub/Sub</strong>, enter the topic name
+  <code>projects/&lt;your-project&gt;/topics/hermes-chat-events</code>.</li>
+<li><strong>Visibility</strong>: restrict to your workspace (or specific users) — do not publish
+  to everyone while you're testing.</li>
+</ul>
+<p>Save.</p>
+<hr />
+<h2 id="step-8-install-the-bot-in-a-test-space">Step 8: Install the bot in a test space</h2>
+<p>Open Google Chat in a browser. Start a DM with your app by searching for its name
+in the <strong>+ New Chat</strong> menu. The first time you message it, Google sends an
+<code>ADDED_TO_SPACE</code> event that Hermes uses to cache the bot's own <code>users/{id}</code> for
+self-message filtering.</p>
+<hr />
+<h2 id="step-9-configure-hermes">Step 9: Configure Hermes</h2>
+<p>Add the Google Chat section to <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Required</span>
+<span class="nv">GOOGLE_CHAT_PROJECT_ID</span><span class="o">=</span>my-chat-bot-123
+<span class="nv">GOOGLE_CHAT_SUBSCRIPTION_NAME</span><span class="o">=</span>projects/my-chat-bot-123/subscriptions/hermes-chat-events-sub
+<span class="nv">GOOGLE_CHAT_SERVICE_ACCOUNT_JSON</span><span class="o">=</span>/home/you/.hermes/google-chat-sa.json
+
+<span class="c1"># Authorization — paste the emails of people allowed to talk to the bot</span>
+<span class="nv">GOOGLE_CHAT_ALLOWED_USERS</span><span class="o">=</span>you@yourdomain.com,coworker@yourdomain.com
+
+<span class="c1"># Optional</span>
+<span class="nv">GOOGLE_CHAT_HOME_CHANNEL</span><span class="o">=</span>spaces/AAAA...<span class="w">         </span><span class="c1"># default delivery destination for cron jobs</span>
+<span class="nv">GOOGLE_CHAT_MAX_MESSAGES</span><span class="o">=</span><span class="m">1</span><span class="w">                      </span><span class="c1"># Pub/Sub FlowControl; 1 serializes commands per session</span>
+<span class="nv">GOOGLE_CHAT_MAX_BYTES</span><span class="o">=</span><span class="m">16777216</span><span class="w">                  </span><span class="c1"># 16 MiB — cap on in-flight message bytes</span>
+</code></pre></div>
+
+<p>The project ID also falls back to <code>GOOGLE_CLOUD_PROJECT</code>, and the SA path falls
+back to <code>GOOGLE_APPLICATION_CREDENTIALS</code> — use whichever convention you prefer.</p>
+<p>Under a <a href="../multi-profile-gateways.html">multi-profile gateway</a>, every
+<code>GOOGLE_CHAT_*</code> setting is read from the routed profile's own <code>.env</code>; a
+secondary profile never inherits the default profile's project, subscription,
+or service account. If a profile has no SA configured while the process
+environment carries one for another profile, the adapter refuses to fall back
+to Application Default Credentials (which would authenticate as that other
+profile) and logs an explicit error instead — put
+<code>GOOGLE_CHAT_SERVICE_ACCOUNT_JSON</code> in that profile's <code>.env</code>.</p>
+<p>Install the Google Chat adapter dependencies through its maintained installer.
+It applies the same pinned security floors used by the runtime checks:</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>plugins.platforms.google_chat.oauth<span class="w"> </span>--install-deps
+</code></pre></div>
+
+<p>On Docker / hosted images <code>/opt/hermes/.venv</code> is read-only. That installer
+routes through <code>tools.lazy_deps</code> into <code>HERMES_LAZY_INSTALL_TARGET</code>
+(<code>/opt/data/lazy-packages</code> in the official image) instead of writing
+site-packages. Restart the gateway after it finishes. The published image
+also bakes the <code>[google-chat]</code> extra so a fresh container does not need a
+first-boot install.</p>
+<p>Start the gateway:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>You should see a log line like:</p>
+<div class="highlight"><pre><span></span><code>[GoogleChat] Connected; project=my-chat-bot-123, subscription=&lt;redacted&gt;,
+             bot_user_id=users/XXXX, flow_control(msgs=1, bytes=16777216)
+</code></pre></div>
+
+<p>Send "hola" in the test DM. The bot posts a "Hermes is thinking…" marker, then
+edits that same message in place with the real response — no "message deleted"
+tombstones.</p>
+<h3 id="customizing-the-working-state-marker">Customizing the working-state marker</h3>
+<p>The marker text is configurable via <code>typing_status_text</code> in
+<code>~/.hermes/config.yaml</code> — e.g. a kitten assistant named Ada:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">google_chat</span><span class="p">:</span>
+<span class="w">    </span><span class="c1"># Custom working-state marker text (default: &quot;Hermes is thinking…&quot;).</span>
+<span class="w">    </span><span class="nt">typing_status_text</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;is</span><span class="nv"> </span><span class="s">pouncing…</span><span class="nv"> </span><span class="s">🐾&quot;</span>
+</code></pre></div>
+
+<p>Unlike Slack's ephemeral status line, this is a <strong>real posted message</strong> that
+gets edited in place with the response — so whatever you set here briefly
+appears in the chat as a normal message. Set <code>typing_indicator: false</code> to
+disable the marker entirely.</p>
+<hr />
+<h2 id="formatting-and-capabilities">Formatting and capabilities</h2>
+<p>Google Chat renders a limited markdown subset:</p>
+<table>
+<thead>
+<tr>
+<th>Supported</th>
+<th>Not supported</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>*bold*</code>, <code>_italic_</code>, <code>~strike~</code>, <code>`code`</code></td>
+<td>Headings, lists</td>
+</tr>
+<tr>
+<td>Inline images via URL</td>
+<td>Interactive Card v2 buttons (v1 of this gateway)</td>
+</tr>
+<tr>
+<td>Native file attachments (after <code>/setup-files</code> — see Step 10)</td>
+<td>Native voice notes / circular video notes</td>
+</tr>
+</tbody>
+</table>
+<p>The agent's system prompt includes a Google Chat–specific hint so it knows these
+limits and avoids formatting that won't render.</p>
+<p>Message size limit: 4000 characters per message. Longer agent responses are
+automatically split across multiple messages.</p>
+<p>Thread support: when a user replies inside a thread, Hermes detects the
+<code>thread.name</code> and posts its reply in the same thread, so each thread gets a
+separate Hermes session.</p>
+<h3 id="clarify-questions-as-interactive-cards">Clarify questions as interactive cards</h3>
+<p>When the agent asks a multiple-choice clarify question, the adapter renders it
+as a native <strong>Card v2</strong> with one button per choice plus an
+<strong>"Other / type answer"</strong> button, instead of a plain numbered text list.
+Clicking a button answers the question directly (<code>CARD_CLICKED</code> events route
+the choice back into the waiting session). If the card fails to send, or the
+question has no fixed choices, the adapter falls back to the standard text
+clarify. No configuration needed.</p>
+<hr />
+<h2 id="step-10-native-attachment-delivery-optional">Step 10: Native attachment delivery (optional)</h2>
+<p>Out of the box the bot can post text, inline images via URL, and download cards
+for audio/video/documents. To deliver <strong>native</strong> Chat attachments — the same
+file widget you get when a human drags-and-drops a file — each user authorizes
+the bot once via a per-user OAuth flow.</p>
+<h3 id="why-a-separate-flow">Why a separate flow</h3>
+<p>Google Chat's <code>media.upload</code> endpoint hard-rejects service-account auth:</p>
+<blockquote>
+<p>This method doesn't support app authentication with a service account.
+Authenticate with a user account.</p>
+</blockquote>
+<p>There's no IAM role or scope that fixes this. The endpoint only accepts user
+credentials. So the bot has to act <em>as a user</em> whenever it uploads a file —
+specifically, as the user who asked for the file.</p>
+<h3 id="one-time-setup-per-profile">One-time setup (per profile)</h3>
+<ol>
+<li>Go to <strong>APIs &amp; Services → Credentials</strong> in the same GCP project.</li>
+<li><strong>Create credentials → OAuth client ID → Desktop app</strong>.</li>
+<li>Download the JSON. Move it onto the host that runs Hermes.</li>
+<li>Register the client with Hermes (run under the profile you want it scoped to):</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="c1"># Default profile:</span>
+python<span class="w"> </span>-m<span class="w"> </span>plugins.platforms.google_chat.oauth<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--client-secret<span class="w"> </span>/path/to/client_secret.json
+
+<span class="c1"># A named profile gets its own separate registration:</span>
+hermes<span class="w"> </span>-p<span class="w"> </span>&lt;profile&gt;<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>plugins.platforms.google_chat.oauth<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--client-secret<span class="w"> </span>/path/to/client_secret.json
+</code></pre></div>
+
+<p>That writes the client secret into the active profile's Hermes home (e.g.
+<code>~/.hermes/google_chat_user_client_secret.json</code> for the default profile). The
+client secret is <strong>profile-scoped, not shared across profiles</strong> — each profile
+registers its own. This is deliberate: profiles are isolated auth boundaries, so
+two profiles can point at different Google OAuth apps / accounts. Register it
+once per profile that needs Google Chat attachment delivery.</p>
+<h3 id="per-user-authorization-in-chat">Per-user authorization (in chat)</h3>
+<p>Each user runs the flow once, in their own DM with the bot:</p>
+<ol>
+<li>They send <code>/setup-files</code> to the bot. It replies with status and the next
+   step.</li>
+<li>They send <code>/setup-files start</code>. The bot replies with an OAuth URL.</li>
+<li>They open the URL, click <strong>Allow</strong>, and watch the browser fail to load
+   <code>http://localhost:1/?...&amp;code=...</code>. That failure is expected — the auth
+   code is in the URL bar.</li>
+<li>They copy the failed URL (or just the <code>code=...</code> value) and paste it back
+   into chat as <code>/setup-files &lt;PASTED_URL&gt;</code>. The bot exchanges it for a
+   refresh token.</li>
+</ol>
+<p>The token lands at <code>~/.hermes/google_chat_user_tokens/&lt;sanitized_email&gt;.json</code>.
+Subsequent file requests in that user's DM use <em>their</em> token, so the bot
+uploads as them and the message lands in their space.</p>
+<p>To revoke later: <code>/setup-files revoke</code> deletes only that user's token. Other
+users' tokens are untouched.</p>
+<h3 id="scope">Scope</h3>
+<p>The flow requests exactly one scope: <code>chat.messages.create</code>. That covers both
+<code>media.upload</code> and the <code>messages.create</code> that references the uploaded
+<code>attachmentDataRef</code>. No Drive, no broader Chat scopes — this is least-privilege
+on purpose.</p>
+<h3 id="multi-user-behavior">Multi-user behavior</h3>
+<p>When the asker has no per-user token yet, the bot falls back to a legacy
+single-user token at <code>~/.hermes/google_chat_user_token.json</code> (if present from
+a pre-multi-user install). When neither is available, the bot posts a clear
+text notice telling the asker to run <code>/setup-files</code>.</p>
+<p>A user revoking only clears their own slot. A 401/403 from one user's token
+evicts only that user's cache. Users don't disrupt each other.</p>
+<hr />
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p><strong>Bot stays silent after sending "hola."</strong></p>
+<ol>
+<li>Check the Pub/Sub subscription has undelivered messages in the console.
+   If it does, Hermes isn't authenticated — verify <code>GOOGLE_CHAT_SERVICE_ACCOUNT_JSON</code>
+   and that the SA is listed as <code>Pub/Sub Subscriber</code> on the subscription.</li>
+<li>If the subscription has zero messages, Google Chat isn't publishing.
+   Double-check the IAM binding on the <strong>topic</strong>:
+   <code>chat-api-push@system.gserviceaccount.com</code> must have <code>Pub/Sub Publisher</code>.</li>
+<li>Check <code>hermes gateway</code> logs for <code>[GoogleChat] Connected</code>. If you see
+   <code>[GoogleChat] Config validation failed</code>, the error message tells you which
+   env var to fix.</li>
+</ol>
+<p><strong>Bot replies but an error message appears instead of the agent's answer.</strong></p>
+<p>Check logs for <code>[GoogleChat] Pub/Sub stream died</code> — if these repeat, your SA
+credentials may have been rotated or the subscription deleted. After 10 attempts
+the adapter marks itself fatal.</p>
+<p><strong>"403 Forbidden" on every outbound message.</strong></p>
+<p>The bot was removed from the space, or you revoked it in the Chat API console.
+Re-install it in the space (the next <code>ADDED_TO_SPACE</code> event will re-enable
+messaging automatically).</p>
+<p><strong>Too many "Rate limit hit" warnings.</strong></p>
+<p>The Chat API's default quotas allow 60 messages per space per minute. If your
+agent produces long streaming responses that exceed that, the adapter retries
+with exponential backoff — but you'll still see user-visible latency. Consider
+concise responses or raising the quota in the GCP console.</p>
+<p><strong>Bot keeps posting the "/setup-files" notice instead of files.</strong></p>
+<p>The asker has no per-user OAuth token and there's no legacy fallback. Run
+<code>/setup-files</code> in their DM and follow Step 10. After the exchange completes
+the next file request uploads natively without a gateway restart.</p>
+<p><strong><code>/setup-files start</code> says "No client credentials stored."</strong></p>
+<p>The one-time setup wasn't done <em>for this profile</em> (the client secret is
+profile-scoped, so a registration under one profile won't be seen by another).
+From a terminal, run it under the profile the gateway uses:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Default profile:</span>
+python<span class="w"> </span>-m<span class="w"> </span>plugins.platforms.google_chat.oauth<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--client-secret<span class="w"> </span>/path/to/client_secret.json
+
+<span class="c1"># Named profile:</span>
+hermes<span class="w"> </span>-p<span class="w"> </span>&lt;profile&gt;<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>plugins.platforms.google_chat.oauth<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--client-secret<span class="w"> </span>/path/to/client_secret.json
+</code></pre></div>
+
+<p>Then send <code>/setup-files start</code> again.</p>
+<p><strong><code>/setup-files &lt;PASTED_URL&gt;</code> says "Token exchange failed."</strong></p>
+<p>The auth code is single-use and short-lived (typically a few minutes). Send
+<code>/setup-files start</code> to get a fresh URL and retry.</p>
+<hr />
+<h2 id="security-notes">Security notes</h2>
+<ul>
+<li><strong>Service Account scope</strong>: the adapter requests <code>chat.bot</code> and <code>pubsub</code> scopes.
+  IAM should be the actual enforcement — grant your SA the minimum
+  (<code>roles/pubsub.subscriber</code> + <code>roles/pubsub.viewer</code> on the subscription), not
+  project-level or org-level Pub/Sub roles.</li>
+<li><strong>Attachment download protection</strong>: Hermes will only attach the SA bearer
+  token to URLs whose host matches a short allowlist of Google-owned domains
+  (<code>googleapis.com</code>, <code>drive.google.com</code>, <code>lh[3-6].googleusercontent.com</code>, and
+  a few others). Any other host is rejected before the HTTP request, to
+  protect against SSRF scenarios where a crafted event could redirect the
+  bearer token to the GCE metadata service.</li>
+<li><strong>Redaction</strong>: Service Account emails, subscription paths, and topic paths
+  are stripped from log output by <code>agent/redact.py</code>. The debug envelope dump
+  (<code>GOOGLE_CHAT_DEBUG_RAW=1</code>) routes through the same redaction filter and
+  logs at DEBUG level.</li>
+<li><strong>Compliance</strong>: if you plan to connect this bot to a regulated workspace
+  (anything with a data-residency or AI-governance policy), get that approval
+  before the first install.</li>
+<li><strong>User OAuth scope</strong>: the per-user attachment flow requests <em>only</em>
+  <code>chat.messages.create</code> — the minimum that covers <code>media.upload</code> plus the
+  follow-up <code>messages.create</code>. Tokens are persisted as plain JSON at
+  <code>~/.hermes/google_chat_user_tokens/&lt;sanitized_email&gt;.json</code> (filesystem
+  permissions are the protection — same model as the SA key file). Each
+  token is owned by exactly one user; revoke is scoped to that user.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/messaging/google_chat</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#overview">Overview</a></li>
+<li class="lvl2"><a href="#step-1-create-or-pick-a-gcp-project">Step 1: Create or pick a GCP project</a></li>
+<li class="lvl2"><a href="#step-2-enable-two-apis">Step 2: Enable two APIs</a></li>
+<li class="lvl2"><a href="#step-3-create-a-service-account">Step 3: Create a Service Account</a></li>
+<li class="lvl2"><a href="#step-4-create-the-pubsub-topic-and-subscription">Step 4: Create the Pub/Sub topic and subscription</a></li>
+<li class="lvl2"><a href="#step-5-iam-binding-on-the-topic-critical">Step 5: IAM binding on the topic (critical)</a></li>
+<li class="lvl2"><a href="#step-6-iam-binding-on-the-subscription">Step 6: IAM binding on the subscription</a></li>
+<li class="lvl2"><a href="#step-7-configure-the-chat-app">Step 7: Configure the Chat app</a></li>
+<li class="lvl2"><a href="#step-8-install-the-bot-in-a-test-space">Step 8: Install the bot in a test space</a></li>
+<li class="lvl2"><a href="#step-9-configure-hermes">Step 9: Configure Hermes</a></li>
+<li class="lvl3"><a href="#customizing-the-working-state-marker">Customizing the working-state marker</a></li>
+<li class="lvl2"><a href="#formatting-and-capabilities">Formatting and capabilities</a></li>
+<li class="lvl3"><a href="#clarify-questions-as-interactive-cards">Clarify questions as interactive cards</a></li>
+<li class="lvl2"><a href="#step-10-native-attachment-delivery-optional">Step 10: Native attachment delivery (optional)</a></li>
+<li class="lvl3"><a href="#why-a-separate-flow">Why a separate flow</a></li>
+<li class="lvl3"><a href="#one-time-setup-per-profile">One-time setup (per profile)</a></li>
+<li class="lvl3"><a href="#per-user-authorization-in-chat">Per-user authorization (in chat)</a></li>
+<li class="lvl3"><a href="#scope">Scope</a></li>
+<li class="lvl3"><a href="#multi-user-behavior">Multi-user behavior</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl2"><a href="#security-notes">Security notes</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

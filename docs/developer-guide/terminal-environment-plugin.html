@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terminal Environment Provider Plugins · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/terminal-environment-plugin</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="terminal-environment-provider-plugins">Terminal Environment Provider Plugins</h1>
+<p>Hermes runs shell commands through a pluggable set of <strong>terminal backends</strong>.
+The built-in backends (local, Docker, Singularity, Modal, Daytona, Vercel
+Sandbox, SSH) live in the core repo under <code>tools/environments/</code>. Third-party
+sandbox vendors integrate as <strong>plugins</strong> instead — a standalone plugin repo
+installed under <code>~/.hermes/plugins/</code>, registering a backend the user selects
+exactly like a built-in one via <code>terminal.backend</code> in <code>config.yaml</code>.</p>
+<p>This page mirrors the <a href="browser-provider-plugin.html">Browser Provider Plugins</a>
+guide — same registration flow, same scope semantics.</p>
+<h2 id="what-a-provider-controls">What a provider controls</h2>
+<p>A registered backend automatically participates in every core surface:</p>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>Driven by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Command dispatch (<code>terminal</code>, <code>execute_code</code>, file tools)</td>
+<td><code>create_environment()</code></td>
+</tr>
+<tr>
+<td><code>hermes setup</code> backend picker</td>
+<td><code>display_name</code>, <code>description</code>, <code>setup_instructions()</code>, <code>post_setup()</code></td>
+</tr>
+<tr>
+<td>Dashboard terminal-backend picker (probe status)</td>
+<td><code>probe()</code></td>
+</tr>
+<tr>
+<td><code>hermes status</code> / <code>hermes doctor</code></td>
+<td><code>doctor_checks()</code></td>
+</tr>
+<tr>
+<td>System-prompt environment hints</td>
+<td><code>is_remote</code>, <code>env_description</code></td>
+</tr>
+<tr>
+<td>Dangerous-command approval skipping</td>
+<td><code>skip_container_guards</code></td>
+</tr>
+<tr>
+<td>Container path/cwd handling</td>
+<td><code>is_container</code></td>
+</tr>
+<tr>
+<td>Synced cache-file path translation</td>
+<td><code>cache_path_base</code></td>
+</tr>
+<tr>
+<td>Secret stripping from spawned subprocesses</td>
+<td><code>strip_env_keys</code></td>
+</tr>
+<tr>
+<td>Per-session sandbox isolation (<code>container_persistent: false</code>)</td>
+<td><code>session_isolated_when_nonpersistent</code></td>
+</tr>
+</tbody>
+</table>
+<p>Declaring these flags on the provider closes the classic "new backend missed
+classification site N" bug class — the core consults the registry at each
+site instead of a hardcoded list of names.</p>
+<h2 id="minimal-provider">Minimal provider</h2>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.terminal_env_provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">TerminalEnvironmentProvider</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">AcmeBoxEnvironment</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Must satisfy the BaseEnvironment duck-typed contract.&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cwd</span><span class="p">,</span> <span class="n">timeout</span><span class="p">,</span> <span class="n">task_id</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cwd</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">timeout</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">task_id</span> <span class="o">=</span> <span class="n">cwd</span><span class="p">,</span> <span class="n">timeout</span><span class="p">,</span> <span class="n">task_id</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">execute</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">command</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="o">...</span>  <span class="c1"># run the command in the sandbox</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;output&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="s2">&quot;exit_code&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">cleanup</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="o">...</span>  <span class="c1"># tear down / detach</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">AcmeBoxProvider</span><span class="p">(</span><span class="n">TerminalEnvironmentProvider</span><span class="p">):</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="s2">&quot;acmebox&quot;</span>
+    <span class="n">display_name</span> <span class="o">=</span> <span class="s2">&quot;AcmeBox&quot;</span>
+    <span class="n">is_remote</span> <span class="o">=</span> <span class="kc">True</span>          <span class="c1"># commands don&#39;t run on the host</span>
+    <span class="n">is_container</span> <span class="o">=</span> <span class="kc">True</span>       <span class="c1"># container-style path/cwd semantics</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">description</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="s2">&quot;Run commands in an AcmeBox cloud sandbox.&quot;</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">cache_path_base</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="s2">&quot;~/.hermes&quot;</span>    <span class="c1"># where synced cache files land, or None</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">strip_env_keys</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="nb">frozenset</span><span class="p">({</span><span class="s2">&quot;ACMEBOX_TOKEN&quot;</span><span class="p">})</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_available</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="kn">import</span><span class="w"> </span><span class="nn">importlib.util</span><span class="o">,</span><span class="w"> </span><span class="nn">os</span>
+        <span class="k">return</span> <span class="p">(</span>
+            <span class="n">importlib</span><span class="o">.</span><span class="n">util</span><span class="o">.</span><span class="n">find_spec</span><span class="p">(</span><span class="s2">&quot;acmebox&quot;</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+            <span class="ow">and</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;ACMEBOX_TOKEN&quot;</span><span class="p">))</span>
+        <span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">create_environment</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">cwd</span><span class="p">,</span> <span class="n">timeout</span><span class="p">,</span> <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;default&quot;</span><span class="p">,</span>
+                           <span class="n">image</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">container_config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">AcmeBoxEnvironment</span><span class="p">(</span><span class="n">cwd</span><span class="p">,</span> <span class="n">timeout</span><span class="p">,</span> <span class="n">task_id</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_terminal_environment_provider</span><span class="p">(</span><span class="n">AcmeBoxProvider</span><span class="p">())</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">acmebox</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.1.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">AcmeBox cloud sandbox terminal backend</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backend</span>
+</code></pre></div>
+
+<p>Enable it, select it, run:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>plugins<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>acmebox
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>terminal.backend<span class="w"> </span>acmebox
+</code></pre></div>
+
+<h2 id="rules">Rules</h2>
+<ul>
+<li><strong>Reserved names.</strong> Registrations that collide with a built-in backend name
+  (<code>local</code>, <code>docker</code>, <code>singularity</code>, <code>modal</code>, <code>managed_modal</code>, <code>daytona</code>,
+  <code>vercel_sandbox</code>, <code>ssh</code>) are rejected. Plugins extend the backend set; they
+  never shadow in-tree backends.</li>
+<li><strong><code>create_environment</code> must accept <code>**kwargs</code></strong> and ignore unknown keys —
+  the forward-compat contract that lets the factory signature evolve without
+  breaking older plugins.</li>
+<li><strong><code>is_available()</code> / <code>probe()</code> must be cheap.</strong> No network calls — they run
+  during requirement checks and UI paints.</li>
+<li><strong>Fail-soft everywhere.</strong> A provider attribute that raises is treated as
+  its default by the core (e.g. a raising <code>skip_container_guards</code> keeps the
+  approval layer ON). Don't rely on exceptions for control flow.</li>
+<li><strong>Secrets belong in <code>strip_env_keys</code>.</strong> Your vendor token must never be
+  readable by a model-authored shell command; listing it strips it from every
+  spawned subprocess unconditionally, like the built-in <code>MODAL_*</code> /
+  <code>DAYTONA_API_KEY</code> handling.</li>
+</ul>
+<h2 id="environment-object-contract">Environment object contract</h2>
+<p><code>create_environment()</code> returns an object satisfying the same duck-typed
+interface as <code>tools.environments.base.BaseEnvironment</code>:</p>
+<ul>
+<li><code>execute(command, timeout=None, ...)</code> → <code>{"output": str, "exit_code": int}</code></li>
+<li><code>cleanup()</code> — release resources; called on session teardown / idle reaping</li>
+<li>Optional: persistence hooks mirroring the built-in cloud backends</li>
+</ul>
+<p>Subclassing <code>BaseEnvironment</code> is recommended (you inherit the shared file-sync
+and background-process plumbing) but not required.</p>
+<h2 id="session-isolation-semantics">Session isolation semantics</h2>
+<p>If your sandbox is <strong>resumed by name</strong> (a durable VM the backend re-attaches
+to), set <code>session_isolated_when_nonpersistent = True</code>. With
+<code>terminal.container_persistent: false</code>, each session then gets its own
+sandbox identity instead of sharing one — without this, two independent
+ephemeral runs could attach one live VM and delete it out from under each
+other.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/terminal-environment-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#what-a-provider-controls">What a provider controls</a></li>
+<li class="lvl2"><a href="#minimal-provider">Minimal provider</a></li>
+<li class="lvl2"><a href="#rules">Rules</a></li>
+<li class="lvl2"><a href="#environment-object-contract">Environment object contract</a></li>
+<li class="lvl2"><a href="#session-isolation-semantics">Session isolation semantics</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

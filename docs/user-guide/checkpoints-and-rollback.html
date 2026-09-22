@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Checkpoints and /rollback · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/checkpoints-and-rollback</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="checkpoints-and-rollback">Checkpoints and <code>/rollback</code></h1>
+<p>Hermes Agent can automatically snapshot your project before <strong>destructive operations</strong> and restore it with a single command. Checkpoints are <strong>opt-in</strong> as of v2 — most users never use <code>/rollback</code>, and the shadow-store storage is non-trivial over time, so the default is off.</p>
+<p>Enable checkpoints per-session with <code>--checkpoints</code>:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>chat<span class="w"> </span>--checkpoints
+</code></pre></div>
+
+<p>Or enable globally in <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">checkpoints</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>This safety net is powered by an internal <strong>Checkpoint Manager</strong> that keeps a single shared shadow git repository under <code>~/.hermes/checkpoints/store/</code> — your real project <code>.git</code> is never touched. Every project the agent works in shares the same store, so git's content-addressable object DB deduplicates across projects and across turns.</p>
+<h2 id="what-triggers-a-checkpoint">What Triggers a Checkpoint</h2>
+<p>Checkpoints are taken automatically before:</p>
+<ul>
+<li><strong>File tools</strong> — <code>write_file</code> and <code>patch</code></li>
+<li><strong>Destructive terminal commands</strong> — <code>rm</code>, <code>rmdir</code>, <code>cp</code>, <code>install</code>, <code>mv</code>, <code>sed -i</code>, <code>truncate</code>, <code>dd</code>, <code>shred</code>, output redirects (<code>&gt;</code>), and <code>git reset</code>/<code>clean</code>/<code>checkout</code></li>
+</ul>
+<p>The agent creates <strong>at most one checkpoint per directory per turn</strong>, so long-running sessions don't spam snapshots.</p>
+<h2 id="quick-reference">Quick Reference</h2>
+<p>In-session slash commands:</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/rollback</code></td>
+<td>List all checkpoints with change stats</td>
+</tr>
+<tr>
+<td><code>/rollback &lt;N&gt;</code></td>
+<td>Restore to checkpoint N, keeping your hand-edits (also undoes last chat turn)</td>
+</tr>
+<tr>
+<td><code>/rollback &lt;N&gt; --all</code></td>
+<td>Full restore — overwrites your hand-edits too</td>
+</tr>
+<tr>
+<td><code>/rollback diff &lt;N&gt;</code></td>
+<td>Preview diff between checkpoint N and current state</td>
+</tr>
+<tr>
+<td><code>/rollback &lt;N&gt; &lt;file&gt;</code></td>
+<td>Restore a single file from checkpoint N</td>
+</tr>
+</tbody>
+</table>
+<p>CLI for inspecting and managing the store outside a session:</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hermes checkpoints</code></td>
+<td>Show total size, project count, per-project breakdown</td>
+</tr>
+<tr>
+<td><code>hermes checkpoints status</code></td>
+<td>Same as bare <code>checkpoints</code></td>
+</tr>
+<tr>
+<td><code>hermes checkpoints list</code></td>
+<td>Alias for <code>status</code></td>
+</tr>
+<tr>
+<td><code>hermes checkpoints prune</code></td>
+<td>Force a sweep: delete orphans/stale, GC, enforce size cap</td>
+</tr>
+<tr>
+<td><code>hermes checkpoints clear</code></td>
+<td>Nuke the entire checkpoint base (asks first)</td>
+</tr>
+<tr>
+<td><code>hermes checkpoints clear-legacy</code></td>
+<td>Delete only the <code>legacy-*</code> archives from v1 migration</td>
+</tr>
+</tbody>
+</table>
+<h2 id="how-checkpoints-work">How Checkpoints Work</h2>
+<p>At a high level:</p>
+<ul>
+<li>Hermes detects when tools are about to <strong>modify files</strong> in your working tree.</li>
+<li>Once per conversation turn (per directory), it:</li>
+<li>Resolves a reasonable project root for the file.</li>
+<li>Initialises or reuses the <strong>single shared shadow store</strong> at <code>~/.hermes/checkpoints/store/</code>.</li>
+<li>Stages into a per-project index, builds a tree, and commits to a per-project ref (<code>refs/hermes/&lt;project-hash&gt;</code>).</li>
+<li>These per-project refs form a checkpoint history that you can inspect and restore via <code>/rollback</code>.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>flowchart LR
+  user[&quot;User command\n(hermes, gateway)&quot;]
+  agent[&quot;AIAgent\n(run_agent.py)&quot;]
+  tools[&quot;File &amp; terminal tools&quot;]
+  cpMgr[&quot;CheckpointManager&quot;]
+  store[&quot;Shared shadow store\n~/.hermes/checkpoints/store/&quot;]
+
+  user --&gt; agent
+  agent --&gt;|&quot;tool call&quot;| tools
+  tools --&gt;|&quot;before mutate\nensure_checkpoint()&quot;| cpMgr
+  cpMgr --&gt;|&quot;git add/commit-tree/update-ref&quot;| store
+  cpMgr --&gt;|&quot;OK / skipped&quot;| tools
+  tools --&gt;|&quot;apply changes&quot;| agent
+</code></pre></div>
+
+<h2 id="configuration">Configuration</h2>
+<p>Configure in <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">checkpoints</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">              </span><span class="c1"># master switch (default: false — opt-in)</span>
+<span class="w">  </span><span class="nt">max_snapshots</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">20</span><span class="w">           </span><span class="c1"># max checkpoints per project (enforced via ref rewrite + gc)</span>
+<span class="w">  </span><span class="nt">max_total_size_mb</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">500</span><span class="w">      </span><span class="c1"># hard cap on total store size; oldest commits dropped</span>
+<span class="w">  </span><span class="nt">max_file_size_mb</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span><span class="w">        </span><span class="c1"># skip any single file larger than this</span>
+
+<span class="w">  </span><span class="c1"># Auto-maintenance (on by default): sweep ~/.hermes/checkpoints/ in the</span>
+<span class="w">  </span><span class="c1"># background — the CLI on a helper thread right after launch, the gateway</span>
+<span class="w">  </span><span class="c1"># on its housekeeping tick — and delete project entries whose last_touch is</span>
+<span class="w">  </span><span class="c1"># older than retention_days. Runs at most once per min_interval_hours,</span>
+<span class="w">  </span><span class="c1"># tracked via a .last_prune marker. It never blocks the prompt or gateway</span>
+<span class="w">  </span><span class="c1"># startup: the `git gc` that reclaims space can take tens of seconds on a</span>
+<span class="w">  </span><span class="c1"># large store. This sweep never deletes &quot;orphan&quot; entries (working directory</span>
+<span class="w">  </span><span class="c1"># not found) — a missing workdir is ambiguous (deleted project vs. an</span>
+<span class="w">  </span><span class="c1"># unmounted external volume / network share / VPN not yet up), so orphan</span>
+<span class="w">  </span><span class="c1"># cleanup is only ever done via the explicit `hermes checkpoints prune`</span>
+<span class="w">  </span><span class="c1"># command below, with a confirmation prompt.</span>
+<span class="w">  </span><span class="nt">auto_prune</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">retention_days</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">7</span>
+<span class="w">  </span><span class="nt">min_interval_hours</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">24</span>
+</code></pre></div>
+
+<p>To disable everything:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">checkpoints</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">  </span><span class="nt">auto_prune</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>When <code>enabled: false</code>, the Checkpoint Manager is a no-op and never attempts git operations. When <code>auto_prune: false</code>, the store grows until you run <code>hermes checkpoints prune</code> manually.</p>
+<h2 id="listing-checkpoints">Listing Checkpoints</h2>
+<p>From a CLI session:</p>
+<div class="highlight"><pre><span></span><code>/rollback
+</code></pre></div>
+
+<p>Hermes responds with a formatted list showing change statistics:</p>
+<div class="highlight"><pre><span></span><code>📸 Checkpoints for /path/to/project:
+
+  1. 4270a8c  2026-03-16 04:36  before patch  (1 file, +1/-0)
+  2. eaf4c1f  2026-03-16 04:35  before write_file
+  3. b3f9d2e  2026-03-16 04:34  before terminal: sed -i s/old/new/ config.py  (1 file, +1/-1)
+
+  /rollback &lt;N&gt;             restore to checkpoint N (keeps your hand-edits)
+  /rollback &lt;N&gt; --all       full restore, overwriting your hand-edits too
+  /rollback diff &lt;N&gt;        preview changes since checkpoint N
+  /rollback &lt;N&gt; &lt;file&gt;      restore a single file from checkpoint N
+</code></pre></div>
+
+<h2 id="inspecting-the-store-from-the-shell">Inspecting the Store from the Shell</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>checkpoints
+</code></pre></div>
+
+<p>Sample output:</p>
+<div class="highlight"><pre><span></span><code>Checkpoint base: /home/you/.hermes/checkpoints
+Total size:      142.3 MB
+  store/         138.1 MB
+  legacy-*       4.2 MB
+Projects:        12
+
+  WORKDIR                                                       COMMITS    LAST TOUCH  STATE
+  /home/you/code/hermes-agent                                        20       2h ago  live
+  /home/you/code/experiments/rl-runner                                8       1d ago  live
+  /home/you/code/old-prototype                                        3       9d ago  orphan
+  ...
+
+Legacy archives (1):
+  legacy-20260506-050616                           4.2 MB
+
+Clear with: hermes checkpoints clear-legacy
+</code></pre></div>
+
+<p>Force a full sweep (ignores the 24h idempotency marker):</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>checkpoints<span class="w"> </span>prune<span class="w"> </span>--retention-days<span class="w"> </span><span class="m">3</span><span class="w"> </span>--max-size-mb<span class="w"> </span><span class="m">200</span>
+</code></pre></div>
+
+<h2 id="previewing-changes-with-rollback-diff">Previewing Changes with <code>/rollback diff</code></h2>
+<p>Before committing to a restore, preview what has changed since a checkpoint:</p>
+<div class="highlight"><pre><span></span><code>/rollback diff 1
+</code></pre></div>
+
+<p>This shows a git diff stat summary followed by the actual diff.</p>
+<h2 id="restoring-with-rollback">Restoring with <code>/rollback</code></h2>
+<div class="highlight"><pre><span></span><code>/rollback 1
+</code></pre></div>
+
+<p>Behind the scenes, Hermes:</p>
+<ol>
+<li>Verifies the target commit exists in the shadow store.</li>
+<li>Takes a <strong>pre-rollback snapshot</strong> of the current state so you can "undo the undo" later.</li>
+<li>Restores tracked files in your working directory — <strong>preserving your hand-edits</strong> (see below).</li>
+<li><strong>Undoes the last conversation turn</strong> so the agent's context matches the restored filesystem state.</li>
+</ol>
+<h3 id="user-hand-edits-are-preserved-by-default">User hand-edits are preserved by default</h3>
+<p><code>/rollback &lt;N&gt;</code> restores only the files Hermes itself changed. Every successful
+<code>write_file</code> / <code>patch</code> records the file's content hash in an <strong>agent-write
+ledger</strong>; at restore time, any file whose current contents no longer match what
+Hermes last wrote (you edited it afterwards, or Hermes never touched it) is
+<strong>skipped</strong> instead of overwritten, and listed in the output:</p>
+<div class="highlight"><pre><span></span><code>✅ Restored to checkpoint a1b2c3d4: before write_file
+↷ Kept your hand-edits: src/config.py, notes.md
+Use /rollback &lt;N&gt; --all to restore those too.
+</code></pre></div>
+
+<p>To force the classic full restore that reverts everything — including your own
+edits — add <code>--all</code>:</p>
+<div class="highlight"><pre><span></span><code>/rollback 1 --all
+</code></pre></div>
+
+<p>If the ledger is empty (a store created before this feature, or Hermes hasn't
+written any files in the project yet), <code>/rollback</code> falls back to the full
+restore automatically.</p>
+<h2 id="single-file-restore">Single-File Restore</h2>
+<p>Restore just one file from a checkpoint without affecting the rest of the directory:</p>
+<div class="highlight"><pre><span></span><code>/rollback 1 src/broken_file.py
+</code></pre></div>
+
+<h2 id="safety-and-performance-guards">Safety and Performance Guards</h2>
+<h3 id="container-backends">Container Backends</h3>
+<p>With a container terminal backend (<code>docker</code>, <code>singularity</code>, <code>modal</code>, <code>daytona</code>, <code>vercel_sandbox</code>, or a container plugin), file paths belong to the sandbox rather than the host. Hermes therefore does not take checkpoints or record the agent-write ledger for those paths, and <code>/rollback</code> explains the limitation: it still lists existing host checkpoints but refuses diff and restore, on the CLI and in messaging-gateway chats alike; <code>/diff session</code> answers with the same reason. The TUI and Desktop behave the same: <code>/rollback list</code> still works while <code>/rollback diff</code> and <code>/rollback &lt;N&gt;</code> are refused with that reason. Local and SSH backends are unaffected. To point <code>terminal.cwd</code> at the container-side view of a mounted directory see <a href="configuration.html"><code>terminal.docker_mount_cwd_to_workspace</code></a>.</p>
+<ul>
+<li><strong>Git availability</strong> — if <code>git</code> is not found on <code>PATH</code>, checkpoints are transparently disabled.</li>
+<li><strong>Directory scope</strong> — Hermes skips overly broad directories (root <code>/</code>, home <code>$HOME</code>).</li>
+<li><strong>Repository size</strong> — directories with more than 50,000 files are skipped.</li>
+<li><strong>Per-file size cap</strong> — files larger than <code>max_file_size_mb</code> (default 10 MB) are excluded from the snapshot. Prevents accidentally swallowing datasets, model weights, or generated media.</li>
+<li><strong>Total store size cap</strong> — when the store exceeds <code>max_total_size_mb</code> (default 500 MB), each checkpoint drops the oldest commit of every project that still has more than one snapshot (one round per checkpoint), and the periodic prune repeats drop → gc → re-measure until the store fits. A project is never reduced below one snapshot, so a store of many large projects can legitimately sit above the cap.</li>
+<li><strong>Real pruning, off the hot path</strong> — <code>max_snapshots</code> and the size cap are enforced by rewriting the per-project ref at checkpoint time (cheap); the store is then marked <code>.gc-pending</code> and the periodic prune runs <code>git gc --prune=now</code> once, so loose objects don't accumulate and a tool call never waits on a full repack.</li>
+<li><strong>No-change snapshots</strong> — if there are no changes since the last snapshot, the checkpoint is skipped.</li>
+<li><strong>Non-fatal errors</strong> — all errors inside the Checkpoint Manager are logged at debug level; your tools continue to run.</li>
+</ul>
+<h2 id="where-checkpoints-live">Where Checkpoints Live</h2>
+<div class="highlight"><pre><span></span><code>~/.hermes/checkpoints/
+  ├── store/                 # single shared bare git repo
+  │   ├── HEAD, objects/     # git internals (shared across projects)
+  │   ├── refs/hermes/&lt;hash&gt; # per-project branch tip
+  │   ├── indexes/&lt;hash&gt;     # per-project git index
+  │   ├── projects/&lt;hash&gt;.json  # workdir + created_at + last_touch
+  │   ├── .gc-pending        # refs rewritten since the last gc; cleared by the next prune
+  │   └── info/exclude
+  ├── .last_prune            # auto-prune idempotency marker
+  └── legacy-&lt;ts&gt;/           # archived pre-v2 per-project shadow repos
+</code></pre></div>
+
+<p>Each <code>&lt;hash&gt;</code> is derived from the absolute path of the working directory. You normally never need to touch these manually — use <code>hermes checkpoints status</code> / <code>prune</code> / <code>clear</code> instead.</p>
+<h3 id="migration-from-v1">Migration from v1</h3>
+<p>Before the v2 rewrite, each working directory got its own complete shadow git repo directly under <code>~/.hermes/checkpoints/&lt;hash&gt;/</code>. That layout couldn't dedup objects across projects and had a documented no-op pruner — the store would grow without bound.</p>
+<p>On first v2 run, any pre-v2 shadow repos are moved into <code>~/.hermes/checkpoints/legacy-&lt;timestamp&gt;/</code> so the new single-store layout starts clean. Old <code>/rollback</code> history is still reachable by manually inspecting the legacy archive with <code>git</code>; once you're confident you don't need it, run:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>checkpoints<span class="w"> </span>clear-legacy
+</code></pre></div>
+
+<p>to reclaim the space. Legacy archives are also swept by <code>auto_prune</code> after <code>retention_days</code>.</p>
+<h2 id="best-practices">Best Practices</h2>
+<ul>
+<li><strong>Enable checkpoints only when you need them</strong> — <code>hermes chat --checkpoints</code> or per-profile <code>enabled: true</code>.</li>
+<li><strong>Use <code>/rollback diff</code> before restoring</strong> — preview what will change to pick the right checkpoint.</li>
+<li><strong>Use <code>/rollback</code> instead of <code>git reset</code></strong> when you want to undo agent-driven changes only.</li>
+<li><strong>Check <code>hermes checkpoints status</code> occasionally</strong> if you use checkpoints regularly — shows which projects are active and what the store costs you.</li>
+<li><strong>Combine with Git worktrees</strong> for maximum safety — keep each Hermes session in its own worktree/branch, with checkpoints as an extra layer.</li>
+</ul>
+<p>For running multiple agents in parallel on the same repo, see the guide on <a href="git-worktrees.html">Git worktrees</a>.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/checkpoints-and-rollback</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#what-triggers-a-checkpoint">What Triggers a Checkpoint</a></li>
+<li class="lvl2"><a href="#quick-reference">Quick Reference</a></li>
+<li class="lvl2"><a href="#how-checkpoints-work">How Checkpoints Work</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl2"><a href="#listing-checkpoints">Listing Checkpoints</a></li>
+<li class="lvl2"><a href="#inspecting-the-store-from-the-shell">Inspecting the Store from the Shell</a></li>
+<li class="lvl2"><a href="#previewing-changes-with-rollback-diff">Previewing Changes with /rollback diff</a></li>
+<li class="lvl2"><a href="#restoring-with-rollback">Restoring with /rollback</a></li>
+<li class="lvl3"><a href="#user-hand-edits-are-preserved-by-default">User hand-edits are preserved by default</a></li>
+<li class="lvl2"><a href="#single-file-restore">Single-File Restore</a></li>
+<li class="lvl2"><a href="#safety-and-performance-guards">Safety and Performance Guards</a></li>
+<li class="lvl3"><a href="#container-backends">Container Backends</a></li>
+<li class="lvl2"><a href="#where-checkpoints-live">Where Checkpoints Live</a></li>
+<li class="lvl3"><a href="#migration-from-v1">Migration from v1</a></li>
+<li class="lvl2"><a href="#best-practices">Best Practices</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

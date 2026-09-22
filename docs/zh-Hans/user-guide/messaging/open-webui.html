@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Open WebUI · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/messaging/open-webui</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="open-webui-集成">Open WebUI 集成</h1>
+<p><a href="https://github.com/open-webui/open-webui" class="ext" target="_blank" rel="noopener">Open WebUI</a>（126k★）是最受欢迎的自托管 AI 聊天界面。借助 Hermes Agent 内置的 API 服务器，你可以将 Open WebUI 用作 agent 的精美 Web 前端——完整支持对话管理、用户账户和现代聊天界面。</p>
+<h2 id="架构">架构</h2>
+<div class="highlight"><pre><span></span><code>flowchart LR
+    A[&quot;Open WebUI&lt;br/&gt;浏览器 UI&lt;br/&gt;端口 3000&quot;]
+    B[&quot;hermes-agent&lt;br/&gt;gateway API 服务器&lt;br/&gt;端口 8642&quot;]
+    A --&gt;|POST /v1/chat/completions| B
+    B --&gt;|SSE 流式响应| A
+</code></pre></div>
+
+<p>Open WebUI 连接 Hermes Agent 的 API 服务器，方式与连接 OpenAI 完全相同。Hermes 使用其完整工具集——终端、文件操作、网络搜索、记忆、技能——处理请求并返回最终响应。</p>
+<div class="admonition adm-important"><p class="adm-title">运行时位置</p>
+<p>API 服务器是一个 <strong>Hermes agent 运行时</strong>，而非纯 LLM 代理。对于每个请求，Hermes 会在 API 服务器所在主机上创建一个服务端 <code>AIAgent</code>。工具调用在该 API 服务器运行的位置执行。</p>
+<p>例如，如果笔记本电脑将 Open WebUI 或其他 OpenAI 兼容客户端指向远程机器上的 Hermes API 服务器，则 <code>pwd</code>、文件工具、浏览器工具、本地 MCP 工具及其他工作区工具将在远程 API 服务器主机上运行，而非在笔记本电脑上。</p>
+</div>
+<p>Open WebUI 与 Hermes 之间是服务器到服务器的通信，因此此集成无需配置 <code>API_SERVER_CORS_ORIGINS</code>。</p>
+<h2 id="快速设置">快速设置</h2>
+<h3 id="1-启用-api-服务器">1. 启用 API 服务器</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>API_SERVER_ENABLED<span class="w"> </span><span class="nb">true</span>
+hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>API_SERVER_KEY<span class="w"> </span>your-secret-key
+</code></pre></div>
+
+<p><code>hermes config set</code> 会自动将标志路由到 <code>config.yaml</code>，将密钥路由到 <code>~/.hermes/.env</code>。如果 gateway 已在运行，请重启以使更改生效：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>stop<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<h3 id="2-启动-hermes-agent-gateway">2. 启动 Hermes Agent gateway</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>你应该看到：</p>
+<div class="highlight"><pre><span></span><code>[API Server] API server listening on http://127.0.0.1:8642
+</code></pre></div>
+
+<h3 id="3-验证-api-服务器可访问">3. 验证 API 服务器可访问</h3>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8642/health
+<span class="c1"># {&quot;status&quot;: &quot;ok&quot;, ...}</span>
+
+curl<span class="w"> </span>-s<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer your-secret-key&quot;</span><span class="w"> </span>http://127.0.0.1:8642/v1/models
+<span class="c1"># {&quot;object&quot;:&quot;list&quot;,&quot;data&quot;:[{&quot;id&quot;:&quot;hermes-agent&quot;, ...}]}</span>
+</code></pre></div>
+
+<p>如果 <code>/health</code> 失败，说明 gateway 未加载 <code>API_SERVER_ENABLED=true</code>——重启它。如果 <code>/v1/models</code> 返回 <code>401</code>，说明你的 <code>Authorization</code> 头与 <code>API_SERVER_KEY</code> 不匹配。</p>
+<h3 id="4-启动-open-webui">4. 启动 Open WebUI</h3>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span>-p<span class="w"> </span><span class="m">3000</span>:8080<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">OPENAI_API_BASE_URL</span><span class="o">=</span>http://host.docker.internal:8642/v1<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">OPENAI_API_KEY</span><span class="o">=</span>your-secret-key<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">ENABLE_OLLAMA_API</span><span class="o">=</span><span class="nb">false</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--add-host<span class="o">=</span>host.docker.internal:host-gateway<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>open-webui:/app/backend/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>open-webui<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--restart<span class="w"> </span>always<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>ghcr.io/open-webui/open-webui:main
+</code></pre></div>
+
+<p><code>ENABLE_OLLAMA_API=false</code> 会禁用默认的 Ollama 后端，否则它会显示为空并干扰模型选择器。如果你确实在同时运行 Ollama，可以省略此参数。</p>
+<p>首次启动需要 15–30 秒：Open WebUI 在第一次启动时会下载 sentence-transformer embedding（嵌入）模型（约 150MB）。请等待 <code>docker logs open-webui</code> 输出稳定后再打开 UI。</p>
+<h3 id="5-打开-ui">5. 打开 UI</h3>
+<p>访问 <strong>http://localhost:3000</strong> 。创建管理员账户（第一个用户将成为管理员）。你应该能在模型下拉列表中看到你的 agent（以你的 profile 命名，默认 profile 则显示为 <strong>hermes-agent</strong>）。开始聊天吧！</p>
+<h2 id="docker-compose-设置">Docker Compose 设置</h2>
+<p>如需更持久的设置，创建 <code>docker-compose.yml</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">open-webui</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ghcr.io/open-webui/open-webui:main</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;3000:8080&quot;</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">open-webui:/app/backend/data</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">OPENAI_API_BASE_URL=http://host.docker.internal:8642/v1</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">OPENAI_API_KEY=your-secret-key</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ENABLE_OLLAMA_API=false</span>
+<span class="w">    </span><span class="nt">extra_hosts</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;host.docker.internal:host-gateway&quot;</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">always</span>
+
+<span class="nt">volumes</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">open-webui</span><span class="p">:</span>
+</code></pre></div>
+
+<p>然后：</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
+</code></pre></div>
+
+<h2 id="通过管理员-ui-配置">通过管理员 UI 配置</h2>
+<p>如果你更倾向于通过 UI 而非环境变量配置连接：</p>
+<ol>
+<li>在 <strong>http://localhost:3000</strong> 登录 Open WebUI</li>
+<li>点击你的<strong>头像</strong> → <strong>Admin Settings</strong></li>
+<li>进入 <strong>Connections</strong></li>
+<li>在 <strong>OpenAI API</strong> 下，点击<strong>扳手图标</strong>（Manage）</li>
+<li>点击 <strong>+ Add New Connection</strong></li>
+<li>填写：</li>
+<li><strong>URL</strong>：<code>http://host.docker.internal:8642/v1</code></li>
+<li><strong>API Key</strong>：与 Hermes 中 <code>API_SERVER_KEY</code> 完全相同的值</li>
+<li>点击<strong>对勾</strong>验证连接</li>
+<li><strong>保存</strong></li>
+</ol>
+<p>你的 agent 模型现在应出现在模型下拉列表中（以你的 profile 命名，默认 profile 则显示为 <strong>hermes-agent</strong>）。</p>
+<div class="admonition adm-warning"><p class="adm-title">警告</p>
+<p>环境变量仅在 Open WebUI <strong>首次启动</strong>时生效。此后，连接设置存储在其内部数据库中。如需后续修改，请使用管理员 UI，或删除 Docker 卷后重新启动。</p>
+</div>
+<h2 id="api-类型chat-completions-与-responses">API 类型：Chat Completions 与 Responses</h2>
+<p>Open WebUI 连接后端时支持两种 API 模式：</p>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>格式</th>
+<th>使用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Chat Completions</strong>（默认）</td>
+<td><code>/v1/chat/completions</code></td>
+<td>推荐。开箱即用。</td>
+</tr>
+<tr>
+<td><strong>Responses</strong>（实验性）</td>
+<td><code>/v1/responses</code></td>
+<td>通过 <code>previous_response_id</code> 实现服务端对话状态。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="使用-chat-completions推荐">使用 Chat Completions（推荐）</h3>
+<p>这是默认模式，无需额外配置。Open WebUI 发送标准 OpenAI 格式请求，Hermes Agent 相应响应。每个请求包含完整的对话历史。</p>
+<h3 id="使用-responses-api">使用 Responses API</h3>
+<p>启用 Responses API 模式：</p>
+<ol>
+<li>进入 <strong>Admin Settings</strong> → <strong>Connections</strong> → <strong>OpenAI</strong> → <strong>Manage</strong></li>
+<li>编辑你的 hermes-agent 连接</li>
+<li>将 <strong>API Type</strong> 从 "Chat Completions" 改为 <strong>"Responses (Experimental)"</strong></li>
+<li>保存</li>
+</ol>
+<p>使用 Responses API 时，Open WebUI 以 Responses 格式发送请求（<code>input</code> 数组 + <code>instructions</code>），Hermes Agent 可通过 <code>previous_response_id</code> 在多轮对话中保留完整的工具调用历史。当 <code>stream: true</code> 时，Hermes 还会流式传输符合规范的 <code>function_call</code> 和 <code>function_call_output</code> 事件，这使得支持 Responses 事件渲染的客户端能够展示自定义结构化工具调用 UI。</p>
+<div class="admonition adm-note"><p class="adm-title">注意</p>
+<p>Open WebUI 目前即使在 Responses 模式下也在客户端管理对话历史——它在每个请求中发送完整的消息历史，而非使用 <code>previous_response_id</code>。Responses 模式目前的主要优势在于结构化事件流：文本增量、<code>function_call</code> 和 <code>function_call_output</code> 事件以 OpenAI Responses SSE 事件形式到达，而非 Chat Completions 分块。</p>
+</div>
+<h2 id="工作原理">工作原理</h2>
+<p>当你在 Open WebUI 中发送消息时：</p>
+<ol>
+<li>Open WebUI 发送包含你的消息和对话历史的 <code>POST /v1/chat/completions</code> 请求</li>
+<li>Hermes Agent 使用 API 服务器的 profile、模型/提供商配置、记忆、技能和已配置的 API 服务器工具集，在服务端创建一个 <code>AIAgent</code> 实例</li>
+<li>Agent 处理你的请求——它可能在 API 服务器主机上调用工具（终端、文件操作、网络搜索等）</li>
+<li>工具执行时，<strong>内联进度消息会流式传输到 UI</strong>，让你实时看到 agent 的操作（例如 <code>`💻 ls -la`</code>、<code>`🔍 Python 3.12 release`</code>）</li>
+<li>Agent 的最终文本响应流式返回给 Open WebUI</li>
+<li>Open WebUI 在聊天界面中显示响应</li>
+</ol>
+<p>你的 agent 可以访问该 API 服务器 Hermes 实例所拥有的相同工具和能力。如果 API 服务器是远程的，这些工具也是远程的。</p>
+<p>如果你今天需要工具在<strong>本地</strong>工作区运行，请在本地运行 Hermes 并将其指向纯 LLM 提供商或纯 OpenAI 兼容模型代理（例如 vLLM、LiteLLM、Ollama、llama.cpp、OpenAI、OpenRouter 等）。"远程大脑、本地执行"的分离运行时模式正在 <a href="https://github.com/NousResearch/hermes-agent/issues/18715" class="ext" target="_blank" rel="noopener">#18715</a> 中跟踪；这不是当前 API 服务器的行为。</p>
+<div class="admonition adm-tip"><p class="adm-title">工具进度</p>
+<p>启用流式传输（默认）后，工具运行时你会看到简短的内联指示——工具 emoji 及其关键参数。这些内容在 agent 最终答案之前出现在响应流中，让你了解后台正在发生的事情。</p>
+</div>
+<h2 id="配置参考">配置参考</h2>
+<h3 id="hermes-agentapi-服务器">Hermes Agent（API 服务器）</h3>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>默认值</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>API_SERVER_ENABLED</code></td>
+<td><code>false</code></td>
+<td>启用 API 服务器</td>
+</tr>
+<tr>
+<td><code>API_SERVER_PORT</code></td>
+<td><code>8642</code></td>
+<td>HTTP 服务器端口</td>
+</tr>
+<tr>
+<td><code>API_SERVER_HOST</code></td>
+<td><code>127.0.0.1</code></td>
+<td>绑定地址</td>
+</tr>
+<tr>
+<td><code>API_SERVER_KEY</code></td>
+<td><em>（必填）</em></td>
+<td>用于认证的 Bearer token（令牌）。需与 <code>OPENAI_API_KEY</code> 匹配。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="open-webui">Open WebUI</h3>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>OPENAI_API_BASE_URL</code></td>
+<td>Hermes Agent 的 API URL（包含 <code>/v1</code>）</td>
+</tr>
+<tr>
+<td><code>OPENAI_API_KEY</code></td>
+<td>不能为空。需与你的 <code>API_SERVER_KEY</code> 匹配。</td>
+</tr>
+</tbody>
+</table>
+<h2 id="故障排查">故障排查</h2>
+<h3 id="下拉列表中没有模型">下拉列表中没有模型</h3>
+<ul>
+<li><strong>检查 URL 是否有 <code>/v1</code> 后缀</strong>：<code>http://host.docker.internal:8642/v1</code>（不只是 <code>:8642</code>）</li>
+<li><strong>验证 gateway 是否运行</strong>：<code>curl http://localhost:8642/health</code> 应返回 <code>{"status": "ok"}</code></li>
+<li><strong>检查模型列表</strong>：<code>curl -H "Authorization: Bearer your-secret-key" http://localhost:8642/v1/models</code> 应返回包含 <code>hermes-agent</code> 的列表</li>
+<li><strong>Docker 网络</strong>：在 Docker 内部，<code>localhost</code> 指容器本身，而非你的主机。请使用 <code>host.docker.internal</code> 或 <code>--network=host</code>。</li>
+<li><strong>空 Ollama 后端遮挡选择器</strong>：如果你省略了 <code>ENABLE_OLLAMA_API=false</code>，Open WebUI 会在你的 Hermes 模型上方显示一个空的 Ollama 区域。请使用 <code>-e ENABLE_OLLAMA_API=false</code> 重启容器，或在 <strong>Admin Settings → Connections</strong> 中禁用 Ollama。</li>
+</ul>
+<h3 id="连接测试通过但模型无法加载">连接测试通过但模型无法加载</h3>
+<p>这几乎总是因为缺少 <code>/v1</code> 后缀。Open WebUI 的连接测试只是基本的连通性检查——它不验证模型列表是否正常工作。</p>
+<h3 id="响应耗时很长">响应耗时很长</h3>
+<p>Hermes Agent 可能在生成最终响应之前执行了多次工具调用（读取文件、运行命令、搜索网络）。对于复杂查询，这是正常现象。响应会在 agent 完成后一次性出现。</p>
+<h3 id="invalid-api-key-错误">"Invalid API key" 错误</h3>
+<p>确保 Open WebUI 中的 <code>OPENAI_API_KEY</code> 与 Hermes Agent 中的 <code>API_SERVER_KEY</code> 匹配。</p>
+<div class="admonition adm-warning"><p class="adm-title">警告</p>
+<p>Open WebUI 在首次启动后会将 OpenAI 兼容连接设置持久化到其自身数据库中。如果你在管理员 UI 中误保存了错误的密钥，仅修改环境变量是不够的——请在 <strong>Admin Settings → Connections</strong> 中更新或删除已保存的连接，或重置 Open WebUI 数据目录/数据库。</p>
+</div>
+<h2 id="多用户设置与-profiles">多用户设置与 Profiles</h2>
+<p>要为每个用户运行独立的 Hermes 实例——各自拥有独立的配置、记忆和技能——请使用 <a href="../profiles.html">profiles</a>。每个 profile 在不同端口上运行自己的 API 服务器，并自动将 profile 名称作为模型名称公告给 Open WebUI。</p>
+<h3 id="1-创建-profiles-并配置-api-服务器">1. 创建 profiles 并配置 API 服务器</h3>
+<p><code>API_SERVER_*</code> 是环境变量，而非 YAML 配置键，因此请将它们写入每个 profile 的 <code>.env</code>。选择默认平台范围之外的端口（<code>8644</code> 是 webhook 适配器，<code>8645</code> 是 wecom-callback，<code>8646</code> 是 msgraph-webhook），例如 <code>8650+</code>：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>alice
+cat<span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/profiles/alice/.env<span class="w"> </span><span class="s">&lt;&lt;EOF</span>
+<span class="s">API_SERVER_ENABLED=true</span>
+<span class="s">API_SERVER_PORT=8650</span>
+<span class="s">API_SERVER_KEY=alice-secret</span>
+<span class="s">EOF</span>
+
+hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>bob
+cat<span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/profiles/bob/.env<span class="w"> </span><span class="s">&lt;&lt;EOF</span>
+<span class="s">API_SERVER_ENABLED=true</span>
+<span class="s">API_SERVER_PORT=8651</span>
+<span class="s">API_SERVER_KEY=bob-secret</span>
+<span class="s">EOF</span>
+</code></pre></div>
+
+<h3 id="2-启动各-gateway">2. 启动各 gateway</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>-p<span class="w"> </span>alice<span class="w"> </span>gateway<span class="w"> </span><span class="p">&amp;</span>
+hermes<span class="w"> </span>-p<span class="w"> </span>bob<span class="w"> </span>gateway<span class="w"> </span><span class="p">&amp;</span>
+</code></pre></div>
+
+<h3 id="3-在-open-webui-中添加连接">3. 在 Open WebUI 中添加连接</h3>
+<p>在 <strong>Admin Settings</strong> → <strong>Connections</strong> → <strong>OpenAI API</strong> → <strong>Manage</strong> 中，为每个 profile 添加一个连接：</p>
+<table>
+<thead>
+<tr>
+<th>连接</th>
+<th>URL</th>
+<th>API Key</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Alice</td>
+<td><code>http://host.docker.internal:8650/v1</code></td>
+<td><code>alice-secret</code></td>
+</tr>
+<tr>
+<td>Bob</td>
+<td><code>http://host.docker.internal:8651/v1</code></td>
+<td><code>bob-secret</code></td>
+</tr>
+</tbody>
+</table>
+<p>模型下拉列表将显示 <code>alice</code> 和 <code>bob</code> 作为独立模型。你可以通过管理员面板将模型分配给 Open WebUI 用户，为每个用户提供其独立的 Hermes agent。</p>
+<div class="admonition adm-tip"><p class="adm-title">自定义模型名称</p>
+<p>模型名称默认为 profile 名称。如需覆盖，请在 profile 的 <code>.env</code> 中设置 <code>API_SERVER_MODEL_NAME</code>：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>-p<span class="w"> </span>alice<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>API_SERVER_MODEL_NAME<span class="w"> </span><span class="s2">&quot;Alice&#39;s Agent&quot;</span>
+</code></pre></div>
+</div>
+<h2 id="linux-docker无-docker-desktop">Linux Docker（无 Docker Desktop）</h2>
+<p>在没有 Docker Desktop 的 Linux 上，<code>host.docker.internal</code> 默认无法解析。可选方案：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 方案 1：添加主机映射</span>
+docker<span class="w"> </span>run<span class="w"> </span>--add-host<span class="o">=</span>host.docker.internal:host-gateway<span class="w"> </span>...
+
+<span class="c1"># 方案 2：使用主机网络</span>
+docker<span class="w"> </span>run<span class="w"> </span>--network<span class="o">=</span>host<span class="w"> </span>-e<span class="w"> </span><span class="nv">OPENAI_API_BASE_URL</span><span class="o">=</span>http://localhost:8642/v1<span class="w"> </span>...
+
+<span class="c1"># 方案 3：使用 Docker bridge IP</span>
+docker<span class="w"> </span>run<span class="w"> </span>-e<span class="w"> </span><span class="nv">OPENAI_API_BASE_URL</span><span class="o">=</span>http://172.17.0.1:8642/v1<span class="w"> </span>...
+</code></pre></div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/messaging/open-webui</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#架构">架构</a></li>
+<li class="lvl2"><a href="#快速设置">快速设置</a></li>
+<li class="lvl3"><a href="#1-启用-api-服务器">1. 启用 API 服务器</a></li>
+<li class="lvl3"><a href="#2-启动-hermes-agent-gateway">2. 启动 Hermes Agent gateway</a></li>
+<li class="lvl3"><a href="#3-验证-api-服务器可访问">3. 验证 API 服务器可访问</a></li>
+<li class="lvl3"><a href="#4-启动-open-webui">4. 启动 Open WebUI</a></li>
+<li class="lvl3"><a href="#5-打开-ui">5. 打开 UI</a></li>
+<li class="lvl2"><a href="#docker-compose-设置">Docker Compose 设置</a></li>
+<li class="lvl2"><a href="#通过管理员-ui-配置">通过管理员 UI 配置</a></li>
+<li class="lvl2"><a href="#api-类型chat-completions-与-responses">API 类型：Chat Completions 与 Responses</a></li>
+<li class="lvl3"><a href="#使用-chat-completions推荐">使用 Chat Completions（推荐）</a></li>
+<li class="lvl3"><a href="#使用-responses-api">使用 Responses API</a></li>
+<li class="lvl2"><a href="#工作原理">工作原理</a></li>
+<li class="lvl2"><a href="#配置参考">配置参考</a></li>
+<li class="lvl3"><a href="#hermes-agentapi-服务器">Hermes Agent（API 服务器）</a></li>
+<li class="lvl3"><a href="#open-webui">Open WebUI</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl3"><a href="#下拉列表中没有模型">下拉列表中没有模型</a></li>
+<li class="lvl3"><a href="#连接测试通过但模型无法加载">连接测试通过但模型无法加载</a></li>
+<li class="lvl3"><a href="#响应耗时很长">响应耗时很长</a></li>
+<li class="lvl3"><a href="#invalid-api-key-错误">&quot;Invalid API key&quot; 错误</a></li>
+<li class="lvl2"><a href="#多用户设置与-profiles">多用户设置与 Profiles</a></li>
+<li class="lvl3"><a href="#1-创建-profiles-并配置-api-服务器">1. 创建 profiles 并配置 API 服务器</a></li>
+<li class="lvl3"><a href="#2-启动各-gateway">2. 启动各 gateway</a></li>
+<li class="lvl3"><a href="#3-在-open-webui-中添加连接">3. 在 Open WebUI 中添加连接</a></li>
+<li class="lvl2"><a href="#linux-docker无-docker-desktop">Linux Docker（无 Docker Desktop）</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

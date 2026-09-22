@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>网页搜索提供商插件 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/web-search-provider-plugin</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="构建网页搜索提供商插件">构建网页搜索提供商插件</h1>
+<p>网页搜索提供商插件注册一个后端，用于处理 <code>web_search</code>、<code>web_extract</code> 以及（可选的）深度爬取工具调用。内置提供商——Firecrawl、SearXNG、Tavily、Exa、Parallel、Brave Search（免费层）和 DDGS——均以插件形式存放于 <code>plugins/web/&lt;name&gt;/</code> 目录下。你可以在该目录旁新建一个目录来添加新提供商，或覆盖已有的内置提供商。</p>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>网页搜索是 Hermes 支持的多种<strong>后端插件</strong>之一。其他插件（各有其 ABC）包括：<a href="image-gen-provider-plugin.html">图像生成提供商插件</a>、<a href="video-gen-provider-plugin.html">视频生成提供商插件</a>、<a href="memory-provider-plugin.html">记忆提供商插件</a>、<a href="context-engine-plugin.html">上下文引擎插件</a>和<a href="model-provider-plugin.html">模型提供商插件</a>。通用工具/hook/CLI 插件请参阅<a href="plugins.html">构建 Hermes 插件</a>。</p>
+</div>
+<h2 id="发现机制">发现机制</h2>
+<p>Hermes 在三个位置扫描网页搜索后端：</p>
+<ol>
+<li><strong>内置</strong> — <code>&lt;repo&gt;/plugins/web/&lt;name&gt;/</code>（以 <code>kind: backend</code> 自动加载，始终可用）</li>
+<li><strong>用户</strong> — <code>~/.hermes/plugins/web/&lt;name&gt;/</code>（通过 <code>plugins.enabled</code> 或 <code>hermes plugins enable &lt;name&gt;</code> 按需启用）</li>
+<li><strong>Pip</strong> — 声明了 <code>hermes_agent.plugins</code> 入口点的包</li>
+</ol>
+<p>每个插件的 <code>register(ctx)</code> 函数调用 <code>ctx.register_web_search_provider(...)</code> ——将实例注册到 <code>agent/web_search_registry.py</code> 中的注册表。各能力的活跃提供商由配置决定：</p>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>配置键</th>
+<th>回退至</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>web_search</code></td>
+<td><code>web.search_backend</code></td>
+<td><code>web.backend</code></td>
+</tr>
+<tr>
+<td><code>web_extract</code></td>
+<td><code>web.extract_backend</code></td>
+<td><code>web.backend</code></td>
+</tr>
+<tr>
+<td><code>web_extract</code> 内的深度爬取模式</td>
+<td><code>web.extract_backend</code></td>
+<td><code>web.backend</code></td>
+</tr>
+</tbody>
+</table>
+<p>若两个键均未设置，Hermes 将根据环境中存在的 API key/URL 自动检测后端。<code>hermes tools</code> 会引导用户完成选择。</p>
+<h2 id="目录结构">目录结构</h2>
+<div class="highlight"><pre><span></span><code>plugins/web/my-backend/
+├── __init__.py     # register() 入口点
+├── provider.py     # WebSearchProvider 子类
+└── plugin.yaml     # 包含 kind: backend 和 provides_web_providers 的清单文件
+</code></pre></div>
+
+<p><code>brave_free/</code> 和 <code>ddgs/</code> 是代码库中最小的参考实现——<code>brave_free</code> 是需要 API key 的纯搜索提供商，<code>ddgs</code> 是无需 key 且懒加载 SDK 的提供商。</p>
+<h2 id="websearchprovider-abc">WebSearchProvider ABC</h2>
+<p>继承 <code>agent.web_search_provider.WebSearchProvider</code>。唯一必须实现的成员是 <code>name</code>、<code>is_available()</code>，以及你所实现的 <code>search()</code> / <code>extract()</code> / <code>crawl()</code> 中的相应方法。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/web/my-backend/provider.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.web_search_provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">WebSearchProvider</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyBackendWebSearchProvider</span><span class="p">(</span><span class="n">WebSearchProvider</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Minimal search-only provider against the My Backend HTTP API.&quot;&quot;&quot;</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="c1"># Stable id used in web.search_backend / web.extract_backend / web.backend</span>
+        <span class="c1"># config keys. Lowercase, no spaces; hyphens permitted.</span>
+        <span class="k">return</span> <span class="s2">&quot;my-backend&quot;</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">display_name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="c1"># Human label shown in `hermes tools`. Defaults to `name`.</span>
+        <span class="k">return</span> <span class="s2">&quot;My Backend&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_available</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="c1"># Cheap check — env var present, optional dep importable, etc.</span>
+        <span class="c1"># MUST NOT make network calls (runs on every `hermes tools` paint).</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_BACKEND_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">())</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">supports_search</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">True</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">supports_extract</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">search</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">query</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">limit</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">5</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="kn">import</span><span class="w"> </span><span class="nn">httpx</span>
+
+        <span class="n">api_key</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;MY_BACKEND_API_KEY&quot;</span><span class="p">]</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">resp</span> <span class="o">=</span> <span class="n">httpx</span><span class="o">.</span><span class="n">get</span><span class="p">(</span>
+                <span class="s2">&quot;https://api.example.com/search&quot;</span><span class="p">,</span>
+                <span class="n">params</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;q&quot;</span><span class="p">:</span> <span class="n">query</span><span class="p">,</span> <span class="s2">&quot;count&quot;</span><span class="p">:</span> <span class="nb">max</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="nb">min</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">limit</span><span class="p">),</span> <span class="mi">20</span><span class="p">))},</span>
+                <span class="n">headers</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;Authorization&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Bearer </span><span class="si">{</span><span class="n">api_key</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">},</span>
+                <span class="n">timeout</span><span class="o">=</span><span class="mi">15</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+            <span class="n">data</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+        <span class="k">except</span> <span class="n">httpx</span><span class="o">.</span><span class="n">HTTPError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span> <span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">exc</span><span class="p">)}</span>
+
+        <span class="c1"># Response shape is fixed — see &quot;Response shape&quot; below.</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+            <span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;web&quot;</span><span class="p">:</span> <span class="p">[</span>
+                    <span class="p">{</span>
+                        <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="n">item</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;title&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">),</span>
+                        <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="n">item</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;url&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">),</span>
+                        <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="n">item</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;snippet&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">),</span>
+                        <span class="s2">&quot;position&quot;</span><span class="p">:</span> <span class="n">idx</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span>
+                    <span class="p">}</span>
+                    <span class="k">for</span> <span class="n">idx</span><span class="p">,</span> <span class="n">item</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;results&quot;</span><span class="p">,</span> <span class="p">[]))</span>
+                <span class="p">],</span>
+            <span class="p">},</span>
+        <span class="p">}</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/web/my-backend/__init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">plugins.web.my_backend.provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">MyBackendWebSearchProvider</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Plugin entry point — called once at load time.&quot;&quot;&quot;</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_web_search_provider</span><span class="p">(</span><span class="n">MyBackendWebSearchProvider</span><span class="p">())</span>
+</code></pre></div>
+
+<h2 id="pluginyaml">plugin.yaml</h2>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">web-my-backend</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;My</span><span class="nv"> </span><span class="s">Backend</span><span class="nv"> </span><span class="s">web</span><span class="nv"> </span><span class="s">search</span><span class="nv"> </span><span class="s">—</span><span class="nv"> </span><span class="s">Bearer-auth</span><span class="nv"> </span><span class="s">REST</span><span class="nv"> </span><span class="s">API&quot;</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backend</span>
+<span class="nt">provides_web_providers</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-backend</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_BACKEND_API_KEY</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>键</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kind: backend</code></td>
+<td>将插件路由至后端加载路径</td>
+</tr>
+<tr>
+<td><code>provides_web_providers</code></td>
+<td>该插件注册的提供商 <code>name</code> 列表——在 <code>register()</code> 运行之前，加载器即可通过此字段在 <code>hermes tools</code> 中公示插件</td>
+</tr>
+<tr>
+<td><code>requires_env</code></td>
+<td>在 <code>hermes plugins install</code> 期间进行交互式凭据提示（富格式说明参见<a href="../../developer-guide/plugins.html#gate-on-environment-variables" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">构建 Hermes 插件</a>）</td>
+</tr>
+</tbody>
+</table>
+<h2 id="abc-参考">ABC 参考</h2>
+<p>完整契约位于 <code>agent/web_search_provider.py</code>。可覆盖的方法如下：</p>
+<table>
+<thead>
+<tr>
+<th>成员</th>
+<th>必须</th>
+<th>默认值</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>✅</td>
+<td>—</td>
+<td>在 <code>web.*_backend</code> 配置中使用的稳定 id</td>
+</tr>
+<tr>
+<td><code>display_name</code></td>
+<td>—</td>
+<td><code>name</code></td>
+<td>在 <code>hermes tools</code> 中显示的标签</td>
+</tr>
+<tr>
+<td><code>is_available()</code></td>
+<td>✅</td>
+<td>—</td>
+<td>轻量可用性检查——环境变量、可选依赖等</td>
+</tr>
+<tr>
+<td><code>supports_search()</code></td>
+<td>—</td>
+<td><code>True</code></td>
+<td><code>web_search</code> 路由的能力标志</td>
+</tr>
+<tr>
+<td><code>supports_extract()</code></td>
+<td>—</td>
+<td><code>False</code></td>
+<td><code>web_extract</code> 路由的能力标志</td>
+</tr>
+<tr>
+<td><code>search(query, limit)</code></td>
+<td>条件必须</td>
+<td>抛出异常</td>
+<td>当 <code>supports_search()</code> 返回 <code>True</code> 时必须实现</td>
+</tr>
+<tr>
+<td><code>extract(urls, **kwargs)</code></td>
+<td>条件必须</td>
+<td>抛出异常</td>
+<td>当 <code>supports_extract()</code> 返回 <code>True</code> 时必须实现</td>
+</tr>
+</tbody>
+</table>
+<p>提供商可以在单个类中声明多种能力——Firecrawl、Tavily、Exa 和 Parallel 均实现了搜索和提取两种能力。Brave Search 和 DDGS 仅支持搜索；SearXNG 也仅支持搜索，并有文档说明的"与提取提供商配对使用"工作流。</p>
+<h2 id="响应格式">响应格式</h2>
+<p>工具包装器期望固定的响应信封（envelope），以避免在不同后端之间进行转换。</p>
+<p><strong>搜索成功：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+    <span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;web&quot;</span><span class="p">:</span> <span class="p">[</span>
+            <span class="p">{</span><span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="s2">&quot;position&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">},</span>
+            <span class="o">...</span>
+        <span class="p">],</span>
+    <span class="p">},</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>提取成功：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+    <span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="p">[</span>
+        <span class="p">{</span>
+            <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+            <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+            <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+            <span class="s2">&quot;raw_content&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+            <span class="s2">&quot;metadata&quot;</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span>    <span class="c1"># optional</span>
+            <span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>        <span class="c1"># optional, only on per-URL failure</span>
+        <span class="p">},</span>
+        <span class="o">...</span>
+    <span class="p">],</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>任意能力，失败时：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span> <span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="s2">&quot;human-readable message&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p><code>search()</code> 和 <code>extract()</code> 均可定义为 <code>async def</code>——调度器通过 <code>inspect.iscoroutinefunction</code> 检测协程函数并相应地进行 await。对于小型后端，执行阻塞 I/O（HTTP、SDK 调用）的同步实现也完全可行；调度器会处理线程调度。</p>
+<h2 id="能力标志">能力标志</h2>
+<p>Hermes 根据 <code>supports_*</code> 标志将调用路由至正确的提供商。一种常见的多提供商配置：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">search_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;brave-free&quot;</span><span class="w">     </span><span class="c1"># 纯搜索，速度快，每月免费 2k 次</span>
+<span class="w">  </span><span class="nt">extract_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;firecrawl&quot;</span><span class="w">     </span><span class="c1"># 提取 + 爬取，付费配额</span>
+</code></pre></div>
+
+<p>当 <code>web.search_backend</code> 或 <code>web.extract_backend</code> 未设置时，均回退至 <code>web.backend</code>。若该项也未设置，Hermes 将根据环境变量的存在情况，选取第一个支持所请求能力的可用提供商。</p>
+<p>如果你的提供商只支持一种能力，将其他标志保持默认值（<code>False</code>）即可，注册表会在对应工具调用时跳过它——当用户仅将 X 用于搜索而要求 agent 进行提取时，不会看到误导性的"提供商 X 失败"错误。</p>
+<h2 id="hermes-如何将其接入工具">Hermes 如何将其接入工具</h2>
+<p><code>web_search</code> 和 <code>web_extract</code> 工具位于 <code>tools/web_tools.py</code>。调用时执行以下步骤：</p>
+<ol>
+<li>读取相关配置键（<code>web_search</code> 对应 <code>web.search_backend</code>，<code>web_extract</code> 对应 <code>web.extract_backend</code>）</li>
+<li>向注册表查询具有该 <code>name</code> 的提供商</li>
+<li>检查 <code>is_available()</code> 及对应的 <code>supports_*()</code> 标志</li>
+<li>调度至 <code>search()</code> / <code>extract()</code> / <code>crawl()</code>，若方法为协程则进行 await</li>
+<li>将响应信封 JSON 序列化后返回给 LLM</li>
+</ol>
+<p>错误以工具结果的形式呈现；LLM 决定如何解释。若没有提供商被注册（或所有可用提供商均未通过能力检查），工具将返回一条指向 <code>hermes tools</code> 的友好错误信息。</p>
+<h2 id="懒加载可选依赖">懒加载可选依赖</h2>
+<p>如果你的提供商封装了第三方 SDK（如 DDGS 封装了 <code>ddgs</code> 包），请勿在模块顶层 <code>import</code>。在 <code>is_available()</code> 或 <code>search()</code> 内部使用 <code>tools.lazy_deps.ensure(...)</code> ——Hermes 将在首次使用时安装该包，并受 <code>security.allow_lazy_installs</code> 控制。安全模型详见<a href="../../developer-guide/plugins.html#lazy-install-optional-python-dependencies" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">构建 Hermes 插件 → 懒加载</a>。</p>
+<h2 id="参考实现">参考实现</h2>
+<ul>
+<li><strong><code>plugins/web/brave_free/</code></strong> — 小型、需要 API key 的纯搜索 HTTP 提供商。适合作为起始模板。</li>
+<li><strong><code>plugins/web/ddgs/</code></strong> — 无需 key、懒加载 SDK 的提供商。适用于封装 Python 包的后端。</li>
+<li><strong><code>plugins/web/firecrawl/</code></strong> — 完整的多能力提供商（搜索 + 提取 + 爬取），支持多种格式模式。</li>
+<li><strong><code>plugins/web/searxng/</code></strong> — 自托管、通过 URL 配置、无需认证的后端。</li>
+<li><strong><code>plugins/web/xai/</code></strong> — 通过 Grok 服务端 <code>web_search</code> 工具实现的 LLM 驱动搜索。展示了如何复用现有的 OAuth/环境变量凭据（<code>tools/xai_http.py</code>）而无需新增环境变量，以及如何编写遵守无网络调用约定的轻量 <code>is_available()</code>。</li>
+</ul>
+<h2 id="通过-pip-分发">通过 pip 分发</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># pyproject.toml</span>
+<span class="k">[project.entry-points.</span><span class="s2">&quot;hermes_agent.plugins&quot;</span><span class="k">]</span>
+<span class="n">my-backend-web</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;my_backend_web_package&quot;</span>
+</code></pre></div>
+
+<p><code>my_backend_web_package</code> 必须暴露顶层 <code>register</code> 函数。完整配置说明参见通用插件指南中的<a href="../../developer-guide/plugins.html#distribute-via-pip" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">通过 pip 分发</a>。</p>
+<h2 id="相关页面">相关页面</h2>
+<ul>
+<li><a href="../user-guide/features/web-search.html">网页搜索</a> — 面向用户的功能文档及各后端配置说明</li>
+<li><a href="../user-guide/features/plugins.html">插件概览</a> — 所有插件类型一览</li>
+<li><a href="plugins.html">构建 Hermes 插件</a> — 通用工具/hook/斜杠命令指南</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/web-search-provider-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#发现机制">发现机制</a></li>
+<li class="lvl2"><a href="#目录结构">目录结构</a></li>
+<li class="lvl2"><a href="#websearchprovider-abc">WebSearchProvider ABC</a></li>
+<li class="lvl2"><a href="#pluginyaml">plugin.yaml</a></li>
+<li class="lvl2"><a href="#abc-参考">ABC 参考</a></li>
+<li class="lvl2"><a href="#响应格式">响应格式</a></li>
+<li class="lvl2"><a href="#能力标志">能力标志</a></li>
+<li class="lvl2"><a href="#hermes-如何将其接入工具">Hermes 如何将其接入工具</a></li>
+<li class="lvl2"><a href="#懒加载可选依赖">懒加载可选依赖</a></li>
+<li class="lvl2"><a href="#参考实现">参考实现</a></li>
+<li class="lvl2"><a href="#通过-pip-分发">通过 pip 分发</a></li>
+<li class="lvl2"><a href="#相关页面">相关页面</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

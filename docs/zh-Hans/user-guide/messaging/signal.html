@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signal · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/messaging/signal</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="signal-配置">Signal 配置</h1>
+<p>Hermes 通过以 HTTP 模式运行的 <a href="https://github.com/AsamK/signal-cli" class="ext" target="_blank" rel="noopener">signal-cli</a> 守护进程连接到 Signal。适配器通过 SSE（Server-Sent Events，服务器推送事件）实时接收消息，并通过 JSON-RPC 发送响应。</p>
+<p>Signal 是隐私保护最完善的主流即时通讯工具——默认端对端加密、开源协议、极少的元数据收集。这使其非常适合对安全性要求较高的 Agent 工作流。</p>
+<div class="admonition adm-info"><p class="adm-title">无需新增 Python 依赖</p>
+<p>Signal 适配器使用 <code>httpx</code>（已是 Hermes 的核心依赖）进行所有通信，无需安装额外的 Python 包。你只需在外部安装 signal-cli。</p>
+</div>
+<hr />
+<h2 id="前提条件">前提条件</h2>
+<ul>
+<li><strong>signal-cli</strong> — 基于 Java 的 Signal 客户端（<a href="https://github.com/AsamK/signal-cli" class="ext" target="_blank" rel="noopener">GitHub</a>）</li>
+<li><strong>Java 17+</strong> 运行时 — signal-cli 所需</li>
+<li><strong>一个已安装 Signal 的手机号</strong>（用于作为辅助设备关联）</li>
+</ul>
+<h3 id="安装-signal-cli">安装 signal-cli</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># macOS</span>
+brew<span class="w"> </span>install<span class="w"> </span>signal-cli
+
+<span class="c1"># Linux（下载最新版本）</span>
+<span class="nv">VERSION</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-Ls<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>-w<span class="w"> </span>%<span class="o">{</span>url_effective<span class="o">}</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://github.com/AsamK/signal-cli/releases/latest<span class="w"> </span><span class="p">|</span><span class="w"> </span>sed<span class="w"> </span><span class="s1">&#39;s/^.*\/v//&#39;</span><span class="k">)</span>
+curl<span class="w"> </span>-L<span class="w"> </span>-O<span class="w"> </span><span class="s2">&quot;https://github.com/AsamK/signal-cli/releases/download/v</span><span class="si">${</span><span class="nv">VERSION</span><span class="si">}</span><span class="s2">/signal-cli-</span><span class="si">${</span><span class="nv">VERSION</span><span class="si">}</span><span class="s2">.tar.gz&quot;</span>
+sudo<span class="w"> </span>tar<span class="w"> </span>xf<span class="w"> </span><span class="s2">&quot;signal-cli-</span><span class="si">${</span><span class="nv">VERSION</span><span class="si">}</span><span class="s2">.tar.gz&quot;</span><span class="w"> </span>-C<span class="w"> </span>/opt
+sudo<span class="w"> </span>ln<span class="w"> </span>-sf<span class="w"> </span><span class="s2">&quot;/opt/signal-cli-</span><span class="si">${</span><span class="nv">VERSION</span><span class="si">}</span><span class="s2">/bin/signal-cli&quot;</span><span class="w"> </span>/usr/local/bin/
+</code></pre></div>
+
+<div class="admonition adm-caution"><p class="adm-title">小心</p>
+<p>signal-cli <strong>不在</strong> apt 或 snap 仓库中。上述 Linux 安装方式直接从 <a href="https://github.com/AsamK/signal-cli/releases" class="ext" target="_blank" rel="noopener">GitHub releases</a> 下载。</p>
+</div>
+<hr />
+<h2 id="第一步关联你的-signal-账号">第一步：关联你的 Signal 账号</h2>
+<p>signal-cli 作为<strong>关联设备</strong>运行——类似 WhatsApp Web，但用于 Signal。你的手机仍是主设备。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 生成关联 URI（显示二维码或链接）</span>
+signal-cli<span class="w"> </span>link<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;HermesAgent&quot;</span>
+</code></pre></div>
+
+<ol>
+<li>在手机上打开 <strong>Signal</strong></li>
+<li>进入 <strong>设置 → 关联设备</strong></li>
+<li>点击 <strong>关联新设备</strong></li>
+<li>扫描二维码或输入 URI</li>
+</ol>
+<hr />
+<h2 id="第二步启动-signal-cli-守护进程">第二步：启动 signal-cli 守护进程</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># 将 +1234567890 替换为你的 Signal 手机号（E.164 格式）</span>
+signal-cli<span class="w"> </span>--account<span class="w"> </span>+1234567890<span class="w"> </span>daemon<span class="w"> </span>--http<span class="w"> </span><span class="m">127</span>.0.0.1:8080
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>保持此进程在后台运行。你可以使用 <code>systemd</code>、<code>tmux</code>、<code>screen</code>，或将其作为服务运行。</p>
+</div>
+<p>验证是否正在运行：</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://127.0.0.1:8080/api/v1/check
+<span class="c1"># 应返回：{&quot;versions&quot;:{&quot;signal-cli&quot;:...}}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="第三步配置-hermes">第三步：配置 Hermes</h2>
+<p>最简单的方式：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>setup
+</code></pre></div>
+
+<p>从平台菜单中选择 <strong>Signal</strong>。向导将：</p>
+<ol>
+<li>检查 signal-cli 是否已安装</li>
+<li>提示输入 HTTP URL（默认：<code>http://127.0.0.1:8080</code>）</li>
+<li>测试与守护进程的连通性</li>
+<li>询问你的账号手机号</li>
+<li>配置允许的用户和访问策略</li>
+</ol>
+<h3 id="手动配置">手动配置</h3>
+<p>在 <code>~/.hermes/.env</code> 中添加：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 必填</span>
+<span class="nv">SIGNAL_HTTP_URL</span><span class="o">=</span>http://127.0.0.1:8080
+<span class="nv">SIGNAL_ACCOUNT</span><span class="o">=</span>+1234567890
+
+<span class="c1"># 安全设置（推荐）</span>
+<span class="nv">SIGNAL_ALLOWED_USERS</span><span class="o">=</span>+1234567890,+0987654321<span class="w">    </span><span class="c1"># 逗号分隔的 E.164 号码或 UUID</span>
+
+<span class="c1"># 可选</span>
+<span class="nv">SIGNAL_GROUP_ALLOWED_USERS</span><span class="o">=</span>groupId1,groupId2<span class="w">     </span><span class="c1"># 启用群组（省略则禁用，* 表示全部）</span>
+<span class="nv">SIGNAL_HOME_CHANNEL</span><span class="o">=</span>+1234567890<span class="w">                  </span><span class="c1"># cron 任务的默认投递目标</span>
+</code></pre></div>
+
+<p>然后启动 gateway：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w">              </span><span class="c1"># 前台运行</span>
+hermes<span class="w"> </span>gateway<span class="w"> </span>install<span class="w">      </span><span class="c1"># 安装为用户服务</span>
+sudo<span class="w"> </span>hermes<span class="w"> </span>gateway<span class="w"> </span>install<span class="w"> </span>--system<span class="w">   </span><span class="c1"># 仅 Linux：开机自启系统服务</span>
+</code></pre></div>
+
+<hr />
+<h2 id="访问控制">访问控制</h2>
+<h3 id="私信访问">私信访问</h3>
+<p>私信访问遵循与其他 Hermes 平台相同的模式：</p>
+<ol>
+<li><strong>已设置 <code>SIGNAL_ALLOWED_USERS</code></strong> → 仅允许这些用户发送消息</li>
+<li><strong>未设置白名单</strong> → 未知用户会收到私信配对码（通过 <code>hermes pairing approve signal CODE</code> 审批）</li>
+<li><strong><code>SIGNAL_ALLOW_ALL_USERS=true</code></strong> → 任何人均可发送消息（谨慎使用）</li>
+</ol>
+<h3 id="群组访问">群组访问</h3>
+<p>群组访问由 <code>SIGNAL_GROUP_ALLOWED_USERS</code> 环境变量控制：</p>
+<table>
+<thead>
+<tr>
+<th>配置</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>未设置（默认）</td>
+<td>忽略所有群组消息，机器人仅响应私信。</td>
+</tr>
+<tr>
+<td>设置群组 ID</td>
+<td>仅监听列出的群组（如 <code>groupId1,groupId2</code>）。</td>
+</tr>
+<tr>
+<td>设置为 <code>*</code></td>
+<td>机器人在其所在的任意群组中均会响应。</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="功能特性">功能特性</h2>
+<h3 id="附件">附件</h3>
+<p>适配器支持双向收发媒体文件。</p>
+<p><strong>接收</strong>（用户 → Agent）：</p>
+<ul>
+<li><strong>图片</strong> — PNG、JPEG、GIF、WebP（通过魔数自动检测）</li>
+<li><strong>音频</strong> — MP3、OGG、WAV、M4A（若已配置 Whisper，语音消息将自动转录）</li>
+<li><strong>文档</strong> — PDF、ZIP 及其他文件类型</li>
+</ul>
+<p><strong>发送</strong>（Agent → 用户）：</p>
+<p>Agent 可通过响应中的 <code>MEDIA:</code> 标签发送媒体文件，支持以下投递方式：</p>
+<ul>
+<li><strong>图片</strong> — <code>send_multiple_images</code> 和 <code>send_image_file</code> 将 PNG、JPEG、GIF、WebP 作为原生 Signal 附件发送</li>
+<li><strong>语音</strong> — <code>send_voice</code> 将音频文件（OGG、MP3、WAV、M4A、AAC）作为附件发送</li>
+<li><strong>视频</strong> — <code>send_video</code> 发送 MP4 视频文件</li>
+<li><strong>文档</strong> — <code>send_document</code> 发送任意文件类型（PDF、ZIP 等）</li>
+</ul>
+<p>所有外发媒体均通过 Signal 标准附件 API 处理。与某些平台不同，Signal 在协议层面不区分语音消息和文件附件。</p>
+<p>附件大小限制：<strong>100 MB</strong>（双向）。</p>
+<div class="admonition adm-warning"><p class="adm-title">警告</p>
+<p><strong>Signal 服务器会对附件上传进行速率限制</strong>，适配器使用调度器批量发送多张图片，每批最多 32 张，并按照 Signal 服务器策略限速上传。</p>
+</div>
+<h3 id="原生格式引用回复与表情回应">原生格式、引用回复与表情回应</h3>
+<p>Signal 消息以<strong>原生格式</strong>渲染，而非显示原始 markdown 字符。适配器将 markdown（<code>**粗体**</code>、<code>*斜体*</code>、<code>`代码`</code>、<code>~~删除线~~</code>、<code>||剧透||</code>、标题）转换为 Signal <code>bodyRanges</code>，使文本在接收方客户端以真实样式显示，而非可见的 <code>**</code> 或 <code>`</code> 字符。</p>
+<p><strong>引用回复。</strong> 当 Hermes 回复某条特定消息时，会发送原生引用回复——与 Signal 用户使用"回复"功能时看到的 UI 效果相同。对于响应入站消息而生成的回复，此功能自动生效。</p>
+<p><strong>表情回应。</strong> Agent 可通过标准 reaction API 对消息添加表情回应；回应会以 emoji 形式显示在被引用消息上，而非额外的文字。</p>
+<p>以上功能无需额外配置——在近期的 signal-cli 版本中默认启用。若你的 <code>signal-cli</code> 版本过旧，Hermes 会回退到纯文本投递，并记录一次性警告日志。</p>
+<h3 id="长消息">长消息</h3>
+<p>Signal 单条消息上限为 <strong>8,000 字符</strong>。Hermes 会自动将更长的回复拆分为带编号的分段（<code>(1/3)</code>、<code>(2/3)</code>……）发送，而不是截断内容。此行为覆盖所有投递路径——实时对话回复、cron 任务投递、<code>hermes send</code> 以及 MCP <code>send_message</code> 调用——且原生格式（加粗、斜体、代码、剧透）在分段边界处保持不变。</p>
+<h3 id="正在输入指示器">正在输入指示器</h3>
+<p>机器人在处理消息时会发送正在输入指示器，每 8 秒刷新一次。</p>
+<h3 id="手机号脱敏">手机号脱敏</h3>
+<p>所有手机号在日志中自动脱敏：
+- <code>+15551234567</code> → <code>+155****4567</code>
+- 适用于 Hermes gateway 日志和全局脱敏系统</p>
+<h3 id="给自己发消息单号码配置">给自己发消息（单号码配置）</h3>
+<p>如果你将 signal-cli 作为自己手机号的<strong>关联辅助设备</strong>运行（而非单独的机器人号码），可以通过 Signal 的"给自己发消息"功能与 Hermes 交互。</p>
+<p>只需从手机向自己发送消息——signal-cli 会接收到该消息，Hermes 在同一会话中响应。</p>
+<p><strong>工作原理：</strong>
+- "给自己发消息"以 <code>syncMessage.sentMessage</code> 信封形式到达
+- 适配器检测到这些消息是发给机器人自身账号的，并将其作为普通入站消息处理
+- 回声保护（已发时间戳追踪）防止无限循环——机器人自身的回复会被自动过滤</p>
+<p><strong>无需额外配置。</strong> 只要 <code>SIGNAL_ACCOUNT</code> 与你的手机号匹配，此功能自动生效。</p>
+<h3 id="健康监控">健康监控</h3>
+<p>适配器监控 SSE 连接，并在以下情况自动重连：
+- 连接断开（指数退避：2s → 60s）
+- 120 秒内无任何活动（向 signal-cli 发送 ping 以验证连通性）</p>
+<hr />
+<h2 id="故障排查">故障排查</h2>
+<table>
+<thead>
+<tr>
+<th>问题</th>
+<th>解决方案</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>配置时提示 <strong>"Cannot reach signal-cli"</strong></td>
+<td>确保 signal-cli 守护进程正在运行：<code>signal-cli --account +YOUR_NUMBER daemon --http 127.0.0.1:8080</code></td>
+</tr>
+<tr>
+<td><strong>消息未收到</strong></td>
+<td>检查 <code>SIGNAL_ALLOWED_USERS</code> 是否包含发送方号码（E.164 格式，带 <code>+</code> 前缀）</td>
+</tr>
+<tr>
+<td><strong>"signal-cli not found on PATH"</strong></td>
+<td>安装 signal-cli 并确保其在 PATH 中，或使用 Docker</td>
+</tr>
+<tr>
+<td><strong>连接持续断开</strong></td>
+<td>检查 signal-cli 日志中的错误信息，确保已安装 Java 17+。</td>
+</tr>
+<tr>
+<td><strong>群组消息被忽略</strong></td>
+<td>使用具体群组 ID 配置 <code>SIGNAL_GROUP_ALLOWED_USERS</code>，或设为 <code>*</code> 允许所有群组。</td>
+</tr>
+<tr>
+<td><strong>机器人对所有人无响应</strong></td>
+<td>配置 <code>SIGNAL_ALLOWED_USERS</code>，使用私信配对，或通过 gateway 策略显式允许所有用户（如需更广泛的访问权限）。</td>
+</tr>
+<tr>
+<td><strong>消息重复</strong></td>
+<td>确保只有一个 signal-cli 实例在监听你的手机号</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="安全">安全</h2>
+<div class="admonition adm-warning"><p class="adm-title">警告</p>
+<p><strong>务必配置访问控制。</strong> 机器人默认具有终端访问权限。若未设置 <code>SIGNAL_ALLOWED_USERS</code> 或私信配对，gateway 会拒绝所有入站消息作为安全措施。</p>
+</div>
+<ul>
+<li>手机号在所有日志输出中均已脱敏</li>
+<li>使用私信配对或显式白名单安全地引导新用户</li>
+<li>除非明确需要群组支持，否则保持群组禁用状态，或仅将受信任的群组加入白名单</li>
+<li>Signal 的端对端加密保护传输中的消息内容</li>
+<li><code>~/.local/share/signal-cli/</code> 中的 signal-cli 会话数据包含账号凭据——请像保护密码一样保护它</li>
+</ul>
+<hr />
+<h2 id="环境变量参考">环境变量参考</h2>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>必填</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SIGNAL_HTTP_URL</code></td>
+<td>是</td>
+<td>—</td>
+<td>signal-cli HTTP 端点</td>
+</tr>
+<tr>
+<td><code>SIGNAL_ACCOUNT</code></td>
+<td>是</td>
+<td>—</td>
+<td>机器人手机号（E.164）</td>
+</tr>
+<tr>
+<td><code>SIGNAL_ALLOWED_USERS</code></td>
+<td>否</td>
+<td>—</td>
+<td>逗号分隔的手机号/UUID</td>
+</tr>
+<tr>
+<td><code>SIGNAL_GROUP_ALLOWED_USERS</code></td>
+<td>否</td>
+<td>—</td>
+<td>要监听的群组 ID，或 <code>*</code> 表示全部（省略则禁用群组）</td>
+</tr>
+<tr>
+<td><code>SIGNAL_ALLOW_ALL_USERS</code></td>
+<td>否</td>
+<td><code>false</code></td>
+<td>允许任意用户交互（跳过白名单）</td>
+</tr>
+<tr>
+<td><code>SIGNAL_HOME_CHANNEL</code></td>
+<td>否</td>
+<td>—</td>
+<td>cron 任务的默认投递目标</td>
+</tr>
+</tbody>
+</table>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/messaging/signal</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#前提条件">前提条件</a></li>
+<li class="lvl3"><a href="#安装-signal-cli">安装 signal-cli</a></li>
+<li class="lvl2"><a href="#第一步关联你的-signal-账号">第一步：关联你的 Signal 账号</a></li>
+<li class="lvl2"><a href="#第二步启动-signal-cli-守护进程">第二步：启动 signal-cli 守护进程</a></li>
+<li class="lvl2"><a href="#第三步配置-hermes">第三步：配置 Hermes</a></li>
+<li class="lvl3"><a href="#手动配置">手动配置</a></li>
+<li class="lvl2"><a href="#访问控制">访问控制</a></li>
+<li class="lvl3"><a href="#私信访问">私信访问</a></li>
+<li class="lvl3"><a href="#群组访问">群组访问</a></li>
+<li class="lvl2"><a href="#功能特性">功能特性</a></li>
+<li class="lvl3"><a href="#附件">附件</a></li>
+<li class="lvl3"><a href="#原生格式引用回复与表情回应">原生格式、引用回复与表情回应</a></li>
+<li class="lvl3"><a href="#长消息">长消息</a></li>
+<li class="lvl3"><a href="#正在输入指示器">正在输入指示器</a></li>
+<li class="lvl3"><a href="#手机号脱敏">手机号脱敏</a></li>
+<li class="lvl3"><a href="#给自己发消息单号码配置">给自己发消息（单号码配置）</a></li>
+<li class="lvl3"><a href="#健康监控">健康监控</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl2"><a href="#安全">安全</a></li>
+<li class="lvl2"><a href="#环境变量参考">环境变量参考</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

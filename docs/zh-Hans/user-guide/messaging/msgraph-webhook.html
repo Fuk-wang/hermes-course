@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Microsoft Graph Webhook 监听器 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/messaging/msgraph-webhook</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="microsoft-graph-webhook-监听器">Microsoft Graph Webhook 监听器</h1>
+<p><code>msgraph_webhook</code> gateway 平台是一个入站事件监听器。它是 Hermes 接收来自 Microsoft Graph 的<strong>变更通知</strong>的方式——"一个 Teams 会议已结束"、"此聊天中收到了一条新消息"、"此日历事件已更新"。与 <code>teams</code> 平台（用户向其发送消息的聊天机器人）不同——此平台是 M365 告知 Hermes 某事已发生，而非来自用户的消息。</p>
+<p>目前主要的消费者是 Teams 会议摘要流水线：Graph 在会议产生转录文本时发出通知，流水线获取该内容，Hermes 将摘要发回 Teams。其他 Graph 资源（<code>/chats/.../messages</code>、<code>/users/.../events</code>）使用同一监听器——流水线消费者通过各自的 PR 接入。</p>
+<h2 id="前提条件">前提条件</h2>
+<ul>
+<li>Microsoft Graph 应用凭据——<a href="../../guides/microsoft-graph-app-registration.html">注册 Microsoft Graph 应用程序</a></li>
+<li>一个 Microsoft Graph 可访问的<strong>公开 HTTPS URL</strong>（Graph 不会调用私有端点）。测试时可使用 dev tunnel；生产环境需要具有有效证书的真实域名。</li>
+<li>一个强共享密钥，用作 <code>clientState</code> 的值。使用 <code>openssl rand -hex 32</code> 生成，并以 <code>MSGRAPH_WEBHOOK_CLIENT_STATE</code> 写入 <code>~/.hermes/.env</code>。</li>
+</ul>
+<h2 id="快速开始">快速开始</h2>
+<p>最小化 <code>~/.hermes/config.yaml</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">msgraph_webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8646</span>
+<span class="w">      </span><span class="nt">client_state</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;replace-with-a-strong-secret&quot;</span>
+<span class="w">      </span><span class="nt">accepted_resources</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;communications/onlineMeetings&quot;</span>
+</code></pre></div>
+
+<p>或通过 <code>~/.hermes/.env</code> 中的环境变量（启动时自动合并）：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MSGRAPH_WEBHOOK_ENABLED</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">MSGRAPH_WEBHOOK_PORT</span><span class="o">=</span><span class="m">8646</span>
+<span class="nv">MSGRAPH_WEBHOOK_CLIENT_STATE</span><span class="o">=</span>&lt;generate-with-openssl-rand-hex-32&gt;
+<span class="nv">MSGRAPH_WEBHOOK_ACCEPTED_RESOURCES</span><span class="o">=</span>communications/onlineMeetings
+</code></pre></div>
+
+<p>启动 gateway：<code>hermes gateway run</code>。监听器暴露以下端点：</p>
+<ul>
+<li><code>POST /msgraph/webhook</code> — 来自 Graph 的变更通知</li>
+<li><code>GET /msgraph/webhook?validationToken=...</code> — Graph 订阅验证握手</li>
+<li><code>GET /health</code> — 就绪探针，包含已接受/重复计数器</li>
+</ul>
+<p>将监听器公开暴露（反向代理、dev tunnel、ingress）。Graph 订阅的通知 URL 为你的公开 HTTPS 源地址加上 <code>/msgraph/webhook</code>：</p>
+<div class="highlight"><pre><span></span><code>https://ops.example.com/msgraph/webhook
+</code></pre></div>
+
+<h2 id="配置">配置</h2>
+<p>所有设置位于 <code>platforms.msgraph_webhook.extra</code> 下：</p>
+<table>
+<thead>
+<tr>
+<th>设置</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>host</code></td>
+<td><code>0.0.0.0</code></td>
+<td>HTTP 监听器的绑定地址。</td>
+</tr>
+<tr>
+<td><code>port</code></td>
+<td><code>8646</code></td>
+<td>绑定端口。</td>
+</tr>
+<tr>
+<td><code>webhook_path</code></td>
+<td><code>/msgraph/webhook</code></td>
+<td>Graph POST 请求的 URL 路径。</td>
+</tr>
+<tr>
+<td><code>health_path</code></td>
+<td><code>/health</code></td>
+<td>就绪端点。</td>
+</tr>
+<tr>
+<td><code>client_state</code></td>
+<td>—</td>
+<td>Graph 在每条通知中回传的共享密钥。使用 <code>hmac.compare_digest</code> 进行比较——使用 <code>openssl rand -hex 32</code> 生成。</td>
+</tr>
+<tr>
+<td><code>accepted_resources</code></td>
+<td><code>[]</code>（接受全部）</td>
+<td>Graph 资源路径/模式的白名单。末尾 <code>*</code> 作为前缀匹配。可容忍开头的 <code>/</code>。示例：<code>["communications/onlineMeetings", "chats/*/messages"]</code>。</td>
+</tr>
+<tr>
+<td><code>max_seen_receipts</code></td>
+<td><code>5000</code></td>
+<td>通知 ID 的去重缓存大小。达到上限时淘汰最旧的条目。</td>
+</tr>
+<tr>
+<td><code>allowed_source_cidrs</code></td>
+<td><code>[]</code>（允许全部）</td>
+<td>可选的源 IP 白名单。见下文。</td>
+</tr>
+</tbody>
+</table>
+<p>大多数设置也有对应的环境变量（<code>MSGRAPH_WEBHOOK_*</code>），在 gateway 启动时合并到配置中（例外是 <code>host</code>，它仅可通过配置文件设置——参见上方说明）——参见<a href="../../../reference/environment-variables.html#microsoft-graph-teams-meetings" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">环境变量参考</a>。</p>
+<h2 id="安全加固">安全加固</h2>
+<h3 id="clientstate-是主要的认证检查">clientState 是主要的认证检查</h3>
+<p>每条 Graph 通知都包含你在订阅时注册的 <code>clientState</code> 字符串。监听器使用时序安全比较拒绝任何 <code>clientState</code> 不匹配的通知。这是 Microsoft 的官方机制——请将该值视为强共享密钥。</p>
+<p>如果未设置 <code>client_state</code>，监听器将接受所有格式正确的 POST 请求。<strong>生产环境中请勿在未设置的情况下运行。</strong></p>
+<h3 id="源-ip-白名单生产部署">源 IP 白名单（生产部署）</h3>
+<p>在生产环境中，将监听器限制为 Microsoft 公布的 Graph webhook 源 IP 范围。Microsoft 在 <a href="https://learn.microsoft.com/en-us/microsoft-365/enterprise/urls-and-ip-address-ranges" class="ext" target="_blank" rel="noopener">Office 365 IP 地址和 URL Web 服务</a>中记录了出口范围。配置方式如下：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">msgraph_webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">client_state</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;...&quot;</span>
+<span class="w">      </span><span class="nt">allowed_source_cidrs</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;52.96.0.0/14&quot;</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;52.104.0.0/14&quot;</span>
+<span class="w">        </span><span class="c1"># ...添加当前 Microsoft 365 &quot;Common&quot; + &quot;Teams&quot; 类别的出口范围</span>
+</code></pre></div>
+
+<p>或通过环境变量：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MSGRAPH_WEBHOOK_ALLOWED_SOURCE_CIDRS</span><span class="o">=</span><span class="s2">&quot;52.96.0.0/14,52.104.0.0/14&quot;</span>
+</code></pre></div>
+
+<p>空白名单 = 接受来自任何地址的请求（默认；保留 dev tunnel 工作流）。无效的 CIDR 字符串会记录警告并被忽略。<strong>请每季度审查 Microsoft IP 列表</strong>——它会变更。</p>
+<h3 id="https-终止">HTTPS 终止</h3>
+<p>监听器使用纯 HTTP。在你的反向代理（Caddy、Nginx、Cloudflare Tunnel、AWS ALB）处终止 TLS，并通过本地网络代理到监听器。Graph 拒绝向非 HTTPS 端点投递，因此来自 Graph 的未加密流量不存在可达路径。</p>
+<h3 id="响应规范">响应规范</h3>
+<p>成功时，监听器返回 <code>202 Accepted</code> 且响应体为空——内部计数器不会出现在响应中。运维人员可通过 <code>/health</code> 观察计数。</p>
+<p>状态码说明：</p>
+<table>
+<thead>
+<tr>
+<th>结果</th>
+<th>状态码</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>通知已接受或已去重</td>
+<td>202</td>
+</tr>
+<tr>
+<td>验证握手（带 <code>validationToken</code> 的 GET）</td>
+<td>200（原样回传 token）</td>
+</tr>
+<tr>
+<td>批次中所有条目的 clientState 均失败</td>
+<td>403</td>
+</tr>
+<tr>
+<td>JSON 格式错误 / 缺少 <code>value</code> 数组 / 未知资源</td>
+<td>400</td>
+</tr>
+<tr>
+<td>源 IP 不在白名单中</td>
+<td>403</td>
+</tr>
+<tr>
+<td>不带 <code>validationToken</code> 的裸 GET</td>
+<td>400</td>
+</tr>
+</tbody>
+</table>
+<h2 id="故障排查">故障排查</h2>
+<table>
+<thead>
+<tr>
+<th>问题</th>
+<th>检查项</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Graph 订阅验证失败</td>
+<td>公开 URL 可访问，<code>/msgraph/webhook</code> 路径匹配，带 <code>validationToken</code> 的 GET 在 10 秒内以 <code>text/plain</code> 原样回传 token。</td>
+</tr>
+<tr>
+<td>通知 POST 成功但无内容被摄取</td>
+<td><code>client_state</code> 与订阅时注册的值一致。如值已漂移，重新运行 <code>openssl rand -hex 32</code> 并创建新订阅。检查 <code>accepted_resources</code> 是否包含 Graph 发送的资源路径。</td>
+</tr>
+<tr>
+<td>每条通知均返回 403</td>
+<td><code>clientState</code> 不匹配（伪造，或订阅时使用了不同的值）。使用 <code>hermes teams-pipeline subscribe --client-state "$MSGRAPH_WEBHOOK_CLIENT_STATE" ...</code> 重新创建订阅（随流水线运行时 PR 一同发布）。</td>
+</tr>
+<tr>
+<td>监听器已启动，但 <code>curl http://localhost:8646/health</code> 挂起</td>
+<td>端口绑定冲突。检查 <code>ss -tlnp \| grep 8646</code>，如有需要更改 <code>port:</code>。</td>
+</tr>
+<tr>
+<td>来自 Microsoft 的真实 Graph 请求返回 403</td>
+<td>源 IP 白名单范围过窄。临时移除 <code>allowed_source_cidrs</code>，确认流量正常后，将列表扩展至包含当前 Microsoft 出口范围。</td>
+</tr>
+</tbody>
+</table>
+<h2 id="相关文档">相关文档</h2>
+<ul>
+<li><a href="../../guides/microsoft-graph-app-registration.html">注册 Microsoft Graph 应用程序</a> — Azure 应用注册前提条件</li>
+<li><a href="../../../reference/environment-variables.html#microsoft-graph-teams-meetings" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">环境变量 → Microsoft Graph</a> — 完整环境变量列表</li>
+<li><a href="teams.html">Microsoft Teams 机器人设置</a> — 允许用户在 Teams 中与 Hermes 聊天的另一平台</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/messaging/msgraph-webhook</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#前提条件">前提条件</a></li>
+<li class="lvl2"><a href="#快速开始">快速开始</a></li>
+<li class="lvl2"><a href="#配置">配置</a></li>
+<li class="lvl2"><a href="#安全加固">安全加固</a></li>
+<li class="lvl3"><a href="#clientstate-是主要的认证检查">clientState 是主要的认证检查</a></li>
+<li class="lvl3"><a href="#源-ip-白名单生产部署">源 IP 白名单（生产部署）</a></li>
+<li class="lvl3"><a href="#https-终止">HTTPS 终止</a></li>
+<li class="lvl3"><a href="#响应规范">响应规范</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl2"><a href="#相关文档">相关文档</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

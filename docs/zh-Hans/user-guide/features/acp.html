@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACP 宿主集成 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/features/acp</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="acp-宿主集成">ACP 宿主集成</h1>
+<p>Hermes Agent 可作为 ACP 服务器运行，让兼容 ACP 的编辑器通过 stdio 与 Hermes 通信并渲染：</p>
+<ul>
+<li>聊天消息</li>
+<li>工具活动</li>
+<li>文件差异</li>
+<li>终端命令</li>
+<li>审批 prompt（提示词）</li>
+<li>流式思考 / 响应块</li>
+</ul>
+<p>当你希望 Hermes 表现得像编辑器原生的编码 agent，而非独立 CLI 或消息机器人时，ACP 是合适的选择。</p>
+<h2 id="hermes-在-acp-模式下暴露的内容">Hermes 在 ACP 模式下暴露的内容</h2>
+<p>Hermes 使用专为编辑器工作流设计的精选 <code>hermes-acp</code> 工具集运行，包括：</p>
+<ul>
+<li>文件工具：<code>read_file</code>、<code>write_file</code>、<code>patch</code>、<code>search_files</code></li>
+<li>终端工具：<code>terminal</code>、<code>process</code></li>
+<li>网页/浏览器工具</li>
+<li>记忆、待办事项、会话搜索</li>
+<li>skills</li>
+<li><code>execute_code</code> 和 <code>delegate_task</code></li>
+<li>视觉</li>
+</ul>
+<p>它有意排除了不适合典型编辑器 UX 的功能，例如消息投递和 cronjob 管理。</p>
+<h2 id="安装">安装</h2>
+<p>正常安装 Hermes 后，从安装检出目录添加 ACP 扩展：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>~/.hermes/hermes-agent<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s1">&#39;.[acp]&#39;</span>
+</code></pre></div>
+
+<p>这将安装 <code>agent-client-protocol</code> 依赖并启用：</p>
+<ul>
+<li><code>hermes acp</code></li>
+<li><code>hermes-acp</code></li>
+<li><code>python -m acp_adapter</code></li>
+</ul>
+<h2 id="启动-acp-服务器">启动 ACP 服务器</h2>
+<p>以下任意命令均可以 ACP 模式启动 Hermes：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>acp
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>hermes-acp
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>acp_adapter
+</code></pre></div>
+
+<p>Hermes 将日志输出到 stderr，以保留 stdout 用于 ACP JSON-RPC 流量。</p>
+<p>非交互式检查：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>acp<span class="w"> </span>--version
+hermes<span class="w"> </span>acp<span class="w"> </span>--check
+</code></pre></div>
+
+<h3 id="浏览器工具可选">浏览器工具（可选）</h3>
+<p>浏览器工具（<code>browser_navigate</code>、<code>browser_click</code> 等）依赖 <code>agent-browser</code> npm 包和 Chromium，这些不包含在 Python wheel 中。通过以下命令安装：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>acp<span class="w"> </span>--setup-browser<span class="w">           </span><span class="c1"># 交互式（下载约 400 MB 前会提示确认）</span>
+hermes<span class="w"> </span>acp<span class="w"> </span>--setup-browser<span class="w"> </span>--yes<span class="w">     </span><span class="c1"># 非交互式接受下载</span>
+</code></pre></div>
+
+<p>这是独立命令。终端认证流程（<code>hermes acp --setup</code>）在模型选择后也会将浏览器引导作为后续问题提供，因此大多数用户无需直接运行 <code>--setup-browser</code>。</p>
+<p>具体操作：</p>
+<ul>
+<li>若缺少 Node.js 22 LTS，将其安装到 <code>~/.hermes/node/</code></li>
+<li>将 <code>npm install -g agent-browser @askjo/camofox-browser</code> 安装到该前缀（无需 sudo — <code>npm</code> 的 <code>--prefix</code> 指向用户可写的 Hermes 管理 Node）</li>
+<li>安装 Playwright Chromium，或在检测到系统 Chrome/Chromium 时使用已有版本</li>
+</ul>
+<p>该引导过程是幂等的——重复运行速度很快，已完成的步骤会被跳过。</p>
+<h2 id="宿主设置">宿主设置</h2>
+<h3 id="buzz-频道中继桥接">Buzz 频道（中继桥接）</h3>
+<p><a href="https://github.com/block/buzz" class="ext" target="_blank" rel="noopener">Buzz</a> 是一个基于 Nostr 的人机协作平台。
+其 <code>buzz-acp</code> harness 通过 stdio 将 Buzz 频道连接到任意 ACP agent：</p>
+<div class="highlight"><pre><span></span><code>Buzz relay &lt;-- WebSocket --&gt; buzz-acp &lt;-- ACP over stdio --&gt; Hermes Agent
+</code></pre></div>
+
+<p>这是一种传输层集成，不是第二个 Hermes 安装。由 <code>buzz-acp</code> 启动的子进程使用该主机上
+与 <code>hermes</code> 相同的配置、凭据、记忆、技能和状态。</p>
+<p>（这与 <a href="#buzz-desktop">Buzz Desktop 的托管运行时</a>不同——后者在本地将 Hermes 作为
+预设 harness 启动。中继桥接用于以 agent 身份加入 Buzz <em>频道</em>，通常部署在服务器上。）</p>
+<p>前置条件：</p>
+<ul>
+<li>完成上文的 ACP 安装并通过 <code>hermes acp --check</code>。</li>
+<li>从 <a href="https://github.com/block/buzz" class="ext" target="_blank" rel="noopener">Buzz 仓库</a>构建 <code>buzz-acp</code> 和 <code>buzz</code> CLI
+  （<code>cargo build --release -p buzz-acp</code>）。</li>
+<li>为 Hermes 铸造专用的 Nostr 密钥对（<code>buzz-admin generate-key</code>）并将其注册为
+  中继成员（<code>buzz-admin add-member</code>）。每个 agent 都需要自己的身份——不要复用
+  人类的密钥对。</li>
+<li>将该身份加入目标 Buzz 频道。</li>
+</ul>
+<p>启动桥接：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_RELAY_URL</span><span class="o">=</span><span class="s2">&quot;wss://community.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_PRIVATE_KEY</span><span class="o">=</span><span class="s2">&quot;...&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_API_TOKEN</span><span class="o">=</span><span class="s2">&quot;...&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_ACP_AGENT_COMMAND</span><span class="o">=</span><span class="s2">&quot;hermes&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_ACP_AGENT_ARGS</span><span class="o">=</span><span class="s2">&quot;acp&quot;</span>
+
+buzz-acp
+</code></pre></div>
+
+<p>仅当中继强制 token 认证时才需要 <code>BUZZ_API_TOKEN</code>。切勿提交或粘贴私钥和 API token。</p>
+<p>若要持久化部署到服务器，请以拥有目标 Hermes home 的同一操作系统用户身份，
+在服务管理器下运行 <code>buzz-acp</code>。安装、密钥生成、频道发现和各项 agent 选项见
+<a href="https://github.com/block/buzz/tree/main/crates/buzz-acp" class="ext" target="_blank" rel="noopener">buzz-acp README</a>。</p>
+<p>桥接会发现 Hermes 身份所属的每个 Buzz 频道，并在其被加入新频道时自动订阅。
+因此 Buzz 频道成员资格就是访问边界；Hermes 自身配置中无需单独的频道列表。</p>
+<p>若要在所有者的 Buzz Desktop 中展示 Hermes 的 ACP 活动，添加：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">BUZZ_ACP_RELAY_OBSERVER</span><span class="o">=</span><span class="s2">&quot;true&quot;</span>
+</code></pre></div>
+
+<p>这会发布加密的 kind <code>24200</code> 观察者帧（Buzz 的 NIP-AO），仅所有者可解密。
+Desktop 会在该 agent 的 <strong>Activity log</strong> 中实时渲染生命周期、工具、响应和用量流。
+中继将这些帧视为临时数据，因此 Desktop 必须在回合开始前在线；其本地观察者归档
+才是所有者侧的持久历史。</p>
+<p>无头桥接会自行回应 ACP 权限请求，因为没有编辑器来展示审批对话框——参见
+<a href="#将-buzz-agent-保持为-owner-only">将 Buzz agent 保持为 owner-only</a>。请将桥接视为
+特权自动化：使用专用操作系统账户，限制哪些 Buzz 用户可以触发 agent
+（<code>buzz-acp</code> 通过 <code>BUZZ_ACP_AGENT_OWNER</code> 支持仅所有者响应门控），
+并仅在预期 Hermes 工作的频道中授予成员资格。</p>
+<h2 id="编辑器设置">编辑器设置</h2>
+<h3 id="vs-code">VS Code</h3>
+<p>安装 <a href="https://marketplace.visualstudio.com/items?itemName=formulahendry.acp-client" class="ext" target="_blank" rel="noopener">ACP Client</a> 扩展。</p>
+<p>连接步骤：</p>
+<ol>
+<li>从活动栏打开 ACP Client 面板。</li>
+<li>从内置 agent 列表中选择 <strong>Hermes Agent</strong>。</li>
+<li>连接并开始聊天。</li>
+</ol>
+<p>如需手动定义 Hermes，通过 VS Code 设置在 <code>acp.agents</code> 下添加：</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;acp.agents&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;Hermes Agent&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;command&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;acp&quot;</span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="zed">Zed</h3>
+<p>在 Zed 设置中将 Hermes 配置为自定义 agent 服务器：</p>
+<ol>
+<li>打开 Agent 面板。</li>
+<li>使用以下配置添加自定义 agent 服务器：</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;agent_servers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;hermes-agent&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;custom&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;command&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;acp&quot;</span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ol>
+<li>启动新的 Hermes 外部 agent 线程。</li>
+</ol>
+<p>前提条件：</p>
+<ul>
+<li>先通过 <code>hermes model</code> 配置 Hermes provider 凭据，或在 <code>~/.hermes/.env</code> / <code>~/.hermes/config.yaml</code> 中设置。</li>
+</ul>
+<h3 id="jetbrains">JetBrains</h3>
+<p>使用兼容 ACP 的插件并将其指向 <code>hermes acp</code> 或 <code>hermes-acp</code>。</p>
+<h3 id="buzz-desktop">Buzz Desktop</h3>
+<p><a href="https://github.com/block/buzz" class="ext" target="_blank" rel="noopener">Buzz</a> 将 Hermes Agent 作为预设运行时提供。
+按常规方式安装 Hermes 后，Buzz 会自动发现它 —— 打开 <strong>Settings → Runtimes</strong>，
+Hermes 就会出现在你的运行时列表中。</p>
+<p>如果发现失败（较旧的安装），请确认 ACP 启动器可以在登录 shell 的 PATH 上解析：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>hermes-acp<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>hermes
+</code></pre></div>
+
+<p>较新的安装会将 <code>hermes</code> 和 <code>hermes-acp</code> 两个启动器写入 <code>~/.local/bin</code>；
+运行 <code>hermes update</code> 会为较旧的安装补上 <code>hermes-acp</code> 启动器。作为手动兜底方案，
+可以将 Buzz 的 agent 命令配置为 <code>hermes</code>，参数为 <code>["acp"]</code>。</p>
+<h4 id="将-buzz-agent-保持为-owner-only">将 Buzz agent 保持为 owner-only</h4>
+<p>Buzz 创建的每个 agent 默认都将 <strong>Who can talk to this agent</strong> 设为 <code>Owner only</code>。
+当运行时为 Hermes 时，请保持该设置。</p>
+<p>这条路径上有两种行为叠加。<code>hermes-acp</code> 工具集包含 <code>terminal</code> 和 <code>execute_code</code>，
+而 Buzz 的 ACP 桥接层会自行以 <code>allow_once</code> 回应 Hermes 的权限请求，不会转交给你确认。
+因此 Buzz 中的 Hermes agent 会在不提示的情况下在宿主机上执行 shell 命令。
+让它对一个临时目录执行 <code>rm -rf</code>，该目录会被直接删除，全程没有任何提示。</p>
+<p>将该设置改为 <code>Anyone</code>，等于把同样的 shell 访问权限交给频道中的每一位发言者。
+Buzz 在你选择该选项时不会给出任何警告。</p>
+<p>目前两种看起来可行的缓解手段都无效：</p>
+<ul>
+<li><code>approvals.mode: manual</code> 确实会让 Hermes 发出权限请求，但 Buzz 仍会自动批准，
+  命令照样执行。</li>
+<li><code>platform_toolsets.acp</code> 不会收窄 ACP 工具集，因此无法用它去掉 <code>terminal</code>。</li>
+</ul>
+<p>来自 owner 的 <code>!shutdown</code> 在任何模式下都能停止 agent，而 Buzz 会忽略其他人发出的同一命令。</p>
+<h2 id="配置与凭据">配置与凭据</h2>
+<p>ACP 模式使用与 CLI 相同的 Hermes 配置：</p>
+<ul>
+<li><code>~/.hermes/.env</code></li>
+<li><code>~/.hermes/config.yaml</code></li>
+<li><code>~/.hermes/skills/</code></li>
+<li><code>~/.hermes/state.db</code></li>
+</ul>
+<p>Provider 解析使用 Hermes 的正常运行时解析器，因此 ACP 继承当前配置的 provider 和凭据。Hermes 还为首次运行的 ACP 客户端提供终端认证方法（<code>--setup</code>）；这将打开 Hermes 的交互式模型/provider 设置。</p>
+<h2 id="会话行为">会话行为</h2>
+<p>ACP 会话在服务器运行期间由 ACP 适配器的内存会话管理器跟踪。</p>
+<p>每个会话存储：</p>
+<ul>
+<li>会话 ID</li>
+<li>工作目录</li>
+<li>已选模型</li>
+<li>当前对话历史</li>
+<li>取消事件</li>
+</ul>
+<p>底层 <code>AIAgent</code> 仍使用 Hermes 的正常持久化/日志路径，但 ACP 的 <code>list/load/resume/fork</code> 仅限于当前运行的 ACP 服务器进程。</p>
+<h2 id="工作目录行为">工作目录行为</h2>
+<p>ACP 会话将编辑器的 cwd 绑定到 Hermes 任务 ID，使文件和终端工具相对于编辑器工作区运行，而非服务器进程的 cwd。</p>
+<h2 id="审批">审批</h2>
+<p>危险的终端命令可作为审批 prompt 路由回编辑器。ACP 审批选项比 CLI 流程更简单：</p>
+<ul>
+<li>允许一次</li>
+<li>始终允许</li>
+<li>拒绝</li>
+</ul>
+<p>你是否真的会看到提示取决于宿主端。宿主可以用程序方式直接回应该请求而不展示给你，
+此时这些选项只存在于协议层面，永远不会到达人类手中。Buzz Desktop 就是这样做的，
+因此无论你的 <code>approvals</code> 如何设置，都应把该路径视为无人值守执行。</p>
+<p>超时或出错时，审批桥接会拒绝请求。</p>
+<h3 id="会话范围的编辑自动审批">会话范围的编辑自动审批</h3>
+<p>ACP 在<em>允许一次</em>和<em>始终允许</em>之间提供第三层：<strong>允许本次会话</strong>。在编辑器的权限提示中选择此选项，会将审批记录在当前 ACP 会话内——该会话中所有后续匹配命令无需提示即可通过，但新的 ACP 会话（或重启编辑器）会重置状态，并在第一次时重新提示。</p>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>编辑器标签</th>
+<th>范围</th>
+<th>重启后是否持久化</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>allow_once</code></td>
+<td>允许一次</td>
+<td>本次工具调用</td>
+<td>否</td>
+</tr>
+<tr>
+<td><code>allow_session</code></td>
+<td>允许本次会话</td>
+<td>本 ACP 会话中所有匹配调用</td>
+<td>否——会话结束时清除</td>
+</tr>
+<tr>
+<td><code>allow_always</code></td>
+<td>始终允许</td>
+<td>所有未来会话</td>
+<td>是（写入 Hermes 永久允许列表）</td>
+</tr>
+<tr>
+<td><code>deny</code></td>
+<td>拒绝</td>
+<td>本次工具调用</td>
+<td>否</td>
+</tr>
+</tbody>
+</table>
+<p><code>allow_session</code> 是编辑器工作流的正确默认选项——你在任务期间信任 agent，但不想授予长期允许列表条目。安全权衡很直接：范围越广，编辑器打断你的次数越少，行为异常的 agent（或 prompt 注入）在被发现前能造成的损害也越大。对不熟悉的命令从 <code>allow_once</code> 开始；在看到 agent 多次正确运行相同模式后升级为 <code>allow_session</code>；将 <code>allow_always</code> 保留给你永远信任的真正幂等命令（例如 <code>git status</code>）。</p>
+<p>ACP 桥接将这些选项映射到 Hermes 的内部审批语义——<code>allow_always</code> 与 CLI 相同地写入永久允许列表条目，而 <code>allow_session</code> 仅影响当前 ACP 会话的进程内审批缓存。</p>
+<h2 id="故障排查">故障排查</h2>
+<h3 id="acp-agent-未出现在编辑器中">ACP agent 未出现在编辑器中</h3>
+<p>检查：</p>
+<ul>
+<li>对于手动/本地开发，验证自定义 <code>agent_servers</code> 命令是否指向 <code>hermes acp</code>。</li>
+<li>Hermes 已安装且在 PATH 中。</li>
+<li>ACP 扩展已安装（<code>cd ~/.hermes/hermes-agent &amp;&amp; uv pip install -e '.[acp]'</code>）。</li>
+</ul>
+<h3 id="acp-启动后立即报错">ACP 启动后立即报错</h3>
+<p>尝试以下检查：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>acp<span class="w"> </span>--version
+hermes<span class="w"> </span>acp<span class="w"> </span>--check
+hermes<span class="w"> </span>doctor
+hermes<span class="w"> </span>status
+</code></pre></div>
+
+<h3 id="缺少凭据">缺少凭据</h3>
+<p>ACP 模式使用 Hermes 现有的 provider 设置。通过以下方式配置凭据：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>model
+</code></pre></div>
+
+<p>或编辑 <code>~/.hermes/.env</code>。终端认证流程（<code>hermes acp --setup</code>）也可以触发交互式 provider/模型设置。</p>
+<h2 id="另请参阅">另请参阅</h2>
+<ul>
+<li><a href="../../developer-guide/acp-internals.html">ACP 内部机制</a></li>
+<li><a href="../../developer-guide/provider-runtime.html">Provider 运行时解析</a></li>
+<li><a href="../../developer-guide/tools-runtime.html">工具运行时</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/features/acp</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#hermes-在-acp-模式下暴露的内容">Hermes 在 ACP 模式下暴露的内容</a></li>
+<li class="lvl2"><a href="#安装">安装</a></li>
+<li class="lvl2"><a href="#启动-acp-服务器">启动 ACP 服务器</a></li>
+<li class="lvl3"><a href="#浏览器工具可选">浏览器工具（可选）</a></li>
+<li class="lvl2"><a href="#宿主设置">宿主设置</a></li>
+<li class="lvl3"><a href="#buzz-频道中继桥接">Buzz 频道（中继桥接）</a></li>
+<li class="lvl2"><a href="#编辑器设置">编辑器设置</a></li>
+<li class="lvl3"><a href="#vs-code">VS Code</a></li>
+<li class="lvl3"><a href="#zed">Zed</a></li>
+<li class="lvl3"><a href="#jetbrains">JetBrains</a></li>
+<li class="lvl3"><a href="#buzz-desktop">Buzz Desktop</a></li>
+<li class="lvl2"><a href="#配置与凭据">配置与凭据</a></li>
+<li class="lvl2"><a href="#会话行为">会话行为</a></li>
+<li class="lvl2"><a href="#工作目录行为">工作目录行为</a></li>
+<li class="lvl2"><a href="#审批">审批</a></li>
+<li class="lvl3"><a href="#会话范围的编辑自动审批">会话范围的编辑自动审批</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl3"><a href="#acp-agent-未出现在编辑器中">ACP agent 未出现在编辑器中</a></li>
+<li class="lvl3"><a href="#acp-启动后立即报错">ACP 启动后立即报错</a></li>
+<li class="lvl3"><a href="#缺少凭据">缺少凭据</a></li>
+<li class="lvl2"><a href="#另请参阅">另请参阅</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

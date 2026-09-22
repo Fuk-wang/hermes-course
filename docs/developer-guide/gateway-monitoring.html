@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gateway Monitoring · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/gateway-monitoring</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="gateway-monitoring">Gateway Monitoring</h1>
+<p>Service health monitoring plus structured operational diagnostics for the
+Hermes gateway daemon, exported over OTLP/HTTP to an operator-configured
+endpoint (OpenTelemetry Collector, DataDog, or any OTLP receiver).</p>
+<p>This plane is content-free by construction. It exports gateway and cron
+lifecycle state, platform connector health, and content-free warning/error
+diagnostics. It never exports prompts, messages, tool arguments or results,
+job names, destinations, schedules, raw errors, session history, usage
+analytics, audit logs, or detailed execution traces. Run/model/tool trajectory
+capture is a separate plane served by Hermes's native NeMo Relay SDK
+integration and explicitly configured Relay subscribers or exporters.</p>
+<h2 id="what-gets-exported">What gets exported</h2>
+<table>
+<thead>
+<tr>
+<th>Signal</th>
+<th>OTLP route</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gateway gauges</td>
+<td><code>/v1/metrics</code></td>
+<td><code>hermes.gateway.up/state/busy/drainable/active_agents/background_work/background_delegations/restart_requested</code>, <code>hermes.platform.up/degraded</code> with bounded <code>error_code</code> attributes</td>
+</tr>
+<tr>
+<td>Health/lifecycle events</td>
+<td><code>/v1/traces</code></td>
+<td><code>gateway.lifecycle</code> state transitions (<code>starting -&gt; running -&gt; draining -&gt; stopped</code>, <code>startup_failed</code>, exit), <code>gateway.health_snapshot</code>, platform state changes</td>
+</tr>
+<tr>
+<td>Diagnostics</td>
+<td><code>/v1/logs</code></td>
+<td>Warning/error gateway events with a constant body and bounded subsystem, severity, error class, and error code attributes; rendered log messages are never exported</td>
+</tr>
+<tr>
+<td>Cron scheduler gauges</td>
+<td><code>/v1/metrics</code></td>
+<td>Ticker heartbeat and last-success age (omitted when unavailable), a monotonic catch-up-occurrence count from the scheduler's stale-window branch, enabled/running job counts, and overdue count derived from persisted <code>next_run_at</code> plus the scheduler's existing grace rule</td>
+</tr>
+<tr>
+<td>Cron execution lifecycle</td>
+<td><code>/v1/traces</code></td>
+<td>Durable <code>claimed/running/completed/failed/unknown</code> states, bounded source and error class, opaque hashed job key, elapsed duration when timestamps exist, and delivery outcome when the scheduler knows it; terminal states make a fail-open flush attempt that can delay completion by up to one second</td>
+</tr>
+</tbody>
+</table>
+<p>Signals carry <code>service.name</code>, version, supervision mode, and a stable one-way
+hash of the install id so an operator can distinguish instances without
+exporting account/profile identity or the raw install identifier.</p>
+<p><code>hermes.gateway.active_agents</code>, <code>hermes.gateway.background_work</code>, and
+<code>hermes.gateway.background_delegations</code> are complementary. <code>active_agents</code>
+counts foreground message turns plus in-flight cron jobs plus API runs — the
+work the gateway drains on shutdown. <code>background_work</code> counts detached work that
+<code>active_agents</code> never includes: backgrounded <code>delegate_task</code> subagents,
+<code>terminal(background=true)</code> processes, and kanban workers; it is
+<strong>task-granular</strong> — a fan-out batch of N subagents counts as N — so it reflects
+real concurrent subagent load. <code>background_delegations</code> counts only async
+delegation <strong>units</strong> (each <code>delegate_task</code> dispatch is one, a fan-out batch is
+one), matching the async pool's capacity accounting; alert it against
+<code>delegation.max_concurrent_children</code> to see slot pressure. Sum <code>active_agents</code>
+and <code>background_work</code> for total live work per instance; use
+<code>background_delegations</code> for pool-saturation.</p>
+<h2 id="enabling">Enabling</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">monitoring</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">gateway_health_export</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">export</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">otlp</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">      </span><span class="nt">endpoint</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http://collector-host:4318/v1/traces</span><span class="w">   </span><span class="c1"># metrics/logs derive</span>
+<span class="w">      </span><span class="nt">headers_env</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span><span class="w">   </span><span class="c1"># header name -&gt; ENV VAR NAME (values never stored)</span>
+</code></pre></div>
+
+<p>Check the posture any time:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>monitoring<span class="w"> </span>status
+</code></pre></div>
+
+<p>The OpenTelemetry SDK is an optional extra (<code>pip install 'hermes-agent[otlp]'</code>),
+lazy-installed on first use. When the SDK is missing or the endpoint is down,
+the gateway runs unaffected: metric collection and ordinary event export stay
+off the hot path, while terminal cron events make one bounded fail-open flush
+attempt of up to one second so the final state is less likely to be lost.</p>
+<p>Works identically under systemd/launchd/s6 supervision, containers, tmux, or
+a plain <code>hermes gateway run</code>: the exporter lives in the gateway process, so
+no sidecar, agent, or collector is required on the host.</p>
+<h2 id="collecting-into-datadog">Collecting into DataDog</h2>
+<p>Run a customer-owned OpenTelemetry Collector and forward:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># otel-collector config</span>
+<span class="nt">receivers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">otlp</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">protocols</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">http</span><span class="p">:</span>
+<span class="nt">exporters</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">datadog</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">api</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${env:DD_API_KEY}</span>
+<span class="nt">service</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">pipelines</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">metrics</span><span class="p">:</span><span class="w">   </span><span class="p p-Indicator">{</span><span class="nt">receivers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">otlp</span><span class="p p-Indicator">],</span><span class="nt"> exporters</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">datadog</span><span class="p p-Indicator">]}</span>
+<span class="w">    </span><span class="nt">traces</span><span class="p">:</span><span class="w">    </span><span class="p p-Indicator">{</span><span class="nt">receivers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">otlp</span><span class="p p-Indicator">],</span><span class="nt"> exporters</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">datadog</span><span class="p p-Indicator">]}</span>
+<span class="w">    </span><span class="nt">logs</span><span class="p">:</span><span class="w">      </span><span class="p p-Indicator">{</span><span class="nt">receivers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">otlp</span><span class="p p-Indicator">],</span><span class="nt"> exporters</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">datadog</span><span class="p p-Indicator">]}</span>
+</code></pre></div>
+
+<p>Point <code>monitoring.export.otlp.endpoint</code> at the collector. Alerts belong on
+<code>hermes.gateway.up</code>, <code>hermes.platform.up</code>, and <code>hermes.platform.degraded</code>.</p>
+<h2 id="generic-fleet-queries-and-alerts">Generic fleet queries and alerts</h2>
+<p>The exact syntax depends on the customer's observability backend. The examples
+below use PromQL-style expressions and intentionally avoid vendor-specific
+routing, destinations, or customer inventory.</p>
+<p>Group fleet views by the opaque <code>service.instance.id</code> resource attribute. A
+process that has died cannot emit its own zero, so every deployment needs both
+explicit-state and missing-series detection.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Explicit gateway failure.</span>
+<span class="nv">hermes_gateway_up</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span>
+
+<span class="c1"># Box disappeared or stopped exporting. Choose a window longer than the</span>
+<span class="c1"># configured export interval and collector retry allowance.</span>
+<span class="kr">absent_over_time</span><span class="o">(</span><span class="nv">hermes_gateway_up</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">)</span>
+
+<span class="c1"># Locally owned bridge is explicitly down.</span>
+<span class="nv">hermes_platform_up</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span>
+
+<span class="c1"># Scheduler thread is stale even though the gateway may still be alive.</span>
+<span class="nv">hermes_cron_scheduler_heartbeat_age_seconds</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">180</span>
+
+<span class="c1"># Ticker loops but has not completed a successful tick recently.</span>
+<span class="nv">hermes_cron_scheduler_last_success_age_seconds</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">300</span>
+
+<span class="c1"># One or more jobs are beyond their existing scheduler grace window.</span>
+<span class="nv">hermes_cron_jobs_overdue</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span>
+
+<span class="c1"># Catch-up counter increased, proving at least one stale occurrence was</span>
+<span class="c1"># collapsed and run once after a delay.</span>
+<span class="kr">increase</span><span class="o">(</span><span class="nv">hermes_cron_scheduler_catch_up_occurrences</span><span class="p">[</span><span class="s">15m</span><span class="p">]</span><span class="o">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span>
+</code></pre></div>
+
+<p>Cron execution lifecycle records arrive as <code>hermes.cron_execution</code> spans.
+Alert or derive events from bounded attributes such as:</p>
+<div class="highlight"><pre><span></span><code>hermes.status = failed|unknown
+hermes.delivery_outcome = failed|not_configured
+hermes.error_class = auth_failed|rate_limited|timeout|network_error|
+                     dispatch_failed|interrupted|empty_response|
+                     invalid_config|unknown
+</code></pre></div>
+
+<p>Recommended operator views:</p>
+<ol>
+<li>one row per <code>service.instance.id</code> with gateway and configured local-platform
+   state;</li>
+<li>scheduler heartbeat, last-success age, running count, overdue count, and
+   catch-up increase;</li>
+<li>a cron lifecycle feed keyed only by opaque <code>hermes.job_key</code>;</li>
+<li>separate alerts for box absence, local bridge down, scheduler stale, cron
+   failed/unknown, delivery failure, and overdue/catch-up activity.</li>
+</ol>
+<p>Keep alert thresholds and routing in deployment-owned configuration. Do not add
+job names, prompts, outputs, schedules, destinations, raw errors, profile names,
+or account identity merely to make a dashboard easier to read.</p>
+<h2 id="release-validation-scenarios">Release-validation scenarios</h2>
+<p>Before accepting a deployment, force and verify all five cases through the real
+collector and backend:</p>
+<ol>
+<li><strong>Cron success:</strong> observe <code>claimed -&gt; running -&gt; completed</code>, duration, and a
+   truthful delivery outcome.</li>
+<li><strong>Cron failure:</strong> observe <code>failed</code> plus a bounded error class, with no raw
+   exception or content in the decoded OTLP payload.</li>
+<li><strong>Cron interruption:</strong> stop the owning gateway during execution, restart it,
+   and observe recovery to <code>unknown</code>.</li>
+<li><strong>Locally owned bridge outage:</strong> break one native connector, observe its
+   bounded down/retrying/fatal state and recovery, and verify unaffected boxes
+   remain healthy.</li>
+<li><strong>Killed gateway:</strong> terminate one canary, verify missing-series detection,
+   restart it, and confirm the same opaque instance identity returns.</li>
+</ol>
+<p>Hermes Agent-owned Relay transport health remains in scope. A separate gateway
+or connector service remains authoritative for any shared connected-platform
+state that it owns and should export that state through its own telemetry path.</p>
+<p>For every scenario, verify the signal and alert clear on recovery, other boxes
+remain unaffected, collector failure stays fail-open, and decoded metrics,
+spans, logs, and resource attributes remain content-free.</p>
+<h2 id="local-smoke-test-no-docker">Local smoke test (no Docker)</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># terminal 1: capture collector on :4318</span>
+python<span class="w"> </span>scripts/observability/otel_capture_collector.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--host<span class="w"> </span><span class="m">127</span>.0.0.1<span class="w"> </span>--port<span class="w"> </span><span class="m">4318</span><span class="w"> </span>--log<span class="w"> </span>~/.hermes/cache/scratch/hermes_otel_capture.jsonl
+
+<span class="c1"># terminal 2: drive the real exporter through lifecycle transitions,</span>
+<span class="c1"># a fatal platform, and a structured warning event, then flush</span>
+python<span class="w"> </span>scripts/observability/gateway_health_export_probe.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--endpoint<span class="w"> </span>http://127.0.0.1:4318/v1/traces<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--log<span class="w"> </span>~/.hermes/cache/scratch/hermes_otel_capture.jsonl<span class="w"> </span>--wait<span class="w"> </span><span class="m">8</span>
+<span class="c1"># exit 0 prints: {&quot;requests&quot;: 6, &quot;paths&quot;: [&quot;/v1/logs&quot;, &quot;/v1/metrics&quot;, &quot;/v1/traces&quot;]}</span>
+</code></pre></div>
+
+<h2 id="maintaining-and-extending-this-plane">Maintaining and extending this plane</h2>
+<p>This plane is a <strong>fixed, enumerated, content-free vocabulary</strong> by design. Adding
+a signal is not just "emit a new metric" — every new name and attribute must be
+declared in each layer that enforces the bounded vocabulary, or it is silently
+dropped downstream. Follow the checklist for the change you are making. The
+golden rule: <strong>a new signal that is emitted but not declared in every layer
+looks like a code bug but is a vocabulary-registration bug — nothing errors, the
+signal just never arrives.</strong></p>
+<h3 id="content-free-invariant-applies-to-every-change">Content-free invariant (applies to every change)</h3>
+<p>Before adding anything, confirm it cannot carry content. Numbers, booleans,
+ages, durations, monotonic counts, and one-way hashes are safe. <strong>Never</strong> add an
+attribute that can hold a job name, prompt, output, schedule, destination, raw
+exception text, file path, profile name, account id, or free-form string. When
+you must key a record to a job/entity, hash it (<code>sha256(...)[:24]</code>, see
+<code>_job_key</code> in <code>agent/monitoring/cron_health.py</code>) — never emit the raw id. All
+string attributes that could touch user input must pass through
+<code>redaction.redact_for_export</code> and be truncated (see <code>_span_attrs</code> in
+<code>agent/monitoring/otlp_exporter.py</code>).</p>
+<h3 id="adding-a-new-gaugemetric">Adding a new gauge/metric</h3>
+<ol>
+<li>Emit it in the snapshot builder (<code>agent/monitoring/gateway_health.py</code>
+   <code>build_gateway_health_snapshot</code>, <code>cron_health.py</code> <code>build_cron_health_snapshot</code>,
+   or a sibling reader wired into <code>_read_runtime_snapshot</code> in
+   <code>gateway_health_export.py</code>). Best-effort: never let a reader raise into the
+   collection loop — wrap it and log a <strong>content-free WARNING with the exception
+   TYPE name only</strong> (the pattern the cron and background-work readers use), so a
+   future regression is visible instead of silently dropping the signal.</li>
+<li>Register the dotted metric name in the observable-gauge <code>metric_names</code> list in
+   <code>gateway_health_export.py::_start_metric_provider</code>. <strong>A gauge that is emitted
+   in the snapshot but not registered here is never observed.</strong></li>
+<li>Add the export-table row and an alert example in this file.</li>
+<li>If the deployment fronts the exporter with an OpenTelemetry Collector that
+   uses a metric-name allowlist (a <code>filter/...</code> processor with <code>name != "..."</code>
+   guards), add the new name there too — otherwise the collector drops it before
+   the backend. This is not repo code, but it is the single most common reason a
+   correctly-emitted new metric never appears; call it out in the PR so the
+   deploying operator updates their collector config.</li>
+</ol>
+<h3 id="adding-a-new-subsystem-a-new-family-of-signals">Adding a new subsystem (a new family of signals)</h3>
+<p>Mirror the cron pattern (<code>cron_health.py</code> + its wiring): put the read/projection
+logic in its own module, expose one <code>build_&lt;subsystem&gt;_health_snapshot()</code> that
+returns bounded <code>GatewayMetric</code>s (and events if any), and extend it into
+<code>_read_runtime_snapshot</code> with the same best-effort try/except-WARNING guard.
+Then do the "adding a metric" checklist for each new name, and the "adding an
+attribute" checklist for each new event attribute. Add a release-validation
+scenario below for the subsystem's failure mode.</p>
+<h3 id="extending-the-error-class--status--source--state-vocabularies">Extending the error-class / status / source / state vocabularies</h3>
+<p>These are the closed enums that keep the plane bounded. Extend the SET, then the
+classifier, never one without the other:</p>
+<ul>
+<li><strong>Cron</strong> (<code>agent/monitoring/cron_health.py</code>): <code>_KNOWN_STATUSES</code>,
+  <code>_KNOWN_SOURCES</code>, <code>_KNOWN_DELIVERY_OUTCOMES</code>, and the <code>classify_cron_error</code>
+  keyword buckets. Anything not in the set is coerced to <code>unknown</code> on the way
+  out, so a new value that is not added to the set is invisible.</li>
+<li><strong>Gateway/platform</strong> (<code>agent/monitoring/gateway_health.py</code>):
+  <code>_KNOWN_GATEWAY_STATES</code>, <code>_KNOWN_PLATFORM_STATES</code>, and <code>classify_gateway_error</code>.</li>
+</ul>
+<p>Rules: keep the vocabulary SMALL and operationally meaningful (an error class
+should map to an operator action, not to an exception subclass); a new bucket
+must match on a stable keyword, not on message text that could vary; update the
+<code>hermes.error_class = ...</code> list in this file's alert section and the enum's unit
+test so the contract is asserted, not frozen as a count.</p>
+<h3 id="adding-a-content-free-attribute-to-an-existing-eventspan">Adding a content-free attribute to an existing event/span</h3>
+<p>Add the key to the emitter's per-kind <code>keep_by_kind</code> allowlist in
+<code>agent/monitoring/otlp_exporter.py::_span_attrs</code> (unlisted keys are dropped), run
+it through redaction if it is ever string-shaped, and — as with metrics — if the
+deployment's collector has a span-attribute <code>keep_keys(...)</code> allowlist, add the
+attribute there too or it is stripped in transit.</p>
+<h3 id="verify-the-whole-chain-not-just-emission">Verify the whole chain, not just emission</h3>
+<p>Emitting is necessary but not sufficient. Confirm the signal survives all the
+way to the backend, because the enums, the <code>metric_names</code> registration, the
+emitter attribute allowlist, and any collector allowlist each drop unlisted
+values with no error:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>monitoring<span class="w"> </span>status<span class="w">                 </span><span class="c1"># posture</span>
+python<span class="w"> </span>scripts/observability/gateway_health_export_probe.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--endpoint<span class="w"> </span>http://127.0.0.1:4318/v1/traces<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--log<span class="w"> </span>~/.hermes/cache/scratch/cap.jsonl<span class="w"> </span>--wait<span class="w"> </span><span class="m">8</span><span class="w">          </span><span class="c1"># drive the real exporter</span>
+</code></pre></div>
+
+<p>Decode the captured OTLP payload and assert the new name/attribute is present
+AND that no content leaked. When a real collector sits in front, add its
+allowlist entries and re-verify against the backend, not just the local capture.</p>
+<h2 id="boundaries-and-roadmap">Boundaries and roadmap</h2>
+<p>The <code>hermes monitoring</code> CLI intentionally exposes <code>status</code> only. This first
+release covers only Hermes Agent-owned service-health and operational-diagnostic
+signals, including Hermes Agent-owned Relay transport health. Team Gateway's
+authoritative shared connector/platform state is explicitly out of scope, as
+are product analytics, audit/quality reporting, and detailed execution traces.
+Shared client usage metrics and enterprise trace telemetry are being designed on
+the NeMo Relay integration with their own consent, policy, and export
+boundaries; this monitoring plane stays narrow so an operator can enable it
+without touching any content-bearing signal. The telemetry surface may be
+reorganized as that lands.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-monitoring</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#what-gets-exported">What gets exported</a></li>
+<li class="lvl2"><a href="#enabling">Enabling</a></li>
+<li class="lvl2"><a href="#collecting-into-datadog">Collecting into DataDog</a></li>
+<li class="lvl2"><a href="#generic-fleet-queries-and-alerts">Generic fleet queries and alerts</a></li>
+<li class="lvl2"><a href="#release-validation-scenarios">Release-validation scenarios</a></li>
+<li class="lvl2"><a href="#local-smoke-test-no-docker">Local smoke test (no Docker)</a></li>
+<li class="lvl2"><a href="#maintaining-and-extending-this-plane">Maintaining and extending this plane</a></li>
+<li class="lvl3"><a href="#content-free-invariant-applies-to-every-change">Content-free invariant (applies to every change)</a></li>
+<li class="lvl3"><a href="#adding-a-new-gaugemetric">Adding a new gauge/metric</a></li>
+<li class="lvl3"><a href="#adding-a-new-subsystem-a-new-family-of-signals">Adding a new subsystem (a new family of signals)</a></li>
+<li class="lvl3"><a href="#extending-the-error-class--status--source--state-vocabularies">Extending the error-class / status / source / state vocabularies</a></li>
+<li class="lvl3"><a href="#adding-a-content-free-attribute-to-an-existing-eventspan">Adding a content-free attribute to an existing event/span</a></li>
+<li class="lvl3"><a href="#verify-the-whole-chain-not-just-emission">Verify the whole chain, not just emission</a></li>
+<li class="lvl2"><a href="#boundaries-and-roadmap">Boundaries and roadmap</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

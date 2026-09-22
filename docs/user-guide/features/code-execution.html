@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Execution · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/code-execution</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="code-execution-programmatic-tool-calling">Code Execution (Programmatic Tool Calling)</h1>
+<p>The <code>execute_code</code> tool lets the agent write Python scripts that call Hermes tools programmatically, collapsing multi-step workflows into a single LLM turn. The script runs in a child process on the agent host, communicating with Hermes over a Unix domain socket RPC.</p>
+<h2 id="how-it-works">How It Works</h2>
+<ol>
+<li>The agent writes a Python script using <code>from hermes_tools import ...</code></li>
+<li>Hermes generates a <code>hermes_tools.py</code> stub module with RPC functions</li>
+<li>Hermes opens a Unix domain socket and starts an RPC listener thread</li>
+<li>The script runs in a child process — tool calls travel over the socket back to Hermes</li>
+<li>Only the script's <code>print()</code> output is returned to the LLM; intermediate tool results never enter the context window</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="c1"># The agent can write scripts like:</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">hermes_tools</span><span class="w"> </span><span class="kn">import</span> <span class="n">web_search</span><span class="p">,</span> <span class="n">web_extract</span>
+
+<span class="n">results</span> <span class="o">=</span> <span class="n">web_search</span><span class="p">(</span><span class="s2">&quot;Python 3.13 features&quot;</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">results</span><span class="p">[</span><span class="s2">&quot;data&quot;</span><span class="p">][</span><span class="s2">&quot;web&quot;</span><span class="p">]:</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">web_extract</span><span class="p">([</span><span class="n">r</span><span class="p">[</span><span class="s2">&quot;url&quot;</span><span class="p">]])</span>
+    <span class="c1"># ... filter and process ...</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">summary</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Available tools inside scripts:</strong> <code>web_search</code>, <code>web_extract</code>, <code>read_file</code>, <code>write_file</code>, <code>search_files</code>, <code>patch</code>, <code>terminal</code> (foreground only).</p>
+<h2 id="when-the-agent-uses-this">When the Agent Uses This</h2>
+<p>The agent uses <code>execute_code</code> when there are:</p>
+<ul>
+<li><strong>3+ tool calls</strong> with processing logic between them</li>
+<li>Bulk data filtering or conditional branching</li>
+<li>Loops over results</li>
+</ul>
+<p>The key benefit: intermediate tool results never enter the context window — only the final <code>print()</code> output comes back, dramatically reducing token usage.</p>
+<h2 id="practical-examples">Practical Examples</h2>
+<h3 id="data-processing-pipeline">Data Processing Pipeline</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">hermes_tools</span><span class="w"> </span><span class="kn">import</span> <span class="n">search_files</span><span class="p">,</span> <span class="n">read_file</span>
+
+<span class="c1"># Find all config files and extract database settings</span>
+<span class="n">matches</span> <span class="o">=</span> <span class="n">search_files</span><span class="p">(</span><span class="s2">&quot;database&quot;</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="s2">&quot;.&quot;</span><span class="p">,</span> <span class="n">file_glob</span><span class="o">=</span><span class="s2">&quot;*.yaml&quot;</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">20</span><span class="p">)</span>
+<span class="n">configs</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">for</span> <span class="n">match</span> <span class="ow">in</span> <span class="n">matches</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;matches&quot;</span><span class="p">,</span> <span class="p">[]):</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">read_file</span><span class="p">(</span><span class="n">match</span><span class="p">[</span><span class="s2">&quot;path&quot;</span><span class="p">])</span>
+    <span class="n">configs</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;file&quot;</span><span class="p">:</span> <span class="n">match</span><span class="p">[</span><span class="s2">&quot;path&quot;</span><span class="p">],</span> <span class="s2">&quot;preview&quot;</span><span class="p">:</span> <span class="n">content</span><span class="p">[</span><span class="s2">&quot;content&quot;</span><span class="p">][:</span><span class="mi">200</span><span class="p">]})</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">configs</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">2</span><span class="p">))</span>
+</code></pre></div>
+
+<h3 id="multi-step-web-research">Multi-Step Web Research</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">hermes_tools</span><span class="w"> </span><span class="kn">import</span> <span class="n">web_search</span><span class="p">,</span> <span class="n">web_extract</span>
+
+<span class="c1"># Search, extract, and summarize in one turn</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">web_search</span><span class="p">(</span><span class="s2">&quot;Rust async runtime comparison 2025&quot;</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+<span class="n">summaries</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">results</span><span class="p">[</span><span class="s2">&quot;data&quot;</span><span class="p">][</span><span class="s2">&quot;web&quot;</span><span class="p">]:</span>
+    <span class="n">page</span> <span class="o">=</span> <span class="n">web_extract</span><span class="p">([</span><span class="n">r</span><span class="p">[</span><span class="s2">&quot;url&quot;</span><span class="p">]])</span>
+    <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">page</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;results&quot;</span><span class="p">,</span> <span class="p">[]):</span>
+        <span class="k">if</span> <span class="n">p</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;content&quot;</span><span class="p">):</span>
+            <span class="n">summaries</span><span class="o">.</span><span class="n">append</span><span class="p">({</span>
+                <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="n">r</span><span class="p">[</span><span class="s2">&quot;title&quot;</span><span class="p">],</span>
+                <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="n">r</span><span class="p">[</span><span class="s2">&quot;url&quot;</span><span class="p">],</span>
+                <span class="s2">&quot;excerpt&quot;</span><span class="p">:</span> <span class="n">p</span><span class="p">[</span><span class="s2">&quot;content&quot;</span><span class="p">][:</span><span class="mi">500</span><span class="p">]</span>
+            <span class="p">})</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">summaries</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">2</span><span class="p">))</span>
+</code></pre></div>
+
+<h3 id="bulk-file-refactoring">Bulk File Refactoring</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">hermes_tools</span><span class="w"> </span><span class="kn">import</span> <span class="n">search_files</span><span class="p">,</span> <span class="n">read_file</span><span class="p">,</span> <span class="n">patch</span>
+
+<span class="c1"># Find all Python files using deprecated API and fix them</span>
+<span class="n">matches</span> <span class="o">=</span> <span class="n">search_files</span><span class="p">(</span><span class="s2">&quot;old_api_call&quot;</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="s2">&quot;src/&quot;</span><span class="p">,</span> <span class="n">file_glob</span><span class="o">=</span><span class="s2">&quot;*.py&quot;</span><span class="p">)</span>
+<span class="n">fixed</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="k">for</span> <span class="n">match</span> <span class="ow">in</span> <span class="n">matches</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;matches&quot;</span><span class="p">,</span> <span class="p">[]):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">patch</span><span class="p">(</span>
+        <span class="n">path</span><span class="o">=</span><span class="n">match</span><span class="p">[</span><span class="s2">&quot;path&quot;</span><span class="p">],</span>
+        <span class="n">old_string</span><span class="o">=</span><span class="s2">&quot;old_api_call(&quot;</span><span class="p">,</span>
+        <span class="n">new_string</span><span class="o">=</span><span class="s2">&quot;new_api_call(&quot;</span><span class="p">,</span>
+        <span class="n">replace_all</span><span class="o">=</span><span class="kc">True</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="s2">&quot;error&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="nb">str</span><span class="p">(</span><span class="n">result</span><span class="p">):</span>
+        <span class="n">fixed</span> <span class="o">+=</span> <span class="mi">1</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Fixed </span><span class="si">{</span><span class="n">fixed</span><span class="si">}</span><span class="s2"> files out of </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">matches</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;matches&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">[]))</span><span class="si">}</span><span class="s2"> matches&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="build-and-test-pipeline">Build and Test Pipeline</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">hermes_tools</span><span class="w"> </span><span class="kn">import</span> <span class="n">terminal</span><span class="p">,</span> <span class="n">read_file</span>
+
+<span class="c1"># Run tests, parse results, and report</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">terminal</span><span class="p">(</span><span class="s2">&quot;cd /project &amp;&amp; python -m pytest --tb=short -q 2&gt;&amp;1&quot;</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">120</span><span class="p">)</span>
+<span class="n">output</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;output&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span>
+
+<span class="c1"># Parse test output</span>
+<span class="n">passed</span> <span class="o">=</span> <span class="n">output</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s2">&quot; passed&quot;</span><span class="p">)</span>
+<span class="n">failed</span> <span class="o">=</span> <span class="n">output</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s2">&quot; failed&quot;</span><span class="p">)</span>
+<span class="n">errors</span> <span class="o">=</span> <span class="n">output</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s2">&quot; error&quot;</span><span class="p">)</span>
+
+<span class="n">report</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;passed&quot;</span><span class="p">:</span> <span class="n">passed</span><span class="p">,</span>
+    <span class="s2">&quot;failed&quot;</span><span class="p">:</span> <span class="n">failed</span><span class="p">,</span>
+    <span class="s2">&quot;errors&quot;</span><span class="p">:</span> <span class="n">errors</span><span class="p">,</span>
+    <span class="s2">&quot;exit_code&quot;</span><span class="p">:</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;exit_code&quot;</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">),</span>
+    <span class="s2">&quot;summary&quot;</span><span class="p">:</span> <span class="n">output</span><span class="p">[</span><span class="o">-</span><span class="mi">500</span><span class="p">:]</span> <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">output</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">500</span> <span class="k">else</span> <span class="n">output</span>
+<span class="p">}</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">report</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">2</span><span class="p">))</span>
+</code></pre></div>
+
+<h2 id="execution-mode">Execution Mode</h2>
+<p><code>execute_code</code> has two execution modes controlled by <code>code_execution.mode</code> in <code>~/.hermes/config.yaml</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Working directory</th>
+<th>Python interpreter</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>project</code></strong> (default)</td>
+<td>The session's working directory (same as <code>terminal()</code>)</td>
+<td>Active <code>VIRTUAL_ENV</code> / <code>CONDA_PREFIX</code> python, falling back to Hermes's own python</td>
+</tr>
+<tr>
+<td><code>strict</code></td>
+<td>A temp staging directory isolated from the user's project</td>
+<td><code>sys.executable</code> (Hermes's own python)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>When to leave it on <code>project</code>:</strong> you want <code>import pandas</code>, <code>from my_project import foo</code>, or relative paths like <code>open(".env")</code> to work the same way they do in <code>terminal()</code>. This is almost always what you want.</p>
+<p><strong>When to flip to <code>strict</code>:</strong> you need maximum reproducibility — you want the same interpreter every session regardless of which venv the user activated, and you want scripts quarantined from the project tree (no risk of accidentally reading project files through a relative path).</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">code_execution</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">project</span><span class="w">   </span><span class="c1"># or &quot;strict&quot;</span>
+</code></pre></div>
+
+<p>Fallback behavior in <code>project</code> mode: if <code>VIRTUAL_ENV</code> / <code>CONDA_PREFIX</code> is unset, broken, or points at a Python older than 3.8, the resolver falls back cleanly to <code>sys.executable</code> — it never leaves the agent without a working interpreter.</p>
+<p>Security-critical invariants are identical across both modes:</p>
+<ul>
+<li>environment scrubbing (API keys, tokens, credentials stripped)</li>
+<li>tool whitelist (scripts cannot call <code>execute_code</code> recursively, <code>delegate_task</code>, or MCP tools)</li>
+<li>resource limits (timeout, stdout cap, tool-call cap)</li>
+</ul>
+<p>Switching mode changes where scripts run and which interpreter runs them, not what credentials they can see or which tools they can call.</p>
+<h2 id="resource-limits">Resource Limits</h2>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Limit</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Timeout</strong></td>
+<td>5 minutes (300s)</td>
+<td>Script is killed with SIGTERM, then SIGKILL after 5s grace</td>
+</tr>
+<tr>
+<td><strong>Stdout</strong></td>
+<td>50 KB</td>
+<td>Shown head-and-tail inline; the full output is saved to <code>~/.hermes/cache/exec/</code> and the path is included in the result</td>
+</tr>
+<tr>
+<td><strong>Stderr</strong></td>
+<td>10 KB</td>
+<td>Included in output on non-zero exit for debugging</td>
+</tr>
+<tr>
+<td><strong>Tool calls</strong></td>
+<td>50 per execution</td>
+<td>Error returned when limit reached</td>
+</tr>
+</tbody>
+</table>
+<p>All limits are configurable via <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># In ~/.hermes/config.yaml</span>
+<span class="nt">code_execution</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">project</span><span class="w">      </span><span class="c1"># project (default) | strict</span>
+<span class="w">  </span><span class="nt">timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span><span class="w">       </span><span class="c1"># Max seconds per script (default: 300)</span>
+<span class="w">  </span><span class="nt">max_tool_calls</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">50</span><span class="w"> </span><span class="c1"># Max tool calls per execution (default: 50)</span>
+</code></pre></div>
+
+<h2 id="state-between-calls-the-session-kernel">State Between Calls (the session kernel)</h2>
+<p>On the local terminal backend, <code>execute_code</code> does not start a fresh interpreter for every call. Each session owns a persistent Python kernel, so variables, imports, and loaded data from one call are available in the next. The agent can load a dataset once and query it across several turns instead of re-reading it every time. Subagents get their own kernel; kernels are never shared across sessions. A subagent's kernel lives exactly as long as the subagent: it is exempt from the live-kernel cap while the subagent runs (a wide fan-out no longer evicts a sibling's kernel mid-task) and is disposed when the subagent finishes.</p>
+<p>What ends a kernel:</p>
+<ul>
+<li><strong>Timeout or interrupt.</strong> A cell that hits the timeout (or is interrupted) kills the kernel process and its state is lost on purpose; the result says so and the next call starts a fresh kernel.</li>
+<li><strong><code>reset=true</code>.</strong> The agent can pass <code>reset: true</code> to discard the kernel's state and start clean. This is also the way to pick up environment changes: a kernel's environment is frozen when it spawns, so a newly allowlisted passthrough variable is invisible until the kernel is reset.</li>
+<li><strong>Idle timeout and eviction.</strong> Kernels die with the session, after <code>code_execution.kernel_idle_timeout</code> idle seconds (default 1800), or when more than <code>code_execution.max_session_kernels</code> (default 4) top-level sessions' kernels are alive and the oldest is evicted (running subagents' kernels do not count against the cap).</li>
+</ul>
+<p>The security envelope is the same as a one-shot script: environment scrubbing, the tool whitelist, and the per-call tool budget all apply to every cell, and tool-call authority (approvals, session, allow-list) is rebound on each cell.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">code_execution</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">kernel_idle_timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1800</span><span class="w">   </span><span class="c1"># seconds a kernel may sit idle before it is reaped</span>
+<span class="w">  </span><span class="nt">max_session_kernels</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span><span class="w">      </span><span class="c1"># kernels kept alive at once; oldest is evicted past this</span>
+</code></pre></div>
+
+<p><strong>Remote backends</strong> (Docker, SSH, Modal) run a remote session kernel with the same contract. If the kernel cannot be spawned on the backend, Hermes falls back to running each call as a standalone script and says so in the result.</p>
+<p><strong>Large output.</strong> Stdout over 50 KB is shown head-and-tail inline, and the full text is saved under <code>~/.hermes/cache/exec/</code> with the path included in the result, so the agent can page through it with <code>read_file</code> instead of re-running the script.</p>
+<h2 id="how-tool-calls-work-inside-scripts">How Tool Calls Work Inside Scripts</h2>
+<p>When your script calls a function like <code>web_search("query")</code>:</p>
+<ol>
+<li>The call is serialized to JSON and sent over a Unix domain socket to the parent process</li>
+<li>The parent dispatches through the standard <code>handle_function_call</code> handler</li>
+<li>The result is sent back over the socket</li>
+<li>The function returns the parsed result</li>
+</ol>
+<p>This means tool calls inside scripts behave identically to normal tool calls — same rate limits, same error handling, same capabilities. The only restriction is that <code>terminal()</code> is foreground-only (no <code>background</code> or <code>pty</code> parameters).</p>
+<h2 id="error-handling">Error Handling</h2>
+<p>When a script fails, the agent receives structured error information:</p>
+<ul>
+<li><strong>Non-zero exit code</strong>: stderr is included in the output so the agent sees the full traceback</li>
+<li><strong>Timeout</strong>: Script is killed and the agent sees <code>"Script timed out after 300s and was killed."</code></li>
+<li><strong>Interruption</strong>: If the user sends a new message during execution, the script is terminated and the agent sees <code>[execution interrupted — user sent a new message]</code></li>
+<li><strong>Tool call limit</strong>: When the 50-call limit is hit, subsequent tool calls return an error message</li>
+</ul>
+<p>The response always includes <code>status</code> (success/error/timeout/interrupted), <code>output</code>, <code>tool_calls_made</code>, and <code>duration_seconds</code>.</p>
+<h2 id="security">Security</h2>
+<div class="admonition adm-danger"><p class="adm-title">Security Model</p>
+<p>The child process runs with a <strong>minimal environment</strong>. API keys, tokens, and credentials are stripped by default. The script accesses tools exclusively via the RPC channel — it cannot read secrets from environment variables unless explicitly allowed.</p>
+</div>
+<p>Environment variables containing <code>KEY</code>, <code>TOKEN</code>, <code>SECRET</code>, <code>PASSWORD</code>, <code>CREDENTIAL</code>, <code>PASSWD</code>, or <code>AUTH</code> in their names are excluded. Only safe system variables (<code>PATH</code>, <code>HOME</code>, <code>LANG</code>, <code>SHELL</code>, <code>PYTHONPATH</code>, <code>VIRTUAL_ENV</code>, etc.) are passed through.</p>
+<h3 id="skill-environment-variable-passthrough">Skill Environment Variable Passthrough</h3>
+<p>When a skill declares <code>required_environment_variables</code> in its frontmatter, those variables are <strong>automatically passed through</strong> to both <code>execute_code</code> and <code>terminal</code> child processes after the skill is loaded. This lets skills use their declared API keys without weakening the security posture for arbitrary code.</p>
+<p>For non-skill use cases, you can explicitly allowlist variables in <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">terminal</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">env_passthrough</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_CUSTOM_KEY</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ANOTHER_TOKEN</span>
+</code></pre></div>
+
+<p>See the <a href="../security.html#environment-variable-passthrough">Security guide</a> for full details.</p>
+<h3 id="hermes_-variables-in-the-child"><code>HERMES_*</code> variables in the child</h3>
+<p>The child process receives only a small, fixed set of operational <code>HERMES_*</code>
+variables by exact name:</p>
+<ul>
+<li><code>HERMES_HOME</code></li>
+<li><code>HERMES_PROFILE</code></li>
+<li><code>HERMES_CONFIG</code></li>
+<li><code>HERMES_ENV</code></li>
+</ul>
+<p>(plus <code>HERMES_RPC_DIR</code> / <code>HERMES_RPC_SOCKET</code> / <code>TZ</code> / <code>HOME</code>, which Hermes
+injects explicitly so the RPC channel works).</p>
+<div class="admonition adm-note"><p class="adm-title">Behavior change</p>
+<p>Earlier versions passed <strong>any</strong> variable whose name began with <code>HERMES_</code>
+through to the child. That broad prefix was removed for security hardening: it
+could leak <code>HERMES_*</code>-named configuration that doesn't match a secret substring
+(for example <code>HERMES_BASE_URL</code>, <code>HERMES_KANBAN_DB</code>, or a <code>HERMES_*_WEBHOOK</code>
+endpoint) into arbitrary sandboxed code.</p>
+<p>If an <code>execute_code</code> script — or a repo/plugin module it imports at import time
+— relied on a <code>HERMES_*</code> variable outside the four operational names above, it
+will now find that variable <strong>unset</strong> in the child. The drop is intentional,
+not a bug.</p>
+</div>
+<p><strong>Workaround — opt the variable back in explicitly.</strong> Both routes pass the
+variable through <code>execute_code</code> <em>and</em> <code>terminal</code> children, and neither weakens
+the secret-stripping guarantee (Hermes-managed provider credentials can never
+be re-allowed this way):</p>
+<ol>
+<li><strong>Per-machine, in <code>config.yaml</code></strong> — add the exact variable name to the
+   passthrough allowlist:</li>
+</ol>
+<p><code>yaml
+   terminal:
+     env_passthrough:
+       - HERMES_KANBAN_DB
+       - HERMES_BASE_URL</code></p>
+<ol>
+<li><strong>Per-skill, in the skill's frontmatter</strong> — declare it so it is registered
+   automatically whenever that skill is loaded:</li>
+</ol>
+<p><code>yaml
+   required_environment_variables:
+     - HERMES_KANBAN_DB</code></p>
+<p><strong>Diagnosing it.</strong> When the child drops one or more non-allowlisted <code>HERMES_*</code>
+variables, Hermes emits a one-line <code>debug</code> log naming them and pointing at the
+<code>env_passthrough</code> escape hatch. Run with debug logging (<code>hermes logs --level
+DEBUG</code>, or check <code>~/.hermes/logs/agent.log</code>) and look for
+<code>execute_code: dropped N non-allowlisted HERMES_* var(s)</code> if a script behaves
+as though a <code>HERMES_*</code> variable is missing.</p>
+<p>Hermes always writes the script and the auto-generated <code>hermes_tools.py</code> RPC stub into a temp staging directory that is cleaned up after execution. In <code>strict</code> mode the script also <em>runs</em> there; in <code>project</code> mode it runs in the session's working directory (the staging directory stays on <code>PYTHONPATH</code> so imports still resolve). The child process runs in its own process group so it can be cleanly killed on timeout or interruption.</p>
+<h2 id="execute_code-vs-terminal">execute_code vs terminal</h2>
+<table>
+<thead>
+<tr>
+<th>Use Case</th>
+<th>execute_code</th>
+<th>terminal</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Multi-step workflows with tool calls between</td>
+<td>✅</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Simple shell command</td>
+<td>❌</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Filtering/processing large tool outputs</td>
+<td>✅</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Running a build or test suite</td>
+<td>❌</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Looping over search results</td>
+<td>✅</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Interactive/background processes</td>
+<td>❌</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Needs API keys in environment</td>
+<td>⚠️ Only via <a href="../security.html#environment-variable-passthrough">passthrough</a></td>
+<td>✅ (most pass through)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Rule of thumb:</strong> Use <code>execute_code</code> when you need to call Hermes tools programmatically with logic between calls. Use <code>terminal</code> for running shell commands, builds, and processes.</p>
+<h2 id="platform-support">Platform Support</h2>
+<p>Code execution is available on <strong>Linux, macOS, and Windows</strong>. On Linux and macOS the RPC channel uses a Unix domain socket; on Windows, where <code>AF_UNIX</code> is unreliable, Hermes automatically falls back to a loopback TCP socket for the sandbox RPC transport. Remote terminal backends (Docker/SSH/Modal/etc.) use a file-based RPC transport instead and additionally require Python 3 inside the backend.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/code-execution</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-it-works">How It Works</a></li>
+<li class="lvl2"><a href="#when-the-agent-uses-this">When the Agent Uses This</a></li>
+<li class="lvl2"><a href="#practical-examples">Practical Examples</a></li>
+<li class="lvl3"><a href="#data-processing-pipeline">Data Processing Pipeline</a></li>
+<li class="lvl3"><a href="#multi-step-web-research">Multi-Step Web Research</a></li>
+<li class="lvl3"><a href="#bulk-file-refactoring">Bulk File Refactoring</a></li>
+<li class="lvl3"><a href="#build-and-test-pipeline">Build and Test Pipeline</a></li>
+<li class="lvl2"><a href="#execution-mode">Execution Mode</a></li>
+<li class="lvl2"><a href="#resource-limits">Resource Limits</a></li>
+<li class="lvl2"><a href="#state-between-calls-the-session-kernel">State Between Calls (the session kernel)</a></li>
+<li class="lvl2"><a href="#how-tool-calls-work-inside-scripts">How Tool Calls Work Inside Scripts</a></li>
+<li class="lvl2"><a href="#error-handling">Error Handling</a></li>
+<li class="lvl2"><a href="#security">Security</a></li>
+<li class="lvl3"><a href="#skill-environment-variable-passthrough">Skill Environment Variable Passthrough</a></li>
+<li class="lvl3"><a href="#hermes_-variables-in-the-child">HERMES_* variables in the child</a></li>
+<li class="lvl2"><a href="#execute_code-vs-terminal">execute_code vs terminal</a></li>
+<li class="lvl2"><a href="#platform-support">Platform Support</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

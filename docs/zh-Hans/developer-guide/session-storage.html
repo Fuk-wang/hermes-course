@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会话存储 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/session-storage</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="会话存储">会话存储</h1>
+<p>Hermes Agent 使用 SQLite 数据库（<code>~/.hermes/state.db</code>）跨 CLI 和 gateway 会话持久化会话元数据、完整消息历史及模型配置。这替代了早期的逐会话 JSONL 文件方案。</p>
+<p>源文件：<code>hermes_state.py</code></p>
+<h2 id="hermes-home-与-profile-隔离">Hermes home 与 profile 隔离</h2>
+<p><code>get_hermes_home()</code> 是状态与配置的权威文件系统解析器。它依次使用上下文本地覆盖、<code>HERMES_HOME</code>
+环境变量，最后才是平台默认值（macOS 和 Linux 上为 <code>~/.hermes</code>；Windows 上为
+<code>%LOCALAPPDATA%/hermes</code>）。因此默认数据库始终是 <code>get_hermes_home() / "state.db"</code>，
+调用方不应硬编码 <code>~/.hermes/state.db</code>。</p>
+<p>命名 profile 是相互隔离的目录：例如名为 <code>coder</code> 的 profile 使用
+<code>&lt;默认 Hermes 根目录&gt;/profiles/coder/</code>，拥有自己的 <code>state.db</code>、配置、日志和其他 profile 级状态。
+为某个 profile 创建数据库、读取配置或启动子进程的进程必须保留或传递该 profile 的
+<code>HERMES_HOME</code>；回退到默认根目录会把错误 profile 的状态混入操作中。</p>
+<p>CLI 启动流程在导入 Hermes 其余部分之前调用 <code>_apply_profile_override()</code>。显式的
+<code>--profile</code>/<code>-p</code> 会解析该 profile 并把解析后的目录写入 <code>HERMES_HOME</code>。没有显式选择器时，
+指向 profile 的 <code>HERMES_HOME</code> 会被保留；否则启动流程可以使用默认根目录中的 active-profile
+选择。<code>HOME</code> 只决定在没有上下文覆盖和 <code>HERMES_HOME</code> 时使用的平台默认值，修改 <code>HOME</code>
+不是选择命名 profile 的安全方式。特别地，丢弃了 <code>HERMES_HOME</code> 的子进程即使在另一个 profile
+处于激活状态时也可能回退到默认 profile，因此子进程的启动方应显式传递 <code>HERMES_HOME</code>。</p>
+<p><code>display_hermes_home()</code> 仅用于面向用户的文本：它在可能时把解析出的 home 格式化为相对用户主目录
+的形式（例如 <code>~/.hermes/profiles/coder</code>），并不提供另一套解析规则。</p>
+<h3 id="测试隔离守卫">测试隔离守卫</h3>
+<p>测试必须使用临时 <code>HERMES_HOME</code> 或显式的临时数据库路径。实时系统守卫会在测试上下文进程打开
+真实默认 Hermes 根目录或真实命名 profile 下的生产 <code>state.db</code> 之前抛出异常，防止 fixture 数据或
+SQLite 副作用触及正在使用的安装。</p>
+<p><code>HERMES_STATE_DB_GUARD_BYPASS=1</code> 是仅供测试使用的逃生口，用于确实必须访问实时数据库的派生子进程。
+进程内的等价逃生口是 <code>@pytest.mark.live_system_guard_bypass</code>。不要在普通 Hermes 命令、开发 shell
+或应用配置中设置任一绕过：它会禁用保护实时会话历史的守卫（一个硬性的 <code>RuntimeError</code>），而导出了
+它的 shell 会把该绕过传给之后的每一次 pytest 运行。</p>
+<h2 id="架构概览">架构概览</h2>
+<div class="highlight"><pre><span></span><code>~/.hermes/state.db (SQLite, WAL mode)
+├── sessions              — 会话元数据、token 计数、计费信息
+├── messages              — 每个会话的完整消息历史
+├── messages_fts          — FTS5 虚拟表（content + tool_name + tool_calls）
+├── messages_fts_trigram  — 使用 trigram tokenizer 的 FTS5 虚拟表（CJK / 子串搜索）
+├── state_meta            — 键值元数据表
+└── schema_version        — 单行表，跟踪迁移状态
+</code></pre></div>
+
+<p>关键设计决策：
+- <strong>WAL 模式</strong>：支持并发读取 + 单写入（gateway 多平台）
+- <strong>FTS5 虚拟表</strong>：跨所有会话消息的快速全文搜索
+- <strong>会话血缘</strong>：通过 <code>parent_session_id</code> 链实现（压缩触发的会话分割）
+- <strong>来源标记</strong>（<code>cli</code>、<code>telegram</code>、<code>discord</code> 等）：用于平台过滤
+- 批量运行器和 RL 轨迹不存储于此（独立系统）</p>
+<h2 id="sqlite-schema">SQLite Schema</h2>
+<h3 id="sessions-表">Sessions 表</h3>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="k">source</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">user_id</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">model</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">model_config</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">system_prompt</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">parent_session_id</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">started_at</span><span class="w"> </span><span class="nb">REAL</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">ended_at</span><span class="w"> </span><span class="nb">REAL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">end_reason</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">message_count</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tool_call_count</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">input_tokens</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">output_tokens</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cache_read_tokens</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cache_write_tokens</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">reasoning_tokens</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">billing_provider</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">billing_base_url</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">billing_mode</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">estimated_cost_usd</span><span class="w"> </span><span class="nb">REAL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">actual_cost_usd</span><span class="w"> </span><span class="nb">REAL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cost_status</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cost_source</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">pricing_version</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">title</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">api_call_count</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="k">FOREIGN</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">parent_session_id</span><span class="p">)</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="n">id</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_sessions_source</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="k">source</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_sessions_parent</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="n">parent_session_id</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_sessions_started</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="n">started_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_sessions_title_unique</span>
+<span class="w">    </span><span class="k">ON</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="n">title</span><span class="p">)</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">title</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">;</span>
+</code></pre></div>
+
+<h3 id="messages-表">Messages 表</h3>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">messages</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="n">AUTOINCREMENT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">session_id</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="k">role</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">content</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tool_call_id</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tool_calls</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tool_name</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="k">timestamp</span><span class="w"> </span><span class="nb">REAL</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">token_count</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">,</span>
+<span class="w">    </span><span class="n">finish_reason</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">reasoning</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">reasoning_content</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">reasoning_details</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">codex_reasoning_items</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">codex_message_items</span><span class="w"> </span><span class="nb">TEXT</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_messages_session</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">messages</span><span class="p">(</span><span class="n">session_id</span><span class="p">,</span><span class="w"> </span><span class="k">timestamp</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_messages_session_id</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">messages</span><span class="p">(</span><span class="n">session_id</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">);</span>
+</code></pre></div>
+
+<p>说明：
+- <code>tool_calls</code> 以 JSON 字符串存储（序列化的 tool call 对象列表）
+- <code>reasoning_details</code>、<code>codex_reasoning_items</code> 和 <code>codex_message_items</code> 以 JSON 字符串存储
+- <code>reasoning</code> 存储提供商暴露的原始推理文本
+- 时间戳为 Unix epoch 浮点数（<code>time.time()</code>）</p>
+<h3 id="fts5-全文搜索">FTS5 全文搜索</h3>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="n">VIRTUAL</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">messages_fts</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">fts5</span><span class="p">(</span>
+<span class="w">    </span><span class="n">content</span><span class="p">,</span>
+<span class="w">    </span><span class="n">content</span><span class="o">=</span><span class="n">messages</span><span class="p">,</span>
+<span class="w">    </span><span class="n">content_rowid</span><span class="o">=</span><span class="n">id</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<p>FTS5 表通过三个触发器与 <code>messages</code> 表保持同步，分别在 INSERT、UPDATE 和 DELETE 时触发：</p>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">TRIGGER</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">messages_fts_insert</span><span class="w"> </span><span class="k">AFTER</span><span class="w"> </span><span class="k">INSERT</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">messages</span><span class="w"> </span><span class="k">BEGIN</span>
+<span class="w">    </span><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">messages_fts</span><span class="p">(</span><span class="n">rowid</span><span class="p">,</span><span class="w"> </span><span class="n">content</span><span class="p">)</span><span class="w"> </span><span class="k">VALUES</span><span class="w"> </span><span class="p">(</span><span class="k">new</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="k">new</span><span class="p">.</span><span class="n">content</span><span class="p">);</span>
+<span class="k">END</span><span class="p">;</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TRIGGER</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">messages_fts_delete</span><span class="w"> </span><span class="k">AFTER</span><span class="w"> </span><span class="k">DELETE</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">messages</span><span class="w"> </span><span class="k">BEGIN</span>
+<span class="w">    </span><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">messages_fts</span><span class="p">(</span><span class="n">messages_fts</span><span class="p">,</span><span class="w"> </span><span class="n">rowid</span><span class="p">,</span><span class="w"> </span><span class="n">content</span><span class="p">)</span>
+<span class="w">        </span><span class="k">VALUES</span><span class="p">(</span><span class="s1">&#39;delete&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">old</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="k">old</span><span class="p">.</span><span class="n">content</span><span class="p">);</span>
+<span class="k">END</span><span class="p">;</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TRIGGER</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">messages_fts_update</span><span class="w"> </span><span class="k">AFTER</span><span class="w"> </span><span class="k">UPDATE</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">messages</span><span class="w"> </span><span class="k">BEGIN</span>
+<span class="w">    </span><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">messages_fts</span><span class="p">(</span><span class="n">messages_fts</span><span class="p">,</span><span class="w"> </span><span class="n">rowid</span><span class="p">,</span><span class="w"> </span><span class="n">content</span><span class="p">)</span>
+<span class="w">        </span><span class="k">VALUES</span><span class="p">(</span><span class="s1">&#39;delete&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">old</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="k">old</span><span class="p">.</span><span class="n">content</span><span class="p">);</span>
+<span class="w">    </span><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">messages_fts</span><span class="p">(</span><span class="n">rowid</span><span class="p">,</span><span class="w"> </span><span class="n">content</span><span class="p">)</span><span class="w"> </span><span class="k">VALUES</span><span class="w"> </span><span class="p">(</span><span class="k">new</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="k">new</span><span class="p">.</span><span class="n">content</span><span class="p">);</span>
+<span class="k">END</span><span class="p">;</span>
+</code></pre></div>
+
+<h2 id="schema-版本与迁移">Schema 版本与迁移</h2>
+<p>当前 schema 版本：<strong>11</strong></p>
+<p><code>schema_version</code> 表存储单个整数。简单的列添加由 <code>_reconcile_columns()</code> 声明式处理（对比实时列与 <code>SCHEMA_SQL</code> 并 ADD 缺失列）。版本门控链保留用于无法声明式表达的数据迁移及索引/FTS 变更：</p>
+<table>
+<thead>
+<tr>
+<th>版本</th>
+<th>变更</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>初始 schema（sessions、messages、FTS5）</td>
+</tr>
+<tr>
+<td>2</td>
+<td>向 messages 添加 <code>finish_reason</code> 列</td>
+</tr>
+<tr>
+<td>3</td>
+<td>向 sessions 添加 <code>title</code> 列</td>
+</tr>
+<tr>
+<td>4</td>
+<td>在 <code>title</code> 上添加唯一索引（允许 NULL，非 NULL 必须唯一）</td>
+</tr>
+<tr>
+<td>5</td>
+<td>添加计费列：<code>cache_read_tokens</code>、<code>cache_write_tokens</code>、<code>reasoning_tokens</code>、<code>billing_provider</code>、<code>billing_base_url</code>、<code>billing_mode</code>、<code>estimated_cost_usd</code>、<code>actual_cost_usd</code>、<code>cost_status</code>、<code>cost_source</code>、<code>pricing_version</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td>向 messages 添加推理列：<code>reasoning</code>、<code>reasoning_details</code>、<code>codex_reasoning_items</code></td>
+</tr>
+<tr>
+<td>7</td>
+<td>向 messages 添加 <code>reasoning_content</code> 列</td>
+</tr>
+<tr>
+<td>8</td>
+<td>向 sessions 添加 <code>api_call_count</code> 列</td>
+</tr>
+<tr>
+<td>9</td>
+<td>向 messages 添加 <code>codex_message_items</code> 列，用于 Codex Responses 消息 id/phase 重放</td>
+</tr>
+<tr>
+<td>10</td>
+<td>添加 <code>messages_fts_trigram</code> 虚拟表（trigram tokenizer，用于 CJK / 子串搜索）并回填现有行</td>
+</tr>
+<tr>
+<td>11</td>
+<td>重新索引 <code>messages_fts</code> 和 <code>messages_fts_trigram</code> 以覆盖 <code>tool_name</code> + <code>tool_calls</code>，从外部内容模式切换为内联模式；删除旧触发器并回填所有消息行</td>
+</tr>
+</tbody>
+</table>
+<p>声明式列添加使用 <code>ALTER TABLE ADD COLUMN</code>，包裹在 try/except 中以处理列已存在的情况（幂等）。每个成功的迁移块完成后版本号递增。</p>
+<h2 id="写入竞争处理">写入竞争处理</h2>
+<p>多个 hermes 进程（gateway + CLI 会话 + worktree agent）共享同一个 <code>state.db</code>。<code>SessionDB</code> 类通过以下方式处理写入竞争：</p>
+<ul>
+<li><strong>短 SQLite 超时</strong>（1 秒），而非默认的 30 秒</li>
+<li><strong>应用层重试</strong>，带随机抖动（20–150ms，最多 15 次重试）</li>
+<li><strong>BEGIN IMMEDIATE</strong> 事务，在事务开始时暴露锁竞争</li>
+<li><strong>定期 WAL checkpoint</strong>，每 50 次成功写入执行一次（PASSIVE 模式）</li>
+</ul>
+<p>这避免了"护卫效应"——SQLite 确定性内部退避会导致所有竞争写入者在相同间隔重试。</p>
+<div class="highlight"><pre><span></span><code>_WRITE_MAX_RETRIES = 15
+_WRITE_RETRY_MIN_S = 0.020   # 20ms
+_WRITE_RETRY_MAX_S = 0.150   # 150ms
+_CHECKPOINT_EVERY_N_WRITES = 50
+</code></pre></div>
+
+<h2 id="常用操作">常用操作</h2>
+<h3 id="初始化">初始化</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">hermes_state</span><span class="w"> </span><span class="kn">import</span> <span class="n">SessionDB</span>
+
+<span class="n">db</span> <span class="o">=</span> <span class="n">SessionDB</span><span class="p">()</span>                           <span class="c1"># 默认：~/.hermes/state.db</span>
+<span class="n">db</span> <span class="o">=</span> <span class="n">SessionDB</span><span class="p">(</span><span class="n">db_path</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/tmp/test.db&quot;</span><span class="p">))</span>  <span class="c1"># 自定义路径</span>
+</code></pre></div>
+
+<h3 id="创建和管理会话">创建和管理会话</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 创建新会话</span>
+<span class="n">db</span><span class="o">.</span><span class="n">create_session</span><span class="p">(</span>
+    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">,</span>
+    <span class="n">source</span><span class="o">=</span><span class="s2">&quot;cli&quot;</span><span class="p">,</span>
+    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;anthropic/claude-sonnet-4.6&quot;</span><span class="p">,</span>
+    <span class="n">user_id</span><span class="o">=</span><span class="s2">&quot;user_1&quot;</span><span class="p">,</span>
+    <span class="n">parent_session_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>  <span class="c1"># 或用于血缘追踪的上一个会话 ID</span>
+<span class="p">)</span>
+
+<span class="c1"># 结束会话</span>
+<span class="n">db</span><span class="o">.</span><span class="n">end_session</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">,</span> <span class="n">end_reason</span><span class="o">=</span><span class="s2">&quot;user_exit&quot;</span><span class="p">)</span>
+
+<span class="c1"># 重新打开会话（清除 ended_at/end_reason）</span>
+<span class="n">db</span><span class="o">.</span><span class="n">reopen_session</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="存储消息">存储消息</h3>
+<div class="highlight"><pre><span></span><code><span class="n">msg_id</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">append_message</span><span class="p">(</span>
+    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">,</span>
+    <span class="n">role</span><span class="o">=</span><span class="s2">&quot;assistant&quot;</span><span class="p">,</span>
+    <span class="n">content</span><span class="o">=</span><span class="s2">&quot;Here&#39;s the answer...&quot;</span><span class="p">,</span>
+    <span class="n">tool_calls</span><span class="o">=</span><span class="p">[{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;call_1&quot;</span><span class="p">,</span> <span class="s2">&quot;function&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;terminal&quot;</span><span class="p">,</span> <span class="s2">&quot;arguments&quot;</span><span class="p">:</span> <span class="s2">&quot;</span><span class="si">{}</span><span class="s2">&quot;</span><span class="p">}}],</span>
+    <span class="n">token_count</span><span class="o">=</span><span class="mi">150</span><span class="p">,</span>
+    <span class="n">finish_reason</span><span class="o">=</span><span class="s2">&quot;stop&quot;</span><span class="p">,</span>
+    <span class="n">reasoning</span><span class="o">=</span><span class="s2">&quot;Let me think about this...&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="检索消息">检索消息</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 包含所有元数据的原始消息</span>
+<span class="n">messages</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">get_messages</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+
+<span class="c1"># OpenAI 对话格式（用于 API 重放）</span>
+<span class="n">conversation</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">get_messages_as_conversation</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+<span class="c1"># 返回：[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;...&quot;}, {&quot;role&quot;: &quot;assistant&quot;, ...}]</span>
+</code></pre></div>
+
+<h3 id="会话标题">会话标题</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 设置标题（非 NULL 标题中必须唯一）</span>
+<span class="n">db</span><span class="o">.</span><span class="n">set_session_title</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">,</span> <span class="s2">&quot;Fix Docker Build&quot;</span><span class="p">)</span>
+
+<span class="c1"># 按标题解析（返回血缘中最新的）</span>
+<span class="n">session_id</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">resolve_session_by_title</span><span class="p">(</span><span class="s2">&quot;Fix Docker Build&quot;</span><span class="p">)</span>
+
+<span class="c1"># 自动生成血缘中的下一个标题</span>
+<span class="n">next_title</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">get_next_title_in_lineage</span><span class="p">(</span><span class="s2">&quot;Fix Docker Build&quot;</span><span class="p">)</span>
+<span class="c1"># 返回：&quot;Fix Docker Build #2&quot;</span>
+</code></pre></div>
+
+<h2 id="全文搜索">全文搜索</h2>
+<p><code>search_messages()</code> 方法支持 FTS5 查询语法，并自动对用户输入进行清理。</p>
+<h3 id="基本搜索">基本搜索</h3>
+<div class="highlight"><pre><span></span><code><span class="n">results</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">search_messages</span><span class="p">(</span><span class="s2">&quot;docker deployment&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="fts5-查询语法">FTS5 查询语法</h3>
+<table>
+<thead>
+<tr>
+<th>语法</th>
+<th>示例</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>关键词</td>
+<td><code>docker deployment</code></td>
+<td>两个词均包含（隐式 AND）</td>
+</tr>
+<tr>
+<td>引号短语</td>
+<td><code>"exact phrase"</code></td>
+<td>精确短语匹配</td>
+</tr>
+<tr>
+<td>布尔 OR</td>
+<td><code>docker OR kubernetes</code></td>
+<td>任一词</td>
+</tr>
+<tr>
+<td>布尔 NOT</td>
+<td><code>python NOT java</code></td>
+<td>排除词</td>
+</tr>
+<tr>
+<td>前缀</td>
+<td><code>deploy*</code></td>
+<td>前缀匹配</td>
+</tr>
+</tbody>
+</table>
+<h3 id="过滤搜索">过滤搜索</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 仅搜索 CLI 会话</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">search_messages</span><span class="p">(</span><span class="s2">&quot;error&quot;</span><span class="p">,</span> <span class="n">source_filter</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;cli&quot;</span><span class="p">])</span>
+
+<span class="c1"># 排除 gateway 会话</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">search_messages</span><span class="p">(</span><span class="s2">&quot;bug&quot;</span><span class="p">,</span> <span class="n">exclude_sources</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;telegram&quot;</span><span class="p">,</span> <span class="s2">&quot;discord&quot;</span><span class="p">])</span>
+
+<span class="c1"># 仅搜索用户消息</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">search_messages</span><span class="p">(</span><span class="s2">&quot;help&quot;</span><span class="p">,</span> <span class="n">role_filter</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;user&quot;</span><span class="p">])</span>
+</code></pre></div>
+
+<h3 id="搜索结果格式">搜索结果格式</h3>
+<p>每条结果包含：
+- <code>id</code>、<code>session_id</code>、<code>role</code>、<code>timestamp</code>
+- <code>snippet</code> — FTS5 生成的片段，带 <code>&gt;&gt;&gt;match&lt;&lt;&lt;</code> 标记
+- <code>context</code> — 匹配前后各 1 条消息（内容截断至 200 字符）
+- <code>source</code>、<code>model</code>、<code>session_started</code> — 来自父会话</p>
+<p><code>_sanitize_fts5_query()</code> 方法处理边缘情况：
+- 去除不匹配的引号和特殊字符
+- 将含连字符的词包裹在引号中（<code>chat-send</code> → <code>"chat-send"</code>）
+- 移除悬空的布尔运算符（<code>hello AND</code> → <code>hello</code>）</p>
+<h2 id="会话血缘">会话血缘</h2>
+<p>会话可通过 <code>parent_session_id</code> 形成链。这发生在 gateway 中上下文压缩触发会话分割时。</p>
+<h3 id="查询查找会话血缘">查询：查找会话血缘</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">-- 查找会话的所有祖先</span>
+<span class="k">WITH</span><span class="w"> </span><span class="k">RECURSIVE</span><span class="w"> </span><span class="n">lineage</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">?</span>
+<span class="w">    </span><span class="k">UNION</span><span class="w"> </span><span class="k">ALL</span>
+<span class="w">    </span><span class="k">SELECT</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="n">s</span>
+<span class="w">    </span><span class="k">JOIN</span><span class="w"> </span><span class="n">lineage</span><span class="w"> </span><span class="n">l</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">l</span><span class="p">.</span><span class="n">parent_session_id</span>
+<span class="p">)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">title</span><span class="p">,</span><span class="w"> </span><span class="n">started_at</span><span class="p">,</span><span class="w"> </span><span class="n">parent_session_id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">lineage</span><span class="p">;</span>
+
+<span class="c1">-- 查找会话的所有后代</span>
+<span class="k">WITH</span><span class="w"> </span><span class="k">RECURSIVE</span><span class="w"> </span><span class="n">descendants</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">?</span>
+<span class="w">    </span><span class="k">UNION</span><span class="w"> </span><span class="k">ALL</span>
+<span class="w">    </span><span class="k">SELECT</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="n">s</span>
+<span class="w">    </span><span class="k">JOIN</span><span class="w"> </span><span class="n">descendants</span><span class="w"> </span><span class="n">d</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">parent_session_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">d</span><span class="p">.</span><span class="n">id</span>
+<span class="p">)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">title</span><span class="p">,</span><span class="w"> </span><span class="n">started_at</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">descendants</span><span class="p">;</span>
+</code></pre></div>
+
+<h3 id="查询带预览的最近会话">查询：带预览的最近会话</h3>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="o">*</span><span class="p">,</span>
+<span class="w">    </span><span class="k">COALESCE</span><span class="p">(</span>
+<span class="w">        </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="n">SUBSTR</span><span class="p">(</span><span class="n">m</span><span class="p">.</span><span class="n">content</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">63</span><span class="p">)</span>
+<span class="w">         </span><span class="k">FROM</span><span class="w"> </span><span class="n">messages</span><span class="w"> </span><span class="n">m</span>
+<span class="w">         </span><span class="k">WHERE</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">session_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="k">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;user&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">content</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
+<span class="w">         </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="k">timestamp</span><span class="p">,</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="mi">1</span><span class="p">),</span>
+<span class="w">        </span><span class="s1">&#39;&#39;</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">preview</span><span class="p">,</span>
+<span class="w">    </span><span class="k">COALESCE</span><span class="p">(</span>
+<span class="w">        </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="k">MAX</span><span class="p">(</span><span class="n">m2</span><span class="p">.</span><span class="k">timestamp</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">messages</span><span class="w"> </span><span class="n">m2</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">m2</span><span class="p">.</span><span class="n">session_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">id</span><span class="p">),</span>
+<span class="w">        </span><span class="n">s</span><span class="p">.</span><span class="n">started_at</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">last_active</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="n">s</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">started_at</span><span class="w"> </span><span class="k">DESC</span>
+<span class="k">LIMIT</span><span class="w"> </span><span class="mi">20</span><span class="p">;</span>
+</code></pre></div>
+
+<h3 id="查询token-使用统计">查询：Token 使用统计</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">-- 按模型统计总 token 数</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">model</span><span class="p">,</span>
+<span class="w">       </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">session_count</span><span class="p">,</span>
+<span class="w">       </span><span class="k">SUM</span><span class="p">(</span><span class="n">input_tokens</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">total_input</span><span class="p">,</span>
+<span class="w">       </span><span class="k">SUM</span><span class="p">(</span><span class="n">output_tokens</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">total_output</span><span class="p">,</span>
+<span class="w">       </span><span class="k">SUM</span><span class="p">(</span><span class="n">estimated_cost_usd</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">total_cost</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">model</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
+<span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">model</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">total_cost</span><span class="w"> </span><span class="k">DESC</span><span class="p">;</span>
+
+<span class="c1">-- token 使用量最高的会话</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">title</span><span class="p">,</span><span class="w"> </span><span class="n">model</span><span class="p">,</span><span class="w"> </span><span class="n">input_tokens</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">output_tokens</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">total_tokens</span><span class="p">,</span>
+<span class="w">       </span><span class="n">estimated_cost_usd</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">total_tokens</span><span class="w"> </span><span class="k">DESC</span>
+<span class="k">LIMIT</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span>
+</code></pre></div>
+
+<h2 id="导出与清理">导出与清理</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># 导出单个会话及其消息</span>
+<span class="n">data</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">export_session</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+
+<span class="c1"># 导出所有会话（含消息）为字典列表</span>
+<span class="n">all_data</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">export_all</span><span class="p">(</span><span class="n">source</span><span class="o">=</span><span class="s2">&quot;cli&quot;</span><span class="p">)</span>
+
+<span class="c1"># 删除旧会话（仅删除已结束的会话）</span>
+<span class="n">deleted_count</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">prune_sessions</span><span class="p">(</span><span class="n">older_than_days</span><span class="o">=</span><span class="mi">90</span><span class="p">)</span>
+<span class="n">deleted_count</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">prune_sessions</span><span class="p">(</span><span class="n">older_than_days</span><span class="o">=</span><span class="mi">30</span><span class="p">,</span> <span class="n">source</span><span class="o">=</span><span class="s2">&quot;telegram&quot;</span><span class="p">)</span>
+
+<span class="c1"># 清除消息但保留会话记录</span>
+<span class="n">db</span><span class="o">.</span><span class="n">clear_messages</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+
+<span class="c1"># 删除会话及所有消息</span>
+<span class="n">db</span><span class="o">.</span><span class="n">delete_session</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="数据库位置">数据库位置</h2>
+<p>默认路径：<code>~/.hermes/state.db</code></p>
+<p>该路径由 <code>hermes_constants.get_hermes_home()</code> 推导，默认解析为 <code>~/.hermes/</code>，或 <code>HERMES_HOME</code> 环境变量的值。</p>
+<p>数据库文件、WAL 文件（<code>state.db-wal</code>）和共享内存文件（<code>state.db-shm</code>）均创建于同一目录。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/session-storage</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#hermes-home-与-profile-隔离">Hermes home 与 profile 隔离</a></li>
+<li class="lvl3"><a href="#测试隔离守卫">测试隔离守卫</a></li>
+<li class="lvl2"><a href="#架构概览">架构概览</a></li>
+<li class="lvl2"><a href="#sqlite-schema">SQLite Schema</a></li>
+<li class="lvl3"><a href="#sessions-表">Sessions 表</a></li>
+<li class="lvl3"><a href="#messages-表">Messages 表</a></li>
+<li class="lvl3"><a href="#fts5-全文搜索">FTS5 全文搜索</a></li>
+<li class="lvl2"><a href="#schema-版本与迁移">Schema 版本与迁移</a></li>
+<li class="lvl2"><a href="#写入竞争处理">写入竞争处理</a></li>
+<li class="lvl2"><a href="#常用操作">常用操作</a></li>
+<li class="lvl3"><a href="#初始化">初始化</a></li>
+<li class="lvl3"><a href="#创建和管理会话">创建和管理会话</a></li>
+<li class="lvl3"><a href="#存储消息">存储消息</a></li>
+<li class="lvl3"><a href="#检索消息">检索消息</a></li>
+<li class="lvl3"><a href="#会话标题">会话标题</a></li>
+<li class="lvl2"><a href="#全文搜索">全文搜索</a></li>
+<li class="lvl3"><a href="#基本搜索">基本搜索</a></li>
+<li class="lvl3"><a href="#fts5-查询语法">FTS5 查询语法</a></li>
+<li class="lvl3"><a href="#过滤搜索">过滤搜索</a></li>
+<li class="lvl3"><a href="#搜索结果格式">搜索结果格式</a></li>
+<li class="lvl2"><a href="#会话血缘">会话血缘</a></li>
+<li class="lvl3"><a href="#查询查找会话血缘">查询：查找会话血缘</a></li>
+<li class="lvl3"><a href="#查询带预览的最近会话">查询：带预览的最近会话</a></li>
+<li class="lvl3"><a href="#查询token-使用统计">查询：Token 使用统计</a></li>
+<li class="lvl2"><a href="#导出与清理">导出与清理</a></li>
+<li class="lvl2"><a href="#数据库位置">数据库位置</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

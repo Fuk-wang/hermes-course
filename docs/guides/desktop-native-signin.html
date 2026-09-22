@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desktop Native Sign-In (RFC 8252) · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/desktop-native-signin</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="desktop-native-sign-in-rfc-8252">Desktop Native Sign-In (RFC 8252)</h1>
+<p>When the Hermes Desktop app connects to a <strong>gated gateway</strong> (a hosted or
+self-hosted dashboard that sits behind an OAuth provider), it can sign in two
+ways:</p>
+<ol>
+<li><strong>Native sign-in (RFC 8252)</strong> — the app opens your <strong>real system browser</strong>,
+   you approve in the browser you already trust, and the app receives tokens it
+   stores as owner-only files in its user-data directory (optionally encrypted
+   with your OS keychain — Settings → Gateway). <strong>No embedded webview, no
+   browser session cookies.</strong> This is the default whenever the gateway
+   supports it.</li>
+<li><strong>Embedded sign-in (legacy fallback)</strong> — the app opens a small in-app
+   browser window and captures the gateway's session cookie. Used automatically
+   when the gateway is an older build that doesn't advertise native sign-in.</li>
+</ol>
+<p>You don't choose between these — the app detects what the gateway supports and
+picks the best one. This page explains what happens and why.</p>
+<h2 id="why-native-sign-in">Why native sign-in</h2>
+<p>Embedding a browser inside a native app for OAuth has well-known downsides:
+the login page can't see your existing browser session (so you re-type
+credentials and re-do MFA), password managers and passkeys often don't work,
+and the app relies on reading a session cookie out of a private webview. RFC
+8252 ("OAuth 2.0 for Native Apps") is the industry best practice that avoids
+all of that: <strong>do the authorization in the system browser and hand the app its
+own tokens.</strong></p>
+<p>For Hermes specifically, native sign-in means:</p>
+<ul>
+<li><strong>No embedded webview.</strong> The authorization happens in Safari / Chrome /
+  Firefox / Edge — whatever you use — with your logins, extensions, and
+  passkeys intact.</li>
+<li><strong>No session cookies.</strong> The app holds an OAuth <strong>access token</strong> (short-lived)
+  and <strong>refresh token</strong>, stored as owner-only files — encrypted at rest via
+  your OS keychain (Electron <code>safeStorage</code>) when the opt-in keychain toggle in
+  Settings → Gateway is on. REST calls and WebSocket tickets are authenticated
+  with an <code>Authorization: Bearer</code> header, not a cookie jar.</li>
+</ul>
+<h2 id="how-it-works">How it works</h2>
+<div class="highlight"><pre><span></span><code>Desktop app                Gateway (/auth/native/*)          Nous Portal (IDP)
+   │ 1. open loopback 127.0.0.1:&lt;random port&gt;
+   │ 2. system browser ─►  /auth/native/authorize
+   │    (PKCE challenge)    (starts the normal PKCE login) ─► /oauth/authorize
+   │                        ◄──── code ──── /auth/callback ◄──┘
+   │                        3. mint one-time gateway code
+   │ ◄─ 302 127.0.0.1/cb?code=… ─┘
+   │ 4. POST /auth/native/token (code + PKCE verifier)
+   │ ◄─ 5. { access_token, refresh_token, expires_at } ───────┘
+   │ 6. store in local token store; use Bearer for REST + WS tickets
+</code></pre></div>
+
+<p>The gateway <strong>brokers</strong> the flow: it is the authorization server <em>to the
+desktop app</em> and an OAuth client <em>to the upstream identity provider</em> (Nous
+Portal). This is required because the upstream <code>client_id</code> and permitted
+redirect URIs are bound to the gateway's own origin — a desktop app can't be a
+direct client of the Portal. The desktop still gets the full RFC 8252
+experience: its own PKCE pair, its own loopback redirect, and tokens it owns.</p>
+<p><strong>PKCE (RFC 7636)</strong> protects the loopback hop: the one-time gateway code is
+useless without the code verifier, which never leaves the app. The code is
+single-use and short-lived.</p>
+<h2 id="capability-detection--fallback">Capability detection &amp; fallback</h2>
+<p>The desktop reads the gateway's public <code>/api/status</code> endpoint, which advertises
+an <code>auth_flows</code> array:</p>
+<table>
+<thead>
+<tr>
+<th><code>auth_flows</code> value</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>["cookie", "native_pkce"]</code></td>
+<td>Gateway supports native sign-in → the app uses it</td>
+</tr>
+<tr>
+<td><code>["cookie"]</code></td>
+<td>Gateway supports only the legacy flow → the app uses the embedded webview</td>
+</tr>
+<tr>
+<td><em>(field absent)</em></td>
+<td>Older gateway → the app uses the embedded webview</td>
+</tr>
+</tbody>
+</table>
+<p>If native sign-in is advertised but fails for a local reason — e.g. a security
+tool blocks the loopback listener, or you close the browser tab — the app
+<strong>falls back to the embedded flow automatically</strong> so you can still sign in.</p>
+<h2 id="token-lifecycle">Token lifecycle</h2>
+<ul>
+<li><strong>Access token</strong>: short-lived (minutes). Sent as <code>Authorization: Bearer</code> on
+  every REST call and when minting a WebSocket ticket.</li>
+<li><strong>Refresh token</strong>: longer-lived, rotating. When the access token is near
+  expiry the app calls <code>/auth/native/refresh</code> to rotate both tokens, then
+  updates its token store.</li>
+<li><strong>Terminal expiry</strong>: if the refresh token is dead (expired / revoked /
+  reuse-detected), the app clears its stored tokens and prompts a fresh
+  sign-in.</li>
+<li><strong>Sign out</strong>: clears both the stored native tokens and any legacy session
+  cookie for that gateway.</li>
+</ul>
+<h2 id="for-gateway-operators">For gateway operators</h2>
+<p>Native sign-in is available automatically on any gated gateway with an
+interactive session provider registered. No configuration is required — the
+<code>/auth/native/*</code> routes and the <code>auth_flows</code> advertisement are part of the
+dashboard-auth subsystem. OAuth providers (e.g. the bundled <strong>Nous</strong> provider)
+broker the upstream IDP redirect; password providers (e.g. the bundled
+<strong>basic-auth</strong> plugin) land the system browser on the gateway's <code>/login</code>
+credential form instead — which is what lets OS password managers (macOS
+Passwords, etc.) autofill the form, something no embedded desktop webview can
+offer. Token-only credentials (e.g. drain) are not interactive sign-ins and do
+not advertise <code>native_pkce</code>.</p>
+<p>The relevant endpoints (all public, pre-auth bootstrap, same as the existing
+<code>/auth/*</code> OAuth routes):</p>
+<ul>
+<li><code>GET /auth/native/authorize</code> — starts the brokered PKCE login</li>
+<li><code>POST /auth/native/token</code> — exchanges the loopback code + verifier for tokens</li>
+<li><code>POST /auth/native/refresh</code> — rotates tokens from the app's refresh token</li>
+</ul>
+<h2 id="see-also">See also</h2>
+<ul>
+<li><a href="oauth-over-ssh.html">OAuth over SSH / Remote Hosts</a> — the loopback-callback
+  pattern for provider/MCP OAuth on remote machines.</li>
+<li><a href="run-hermes-with-nous-portal.html">Run Hermes with Nous Portal</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/desktop-native-signin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#why-native-sign-in">Why native sign-in</a></li>
+<li class="lvl2"><a href="#how-it-works">How it works</a></li>
+<li class="lvl2"><a href="#capability-detection--fallback">Capability detection &amp;amp; fallback</a></li>
+<li class="lvl2"><a href="#token-lifecycle">Token lifecycle</a></li>
+<li class="lvl2"><a href="#for-gateway-operators">For gateway operators</a></li>
+<li class="lvl2"><a href="#see-also">See also</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

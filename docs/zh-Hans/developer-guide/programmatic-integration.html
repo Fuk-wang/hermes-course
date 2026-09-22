@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>程序化集成 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/programmatic-integration</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="程序化集成">程序化集成</h1>
+<p>Hermes 提供三种协议，供外部程序驱动 agent——IDE 插件、自定义 UI、CI 流水线、嵌入式子 agent。根据你的传输方式和消费端选择合适的协议。</p>
+<table>
+<thead>
+<tr>
+<th>协议</th>
+<th>传输方式</th>
+<th>适用场景</th>
+<th>定义位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>ACP</strong></td>
+<td>JSON-RPC over stdio</td>
+<td>已支持 <a href="https://github.com/zed-industries/agent-client-protocol" class="ext" target="_blank" rel="noopener">Agent Client Protocol</a> 的 IDE 客户端（VS Code、Zed、JetBrains）</td>
+<td><code>acp_adapter/</code></td>
+</tr>
+<tr>
+<td><strong>TUI gateway</strong></td>
+<td>JSON-RPC over stdio（或 WebSocket）</td>
+<td>需要精细控制会话、slash 命令、审批及流式事件的自定义宿主</td>
+<td><code>tui_gateway/server.py</code></td>
+</tr>
+<tr>
+<td><strong>API server</strong></td>
+<td>HTTP + Server-Sent Events</td>
+<td>兼容 OpenAI 的前端（Open WebUI、LobeChat、LibreChat……）及语言无关的 Web 客户端</td>
+<td><code>gateway/platforms/api_server.py</code></td>
+</tr>
+</tbody>
+</table>
+<p>三种协议均驱动同一个 <code>AIAgent</code> 核心，区别仅在于线路格式和所暴露的功能集。</p>
+<hr />
+<h2 id="acpagent-client-protocol">ACP（Agent Client Protocol）</h2>
+<p><code>hermes acp</code> 启动一个基于 stdio 的 JSON-RPC 服务器，使用 ACP 协议。已在 VS Code（Zed Industries 的 ACP 扩展）、Zed 以及所有安装了 ACP 插件的 JetBrains IDE 中投入生产使用。</p>
+<p>暴露的能力：会话创建、prompt（提示词）提交、流式 agent 消息块、工具调用事件、权限请求、会话 fork、取消及身份验证。工具输出会被渲染为 IDE 可理解的 ACP <code>Diff</code>/<code>ToolCall</code> 内容块。</p>
+<p>完整生命周期、事件桥接及审批流程：<a href="acp-internals.html">ACP 内部机制</a>。</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>acp<span class="w">                  </span><span class="c1"># 在 stdio 上提供 ACP 服务</span>
+hermes<span class="w"> </span>acp<span class="w"> </span>--bootstrap<span class="w">      </span><span class="c1"># 打印适用于支持 ACP 的 IDE 的安装代码片段</span>
+</code></pre></div>
+
+<hr />
+<h2 id="tui-gateway-json-rpc">TUI Gateway JSON-RPC</h2>
+<p><code>tui_gateway/server.py</code> 是 Ink TUI（<code>hermes --tui</code>）和嵌入式仪表板 PTY 桥接所使用的协议。任何外部宿主均可通过 stdio（或经由 <code>tui_gateway/ws.py</code> 的 WebSocket）使用相同协议。</p>
+<h3 id="方法目录精选">方法目录（精选）</h3>
+<div class="highlight"><pre><span></span><code>prompt.submit           prompt.background       session.steer
+session.create          session.list            session.interrupt
+session.history         session.compress        session.branch
+session.title           session.usage           session.status
+clarify.respond         sudo.respond            secret.respond
+approval.respond        config.set / config.get commands.catalog
+command.resolve         command.dispatch        cli.exec
+reload.mcp              reload.env              process.stop
+delegation.status       subagent.interrupt      spawn_tree.save / list / load
+terminal.resize         clipboard.paste         image.attach
+</code></pre></div>
+
+<h3 id="流式返回的事件">流式返回的事件</h3>
+<p><code>message.delta</code>、<code>message.complete</code>、<code>tool.start</code>、<code>tool.progress</code>、<code>tool.complete</code>、<code>approval.request</code>、<code>clarify.request</code>、<code>sudo.request</code>、<code>secret.request</code>、<code>gateway.ready</code>，以及会话生命周期和错误事件。</p>
+<h3 id="pi-风格-rpc-映射">Pi 风格 RPC 映射</h3>
+<p>Pi-mono RPC 规范（<a href="https://github.com/NousResearch/hermes-agent/issues/360" class="ext" target="_blank" rel="noopener">issue #360</a>）中的每条命令均有对应的 TUI gateway 等价项：</p>
+<table>
+<thead>
+<tr>
+<th>Pi 命令</th>
+<th>Hermes 等价项</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>prompt</code></td>
+<td><code>prompt.submit</code>（或 ACP <code>session/prompt</code>）</td>
+</tr>
+<tr>
+<td><code>steer</code></td>
+<td><code>session.steer</code></td>
+</tr>
+<tr>
+<td><code>follow_up</code></td>
+<td>在当前轮次结束后排队的 <code>prompt.submit</code></td>
+</tr>
+<tr>
+<td><code>abort</code></td>
+<td><code>session.interrupt</code></td>
+</tr>
+<tr>
+<td><code>set_model</code></td>
+<td>通过 <code>command.dispatch</code> 执行 <code>/model &lt;provider:model&gt;</code>（会话中途生效，持久化）</td>
+</tr>
+<tr>
+<td><code>compact</code></td>
+<td><code>session.compress</code></td>
+</tr>
+<tr>
+<td><code>get_state</code></td>
+<td><code>session.status</code></td>
+</tr>
+<tr>
+<td><code>get_messages</code></td>
+<td><code>session.history</code></td>
+</tr>
+<tr>
+<td><code>switch_session</code></td>
+<td><code>session.resume</code></td>
+</tr>
+<tr>
+<td><code>fork</code></td>
+<td><code>session.branch</code></td>
+</tr>
+<tr>
+<td><code>ui_request</code> / <code>ui_response</code></td>
+<td><code>clarify.respond</code> / <code>sudo.respond</code> / <code>secret.respond</code> / <code>approval.respond</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="兼容-openai-的-api-server">兼容 OpenAI 的 API Server</h2>
+<p><code>gateway/platforms/api_server.py</code> 通过 HTTP 暴露 Hermes，供任何已支持 OpenAI 格式的客户端使用。适用于需要 Web 前端、curl 驱动的 CI 运行器或非 Python 消费端的场景。</p>
+<p>端点：</p>
+<div class="highlight"><pre><span></span><code>POST /v1/chat/completions        OpenAI Chat Completions（通过 SSE 流式传输）
+POST /v1/responses               OpenAI Responses API（有状态）
+POST /v1/runs                    启动一次运行，返回 run_id（202）
+GET  /v1/runs/{id}               运行状态
+GET  /v1/runs/{id}/events        生命周期事件的 SSE 流
+POST /v1/runs/{id}/approval      解决待处理的审批
+POST /v1/runs/{id}/stop          中断运行
+GET  /v1/capabilities            机器可读的功能标志
+GET  /v1/models                  列出 hermes-agent
+GET  /health, /health/detailed
+</code></pre></div>
+
+<p>配置、请求头（<code>X-Hermes-Session-Id</code>、<code>X-Hermes-Session-Key</code>）及前端接入：<a href="../user-guide/features/api-server.html">API Server</a>。</p>
+<hr />
+<h2 id="该选哪个">该选哪个？</h2>
+<ul>
+<li><strong>正在编写 IDE 插件，且 IDE 已支持 ACP</strong> → 选 ACP。IDE 侧无需任何协议工作。</li>
+<li><strong>正在编写自定义桌面 / Web / TUI 宿主，且需要 Hermes 的全部功能</strong>（slash 命令、审批、clarify、多 agent、会话分支）→ 选 TUI gateway JSON-RPC。</li>
+<li><strong>需要任意兼容 OpenAI 的前端、语言无关的 HTTP 客户端或 curl 驱动的自动化</strong> → 选 API server。</li>
+<li><strong>需要在 Python 进程内嵌入，不想启动子进程</strong> → 直接导入 <code>run_agent.AIAgent</code>。参见 <a href="agent-loop.html">Agent Loop</a>。</li>
+</ul>
+<hr />
+<h2 id="模型热切换">模型热切换</h2>
+<p>会话中途切换模型在所有接入方式上均可用——底层均为 <code>/model</code> slash 命令。</p>
+<ul>
+<li><strong>CLI / TUI：</strong> <code>/model claude-sonnet-4</code> 或 <code>/model openrouter:anthropic/claude-sonnet-4.6</code></li>
+<li><strong>TUI gateway RPC：</strong> 使用 <code>{"command": "/model claude-sonnet-4"}</code> 调用 <code>command.dispatch</code></li>
+<li><strong>ACP：</strong> IDE 将 slash 命令作为 prompt 发送，agent 负责分发</li>
+<li><strong>API server：</strong> 在请求体中包含 <code>model</code> 字段，或设置 <code>X-Hermes-Model</code></li>
+</ul>
+<p>内置 provider 感知解析（相同的模型名称会根据当前 provider 自动选择正确格式）。参见 <code>hermes_cli/model_switch.py</code>。</p>
+<hr />
+<h2 id="关于---mode-rpc-的说明">关于 <code>--mode rpc</code> 的说明</h2>
+<p>Hermes 没有 <code>--mode rpc</code> 标志。上述三种协议已覆盖所有使用场景——ACP 用于 IDE 协议客户端，TUI gateway 用于 stdio JSON-RPC 宿主，API server 用于 HTTP。如果你发现上述协议均无法满足的真实需求，请提交 issue 并说明你正在构建的具体消费端。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/programmatic-integration</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#acpagent-client-protocol">ACP（Agent Client Protocol）</a></li>
+<li class="lvl2"><a href="#tui-gateway-json-rpc">TUI Gateway JSON-RPC</a></li>
+<li class="lvl3"><a href="#方法目录精选">方法目录（精选）</a></li>
+<li class="lvl3"><a href="#流式返回的事件">流式返回的事件</a></li>
+<li class="lvl3"><a href="#pi-风格-rpc-映射">Pi 风格 RPC 映射</a></li>
+<li class="lvl2"><a href="#兼容-openai-的-api-server">兼容 OpenAI 的 API Server</a></li>
+<li class="lvl2"><a href="#该选哪个">该选哪个？</a></li>
+<li class="lvl2"><a href="#模型热切换">模型热切换</a></li>
+<li class="lvl2"><a href="#关于---mode-rpc-的说明">关于 --mode rpc 的说明</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

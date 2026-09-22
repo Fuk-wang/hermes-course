@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TUI &amp; Desktop from Worktrees · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/worktree-ui-dev</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="tui--desktop-from-worktrees">TUI &amp; Desktop from Worktrees</h1>
+<p>The Python core runs fine from any <a href="../user-guide/git-worktrees.html">git worktree</a> — <code>cd</code> in and <code>hermes</code> just works. The two TypeScript surfaces do not: <code>ui-tui/</code> and <code>apps/desktop/</code> each need a populated <code>node_modules</code>, and a fresh <code>npm ci</code> per worktree is slow and duplicates gigabytes across every branch you have checked out.</p>
+<p><code>htui</code> and <code>hgui</code> are two shell helpers that close that gap. Each launches its surface <strong>from the current worktree</strong> while borrowing <code>node_modules</code> from one canonical checkout — so a throwaway branch costs a symlink, not an install.</p>
+<p>They're developer conveniences, not shipped commands. Drop them in <code>~/.zshrc</code>; adapt paths to taste.</p>
+<h2 id="the-deps-sharing-model">The deps-sharing model</h2>
+<p>One checkout is the <strong>deps checkout</strong> — the one place you actually run <code>npm install</code>. Every other worktree links against it, and only re-installs locally when its lockfile diverges (a branch that bumps a dependency must not silently run against stale packages).</p>
+<div class="highlight"><pre><span></span><code>flowchart TD
+    A[htui / hgui in a worktree] --&gt; B{package-lock.json&lt;br/&gt;matches deps checkout?}
+    B -- yes --&gt; C[symlink node_modules&lt;br/&gt;from deps checkout]
+    B -- no --&gt; D[local npm ci&lt;br/&gt;in this worktree]
+    C --&gt; E[launch surface]
+    D --&gt; E
+</code></pre></div>
+
+<p>Two env vars name the canonical checkout:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>HERMES_MAIN_CHECKOUT</code></td>
+<td>The deps checkout — where <code>node_modules</code> really lives, and whose <code>.venv/bin/python</code> runs the backend.</td>
+</tr>
+<tr>
+<td><code>HERMES_GUI_DEPS_CHECKOUT</code></td>
+<td>Where the desktop deps (<code>apps/desktop/node_modules</code>) live. Defaults to <code>HERMES_MAIN_CHECKOUT</code>; override only if you keep desktop deps elsewhere.</td>
+</tr>
+</tbody>
+</table>
+<p>Neither is read by Hermes itself — they're private to these helpers. The variables Hermes <em>does</em> read are covered in <a href="../reference/environment-variables.html">Environment Variables</a>.</p>
+<h2 id="htui--tui-from-the-worktree"><code>htui</code> — TUI from the worktree</h2>
+<p>The Ink TUI has a dev path already: <code>hermes --tui --dev</code> runs the TypeScript sources via <code>tsx</code> instead of the prebuilt bundle. <code>htui</code> is a one-liner over it that also points the run at the current worktree's <code>ui-tui/</code>:</p>
+<div class="highlight"><pre><span></span><code>htui<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">  </span><span class="nb">local</span><span class="w"> </span>root
+<span class="w">  </span><span class="nv">root</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>_hermes_root<span class="k">)</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">{</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;htui: not in a Hermes checkout&quot;</span><span class="w"> </span>&gt;<span class="p">&amp;</span><span class="m">2</span><span class="p">;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="o">}</span>
+<span class="w">  </span><span class="o">(</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$root</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nv">PYTHONPATH</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$root</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">      </span><span class="s2">&quot;</span><span class="nv">$HERMES_MAIN_CHECKOUT</span><span class="s2">/.venv/bin/python&quot;</span><span class="w"> </span>-m<span class="w"> </span>hermes_cli.main<span class="w"> </span>--tui<span class="w"> </span>--dev<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$@</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">)</span>
+<span class="o">}</span>
+</code></pre></div>
+
+<p><code>--dev</code> compiles from source, so it links <code>ui-tui/node_modules</code> from <code>HERMES_MAIN_CHECKOUT</code> when the root lockfile matches and installs locally otherwise (see <a href="#shared-helpers"><code>_hermes_root</code> / linking helpers</a>).</p>
+<div class="admonition adm-warning"><p class="adm-title">`--dev` and `HERMES_TUI_DIR` are mutually exclusive</p>
+<p><code>HERMES_TUI_DIR</code> points Hermes at a <em>prebuilt</em> bundle (Nix, system packages), which has no source to hot-reload. If it's set in your shell, <code>hermes --tui --dev</code> exits with an error. Run <code>unset HERMES_TUI_DIR</code> before <code>htui</code>.</p>
+</div>
+<h2 id="hgui--desktop-app-from-the-worktree"><code>hgui</code> — desktop app from the worktree</h2>
+<p>The desktop app needs dependencies at both the repo root and <code>apps/desktop/</code>, a Vite server, and a Python backend. The stock <code>npm run dev</code> pins Vite to <code>5174</code>; Electron also defaults to CDP port <code>9222</code> and takes a single-instance lock on its user-data directory. Changing only the Vite port is not enough to run two desktops.</p>
+<p>This <strong>zsh</strong> example gives each launch an explicit slot (<code>HGUI_SLOT</code>, default <code>0</code>). Use a different slot in each terminal. It uses the <a href="#shared-helpers">shared helpers</a> below and requires <code>lsof</code>:</p>
+<div class="highlight"><pre><span></span><code>hgui<span class="o">()</span><span class="w"> </span><span class="o">(</span>
+<span class="w">  </span><span class="nb">local</span><span class="w"> </span>root<span class="w"> </span>deps<span class="w"> </span>desktop<span class="w"> </span><span class="nv">slot</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">HGUI_SLOT</span><span class="k">:-</span><span class="nv">0</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>vite_port<span class="w"> </span>cdp_port<span class="w"> </span>port
+<span class="w">  </span><span class="o">[[</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$slot</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="o">[</span><span class="m">0</span>-9<span class="o">]</span><span class="w"> </span><span class="o">]]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">{</span><span class="w"> </span>print<span class="w"> </span>-u2<span class="w"> </span><span class="s1">&#39;hgui: HGUI_SLOT must be 0-9&#39;</span><span class="p">;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="o">}</span>
+<span class="w">  </span><span class="nv">vite_port</span><span class="o">=</span><span class="k">$((</span><span class="m">5174</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nv">slot</span><span class="k">))</span>
+<span class="w">  </span><span class="nv">cdp_port</span><span class="o">=</span><span class="k">$((</span><span class="m">9222</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nv">slot</span><span class="k">))</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span>port<span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$vite_port</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$cdp_port</span><span class="s2">&quot;</span><span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span>lsof<span class="w"> </span>-nP<span class="w"> </span>-t<span class="w"> </span>-iTCP:<span class="s2">&quot;</span><span class="nv">$port</span><span class="s2">&quot;</span><span class="w"> </span>-sTCP:LISTEN<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">      </span>print<span class="w"> </span>-u2<span class="w"> </span><span class="s2">&quot;hgui: port </span><span class="nv">$port</span><span class="s2"> is busy; choose another HGUI_SLOT&quot;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="m">1</span>
+<span class="w">    </span><span class="k">fi</span>
+<span class="w">  </span><span class="k">done</span>
+
+<span class="w">  </span><span class="nv">root</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>_hermes_root<span class="k">)</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">{</span><span class="w"> </span>print<span class="w"> </span>-u2<span class="w"> </span><span class="s1">&#39;hgui: not in a Hermes checkout&#39;</span><span class="p">;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="o">}</span>
+<span class="w">  </span><span class="nv">deps</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">HERMES_GUI_DEPS_CHECKOUT</span><span class="k">:-</span><span class="nv">$HERMES_MAIN_CHECKOUT</span><span class="si">}</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nv">desktop</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$root</span><span class="s2">/apps/desktop&quot;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span>cmp<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$root</span><span class="s2">/package-lock.json&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$deps</span><span class="s2">/package-lock.json&quot;</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span>_hermes_link_deps<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$desktop</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$deps</span><span class="s2">/apps/desktop&quot;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="m">1</span>
+<span class="w">    </span>_hermes_link_deps<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$root</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$deps</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="m">1</span>
+<span class="w">  </span><span class="k">else</span>
+<span class="w">    </span><span class="o">(</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$root</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>npm<span class="w"> </span>ci<span class="w"> </span><span class="o">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="m">1</span>
+<span class="w">  </span><span class="k">fi</span>
+
+<span class="w">  </span><span class="nb">cd</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$desktop</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="m">1</span>
+<span class="w">  </span><span class="nb">export</span><span class="w"> </span><span class="nv">PATH</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$desktop</span><span class="s2">/node_modules/.bin:</span><span class="nv">$root</span><span class="s2">/node_modules/.bin:</span><span class="nv">$PATH</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_DESKTOP_HERMES_ROOT</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$root</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_DESKTOP_PYTHON</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HERMES_MAIN_CHECKOUT</span><span class="s2">/.venv/bin/python&quot;</span>
+<span class="w">  </span><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_DESKTOP_CWD</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$root</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_DESKTOP_DEV_SERVER</span><span class="o">=</span><span class="s2">&quot;http://127.0.0.1:</span><span class="nv">$vite_port</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_DESKTOP_CDP_PORT</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$cdp_port</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_DESKTOP_USER_DATA_DIR</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">XDG_CACHE_HOME</span><span class="k">:-</span><span class="nv">$HOME</span><span class="p">/.cache</span><span class="si">}</span><span class="s2">/hermes-hgui/slot-</span><span class="nv">$slot</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="c1"># A userData override would otherwise also relocate the agent&#39;s home.</span>
+<span class="w">  </span><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_HOME</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">HERMES_HOME</span><span class="k">:-</span><span class="nv">$HOME</span><span class="p">/.hermes</span><span class="si">}</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nb">export</span><span class="w"> </span><span class="nv">XCURSOR_SIZE</span><span class="o">=</span><span class="m">24</span>
+
+<span class="w">  </span><span class="c1"># Mirror the dev scripts, replacing their fixed ports. No repo edits needed.</span>
+<span class="w">  </span>concurrently<span class="w"> </span>-k<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;vite,electron&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="s2">&quot;node scripts/assert-root-install.mjs &amp;&amp; npm run clean:renderer &amp;&amp; vite --host 127.0.0.1 --port </span><span class="nv">$vite_port</span><span class="s2"> --strictPort&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="s2">&quot;tsc --build tsconfig.electron.json &amp;&amp; wait-on http://127.0.0.1:</span><span class="nv">$vite_port</span><span class="s2"> &amp;&amp; node scripts/bundle-electron-main.mjs --dev &amp;&amp; electron .&quot;</span>
+<span class="o">)</span>
+</code></pre></div>
+
+<p>For example, after setting <code>HERMES_MAIN_CHECKOUT</code> and sourcing the helpers:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Terminal 1: main checkout</span>
+<span class="nb">cd</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HERMES_MAIN_CHECKOUT</span><span class="s2">&quot;</span>
+<span class="nv">HGUI_SLOT</span><span class="o">=</span><span class="m">0</span><span class="w"> </span>hgui
+
+<span class="c1"># Terminal 2: an existing worktree</span>
+<span class="nb">cd</span><span class="w"> </span>/path/to/hermes-worktree
+<span class="nv">HGUI_SLOT</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>hgui
+</code></pre></div>
+
+<p>Slot <code>0</code> uses ports <code>5174</code>/<code>9222</code>; slot <code>1</code> uses <code>5175</code>/<code>9223</code>. Slots are caller-assigned, not atomically reserved: always use distinct slots for simultaneous starts. Busy ports are rejected, never evicted. Use separate checkouts for separate builds because launches in the same checkout still share build outputs.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Role in <code>hgui</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>HGUI_SLOT</code></td>
+<td>Helper-only slot number, <code>0</code>–<code>9</code>; not a Hermes setting.</td>
+</tr>
+<tr>
+<td><code>HERMES_DESKTOP_HERMES_ROOT</code></td>
+<td>Runs the backend from this worktree, not the packaged/PATH runtime.</td>
+</tr>
+<tr>
+<td><code>HERMES_DESKTOP_PYTHON</code></td>
+<td>Reuses the main checkout's Python environment. Adjust for an installation that uses <code>venv</code> rather than <code>.venv</code>.</td>
+</tr>
+<tr>
+<td><code>HERMES_DESKTOP_CWD</code></td>
+<td>Roots new desktop work in the worktree.</td>
+</tr>
+<tr>
+<td><code>HERMES_DESKTOP_DEV_SERVER</code></td>
+<td>Points Electron at this instance's Vite server.</td>
+</tr>
+<tr>
+<td><code>HERMES_DESKTOP_CDP_PORT</code></td>
+<td>Gives each instance its own renderer debugging port.</td>
+</tr>
+<tr>
+<td><code>HERMES_DESKTOP_USER_DATA_DIR</code></td>
+<td>Separates Electron's single-instance lock, browser storage, and desktop preferences.</td>
+</tr>
+<tr>
+<td><code>HERMES_HOME</code></td>
+<td>Explicitly preserves the agent home despite the Electron user-data override.</td>
+</tr>
+</tbody>
+</table>
+<p>Each slot starts with fresh desktop preferences and remembers them on later launches. This example does not copy browser storage, saved navigation, or backend ownership from a running app.</p>
+<div class="admonition adm-warning"><p class="adm-title">Separate desktops are not separate agent data</p>
+<p>The default <code>HERMES_HOME</code> is shared: sessions, configuration, credentials, and profiles remain the same. Avoid editing the same conversation from both instances. For destructive tests or incompatible database migrations, pass a separate temporary <code>HERMES_HOME</code> and configure that sandbox independently.</p>
+</div>
+<p>Quit the app normally or press Ctrl-C in its launching terminal. <code>concurrently -k</code> manages its own child commands, and Electron owns its backend shutdown. Do not add a global <code>killport</code>, <code>pkill electron</code>, or a sweep of all <code>serve</code>/<code>dashboard --port 0</code> processes: those can terminate another instance. Remove the old <code>_hermes_gui_cleanup</code> trap if replacing an earlier version of this helper.</p>
+<h2 id="shared-helpers">Shared helpers</h2>
+<p>Both functions resolve the enclosing checkout and link deps the same way:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># The enclosing worktree, verified as a real Hermes checkout.</span>
+_hermes_root<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">  </span><span class="nb">local</span><span class="w"> </span>root
+<span class="w">  </span><span class="nv">root</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>git<span class="w"> </span>rev-parse<span class="w"> </span>--show-toplevel<span class="w"> </span><span class="m">2</span>&gt;/dev/null<span class="k">)</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="m">1</span>
+<span class="w">  </span><span class="o">[[</span><span class="w"> </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$root</span><span class="s2">/hermes_cli/main.py&quot;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>-d<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$root</span><span class="s2">/ui-tui&quot;</span><span class="w"> </span><span class="o">]]</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>print<span class="w"> </span>-r<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$root</span><span class="s2">&quot;</span>
+<span class="o">}</span>
+
+<span class="c1"># Symlink node_modules from the deps checkout — never over an existing tree.</span>
+_hermes_link_deps<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">  </span><span class="nb">local</span><span class="w"> </span><span class="nv">target</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">1</span><span class="p">%/</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="nv">source</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">2</span><span class="p">%/</span><span class="si">}</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="o">[[</span><span class="w"> </span>-d<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$source</span><span class="s2">/node_modules&quot;</span><span class="w"> </span><span class="o">]]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="m">1</span>
+<span class="w">  </span><span class="o">[[</span><span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$target</span><span class="s2">/node_modules&quot;</span><span class="w"> </span><span class="o">]]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span>ln<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$source</span><span class="s2">/node_modules&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$target</span><span class="s2">/node_modules&quot;</span>
+<span class="o">}</span>
+</code></pre></div>
+
+<div class="admonition adm-info"><p class="adm-title">Why link only when locks match</p>
+<p>A symlink to a divergent <code>node_modules</code> is worse than no install — the worktree would build against packages its own lockfile never declared. Byte-comparing <code>package-lock.json</code> is the cheap, exact guard: same lock ⇒ safe to borrow; different lock ⇒ <code>npm ci</code> locally. Vite realpaths symlinks before enforcing <code>server.fs.allow</code>, which is why <code>apps/desktop/vite.config.ts</code> whitelists the real <code>node_modules</code> location.</p>
+</div>
+<h2 id="see-also">See also</h2>
+<ul>
+<li><a href="../user-guide/git-worktrees.html">Git Worktrees</a> — the isolation model these helpers build on</li>
+<li><a href="../user-guide/tui.html">TUI</a> — <code>hermes --tui --dev</code> and the <code>HERMES_TUI_DIR</code> prebuild path</li>
+<li><a href="../user-guide/desktop.html">Desktop App</a> — building from source and the backend resolution ladder</li>
+<li><a href="https://github.com/NousResearch/hermes-agent/blob/main/apps/desktop/README.md" class="ext" target="_blank" rel="noopener"><code>apps/desktop/README.md</code></a> — dev server, sandbox script, and packaging</li>
+<li><a href="../reference/environment-variables.html">Environment Variables</a> — every <code>HERMES_*</code> variable Hermes reads</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/worktree-ui-dev</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#the-deps-sharing-model">The deps-sharing model</a></li>
+<li class="lvl2"><a href="#htui--tui-from-the-worktree">htui — TUI from the worktree</a></li>
+<li class="lvl2"><a href="#hgui--desktop-app-from-the-worktree">hgui — desktop app from the worktree</a></li>
+<li class="lvl2"><a href="#shared-helpers">Shared helpers</a></li>
+<li class="lvl2"><a href="#see-also">See also</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

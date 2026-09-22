@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nemo Curator — Curate LLM training data: dedupe, filter, PII redaction · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/mlops/mlops-nemo-curator</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="nemo-curator">Nemo Curator</h1>
+<p>Curate LLM training data: dedupe, filter, PII redaction.</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/mlops/nemo-curator</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/mlops\nemo-curator</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>1.0.1</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>Orchestra Research</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Dependencies</td>
+<td><code>nemo-curator</code>, <code>cudf</code>, <code>dask</code>, <code>rapids</code></td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>Data Processing</code>, <code>NeMo Curator</code>, <code>Data Curation</code>, <code>GPU Acceleration</code>, <code>Deduplication</code>, <code>Quality Filtering</code>, <code>NVIDIA</code>, <code>RAPIDS</code>, <code>PII Redaction</code>, <code>Multimodal</code>, <code>LLM Training Data</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="nemo-curator---gpu-accelerated-data-curation">NeMo Curator - GPU-Accelerated Data Curation</h1>
+<p>NVIDIA's toolkit for preparing high-quality training data for LLMs.</p>
+<h2 id="when-to-use-nemo-curator">When to use NeMo Curator</h2>
+<p><strong>Use NeMo Curator when:</strong>
+- Preparing LLM training data from web scrapes (Common Crawl)
+- Need fast deduplication (16× faster than CPU)
+- Curating multi-modal datasets (text, images, video, audio)
+- Filtering low-quality or toxic content
+- Scaling data processing across GPU cluster</p>
+<p><strong>Performance</strong>:
+- <strong>16× faster</strong> fuzzy deduplication (8TB RedPajama v2)
+- <strong>40% lower TCO</strong> vs CPU alternatives
+- <strong>Near-linear scaling</strong> across GPU nodes</p>
+<p><strong>Use alternatives instead</strong>:
+- <strong>datatrove</strong>: CPU-based, open-source data processing
+- <strong>dolma</strong>: Allen AI's data toolkit
+- <strong>Ray Data</strong>: General ML data processing (no curation focus)</p>
+<h2 id="quick-start">Quick start</h2>
+<h3 id="installation">Installation</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># NeMo Curator 1.x installs with uv. Extras use hyphens (PyPI-normalized):</span>
+<span class="c1">#   text-cuda12 / text-cpu (and image/video/audio/math variants), or `all`.</span>
+
+<span class="c1"># Text curation (CUDA 12)</span>
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;nemo-curator[text-cuda12]&quot;</span>
+
+<span class="c1"># All modalities</span>
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;nemo-curator[all]&quot;</span>
+
+<span class="c1"># CPU-only text (slower)</span>
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;nemo-curator[text-cpu]&quot;</span>
+</code></pre></div>
+
+<h3 id="basic-text-curation-pipeline">Basic text curation pipeline</h3>
+<blockquote>
+<p><strong>Major version rewrite (1.x):</strong> NeMo Curator was rewritten around a <strong>Ray-based
+pipeline/stage architecture</strong>. The old <code>DocumentDataset</code> + <code>nemo_curator.modules.*</code> /
+<code>ScoreFilter</code> / <code>Modify</code> call-the-object-on-a-dataset API from 0.x is gone. In 1.x you
+compose <code>ProcessingStage</code>s into a <code>Pipeline</code> and run it with an executor. The exact
+stage/import surface differs per modality — treat the examples in this skill below as
+<strong>conceptual</strong> (0.x-style) and follow the current
+<a href="https://github.com/NVIDIA-NeMo/Curator/blob/main/tutorials/quickstart.py" class="ext" target="_blank" rel="noopener">quickstart</a>
+and <a href="https://docs.nvidia.com/nemo/curator/latest/get-started/text" class="ext" target="_blank" rel="noopener">text guide</a> for the
+exact 1.x APIs rather than copying imports verbatim.</p>
+</blockquote>
+<p>Shape of a 1.x pipeline (from the upstream quickstart):</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.pipeline</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.stages.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ProcessingStage</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.stages.resources</span><span class="w"> </span><span class="kn">import</span> <span class="n">Resources</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.backends.xenna</span><span class="w"> </span><span class="kn">import</span> <span class="n">XennaExecutor</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.core.client</span><span class="w"> </span><span class="kn">import</span> <span class="n">RayClient</span>
+
+<span class="c1"># 1. Define/compose stages (load -&gt; filter -&gt; dedupe -&gt; classify -&gt; write).</span>
+<span class="c1">#    Each stage declares its own Resources (CPU cores, GPU memory, replicas).</span>
+<span class="n">pipeline</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;curation&quot;</span><span class="p">,</span> <span class="n">stages</span><span class="o">=</span><span class="p">[</span><span class="o">...</span><span class="p">])</span>
+
+<span class="c1"># 2. Run it with an executor (Ray-backed).</span>
+<span class="n">client</span> <span class="o">=</span> <span class="n">RayClient</span><span class="p">()</span>
+<span class="n">client</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+<span class="n">pipeline</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">XennaExecutor</span><span class="p">())</span>
+<span class="n">client</span><span class="o">.</span><span class="n">stop</span><span class="p">()</span>
+</code></pre></div>
+
+<p>The 0.x-style snippets in the sections that follow illustrate the <em>concepts</em> (quality
+filtering, exact/fuzzy/semantic dedup, PII redaction, classifier filtering). For runnable
+1.x code, map each concept onto the corresponding stage from the modality guide.</p>
+<h2 id="data-curation-pipeline">Data curation pipeline</h2>
+<h3 id="stage-1-quality-filtering">Stage 1: Quality filtering</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.filters</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">WordCountFilter</span><span class="p">,</span>
+    <span class="n">RepeatedLinesFilter</span><span class="p">,</span>
+    <span class="n">UrlRatioFilter</span><span class="p">,</span>
+    <span class="n">NonAlphaNumericFilter</span>
+<span class="p">)</span>
+
+<span class="c1"># Apply 30+ heuristic filters</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScoreFilter</span>
+
+<span class="c1"># Word count filter</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">WordCountFilter</span><span class="p">(</span><span class="n">min_words</span><span class="o">=</span><span class="mi">50</span><span class="p">,</span> <span class="n">max_words</span><span class="o">=</span><span class="mi">100000</span><span class="p">))</span>
+
+<span class="c1"># Remove repetitive content</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">RepeatedLinesFilter</span><span class="p">(</span><span class="n">max_repeated_line_fraction</span><span class="o">=</span><span class="mf">0.3</span><span class="p">))</span>
+
+<span class="c1"># URL ratio filter</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">UrlRatioFilter</span><span class="p">(</span><span class="n">max_url_ratio</span><span class="o">=</span><span class="mf">0.2</span><span class="p">))</span>
+</code></pre></div>
+
+<h3 id="stage-2-deduplication">Stage 2: Deduplication</h3>
+<p><strong>Exact deduplication</strong>:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modules</span><span class="w"> </span><span class="kn">import</span> <span class="n">ExactDuplicates</span>
+
+<span class="c1"># Remove exact duplicates</span>
+<span class="n">deduped</span> <span class="o">=</span> <span class="n">ExactDuplicates</span><span class="p">(</span><span class="n">id_field</span><span class="o">=</span><span class="s2">&quot;id&quot;</span><span class="p">,</span> <span class="n">text_field</span><span class="o">=</span><span class="s2">&quot;text&quot;</span><span class="p">)(</span><span class="n">dataset</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Fuzzy deduplication</strong> (16× faster on GPU):</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modules</span><span class="w"> </span><span class="kn">import</span> <span class="n">FuzzyDuplicates</span>
+
+<span class="c1"># MinHash + LSH deduplication</span>
+<span class="n">fuzzy_dedup</span> <span class="o">=</span> <span class="n">FuzzyDuplicates</span><span class="p">(</span>
+    <span class="n">id_field</span><span class="o">=</span><span class="s2">&quot;id&quot;</span><span class="p">,</span>
+    <span class="n">text_field</span><span class="o">=</span><span class="s2">&quot;text&quot;</span><span class="p">,</span>
+    <span class="n">num_hashes</span><span class="o">=</span><span class="mi">260</span><span class="p">,</span>      <span class="c1"># MinHash parameters</span>
+    <span class="n">num_buckets</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span>
+    <span class="n">hash_method</span><span class="o">=</span><span class="s2">&quot;md5&quot;</span>
+<span class="p">)</span>
+
+<span class="n">deduped</span> <span class="o">=</span> <span class="n">fuzzy_dedup</span><span class="p">(</span><span class="n">dataset</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Semantic deduplication</strong>:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modules</span><span class="w"> </span><span class="kn">import</span> <span class="n">SemanticDuplicates</span>
+
+<span class="c1"># Embedding-based deduplication</span>
+<span class="n">semantic_dedup</span> <span class="o">=</span> <span class="n">SemanticDuplicates</span><span class="p">(</span>
+    <span class="n">id_field</span><span class="o">=</span><span class="s2">&quot;id&quot;</span><span class="p">,</span>
+    <span class="n">text_field</span><span class="o">=</span><span class="s2">&quot;text&quot;</span><span class="p">,</span>
+    <span class="n">embedding_model</span><span class="o">=</span><span class="s2">&quot;sentence-transformers/all-MiniLM-L6-v2&quot;</span><span class="p">,</span>
+    <span class="n">threshold</span><span class="o">=</span><span class="mf">0.8</span>  <span class="c1"># Cosine similarity threshold</span>
+<span class="p">)</span>
+
+<span class="n">deduped</span> <span class="o">=</span> <span class="n">semantic_dedup</span><span class="p">(</span><span class="n">dataset</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="stage-3-pii-redaction">Stage 3: PII redaction</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modules</span><span class="w"> </span><span class="kn">import</span> <span class="n">Modify</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modifiers</span><span class="w"> </span><span class="kn">import</span> <span class="n">PIIRedactor</span>
+
+<span class="c1"># Redact personally identifiable information</span>
+<span class="n">pii_redactor</span> <span class="o">=</span> <span class="n">PIIRedactor</span><span class="p">(</span>
+    <span class="n">supported_entities</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;EMAIL_ADDRESS&quot;</span><span class="p">,</span> <span class="s2">&quot;PHONE_NUMBER&quot;</span><span class="p">,</span> <span class="s2">&quot;PERSON&quot;</span><span class="p">,</span> <span class="s2">&quot;LOCATION&quot;</span><span class="p">],</span>
+    <span class="n">anonymize_action</span><span class="o">=</span><span class="s2">&quot;replace&quot;</span>  <span class="c1"># or &quot;redact&quot;</span>
+<span class="p">)</span>
+
+<span class="n">redacted</span> <span class="o">=</span> <span class="n">Modify</span><span class="p">(</span><span class="n">pii_redactor</span><span class="p">)(</span><span class="n">dataset</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="stage-4-classifier-filtering">Stage 4: Classifier filtering</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.classifiers</span><span class="w"> </span><span class="kn">import</span> <span class="n">QualityClassifier</span>
+
+<span class="c1"># Quality classification</span>
+<span class="n">quality_clf</span> <span class="o">=</span> <span class="n">QualityClassifier</span><span class="p">(</span>
+    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;nvidia/quality-classifier-deberta&quot;</span><span class="p">,</span>
+    <span class="n">batch_size</span><span class="o">=</span><span class="mi">256</span><span class="p">,</span>
+    <span class="n">device</span><span class="o">=</span><span class="s2">&quot;cuda&quot;</span>
+<span class="p">)</span>
+
+<span class="c1"># Filter low-quality documents</span>
+<span class="n">high_quality</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="k">lambda</span> <span class="n">doc</span><span class="p">:</span> <span class="n">quality_clf</span><span class="p">(</span><span class="n">doc</span><span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">])</span> <span class="o">&gt;</span> <span class="mf">0.5</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="gpu-acceleration">GPU acceleration</h2>
+<h3 id="gpu-vs-cpu-performance">GPU vs CPU performance</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>CPU (16 cores)</th>
+<th>GPU (A100)</th>
+<th>Speedup</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Fuzzy dedup (8TB)</td>
+<td>120 hours</td>
+<td>7.5 hours</td>
+<td>16×</td>
+</tr>
+<tr>
+<td>Exact dedup (1TB)</td>
+<td>8 hours</td>
+<td>0.5 hours</td>
+<td>16×</td>
+</tr>
+<tr>
+<td>Quality filtering</td>
+<td>2 hours</td>
+<td>0.2 hours</td>
+<td>10×</td>
+</tr>
+</tbody>
+</table>
+<h3 id="multi-gpu-scaling">Multi-GPU scaling</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_client</span>
+
+<span class="c1"># Initialize GPU cluster</span>
+<span class="n">client</span> <span class="o">=</span> <span class="n">get_client</span><span class="p">(</span><span class="n">cluster_type</span><span class="o">=</span><span class="s2">&quot;gpu&quot;</span><span class="p">,</span> <span class="n">n_workers</span><span class="o">=</span><span class="mi">8</span><span class="p">)</span>
+
+<span class="c1"># Process with 8 GPUs</span>
+<span class="n">deduped</span> <span class="o">=</span> <span class="n">FuzzyDuplicates</span><span class="p">(</span><span class="o">...</span><span class="p">)(</span><span class="n">dataset</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="multi-modal-curation">Multi-modal curation</h2>
+<h3 id="image-curation">Image curation</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.image</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">AestheticFilter</span><span class="p">,</span>
+    <span class="n">NSFWFilter</span><span class="p">,</span>
+    <span class="n">CLIPEmbedder</span>
+<span class="p">)</span>
+
+<span class="c1"># Aesthetic scoring</span>
+<span class="n">aesthetic_filter</span> <span class="o">=</span> <span class="n">AestheticFilter</span><span class="p">(</span><span class="n">threshold</span><span class="o">=</span><span class="mf">5.0</span><span class="p">)</span>
+<span class="n">filtered_images</span> <span class="o">=</span> <span class="n">aesthetic_filter</span><span class="p">(</span><span class="n">image_dataset</span><span class="p">)</span>
+
+<span class="c1"># NSFW detection</span>
+<span class="n">nsfw_filter</span> <span class="o">=</span> <span class="n">NSFWFilter</span><span class="p">(</span><span class="n">threshold</span><span class="o">=</span><span class="mf">0.9</span><span class="p">)</span>
+<span class="n">safe_images</span> <span class="o">=</span> <span class="n">nsfw_filter</span><span class="p">(</span><span class="n">filtered_images</span><span class="p">)</span>
+
+<span class="c1"># Generate CLIP embeddings</span>
+<span class="n">clip_embedder</span> <span class="o">=</span> <span class="n">CLIPEmbedder</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;openai/clip-vit-base-patch32&quot;</span><span class="p">)</span>
+<span class="n">image_embeddings</span> <span class="o">=</span> <span class="n">clip_embedder</span><span class="p">(</span><span class="n">safe_images</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="video-curation">Video curation</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.video</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">SceneDetector</span><span class="p">,</span>
+    <span class="n">ClipExtractor</span><span class="p">,</span>
+    <span class="n">InternVideo2Embedder</span>
+<span class="p">)</span>
+
+<span class="c1"># Detect scenes</span>
+<span class="n">scene_detector</span> <span class="o">=</span> <span class="n">SceneDetector</span><span class="p">(</span><span class="n">threshold</span><span class="o">=</span><span class="mf">27.0</span><span class="p">)</span>
+<span class="n">scenes</span> <span class="o">=</span> <span class="n">scene_detector</span><span class="p">(</span><span class="n">video_dataset</span><span class="p">)</span>
+
+<span class="c1"># Extract clips</span>
+<span class="n">clip_extractor</span> <span class="o">=</span> <span class="n">ClipExtractor</span><span class="p">(</span><span class="n">min_duration</span><span class="o">=</span><span class="mf">2.0</span><span class="p">,</span> <span class="n">max_duration</span><span class="o">=</span><span class="mf">10.0</span><span class="p">)</span>
+<span class="n">clips</span> <span class="o">=</span> <span class="n">clip_extractor</span><span class="p">(</span><span class="n">scenes</span><span class="p">)</span>
+
+<span class="c1"># Generate embeddings</span>
+<span class="n">video_embedder</span> <span class="o">=</span> <span class="n">InternVideo2Embedder</span><span class="p">()</span>
+<span class="n">video_embeddings</span> <span class="o">=</span> <span class="n">video_embedder</span><span class="p">(</span><span class="n">clips</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="audio-curation">Audio curation</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.audio</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">ASRInference</span><span class="p">,</span>
+    <span class="n">WERFilter</span><span class="p">,</span>
+    <span class="n">DurationFilter</span>
+<span class="p">)</span>
+
+<span class="c1"># ASR transcription</span>
+<span class="n">asr</span> <span class="o">=</span> <span class="n">ASRInference</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;nvidia/stt_en_fastconformer_hybrid_large_pc&quot;</span><span class="p">)</span>
+<span class="n">transcribed</span> <span class="o">=</span> <span class="n">asr</span><span class="p">(</span><span class="n">audio_dataset</span><span class="p">)</span>
+
+<span class="c1"># Filter by WER (word error rate)</span>
+<span class="n">wer_filter</span> <span class="o">=</span> <span class="n">WERFilter</span><span class="p">(</span><span class="n">max_wer</span><span class="o">=</span><span class="mf">0.3</span><span class="p">)</span>
+<span class="n">high_quality_audio</span> <span class="o">=</span> <span class="n">wer_filter</span><span class="p">(</span><span class="n">transcribed</span><span class="p">)</span>
+
+<span class="c1"># Duration filtering</span>
+<span class="n">duration_filter</span> <span class="o">=</span> <span class="n">DurationFilter</span><span class="p">(</span><span class="n">min_duration</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">max_duration</span><span class="o">=</span><span class="mf">30.0</span><span class="p">)</span>
+<span class="n">filtered_audio</span> <span class="o">=</span> <span class="n">duration_filter</span><span class="p">(</span><span class="n">high_quality_audio</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="common-patterns">Common patterns</h2>
+<h3 id="web-scrape-curation-common-crawl">Web scrape curation (Common Crawl)</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScoreFilter</span><span class="p">,</span> <span class="n">Modify</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.filters</span><span class="w"> </span><span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.modules</span><span class="w"> </span><span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator.datasets</span><span class="w"> </span><span class="kn">import</span> <span class="n">DocumentDataset</span>
+
+<span class="c1"># Load Common Crawl data</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">DocumentDataset</span><span class="o">.</span><span class="n">read_parquet</span><span class="p">(</span><span class="s2">&quot;common_crawl/*.parquet&quot;</span><span class="p">)</span>
+
+<span class="c1"># Pipeline</span>
+<span class="n">pipeline</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="c1"># 1. Quality filtering</span>
+    <span class="n">WordCountFilter</span><span class="p">(</span><span class="n">min_words</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">max_words</span><span class="o">=</span><span class="mi">50000</span><span class="p">),</span>
+    <span class="n">RepeatedLinesFilter</span><span class="p">(</span><span class="n">max_repeated_line_fraction</span><span class="o">=</span><span class="mf">0.2</span><span class="p">),</span>
+    <span class="n">SymbolToWordRatioFilter</span><span class="p">(</span><span class="n">max_symbol_to_word_ratio</span><span class="o">=</span><span class="mf">0.3</span><span class="p">),</span>
+    <span class="n">UrlRatioFilter</span><span class="p">(</span><span class="n">max_url_ratio</span><span class="o">=</span><span class="mf">0.3</span><span class="p">),</span>
+
+    <span class="c1"># 2. Language filtering</span>
+    <span class="n">LanguageIdentificationFilter</span><span class="p">(</span><span class="n">target_languages</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;en&quot;</span><span class="p">]),</span>
+
+    <span class="c1"># 3. Deduplication</span>
+    <span class="n">ExactDuplicates</span><span class="p">(</span><span class="n">id_field</span><span class="o">=</span><span class="s2">&quot;id&quot;</span><span class="p">,</span> <span class="n">text_field</span><span class="o">=</span><span class="s2">&quot;text&quot;</span><span class="p">),</span>
+    <span class="n">FuzzyDuplicates</span><span class="p">(</span><span class="n">id_field</span><span class="o">=</span><span class="s2">&quot;id&quot;</span><span class="p">,</span> <span class="n">text_field</span><span class="o">=</span><span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="n">num_hashes</span><span class="o">=</span><span class="mi">260</span><span class="p">),</span>
+
+    <span class="c1"># 4. PII redaction</span>
+    <span class="n">PIIRedactor</span><span class="p">(),</span>
+
+    <span class="c1"># 5. NSFW filtering</span>
+    <span class="n">NSFWClassifier</span><span class="p">(</span><span class="n">threshold</span><span class="o">=</span><span class="mf">0.8</span><span class="p">)</span>
+<span class="p">]</span>
+
+<span class="c1"># Execute</span>
+<span class="k">for</span> <span class="n">stage</span> <span class="ow">in</span> <span class="n">pipeline</span><span class="p">:</span>
+    <span class="n">dataset</span> <span class="o">=</span> <span class="n">stage</span><span class="p">(</span><span class="n">dataset</span><span class="p">)</span>
+
+<span class="c1"># Save</span>
+<span class="n">dataset</span><span class="o">.</span><span class="n">to_parquet</span><span class="p">(</span><span class="s2">&quot;curated_common_crawl/&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="distributed-processing">Distributed processing</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">nemo_curator</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_client</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dask_cuda</span><span class="w"> </span><span class="kn">import</span> <span class="n">LocalCUDACluster</span>
+
+<span class="c1"># Multi-GPU cluster</span>
+<span class="n">cluster</span> <span class="o">=</span> <span class="n">LocalCUDACluster</span><span class="p">(</span><span class="n">n_workers</span><span class="o">=</span><span class="mi">8</span><span class="p">)</span>
+<span class="n">client</span> <span class="o">=</span> <span class="n">get_client</span><span class="p">(</span><span class="n">cluster</span><span class="o">=</span><span class="n">cluster</span><span class="p">)</span>
+
+<span class="c1"># Process large dataset</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">DocumentDataset</span><span class="o">.</span><span class="n">read_parquet</span><span class="p">(</span><span class="s2">&quot;s3://large_dataset/*.parquet&quot;</span><span class="p">)</span>
+<span class="n">deduped</span> <span class="o">=</span> <span class="n">FuzzyDuplicates</span><span class="p">(</span><span class="o">...</span><span class="p">)(</span><span class="n">dataset</span><span class="p">)</span>
+
+<span class="c1"># Cleanup</span>
+<span class="n">client</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+<span class="n">cluster</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</code></pre></div>
+
+<h2 id="performance-benchmarks">Performance benchmarks</h2>
+<h3 id="fuzzy-deduplication-8tb-redpajama-v2">Fuzzy deduplication (8TB RedPajama v2)</h3>
+<ul>
+<li><strong>CPU (256 cores)</strong>: 120 hours</li>
+<li><strong>GPU (8× A100)</strong>: 7.5 hours</li>
+<li><strong>Speedup</strong>: 16×</li>
+</ul>
+<h3 id="exact-deduplication-1tb">Exact deduplication (1TB)</h3>
+<ul>
+<li><strong>CPU (64 cores)</strong>: 8 hours</li>
+<li><strong>GPU (4× A100)</strong>: 0.5 hours</li>
+<li><strong>Speedup</strong>: 16×</li>
+</ul>
+<h3 id="quality-filtering-100gb">Quality filtering (100GB)</h3>
+<ul>
+<li><strong>CPU (32 cores)</strong>: 2 hours</li>
+<li><strong>GPU (2× A100)</strong>: 0.2 hours</li>
+<li><strong>Speedup</strong>: 10×</li>
+</ul>
+<h2 id="cost-comparison">Cost comparison</h2>
+<p><strong>CPU-based curation</strong> (AWS c5.18xlarge × 10):
+- Cost: $3.60/hour × 10 = $36/hour
+- Time for 8TB: 120 hours
+- <strong>Total</strong>: $4,320</p>
+<p><strong>GPU-based curation</strong> (AWS p4d.24xlarge × 2):
+- Cost: $32.77/hour × 2 = $65.54/hour
+- Time for 8TB: 7.5 hours
+- <strong>Total</strong>: $491.55</p>
+<p><strong>Savings</strong>: 89% reduction ($3,828 saved)</p>
+<h2 id="supported-data-formats">Supported data formats</h2>
+<ul>
+<li><strong>Input</strong>: Parquet, JSONL, CSV</li>
+<li><strong>Output</strong>: Parquet (recommended), JSONL</li>
+<li><strong>WebDataset</strong>: TAR archives for multi-modal</li>
+</ul>
+<h2 id="use-cases">Use cases</h2>
+<p><strong>Production deployments</strong>:
+- NVIDIA used NeMo Curator to prepare Nemotron-4 training data
+- Open-source datasets curated: RedPajama v2, The Pile</p>
+<h2 id="references">References</h2>
+<ul>
+<li><strong><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops\nemo-curator/references/filtering.md" class="ext" target="_blank" rel="noopener">Filtering Guide</a></strong> - 30+ quality filters, heuristics</li>
+<li><strong><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops\nemo-curator/references/deduplication.md" class="ext" target="_blank" rel="noopener">Deduplication Guide</a></strong> - Exact, fuzzy, semantic methods</li>
+</ul>
+<h2 id="resources">Resources</h2>
+<ul>
+<li><strong>GitHub</strong>: https://github.com/NVIDIA-NeMo/Curator</li>
+<li><strong>Docs</strong>: https://docs.nvidia.com/nemo/curator/latest/</li>
+<li><strong>Version</strong>: 1.2.0 (1.x is a Ray-based pipeline rewrite — see the quickstart before copying 0.x snippets)</li>
+<li><strong>License</strong>: Apache 2.0</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/mlops/mlops-nemo-curator</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#when-to-use-nemo-curator">When to use NeMo Curator</a></li>
+<li class="lvl2"><a href="#quick-start">Quick start</a></li>
+<li class="lvl3"><a href="#installation">Installation</a></li>
+<li class="lvl3"><a href="#basic-text-curation-pipeline">Basic text curation pipeline</a></li>
+<li class="lvl2"><a href="#data-curation-pipeline">Data curation pipeline</a></li>
+<li class="lvl3"><a href="#stage-1-quality-filtering">Stage 1: Quality filtering</a></li>
+<li class="lvl3"><a href="#stage-2-deduplication">Stage 2: Deduplication</a></li>
+<li class="lvl3"><a href="#stage-3-pii-redaction">Stage 3: PII redaction</a></li>
+<li class="lvl3"><a href="#stage-4-classifier-filtering">Stage 4: Classifier filtering</a></li>
+<li class="lvl2"><a href="#gpu-acceleration">GPU acceleration</a></li>
+<li class="lvl3"><a href="#gpu-vs-cpu-performance">GPU vs CPU performance</a></li>
+<li class="lvl3"><a href="#multi-gpu-scaling">Multi-GPU scaling</a></li>
+<li class="lvl2"><a href="#multi-modal-curation">Multi-modal curation</a></li>
+<li class="lvl3"><a href="#image-curation">Image curation</a></li>
+<li class="lvl3"><a href="#video-curation">Video curation</a></li>
+<li class="lvl3"><a href="#audio-curation">Audio curation</a></li>
+<li class="lvl2"><a href="#common-patterns">Common patterns</a></li>
+<li class="lvl3"><a href="#web-scrape-curation-common-crawl">Web scrape curation (Common Crawl)</a></li>
+<li class="lvl3"><a href="#distributed-processing">Distributed processing</a></li>
+<li class="lvl2"><a href="#performance-benchmarks">Performance benchmarks</a></li>
+<li class="lvl3"><a href="#fuzzy-deduplication-8tb-redpajama-v2">Fuzzy deduplication (8TB RedPajama v2)</a></li>
+<li class="lvl3"><a href="#exact-deduplication-1tb">Exact deduplication (1TB)</a></li>
+<li class="lvl3"><a href="#quality-filtering-100gb">Quality filtering (100GB)</a></li>
+<li class="lvl2"><a href="#cost-comparison">Cost comparison</a></li>
+<li class="lvl2"><a href="#supported-data-formats">Supported data formats</a></li>
+<li class="lvl2"><a href="#use-cases">Use cases</a></li>
+<li class="lvl2"><a href="#references">References</a></li>
+<li class="lvl2"><a href="#resources">Resources</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

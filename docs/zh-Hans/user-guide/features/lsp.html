@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSP — 语义诊断 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/features/lsp</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="语言服务器协议lsp">语言服务器协议（LSP）</h1>
+<p>Hermes 以后台子进程方式运行完整的语言服务器——pyright、gopls、rust-analyzer、
+typescript-language-server、clangd 以及约 20 个其他服务器——并将其语义诊断结果
+接入 <code>write_file</code> 和 <code>patch</code> 所使用的写后 lint 检查。当 agent 编辑文件时，
+它能精确看到该次编辑引入的错误——不仅是语法错误，还包括语言服务器检测到的
+<strong>类型错误、未定义名称、缺失导入以及全项目范围的语义问题</strong>。</p>
+<p>这与顶级编码 agent 所采用的架构相同。Hermes 将其作为自包含组件提供：
+无需编辑器宿主，无需安装插件，无需管理独立守护进程。</p>
+<h2 id="lsp-的触发时机">LSP 的触发时机</h2>
+<p>LSP 以 <strong>git 工作区检测</strong>为前提条件。当 agent 的工作目录（或正在编辑的文件）
+位于 git 仓库内时，LSP 针对该工作区运行。若两者均不在 git 仓库中，LSP 保持
+休眠——这对消息网关（gateway）场景很有用，此时 cwd 为用户主目录，没有可诊断的项目。</p>
+<p>检查分层进行：首先进行进程内语法检查（微秒级），语法通过后再进行 LSP 语义诊断。
+不稳定或缺失的语言服务器永远不会导致写入失败——所有 LSP 失败路径均静默回退至
+仅语法检查的结果。</p>
+<p>具体而言，每次成功执行 <code>write_file</code> 或 <code>patch</code> 时：</p>
+<ol>
+<li>Hermes 捕获该文件当前诊断的基线快照。</li>
+<li>执行写入。</li>
+<li>重新查询语言服务器，过滤掉基线中已存在的诊断，仅呈现新引入的诊断。</li>
+</ol>
+<p>agent 看到的输出如下：</p>
+<div class="highlight"><pre><span></span><code>{
+  &quot;bytes_written&quot;: 42,
+  &quot;dirs_created&quot;: false,
+  &quot;lint&quot;: {&quot;status&quot;: &quot;ok&quot;, &quot;output&quot;: &quot;&quot;},
+  &quot;lsp_diagnostics&quot;: &quot;LSP diagnostics introduced by this edit:\n&lt;diagnostics file=\&quot;/path/to/foo.py\&quot;&gt;\nERROR [42:5] Cannot find name &#39;foo&#39; [reportUndefinedVariable] (Pyright)\nERROR [50:1] Argument of type \&quot;str\&quot; is not assignable to \&quot;int\&quot; [reportArgumentType] (Pyright)\n&lt;/diagnostics&gt;&quot;
+}
+</code></pre></div>
+
+<p><code>lint</code> 字段承载语法检查结果（通过 <code>ast.parse</code>、<code>json.loads</code> 等进行微秒级进程内解析）；
+<code>lsp_diagnostics</code> 字段承载来自真实语言服务器的语义诊断。两个通道，独立信号——
+agent 对于语法正确但存在语义问题的文件，会看到 <code>lint: ok</code> 加上已填充的 <code>lsp_diagnostics</code>。</p>
+<h2 id="支持的语言">支持的语言</h2>
+<table>
+<thead>
+<tr>
+<th>语言</th>
+<th>服务器</th>
+<th>自动安装</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Python</td>
+<td><code>pyright-langserver</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>TypeScript / JavaScript / JSX / TSX</td>
+<td><code>typescript-language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Vue</td>
+<td><code>@vue/language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Svelte</td>
+<td><code>svelte-language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Astro</td>
+<td><code>@astrojs/language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Go</td>
+<td><code>gopls</code></td>
+<td><code>go install</code></td>
+</tr>
+<tr>
+<td>Rust</td>
+<td><code>rust-analyzer</code></td>
+<td>手动（rustup）</td>
+</tr>
+<tr>
+<td>C / C++</td>
+<td><code>clangd</code></td>
+<td>手动（LLVM）</td>
+</tr>
+<tr>
+<td>Bash / Zsh</td>
+<td><code>bash-language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>YAML</td>
+<td><code>yaml-language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Lua</td>
+<td><code>lua-language-server</code></td>
+<td>手动（GitHub releases）</td>
+</tr>
+<tr>
+<td>PHP</td>
+<td><code>intelephense</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>OCaml</td>
+<td><code>ocaml-lsp</code></td>
+<td>手动（opam）</td>
+</tr>
+<tr>
+<td>Dockerfile</td>
+<td><code>dockerfile-language-server-nodejs</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Terraform</td>
+<td><code>terraform-ls</code></td>
+<td>手动</td>
+</tr>
+<tr>
+<td>Dart</td>
+<td><code>dart language-server</code></td>
+<td>手动（dart sdk）</td>
+</tr>
+<tr>
+<td>Haskell</td>
+<td><code>haskell-language-server</code></td>
+<td>手动（ghcup）</td>
+</tr>
+<tr>
+<td>Julia</td>
+<td><code>julia</code> + LanguageServer.jl</td>
+<td>手动</td>
+</tr>
+<tr>
+<td>Clojure</td>
+<td><code>clojure-lsp</code></td>
+<td>手动</td>
+</tr>
+<tr>
+<td>Nix</td>
+<td><code>nixd</code></td>
+<td>手动</td>
+</tr>
+<tr>
+<td>Zig</td>
+<td><code>zls</code></td>
+<td>手动</td>
+</tr>
+<tr>
+<td>Gleam</td>
+<td><code>gleam lsp</code></td>
+<td>手动（gleam install）</td>
+</tr>
+<tr>
+<td>Elixir</td>
+<td><code>elixir-ls</code></td>
+<td>手动</td>
+</tr>
+<tr>
+<td>Prisma</td>
+<td><code>prisma language-server</code></td>
+<td>手动</td>
+</tr>
+<tr>
+<td>Kotlin</td>
+<td><code>kotlin-language-server</code></td>
+<td>手动</td>
+</tr>
+<tr>
+<td>Java</td>
+<td><code>jdtls</code></td>
+<td>手动</td>
+</tr>
+</tbody>
+</table>
+<p>对于"手动"条目，请通过该语言对应的工具链管理器安装服务器（rustup、ghcup、opam、brew 等）。
+Hermes 会自动检测 PATH 上或 <code>&lt;HERMES_HOME&gt;/lsp/bin/</code> 中的二进制文件。</p>
+<p>部分服务器需要与 npm 不会自动拉取的对等依赖一同安装。当前的典型情况是
+<code>typescript-language-server</code>，它要求 <code>typescript</code> SDK 可从同一 <code>node_modules</code>
+目录树中导入——当你运行 <code>hermes lsp install typescript</code> 或首次使用时触发自动安装时，
+Hermes 会同时安装这两个包。</p>
+<h2 id="cli">CLI</h2>
+<div class="highlight"><pre><span></span><code>hermes lsp status          # 服务状态 + 各服务器安装状态
+hermes lsp list            # 注册表，可选 --installed-only
+hermes lsp install &lt;id&gt;    # 主动安装单个服务器
+hermes lsp install-all     # 尝试安装所有已知安装方式的服务器
+hermes lsp restart         # 关闭正在运行的客户端
+hermes lsp which &lt;id&gt;      # 打印解析后的二进制路径
+</code></pre></div>
+
+<p><code>hermes lsp status</code> 是最佳起点——它显示哪些语言当前可获得语义诊断，
+哪些语言还需要安装二进制文件。</p>
+<h2 id="配置">配置</h2>
+<p>默认配置适用于典型场景；若二进制文件已在 PATH 上，无需任何设置。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">lsp</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># 主开关。禁用后跳过整个子系统——不会启动任何服务器，不会运行后台事件循环。</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+
+<span class="w">  </span><span class="c1"># 每次写入后等待诊断结果的方式。</span>
+<span class="w">  </span><span class="nt">wait_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">document</span><span class="w">      </span><span class="c1"># &quot;document&quot; 或 &quot;full&quot;</span>
+<span class="w">  </span><span class="nt">wait_timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5.0</span>
+
+<span class="w">  </span><span class="c1"># 处理缺失服务器二进制文件的策略。</span>
+<span class="w">  </span><span class="c1">#   auto    — 通过 npm/pip/go install 安装到 &lt;HERMES_HOME&gt;/lsp/bin</span>
+<span class="w">  </span><span class="c1">#   manual  — 仅使用已在 PATH 上的二进制文件</span>
+<span class="w">  </span><span class="nt">install_strategy</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">auto</span>
+
+<span class="w">  </span><span class="c1"># 各服务器覆盖配置（均为可选）。</span>
+<span class="w">  </span><span class="nt">servers</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">pyright</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">disabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">      </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;/abs/path/to/pyright-langserver&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--stdio&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">env</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> PYRIGHT_LOG_LEVEL</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;info&quot;</span><span class="w"> </span><span class="p p-Indicator">}</span>
+<span class="w">      </span><span class="nt">initialization_options</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">python</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">analysis</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">typeCheckingMode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;strict&quot;</span>
+<span class="w">    </span><span class="nt">typescript</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">disabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">       </span><span class="c1"># 即使扩展名匹配也跳过 TS</span>
+</code></pre></div>
+
+<h3 id="各服务器配置键">各服务器配置键</h3>
+<ul>
+<li><code>disabled: true</code> — 即使扩展名与文件匹配，也完全跳过该服务器。</li>
+<li><code>command: [bin, ...args]</code> — 指定自定义二进制路径，绕过自动安装。</li>
+<li><code>env: {KEY: value}</code> — 传递给启动进程的额外环境变量。</li>
+<li><code>initialization_options: {...}</code> — 合并到 LSP <code>initialize</code> 握手时发送的
+  <code>initializationOptions</code> 载荷中。具体内容因服务器而异，请参阅对应语言服务器的文档。</li>
+</ul>
+<h2 id="安装位置">安装位置</h2>
+<p>当 <code>install_strategy: auto</code> 时，Hermes 将二进制文件安装到 <code>&lt;HERMES_HOME&gt;/lsp/bin/</code>。
+NPM 包安装到 <code>&lt;HERMES_HOME&gt;/lsp/node_modules/</code>，bin 符号链接位于上一级目录。
+Go 二进制文件通过 <code>go install</code> 安装，<code>GOBIN</code> 指向暂存目录。</p>
+<p>任何内容都不会安装到 <code>/usr/local/</code>、<code>~/.local/</code> 或其他共享位置——暂存目录完全由
+Hermes 管理，重置 profile 时会被删除。</p>
+<h2 id="性能特性">性能特性</h2>
+<p>LSP 服务器在<strong>首次使用时懒启动</strong>。在从未处理过 <code>.py</code> 文件的项目中编辑 Python 文件
+会启动 pyright；大多数服务器的启动耗时为 1-3 秒（rust-analyzer 在冷启动项目时可能
+超过 10 秒）。同一工作区内的后续编辑会复用已运行的服务器。</p>
+<p>在没有诊断结果输出时，LSP 层对干净写入仅增加数毫秒延迟。有诊断结果时，等待预算为
+<code>wait_timeout</code> 秒——pyright/tsserver 通常在数十毫秒内响应，rust-analyzer 在索引
+过程中可能需要数秒。</p>
+<p>服务器在 Hermes 进程的整个生命周期内保持运行。没有空闲超时回收机制——每次写入都
+重启服务器索引的代价远高于保持守护进程运行。</p>
+<h2 id="禁用">禁用</h2>
+<p>在 <code>config.yaml</code> 中设置 <code>lsp.enabled: false</code> 可禁用整个子系统。写后检查将回退至
+进程内语法检查（Python 使用 <code>ast.parse</code>，JSON 使用 <code>json.loads</code> 等），与早期版本
+保持一致。</p>
+<p>若要禁用单个语言而不禁用整个层：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">lsp</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">servers</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">rust-analyzer</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">disabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<h2 id="故障排查">故障排查</h2>
+<p><strong><code>hermes lsp status</code> 显示某服务器为"missing"</strong></p>
+<p>该二进制文件不在 PATH 上，也不在 <code>&lt;HERMES_HOME&gt;/lsp/bin/</code> 中。运行
+<code>hermes lsp install &lt;server_id&gt;</code> 尝试自动安装，或通过该语言的常规工具链手动安装。</p>
+<p><strong><code>hermes lsp status</code> 中出现 <code>Backend warnings</code> 部分</strong></p>
+<p>部分服务器以薄包装层的形式调用外部 CLI 进行实际诊断——它们能正常启动并接受请求，
+但在辅助二进制文件缺失时不会报错。最常见的情况是 <code>bash-language-server</code>，
+它将诊断委托给 <code>shellcheck</code>。当 <code>hermes lsp status</code> 显示 <code>Backend warnings</code> 部分时，
+请通过系统包管理器安装对应工具：</p>
+<div class="highlight"><pre><span></span><code>apt install shellcheck      # Debian / Ubuntu
+brew install shellcheck     # macOS
+scoop install shellcheck    # Windows
+</code></pre></div>
+
+<p>同样的警告会在服务器启动时记录一次到 <code>~/.hermes/logs/agent.log</code>。</p>
+<p><strong>服务器已启动但从不返回诊断结果</strong></p>
+<p>检查 <code>~/.hermes/logs/agent.log</code> 中的 <code>[agent.lsp.client]</code> 条目——语言服务器的
+stderr 输出和协议错误均记录于此。部分服务器（尤其是 rust-analyzer）需要完成
+全项目索引后才会输出单文件诊断；服务器启动后的第一次编辑可能没有诊断结果，
+后续编辑才会获取到。</p>
+<p><strong>服务器崩溃</strong></p>
+<p>崩溃的服务器会被加入损坏集合，在本次会话剩余时间内不再重试。运行
+<code>hermes lsp restart</code> 清除该集合；下次编辑时会重新启动。</p>
+<p><strong>编辑位于任何 git 仓库之外的文件</strong></p>
+<p>按设计，LSP 仅在 git 仓库内运行。若项目尚未初始化，运行 <code>git init</code> 以启用
+LSP 诊断。否则将使用进程内仅语法检查的回退方案。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/features/lsp</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#lsp-的触发时机">LSP 的触发时机</a></li>
+<li class="lvl2"><a href="#支持的语言">支持的语言</a></li>
+<li class="lvl2"><a href="#cli">CLI</a></li>
+<li class="lvl2"><a href="#配置">配置</a></li>
+<li class="lvl3"><a href="#各服务器配置键">各服务器配置键</a></li>
+<li class="lvl2"><a href="#安装位置">安装位置</a></li>
+<li class="lvl2"><a href="#性能特性">性能特性</a></li>
+<li class="lvl2"><a href="#禁用">禁用</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

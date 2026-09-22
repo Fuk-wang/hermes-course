@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ast Grep — AST-aware structural code search and rewrite via ast-grep · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/software-development/software-development-ast-grep</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="ast-grep">Ast Grep</h1>
+<p>AST-aware structural code search and rewrite via ast-grep.</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/software-development/ast-grep</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/software-development\ast-grep</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>Yeongyu Kim (code-yeongyu), adapted by Hermes Agent</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>ast</code>, <code>codemod</code>, <code>refactoring</code>, <code>structural-search</code>, <code>code-search</code>, <code>rewrite</code>, <code>tree-sitter</code></td>
+</tr>
+<tr>
+<td>Related skills</td>
+<td><a href="../../bundled/software-development/software-development-simplify-code.html"><code>simplify-code</code></a>, <a href="../../bundled/software-development/software-development-systematic-debugging.html"><code>systematic-debugging</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="ast-grep_1">ast-grep</h1>
+<p><code>ast-grep</code> (binary also named <code>sg</code>) is an <strong>AST-aware search and rewrite tool</strong> across 25 languages. It treats your pattern as code, parses it the same way it parses your project, and matches structurally. It is the right tool whenever your question depends on <strong>code shape</strong> rather than text bytes.</p>
+<p>This skill ships a Python wrapper at <code>scripts/ast_grep_helper.py</code> and platform install scripts at <code>install.sh</code> (POSIX) and <code>install.ps1</code> (Windows). The helper adds offline pattern validation, the two-pass write trick, and binary auto-resolution. Use it as your default entry point.</p>
+<p>Upstream source: vendored from <a href="https://github.com/code-yeongyu/ast-grep-skill" class="ext" target="_blank" rel="noopener">code-yeongyu/ast-grep-skill</a> (MIT), as shipped in oh-my-openagent's shared-skills bundle.</p>
+<hr />
+<h2 id="when-to-use-this-skill">When to use this skill</h2>
+<p>Use it whenever the question is about <strong>code structure</strong>, not bytes:</p>
+<ul>
+<li>"Find every function that takes a <code>Request</code> parameter."</li>
+<li>"Rewrite every <code>console.log(x)</code> to <code>logger.info(x)</code>."</li>
+<li>"Strip every <code>as any</code> cast."</li>
+<li>"Replace <code>require(...)</code> with <code>import</code> across the repo."</li>
+<li>"Find empty catch blocks."</li>
+<li>"Migrate <code>Optional[X]</code> to <code>X | None</code>."</li>
+<li>"Apply this codemod across these 200 files."</li>
+<li>"Run our YAML lint rules and surface violations."</li>
+</ul>
+<p>Switch to <code>search_files</code> (or plain <code>rg</code>) when the question is text-shaped (string literal contents, comments, license headers, file names, cross-language regex). When in doubt, ask: "does the answer depend on the language's syntax tree, or just on the file's bytes?" If the former, ast-grep. If the latter, search_files.</p>
+<p>Hermes integration notes:
+- Run the helper and <code>sg</code> through the <code>terminal</code> tool. Single-quote every pattern so the shell never expands <code>$VAR</code>.
+- For find→read chains around matches, use <code>--json-out</code> and process with <code>execute_code</code> rather than piping through interpreters.
+- This complements (does not replace) Hermes's <code>patch</code> tool: <code>patch</code> is for targeted edits you author; ast-grep is for pattern-driven bulk rewrites across many sites.</p>
+<hr />
+<h2 id="three-things-the-agent-must-internalize">Three things the agent must internalize</h2>
+<h3 id="1-ast-grep-is-not-regex">1. ast-grep is NOT regex</h3>
+<p>The wildcards are <code>$VAR</code> (one AST node) and <code>$$$</code> (zero or more nodes). Regex syntax fails silently:</p>
+<table>
+<thead>
+<tr>
+<th>You wrote</th>
+<th>What ast-grep saw</th>
+<th>What you wanted</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>foo\|bar</code></td>
+<td>bitwise-or of <code>foo</code> and <code>bar</code></td>
+<td>run two separate searches</td>
+</tr>
+<tr>
+<td><code>.*foo</code></td>
+<td>not parseable</td>
+<td><code>$$$ foo</code> (if <code>$$$</code> is a list of nodes) or use rg</td>
+</tr>
+<tr>
+<td><code>\w+</code></td>
+<td>not parseable</td>
+<td><code>$VAR</code> to capture any identifier</td>
+</tr>
+<tr>
+<td><code>[a-z]</code></td>
+<td>character class, not parseable</td>
+<td>switch to rg</td>
+</tr>
+</tbody>
+</table>
+<p>The full anti-pattern table is in <code>references/pitfalls.md</code> §1. The helper's <code>validate</code> subcommand catches these mechanically — call it before debugging "no matches" by hand.</p>
+<h3 id="2-patterns-must-be-valid-code">2. Patterns must be valid code</h3>
+<p>The pattern itself must parse. <code>def $FN($$$):</code> fails because the trailing <code>:</code> makes it incomplete; use <code>def $FN($$$)</code>. <code>function $NAME</code> without params/body fails; use <code>function $NAME($$$) { $$$ }</code>. Full table per language in <code>references/pitfalls.md</code> §2.</p>
+<h3 id="3---update-all-and---json-are-mutually-exclusive-silently">3. <code>--update-all</code> and <code>--json</code> are mutually exclusive (silently)</h3>
+<p>This is the single biggest gotcha when scripting. <code>sg run -p P -r R --json --update-all</code> returns the JSON but <strong>does not mutate files</strong>. To both preview AND apply, run <strong>two passes</strong>:</p>
+<div class="highlight"><pre><span></span><code>sg<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span>P<span class="w"> </span>-r<span class="w"> </span>R<span class="w"> </span>--json<span class="o">=</span>compact<span class="w"> </span>.<span class="w">   </span><span class="c1"># pass 1: see what would change</span>
+sg<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span>P<span class="w"> </span>-r<span class="w"> </span>R<span class="w"> </span>--update-all<span class="w"> </span>.<span class="w">     </span><span class="c1"># pass 2: actually apply</span>
+</code></pre></div>
+
+<p>The helper does this automatically when you call <code>replace --apply</code>. Read <code>references/pitfalls.md</code> §9.</p>
+<hr />
+<h2 id="the-helper-script--scriptsast_grep_helperpy">The helper script — <code>scripts/ast_grep_helper.py</code></h2>
+<p>A single-file Python 3 stdlib wrapper. Same on every OS. The agent's default entry point.</p>
+<h3 id="search--find-all-matches-of-a-pattern"><code>search</code> — find all matches of a pattern</h3>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>search<span class="w"> </span><span class="s1">&#39;console.log($MSG)&#39;</span><span class="w"> </span>--lang<span class="w"> </span>ts<span class="w"> </span>src/
+</code></pre></div>
+
+<p>Validates the pattern offline first. If the pattern looks like regex (<code>\w</code>, <code>.*</code>, <code>|</code>, etc.) the helper exits with a hint and never calls <code>sg</code> — saves a round-trip. Pass <code>--force</code> to skip validation.</p>
+<p>Flags:
+- <code>--lang ts</code> (or any of the 25 languages; aliases like <code>js</code>, <code>py</code>, <code>rs</code>, <code>kt</code> accepted)
+- <code>--globs '!**/*.test.ts'</code> (repeatable; prefix <code>!</code> to exclude)
+- <code>-C 3</code> (context lines)
+- <code>--json-out</code> (raw JSON instead of human format)</p>
+<h3 id="replace--rewrite-by-pattern-dry-run-by-default"><code>replace</code> — rewrite by pattern, dry-run by default</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Dry-run preview (default — no files mutated)</span>
+python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>replace<span class="w"> </span><span class="s1">&#39;console.log($MSG)&#39;</span><span class="w"> </span><span class="s1">&#39;logger.info($MSG)&#39;</span><span class="w"> </span>--lang<span class="w"> </span>ts<span class="w"> </span>src/
+
+<span class="c1"># Actually apply</span>
+python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>replace<span class="w"> </span><span class="s1">&#39;console.log($MSG)&#39;</span><span class="w"> </span><span class="s1">&#39;logger.info($MSG)&#39;</span><span class="w"> </span>--lang<span class="w"> </span>ts<span class="w"> </span>src/<span class="w"> </span>--apply
+</code></pre></div>
+
+<p>The helper:
+1. Validates both <code>pattern</code> and <code>rewrite</code> for hint-detectable mistakes.
+2. Runs pass 1 with <code>--json=compact</code> to collect matches and show a preview.
+3. If <code>--apply</code> is set, runs pass 2 with <code>--update-all</code> to mutate files.</p>
+<h3 id="scan--run-yaml-rules"><code>scan</code> — run YAML rules</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Discover sgconfig.yml from cwd and run all rules</span>
+python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>scan<span class="w"> </span>src/
+
+<span class="c1"># Run a single rule file</span>
+python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>scan<span class="w"> </span>-r<span class="w"> </span>rules/no-console.yml<span class="w"> </span>src/
+
+<span class="c1"># Apply auto-fixes</span>
+python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>scan<span class="w"> </span>-U<span class="w"> </span>src/
+
+<span class="c1"># CI-friendly GitHub annotations</span>
+python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>scan<span class="w"> </span>--report-style<span class="w"> </span>short<span class="w"> </span>src/
+</code></pre></div>
+
+<h3 id="validate--offline-pattern-check-no-sg-call"><code>validate</code> — offline pattern check (no <code>sg</code> call)</h3>
+<p>Useful for CI lints, pre-commit hooks, and quick sanity checks:</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>validate<span class="w"> </span><span class="s1">&#39;\w+&#39;</span><span class="w"> </span>--lang<span class="w"> </span>ts
+<span class="c1"># → exit 2: regex \w not supported. Use $VAR for identifiers.</span>
+
+python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>validate<span class="w"> </span><span class="s1">&#39;console.log($MSG)&#39;</span><span class="w"> </span>--lang<span class="w"> </span>ts
+<span class="c1"># → exit 0: pattern looks plausible for ast-grep.</span>
+</code></pre></div>
+
+<h3 id="langs--doctor--install"><code>langs</code> / <code>doctor</code> / <code>install</code></h3>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>langs<span class="w">       </span><span class="c1"># list 25 supported languages and aliases</span>
+python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>doctor<span class="w">      </span><span class="c1"># check ast-grep binary availability</span>
+python<span class="w"> </span>scripts/ast_grep_helper.py<span class="w"> </span>install<span class="w">     </span><span class="c1"># delegate to install.sh / install.ps1</span>
+</code></pre></div>
+
+<p><code>new</code> and <code>test</code> subcommands proxy directly to <code>sg new</code> and <code>sg test</code>.</p>
+<hr />
+<h2 id="direct-sg-use-when-the-helper-isnt-enough">Direct <code>sg</code> use (when the helper isn't enough)</h2>
+<p>The helper is opinionated. For full control, drop to <code>sg</code>. The skill ships a CLI cheat sheet in <code>references/cli.md</code>. The minimal idioms:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Search</span>
+sg<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="s1">&#39;console.log($MSG)&#39;</span><span class="w"> </span>--lang<span class="w"> </span>ts<span class="w"> </span>src/
+
+<span class="c1"># Search with JSON for scripting</span>
+sg<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="s1">&#39;console.log($MSG)&#39;</span><span class="w"> </span>--lang<span class="w"> </span>ts<span class="w"> </span>--json<span class="o">=</span>compact<span class="w"> </span>src/
+
+<span class="c1"># Rewrite, dry-run</span>
+sg<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="s1">&#39;console.log($MSG)&#39;</span><span class="w"> </span>-r<span class="w"> </span><span class="s1">&#39;logger.info($MSG)&#39;</span><span class="w"> </span>--lang<span class="w"> </span>ts<span class="w"> </span>--json<span class="o">=</span>compact<span class="w"> </span>src/
+
+<span class="c1"># Rewrite, apply</span>
+sg<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="s1">&#39;console.log($MSG)&#39;</span><span class="w"> </span>-r<span class="w"> </span><span class="s1">&#39;logger.info($MSG)&#39;</span><span class="w"> </span>--lang<span class="w"> </span>ts<span class="w"> </span>--update-all<span class="w"> </span>src/
+
+<span class="c1"># Pattern from stdin (great for ad-hoc experiments)</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;console.log(&quot;hi&quot;)&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sg<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="s1">&#39;console.log($MSG)&#39;</span><span class="w"> </span>--lang<span class="w"> </span>js<span class="w"> </span>--stdin
+
+<span class="c1"># Debug a pattern that returns 0 matches</span>
+sg<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="s1">&#39;&lt;your pattern&gt;&#39;</span><span class="w"> </span>--lang<span class="w"> </span>&lt;lang&gt;<span class="w"> </span>--debug-query<span class="o">=</span>ast<span class="w"> </span>--stdin<span class="w"> </span><span class="o">&lt;&lt;&lt;</span><span class="w"> </span><span class="s1">&#39;&lt;sample-code&gt;&#39;</span>
+
+<span class="c1"># Run YAML rules</span>
+sg<span class="w"> </span>scan<span class="w"> </span>src/
+
+<span class="c1"># Inline YAML rule (one-off)</span>
+sg<span class="w"> </span>scan<span class="w"> </span>--inline-rules<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">id: no-todo</span>
+<span class="s1">language: TypeScript</span>
+<span class="s1">severity: warning</span>
+<span class="s1">rule: { pattern: TODO }&#39;</span><span class="w"> </span>src/
+</code></pre></div>
+
+<p>When using <code>sg</code> directly in a shell, <strong>always single-quote patterns</strong> so <code>$VAR</code> is not expanded by the shell.</p>
+<hr />
+<h2 id="decision-tree--what-to-use-when">Decision tree — what to use, when</h2>
+<!-- ascii-guard-ignore -->
+
+<div class="highlight"><pre><span></span><code>USER asks for &quot;find/rewrite/codemod&quot;
+│
+├─ structural pattern (function shape, call, class, import, control flow)
+│  └→ ast-grep (this skill)
+│
+├─ text pattern (regex, alternation, character classes, file names)
+│  └→ search_files / rg
+│
+├─ semantic question (what variable does this refer to? does this throw?)
+│  └→ LSP tools, TypeScript compiler, Pyright, Semgrep with type inference
+│
+└─ multiple repos / federated search
+   └→ a search engine + then ast-grep / rg / LSP per-repo
+</code></pre></div>
+
+<!-- ascii-guard-ignore-end -->
+
+<p>If the user says "find all" or "every", default to ast-grep when the target is shaped (function, class, call, import, statement). Default to search_files when the target is text (string content, comment, license header, file name, identifier substring).</p>
+<hr />
+<h2 id="always-run-dry-run-first-when-rewriting">Always run dry-run first when rewriting</h2>
+<p>A bad pattern silently rewrites the wrong thing. The helper's <code>replace</code> defaults to dry-run for this reason. The flow is:</p>
+<ol>
+<li>Search to confirm matches: <code>helper search '&lt;pattern&gt;' --lang X .</code></li>
+<li>Dry-run rewrite: <code>helper replace '&lt;pattern&gt;' '&lt;rewrite&gt;' --lang X .</code> (no <code>--apply</code>)</li>
+<li>Inspect the dry-run summary: number of matches, files affected, the per-location preview.</li>
+<li>If wrong: refine pattern, go back to step 1.</li>
+<li>If right: <code>helper replace '&lt;pattern&gt;' '&lt;rewrite&gt;' --lang X . --apply</code>.</li>
+</ol>
+<p>Never apply a rewrite that you have not first dry-run. After an <code>--apply</code> in a git repo, review with <code>git diff --stat</code> before committing.</p>
+<hr />
+<h2 id="when-sg-returns-0-matches-but-you-know-the-code-is-there">When <code>sg</code> returns 0 matches but you know the code is there</h2>
+<p>In priority order:</p>
+<ol>
+<li><strong>Run <code>helper validate '&lt;pattern&gt;' --lang &lt;lang&gt;</code></strong> — catches regex misuse, missing function bodies, Python trailing colons.</li>
+<li><strong>Check <code>--lang</code></strong> — <code>sg</code> infers from extension; if you pass a <code>.tsx</code> file with <code>--lang ts</code> (not <code>tsx</code>), JSX won't parse.</li>
+<li><strong>Inspect the parsed pattern</strong>: <code>sg run -p '&lt;pattern&gt;' --lang &lt;lang&gt; --debug-query=ast --stdin &lt;&lt;&lt; '&lt;sample&gt;'</code>. If it shows <code>ERROR</code> nodes, the pattern is malformed.</li>
+<li><strong>Check the AST of the target file</strong>: <code>sg run -p '$_' --lang &lt;lang&gt; --debug-query=cst path/to/file | head -40</code> — find the <code>kind</code> you're trying to match.</li>
+<li><strong>Try the playground</strong>: &lt;https://ast-grep.github.io/playground.html&gt; — paste code + pattern, see what's happening.</li>
+</ol>
+<p>Do not blindly retry with variations. Each failure has a reason; surface it.</p>
+<hr />
+<h2 id="when-to-use-yaml-rules-vs-inline--p-patterns">When to use YAML rules vs inline <code>-p</code> patterns</h2>
+<p><strong>Use inline <code>-p</code></strong> when:
+- One-off ad-hoc query.
+- The pattern is simple (no constraints, no fix template).
+- You're exploring.</p>
+<p><strong>Use YAML rules</strong> (file under <code>rules/</code>, run via <code>sg scan</code>) when:
+- The pattern is reused (lint rule, codemod that runs in CI).
+- You need <code>constraints</code>, <code>transform</code>, complex <code>inside</code>/<code>has</code>, or composite logic.
+- You want auto-fix (<code>fix:</code> field).
+- You want to test the rule (snapshot tests via <code>sg test</code>).</p>
+<p>The full YAML rule schema is in <code>references/yaml-rules.md</code>. Project setup (<code>sgconfig.yml</code>, <code>ruleDirs</code>, <code>utilDirs</code>) is in <code>references/sgconfig.md</code>.</p>
+<hr />
+<h2 id="output-discipline">Output discipline</h2>
+<ul>
+<li><code>sg run --json=compact</code> produces an array of match objects: <code>{ file, range: {start, end}, text, replacement?, lines, language, ... }</code>.</li>
+<li>Without <code>--json</code>, <code>sg</code> produces human-readable colored output suitable for terminals.</li>
+<li>The helper's default output is human-readable (file:line:column + match preview). Pass <code>--json-out</code> for raw JSON.</li>
+<li>The helper's <code>replace</code> always summarizes: number of matches, number of files, per-location preview.</li>
+</ul>
+<p>When summarizing for the user, <strong>always include the count of files affected</strong>, not just the count of matches. Users care about blast radius.</p>
+<hr />
+<h2 id="required-reading-in-order-of-priority">Required reading (in order of priority)</h2>
+<ol>
+<li><code>references/patterns.md</code> — meta-variables, naming rules, strictness levels. Read when you're unsure why a pattern doesn't match.</li>
+<li><code>references/pitfalls.md</code> — the failure-mode field guide. Read when 0 matches surprises you.</li>
+<li><code>references/recipes.md</code> — copy-paste patterns by language. Read first when you start a new task.</li>
+<li><code>references/cli.md</code> — <code>sg run</code>, <code>sg scan</code>, <code>sg test</code>, <code>sg new</code>, <code>sg lsp</code>. Read when the helper isn't enough.</li>
+<li><code>references/yaml-rules.md</code> — YAML rule schema. Read when you outgrow inline patterns.</li>
+<li><code>references/sgconfig.md</code> — project-level configuration. Read when you set up <code>sg scan</code> for a real project.</li>
+<li><code>references/install.md</code> — per-OS install methods. Read only if <code>install.sh</code> / <code>install.ps1</code> fail.</li>
+</ol>
+<hr />
+<h2 id="invariants-do-not-break">Invariants (do not break)</h2>
+<ul>
+<li><strong>Validate before searching.</strong> When emitting a pattern programmatically, call <code>helper validate</code> first. It catches the regex-misuse class of mistakes that account for ~70% of "0 matches" debug sessions.</li>
+<li><strong>Dry-run before applying.</strong> Never run <code>sg run -r ... --update-all</code> without first inspecting the matches. The helper's <code>replace</code> enforces this by default.</li>
+<li><strong>Two-pass writes.</strong> When using <code>sg</code> directly to both preview and apply, run two invocations — <code>--json</code> ignores <code>--update-all</code>.</li>
+<li><strong>Single-quote patterns in shell.</strong> <code>'$VAR'</code> not <code>"$VAR"</code>. The shell expands <code>$VAR</code> to the empty string in double quotes, breaking the pattern.</li>
+<li><strong>Pattern is code, not regex.</strong> When the pattern would need <code>|</code>, <code>.*</code>, <code>\w</code>, or <code>[a-z]</code>, switch to search_files instead. Don't try to force ast-grep into a regex shape.</li>
+<li><strong><code>--lang</code> is required for stdin.</strong> When piping with <code>--stdin</code>, set <code>--lang</code> explicitly; <code>sg</code> cannot infer from extension.</li>
+<li><strong>Linux: prefer <code>ast-grep</code> over <code>sg</code></strong> because <code>sg</code> collides with <code>setgroups</code> from <code>util-linux</code>. The helper handles this; if you call <code>sg</code> directly, alias it: <code>alias sg=ast-grep</code>.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/software-development/software-development-ast-grep</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#when-to-use-this-skill">When to use this skill</a></li>
+<li class="lvl2"><a href="#three-things-the-agent-must-internalize">Three things the agent must internalize</a></li>
+<li class="lvl3"><a href="#1-ast-grep-is-not-regex">1. ast-grep is NOT regex</a></li>
+<li class="lvl3"><a href="#2-patterns-must-be-valid-code">2. Patterns must be valid code</a></li>
+<li class="lvl3"><a href="#3---update-all-and---json-are-mutually-exclusive-silently">3. --update-all and --json are mutually exclusive (silently)</a></li>
+<li class="lvl2"><a href="#the-helper-script--scriptsast_grep_helperpy">The helper script — scripts/ast_grep_helper.py</a></li>
+<li class="lvl3"><a href="#search--find-all-matches-of-a-pattern">search — find all matches of a pattern</a></li>
+<li class="lvl3"><a href="#replace--rewrite-by-pattern-dry-run-by-default">replace — rewrite by pattern, dry-run by default</a></li>
+<li class="lvl3"><a href="#scan--run-yaml-rules">scan — run YAML rules</a></li>
+<li class="lvl3"><a href="#validate--offline-pattern-check-no-sg-call">validate — offline pattern check (no sg call)</a></li>
+<li class="lvl3"><a href="#langs--doctor--install">langs / doctor / install</a></li>
+<li class="lvl2"><a href="#direct-sg-use-when-the-helper-isnt-enough">Direct sg use (when the helper isn&#x27;t enough)</a></li>
+<li class="lvl2"><a href="#decision-tree--what-to-use-when">Decision tree — what to use, when</a></li>
+<li class="lvl2"><a href="#always-run-dry-run-first-when-rewriting">Always run dry-run first when rewriting</a></li>
+<li class="lvl2"><a href="#when-sg-returns-0-matches-but-you-know-the-code-is-there">When sg returns 0 matches but you know the code is there</a></li>
+<li class="lvl2"><a href="#when-to-use-yaml-rules-vs-inline--p-patterns">When to use YAML rules vs inline -p patterns</a></li>
+<li class="lvl2"><a href="#output-discipline">Output discipline</a></li>
+<li class="lvl2"><a href="#required-reading-in-order-of-priority">Required reading (in order of priority)</a></li>
+<li class="lvl2"><a href="#invariants-do-not-break">Invariants (do not break)</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

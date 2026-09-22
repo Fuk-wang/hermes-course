@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Provider 运行时解析 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/provider-runtime</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="provider-运行时解析">Provider 运行时解析</h1>
+<p>Hermes 拥有一个共享的 provider 运行时解析器，用于以下场景：</p>
+<ul>
+<li>CLI</li>
+<li>gateway</li>
+<li>cron 任务</li>
+<li>ACP</li>
+<li>辅助模型调用</li>
+</ul>
+<p>主要实现：</p>
+<ul>
+<li><code>hermes_cli/runtime_provider.py</code> — 凭据解析，<code>_resolve_custom_runtime()</code></li>
+<li><code>hermes_cli/auth.py</code> — provider 注册表，<code>resolve_provider()</code></li>
+<li><code>hermes_cli/model_switch.py</code> — 共享 <code>/model</code> 切换流水线（CLI + gateway）</li>
+<li><code>agent/auxiliary_client.py</code> — 辅助模型路由</li>
+<li><code>providers/</code> — ABC + 注册表入口点（<code>ProviderProfile</code>、<code>register_provider</code>、<code>get_provider_profile</code>、<code>list_providers</code>）</li>
+<li><code>plugins/model-providers/&lt;name&gt;/</code> — 每个 provider 的插件（内置），声明 <code>api_mode</code>、<code>base_url</code>、<code>env_vars</code>、<code>fallback_models</code> 并在首次访问时将自身注册到注册表。用户插件位于 <code>$HERMES_HOME/plugins/model-providers/&lt;name&gt;/</code>，会覆盖同名的内置插件。</li>
+</ul>
+<p><code>providers/</code> 中的 <code>get_provider_profile()</code> 为给定 provider id 返回一个 <code>ProviderProfile</code>。<code>runtime_provider.py</code> 在解析时调用它，以获取规范的 <code>base_url</code>、<code>env_vars</code> 优先级列表、<code>api_mode</code> 和 <code>fallback_models</code>，无需在多个文件中重复这些数据。在 <code>plugins/model-providers/&lt;your-provider&gt;/</code>（或 <code>$HERMES_HOME/plugins/model-providers/&lt;your-provider&gt;/</code>）下添加一个调用 <code>register_provider()</code> 的新插件，即可让 <code>runtime_provider.py</code> 自动识别它——无需在解析器本身中添加分支。</p>
+<p>如果你想添加一个新的一等推理 provider，请结合本页阅读 <a href="adding-providers.html">添加 Provider</a> 和 <a href="model-provider-plugin.html">Model Provider 插件指南</a>。</p>
+<h2 id="解析优先级">解析优先级</h2>
+<p>从高层来看，provider 解析使用以下顺序：</p>
+<ol>
+<li>显式 CLI/运行时请求</li>
+<li><code>config.yaml</code> 中的模型/provider 配置</li>
+<li>环境变量</li>
+<li>provider 特定的默认值或自动解析</li>
+</ol>
+<p>该顺序很重要，因为 Hermes 将已保存的模型/provider 选择视为正常运行的真实来源。这可以防止过时的 shell 导出变量悄悄覆盖用户在 <code>hermes model</code> 中最后选择的端点。</p>
+<h2 id="provider">Provider</h2>
+<p>当前 provider 系列包括（完整内置集合见 <code>plugins/model-providers/</code>）：</p>
+<ul>
+<li>AI Gateway（Vercel）</li>
+<li>OpenRouter</li>
+<li>Nous Portal</li>
+<li>OpenAI Codex</li>
+<li>Copilot / Copilot ACP</li>
+<li>Anthropic（原生）</li>
+<li>Google / Gemini（<code>gemini</code>）</li>
+<li>Alibaba / DashScope（<code>alibaba</code>、<code>alibaba-coding-plan</code>）</li>
+<li>DeepSeek</li>
+<li>Z.AI</li>
+<li>Kimi / Moonshot（<code>kimi-coding</code>、<code>kimi-coding-cn</code>）</li>
+<li>MiniMax（<code>minimax</code>、<code>minimax-cn</code>、<code>minimax-oauth</code>）</li>
+<li>Kilo Code</li>
+<li>Hugging Face</li>
+<li>OpenCode Zen / OpenCode Go</li>
+<li>AWS Bedrock</li>
+<li>Azure Foundry</li>
+<li>NVIDIA NIM</li>
+<li>xAI（Grok）</li>
+<li>Arcee</li>
+<li>GMI Cloud</li>
+<li>StepFun</li>
+<li>Qwen OAuth</li>
+<li>Xiaomi</li>
+<li>Ollama Cloud</li>
+<li>LM Studio</li>
+<li>Tencent TokenHub</li>
+<li>Custom（<code>provider: custom</code>）— 适用于任何 OpenAI 兼容端点的一等 provider</li>
+<li>命名自定义 provider（<code>config.yaml</code> 中的 <code>custom_providers</code> 列表）</li>
+</ul>
+<h2 id="运行时解析的输出">运行时解析的输出</h2>
+<p>运行时解析器返回的数据包括：</p>
+<ul>
+<li><code>provider</code></li>
+<li><code>api_mode</code></li>
+<li><code>base_url</code></li>
+<li><code>api_key</code></li>
+<li><code>source</code></li>
+<li>provider 特定的元数据，如过期/刷新信息</li>
+</ul>
+<h2 id="为什么这很重要">为什么这很重要</h2>
+<p>该解析器是 Hermes 能够在以下场景之间共享认证/运行时逻辑的主要原因：</p>
+<ul>
+<li><code>hermes chat</code></li>
+<li>gateway 消息处理</li>
+<li>在全新会话中运行的 cron 任务</li>
+<li>ACP 编辑器会话</li>
+<li>辅助模型任务</li>
+</ul>
+<h2 id="ai-gateway">AI Gateway</h2>
+<p>在 <code>~/.hermes/.env</code> 中设置 <code>AI_GATEWAY_API_KEY</code>，并使用 <code>--provider ai-gateway</code> 运行。Hermes 从 gateway 的 <code>/models</code> 端点获取可用模型，筛选出支持工具调用的语言模型。</p>
+<h2 id="openrouterai-gateway-与自定义-openai-兼容-base-url">OpenRouter、AI Gateway 与自定义 OpenAI 兼容 base URL</h2>
+<p>Hermes 包含相关逻辑，以避免在存在多个 provider 密钥时（例如同时存在 <code>OPENROUTER_API_KEY</code>、<code>AI_GATEWAY_API_KEY</code> 和 <code>OPENAI_API_KEY</code>）将错误的 API key 泄露给自定义端点。</p>
+<p>每个 provider 的 API key 仅作用于其自身的 base URL：</p>
+<ul>
+<li><code>OPENROUTER_API_KEY</code> 仅发送至 <code>openrouter.ai</code> 端点</li>
+<li><code>AI_GATEWAY_API_KEY</code> 仅发送至 <code>ai-gateway.vercel.sh</code> 端点</li>
+<li><code>OPENAI_API_KEY</code> 用于自定义端点及作为回退</li>
+</ul>
+<p>Hermes 还区分以下两种情况：</p>
+<ul>
+<li>用户主动选择的真实自定义端点</li>
+<li>未配置自定义端点时使用的 OpenRouter 回退路径</li>
+</ul>
+<p>这种区分对以下场景尤为重要：</p>
+<ul>
+<li>本地模型服务器</li>
+<li>非 OpenRouter/非 AI Gateway 的 OpenAI 兼容 API</li>
+<li>无需重新运行 setup 即可切换 provider</li>
+<li>通过 config 保存的自定义端点，即使当前 shell 中未导出 <code>OPENAI_BASE_URL</code> 也应正常工作</li>
+</ul>
+<h2 id="原生-anthropic-路径">原生 Anthropic 路径</h2>
+<p>Anthropic 不再仅限于"通过 OpenRouter"访问。</p>
+<p>当 provider 解析选择 <code>anthropic</code> 时，Hermes 使用：</p>
+<ul>
+<li><code>api_mode = anthropic_messages</code></li>
+<li>原生 Anthropic Messages API</li>
+<li><code>agent/anthropic_adapter.py</code> 进行转换</li>
+</ul>
+<p>原生 Anthropic 的凭据解析现在在两者同时存在时，优先使用可刷新的 Claude Code 凭据，而非复制的环境变量 token。实际效果为：</p>
+<ul>
+<li>包含可刷新认证的 Claude Code 凭据文件被视为首选来源</li>
+<li>手动设置的 <code>ANTHROPIC_TOKEN</code> / <code>CLAUDE_CODE_OAUTH_TOKEN</code> 值仍可作为显式覆盖</li>
+<li>Hermes 在调用原生 Messages API 前会预检 Anthropic 凭据刷新</li>
+<li>Hermes 在重建 Anthropic 客户端后，仍会在收到 401 时重试一次，作为回退路径</li>
+</ul>
+<h2 id="openai-codex-路径">OpenAI Codex 路径</h2>
+<p>Codex 使用独立的 Responses API 路径：</p>
+<ul>
+<li><code>api_mode = codex_responses</code></li>
+<li>专用的凭据解析和认证存储支持</li>
+</ul>
+<h2 id="辅助模型路由">辅助模型路由</h2>
+<p>辅助任务包括：</p>
+<ul>
+<li>视觉</li>
+<li>网页提取摘要</li>
+<li>上下文压缩摘要</li>
+<li>skills hub 操作</li>
+<li>MCP 辅助操作</li>
+<li>记忆刷新</li>
+</ul>
+<p>这些任务可以使用各自独立的 provider/模型路由，而非主对话模型。</p>
+<p>当辅助任务配置的 provider 为 <code>main</code> 时，Hermes 通过与普通对话相同的共享运行时路径进行解析。实际效果为：</p>
+<ul>
+<li>环境变量驱动的自定义端点仍然有效</li>
+<li>通过 <code>hermes model</code> / <code>config.yaml</code> 保存的自定义端点同样有效</li>
+<li>辅助路由能够区分真实保存的自定义端点与 OpenRouter 回退</li>
+</ul>
+<h2 id="回退模型">回退模型</h2>
+<p>Hermes 支持配置回退 provider 链——一个按顺序尝试的 <code>(provider, model)</code> 条目列表，当主模型遇到错误时依次尝试。旧版单对 <code>fallback_model</code> 字典仍被接受以保持向后兼容（并在首次写入时迁移）。</p>
+<h3 id="内部工作原理">内部工作原理</h3>
+<ol>
+<li>
+<p><strong>存储</strong>：<code>AIAgent.__init__</code> 存储 <code>fallback_model</code> 字典并将 <code>_fallback_activated</code> 设为 <code>False</code>。</p>
+</li>
+<li>
+<p><strong>触发点</strong>：<code>_try_activate_fallback()</code> 在 <code>run_agent.py</code> 主重试循环的三处被调用：</p>
+</li>
+<li>在无效 API 响应（None choices、缺少 content）达到最大重试次数后</li>
+<li>在不可重试的客户端错误（HTTP 401、403、404）时</li>
+<li>
+<p>在瞬时错误（HTTP 429、500、502、503）达到最大重试次数后</p>
+</li>
+<li>
+<p><strong>激活流程</strong>（<code>_try_activate_fallback</code>）：</p>
+</li>
+<li>若已激活或未配置，立即返回 <code>False</code></li>
+<li>调用 <code>auxiliary_client.py</code> 中的 <code>resolve_provider_client()</code> 构建带有正确认证的新客户端</li>
+<li>确定 <code>api_mode</code>：openai-codex 使用 <code>codex_responses</code>，anthropic 使用 <code>anthropic_messages</code>，其余使用 <code>chat_completions</code></li>
+<li>原地替换：<code>self.model</code>、<code>self.provider</code>、<code>self.base_url</code>、<code>self.api_mode</code>、<code>self.client</code>、<code>self._client_kwargs</code></li>
+<li>对于 anthropic 回退：构建原生 Anthropic 客户端而非 OpenAI 兼容客户端</li>
+<li>重新评估 prompt 缓存（对 OpenRouter 上的 Claude 模型启用）</li>
+<li>将 <code>_fallback_activated</code> 设为 <code>True</code>——防止再次触发</li>
+<li>
+<p>将重试计数重置为 0 并继续循环</p>
+</li>
+<li>
+<p><strong>配置流程</strong>：</p>
+</li>
+<li>CLI：<code>cli.py</code> 读取 <code>CLI_CONFIG["fallback_model"]</code> → 传递给 <code>AIAgent(fallback_model=...)</code></li>
+<li>Gateway：<code>gateway/run.py._load_fallback_model()</code> 读取 <code>config.yaml</code> → 传递给 <code>AIAgent</code></li>
+<li>验证：<code>provider</code> 和 <code>model</code> 键均须非空，否则回退被禁用</li>
+</ol>
+<h3 id="不支持回退的场景">不支持回退的场景</h3>
+<ul>
+<li><strong>子代理委托</strong>（<code>tools/delegate_tool.py</code>）：子代理继承父代理的 provider，但不继承回退配置</li>
+<li><strong>辅助任务</strong>：使用各自独立的 provider 自动检测链（见上方辅助模型路由）</li>
+</ul>
+<p>Cron 任务<strong>支持</strong>回退：<code>run_job()</code> 从 <code>config.yaml</code> 读取 <code>fallback_providers</code>（或旧版 <code>fallback_model</code>）并传递给 <code>AIAgent(fallback_model=...)</code>，与 gateway 的 <code>_load_fallback_model()</code> 模式一致。参见 <a href="cron-internals.html">Cron 内部机制</a>。</p>
+<h3 id="测试覆盖">测试覆盖</h3>
+<p>参见 <code>tests/test_fallback_model.py</code>，其中包含覆盖所有支持 provider、单次触发语义及边界情况的完整测试。</p>
+<h2 id="相关文档">相关文档</h2>
+<ul>
+<li><a href="agent-loop.html">Agent 循环内部机制</a></li>
+<li><a href="acp-internals.html">ACP 内部机制</a></li>
+<li><a href="context-compression-and-caching.html">上下文压缩与 Prompt 缓存</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/provider-runtime</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#解析优先级">解析优先级</a></li>
+<li class="lvl2"><a href="#provider">Provider</a></li>
+<li class="lvl2"><a href="#运行时解析的输出">运行时解析的输出</a></li>
+<li class="lvl2"><a href="#为什么这很重要">为什么这很重要</a></li>
+<li class="lvl2"><a href="#ai-gateway">AI Gateway</a></li>
+<li class="lvl2"><a href="#openrouterai-gateway-与自定义-openai-兼容-base-url">OpenRouter、AI Gateway 与自定义 OpenAI 兼容 base URL</a></li>
+<li class="lvl2"><a href="#原生-anthropic-路径">原生 Anthropic 路径</a></li>
+<li class="lvl2"><a href="#openai-codex-路径">OpenAI Codex 路径</a></li>
+<li class="lvl2"><a href="#辅助模型路由">辅助模型路由</a></li>
+<li class="lvl2"><a href="#回退模型">回退模型</a></li>
+<li class="lvl3"><a href="#内部工作原理">内部工作原理</a></li>
+<li class="lvl3"><a href="#不支持回退的场景">不支持回退的场景</a></li>
+<li class="lvl3"><a href="#测试覆盖">测试覆盖</a></li>
+<li class="lvl2"><a href="#相关文档">相关文档</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Microsoft Teams · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/messaging/teams</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="microsoft-teams-setup">Microsoft Teams Setup</h1>
+<p>Connect Hermes Agent to Microsoft Teams as a bot. Unlike Slack's Socket Mode, Teams delivers messages by calling a <strong>public HTTPS webhook</strong>, so your instance needs a publicly reachable endpoint — either a dev tunnel (local dev) or a real domain (production).</p>
+<p>Need meeting summaries from Microsoft Graph events rather than normal bot conversations? Use the dedicated setup page: <a href="teams-meetings.html">Teams Meetings</a>.</p>
+<blockquote>
+<p>Run <code>hermes gateway setup</code> and pick <strong>Microsoft Teams</strong> for a guided walk-through.</p>
+</blockquote>
+<h2 id="how-the-bot-responds">How the Bot Responds</h2>
+<table>
+<thead>
+<tr>
+<th>Context</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Personal chat (DM)</strong></td>
+<td>Bot responds to every message. No @mention needed.</td>
+</tr>
+<tr>
+<td><strong>Group chat</strong></td>
+<td>Bot only responds when @mentioned.</td>
+</tr>
+<tr>
+<td><strong>Channel</strong></td>
+<td>Bot only responds when @mentioned.</td>
+</tr>
+</tbody>
+</table>
+<p>Teams delivers @mentions as regular messages with <code>&lt;at&gt;BotName&lt;/at&gt;</code> tags, which Hermes strips automatically before processing.</p>
+<p>Without resource-specific consent (RSC) Teams only delivers messages that @mention the bot, so no filtering is needed. Once the app manifest grants <code>ChannelMessage.Read.Group</code> or <code>ChatMessage.Read.Chat</code>, Teams delivers <strong>every</strong> message in the conversation — set <code>require_mention: true</code> (or <code>TEAMS_REQUIRE_MENTION=true</code>) so the bot only answers channel/group-chat messages that @mention it or reply to one of its own messages. Personal chats are never gated, and a gated message is dropped before its attachments are downloaded.</p>
+<hr />
+<p>For source or local installs, include the Teams extra so the bundled adapter can</p>
+<div class="highlight"><pre><span></span><code>uv<span class="w"> </span>sync<span class="w"> </span>--extra<span class="w"> </span>teams
+<span class="c1"># or, for editable installs:</span>
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[teams]&quot;</span>
+</code></pre></div>
+
+<h2 id="step-1-install-the-teams-cli">Step 1: Install the Teams CLI</h2>
+<p>The <code>@microsoft/teams.cli</code> automates bot registration — no Azure portal needed.</p>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>-g<span class="w"> </span>@microsoft/teams.cli@preview
+teams<span class="w"> </span>login
+</code></pre></div>
+
+<p>To verify your login and find your own AAD object ID (needed for <code>TEAMS_ALLOWED_USERS</code>):</p>
+<div class="highlight"><pre><span></span><code>teams<span class="w"> </span>status<span class="w"> </span>--verbose
+</code></pre></div>
+
+<hr />
+<h2 id="step-2-expose-the-webhook-port">Step 2: Expose the Webhook Port</h2>
+<p>Teams cannot deliver messages to <code>localhost</code>. For local development, use any tunnel tool to get a public HTTPS URL. The default port is <code>3978</code> — change it with <code>TEAMS_PORT</code> if needed.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># devtunnel (Microsoft)</span>
+devtunnel<span class="w"> </span>create<span class="w"> </span>hermes-bot<span class="w"> </span>--allow-anonymous
+devtunnel<span class="w"> </span>port<span class="w"> </span>create<span class="w"> </span>hermes-bot<span class="w"> </span>-p<span class="w"> </span><span class="m">3978</span><span class="w"> </span>--protocol<span class="w"> </span>http<span class="w">  </span><span class="c1"># replace 3978 with TEAMS_PORT if changed</span>
+devtunnel<span class="w"> </span>host<span class="w"> </span>hermes-bot
+
+<span class="c1"># ngrok</span>
+ngrok<span class="w"> </span>http<span class="w"> </span><span class="m">3978</span><span class="w">  </span><span class="c1"># replace 3978 with TEAMS_PORT if changed</span>
+
+<span class="c1"># cloudflared</span>
+cloudflared<span class="w"> </span>tunnel<span class="w"> </span>--url<span class="w"> </span>http://localhost:3978<span class="w">  </span><span class="c1"># replace 3978 with TEAMS_PORT if changed</span>
+</code></pre></div>
+
+<p>Copy the <code>https://</code> URL from the output — you'll use it in the next step. Leave the tunnel running while developing.</p>
+<p>The public tunnel URL uses HTTPS, but Hermes' local webhook listener uses plain HTTP. The tunnel terminates TLS and forwards HTTP to port <code>3978</code>; do not configure the local tunnel port as HTTPS.</p>
+<p>For production, point your bot's endpoint at your server's public domain instead (see <a href="#production-deployment">Production Deployment</a>).</p>
+<hr />
+<h2 id="step-3-create-the-bot">Step 3: Create the Bot</h2>
+<div class="highlight"><pre><span></span><code>teams<span class="w"> </span>app<span class="w"> </span>create<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;Hermes&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--endpoint<span class="w"> </span><span class="s2">&quot;https://&lt;your-tunnel-url&gt;/api/messages&quot;</span>
+</code></pre></div>
+
+<p>The CLI outputs your <code>CLIENT_ID</code>, <code>CLIENT_SECRET</code>, and <code>TENANT_ID</code>, plus an install link for Step 6. Save the client secret — it won't be shown again.</p>
+<hr />
+<h2 id="step-4-configure-environment-variables">Step 4: Configure Environment Variables</h2>
+<p>Add to <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Required</span>
+<span class="nv">TEAMS_CLIENT_ID</span><span class="o">=</span>&lt;your-client-id&gt;
+<span class="nv">TEAMS_CLIENT_SECRET</span><span class="o">=</span>&lt;your-client-secret&gt;
+<span class="nv">TEAMS_TENANT_ID</span><span class="o">=</span>&lt;your-tenant-id&gt;
+
+<span class="c1"># Restrict access to specific users (recommended)</span>
+<span class="c1"># Use AAD object IDs from `teams status --verbose`</span>
+<span class="nv">TEAMS_ALLOWED_USERS</span><span class="o">=</span>&lt;your-aad-object-id&gt;
+</code></pre></div>
+
+<hr />
+<h2 id="step-5-start-the-gateway">Step 5: Start the Gateway</h2>
+<p><strong>Docker</strong> (must run from the directory that contains <code>docker-compose.yml</code> — usually your cloned <code>hermes-agent</code> repo, not <code>~</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>/path/to/hermes-agent
+<span class="nv">HERMES_UID</span><span class="o">=</span><span class="k">$(</span>id<span class="w"> </span>-u<span class="k">)</span><span class="w"> </span><span class="nv">HERMES_GID</span><span class="o">=</span><span class="k">$(</span>id<span class="w"> </span>-g<span class="k">)</span><span class="w"> </span>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d<span class="w"> </span>gateway
+</code></pre></div>
+
+<p><strong>Native / systemd install</strong> (typical <code>hermes</code> one-liner installer under <code>~/.hermes/hermes-agent</code>):</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>restart
+<span class="c1"># or foreground: hermes gateway run</span>
+</code></pre></div>
+
+<p>The Teams SDK is optional; when Teams is enabled, the gateway lazy-installs it into Hermes' own venv on first start (do <strong>not</strong> use system <code>pip install</code> on Ubuntu 24.04 — that hits PEP 668 <code>externally-managed-environment</code>). To install manually into the Hermes venv:</p>
+<div class="highlight"><pre><span></span><code>~/.hermes/hermes-agent/venv/bin/pip<span class="w"> </span>install<span class="w"> </span>microsoft-teams-apps<span class="w"> </span>aiohttp
+<span class="c1"># or from a clone of the agent: uv sync --extra teams</span>
+</code></pre></div>
+
+<p>The default webhook port is <code>3978</code> (override with <code>TEAMS_PORT</code>). Check that it's running:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:3978/health<span class="w">   </span><span class="c1"># should return: ok</span>
+<span class="c1"># Docker:</span>
+docker<span class="w"> </span>logs<span class="w"> </span>-f<span class="w"> </span>hermes
+<span class="c1"># Native:</span>
+hermes<span class="w"> </span>gateway<span class="w"> </span>status<span class="w"> </span>-l
+</code></pre></div>
+
+<p>Look for:</p>
+<div class="highlight"><pre><span></span><code>[teams] Webhook server listening on * (all interfaces, IPv4+IPv6):3978/api/messages
+</code></pre></div>
+
+<hr />
+<h2 id="step-6-install-the-app-in-teams">Step 6: Install the App in Teams</h2>
+<div class="highlight"><pre><span></span><code>teams<span class="w"> </span>app<span class="w"> </span>get<span class="w"> </span>&lt;teamsAppId&gt;<span class="w"> </span>--install-link
+</code></pre></div>
+
+<p>Open the printed link in your browser — it opens directly in the Teams client. After installing, send a direct message to your bot — it's ready.</p>
+<hr />
+<h2 id="configuration-reference">Configuration Reference</h2>
+<h3 id="environment-variables">Environment Variables</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TEAMS_CLIENT_ID</code></td>
+<td>Azure AD App (client) ID</td>
+</tr>
+<tr>
+<td><code>TEAMS_CLIENT_SECRET</code></td>
+<td>Azure AD client secret</td>
+</tr>
+<tr>
+<td><code>TEAMS_TENANT_ID</code></td>
+<td>Azure AD tenant ID</td>
+</tr>
+<tr>
+<td><code>TEAMS_ALLOWED_USERS</code></td>
+<td>Comma-separated AAD object IDs allowed to use the bot</td>
+</tr>
+<tr>
+<td><code>TEAMS_ALLOW_ALL_USERS</code></td>
+<td>Set <code>true</code> to skip the allowlist and allow anyone</td>
+</tr>
+<tr>
+<td><code>TEAMS_HOME_CHANNEL</code></td>
+<td>Conversation ID for cron/proactive message delivery</td>
+</tr>
+<tr>
+<td><code>TEAMS_HOME_CHANNEL_NAME</code></td>
+<td>Display name for the home channel</td>
+</tr>
+<tr>
+<td><code>TEAMS_PORT</code></td>
+<td>Webhook port (default: <code>3978</code>)</td>
+</tr>
+<tr>
+<td><code>TEAMS_REQUIRE_MENTION</code></td>
+<td>Set <code>true</code> to answer only @mentions / replies to the bot in channels and group chats (default: <code>false</code>; for apps with RSC message-read consent)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="configyaml">config.yaml</h3>
+<p>Alternatively, configure via <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">teams</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">client_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-client-id&quot;</span>
+<span class="w">      </span><span class="nt">client_secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-secret&quot;</span>
+<span class="w">      </span><span class="nt">tenant_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-tenant-id&quot;</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3978</span>
+<span class="w">    </span><span class="nt">require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># true once the app has RSC message-read consent</span>
+</code></pre></div>
+
+<hr />
+<h2 id="features">Features</h2>
+<h3 id="interactive-approval-cards">Interactive Approval Cards</h3>
+<p>When the agent needs to run a potentially dangerous command, it sends an Adaptive Card with four buttons instead of asking you to type <code>/approve</code>:</p>
+<ul>
+<li><strong>Allow Once</strong> — approve this specific command</li>
+<li><strong>Allow Session</strong> — approve this pattern for the rest of the session</li>
+<li><strong>Always Allow</strong> — permanently approve this pattern</li>
+<li><strong>Deny</strong> — reject the command</li>
+</ul>
+<p>Clicking a button resolves the approval inline and replaces the card with the decision.</p>
+<h3 id="meeting-summary-delivery-teams-meeting-pipeline">Meeting Summary Delivery (Teams Meeting Pipeline)</h3>
+<p>When the <a href="msgraph-webhook.html">Teams meeting pipeline plugin</a> is enabled, this adapter also handles outbound delivery of meeting summaries — one Teams integration surface, not two. After a meeting's transcript is summarized, the writer posts the summary into your chosen Teams target.</p>
+<p>Pipeline summary delivery is configured under the <code>teams</code> platform entry alongside the bot config:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">teams</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="c1"># existing bot config (client_id, client_secret, tenant_id, port) ...</span>
+
+<span class="w">      </span><span class="c1"># Meeting summary delivery (only used when the teams_pipeline plugin is enabled)</span>
+<span class="w">      </span><span class="nt">delivery_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;graph&quot;</span><span class="w">       </span><span class="c1"># or &quot;incoming_webhook&quot;</span>
+<span class="w">      </span><span class="c1"># For delivery_mode: graph — pick ONE of:</span>
+<span class="w">      </span><span class="nt">chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;19:meeting_...&quot;</span><span class="w">    </span><span class="c1"># post into a Teams chat</span>
+<span class="w">      </span><span class="c1"># team_id: &quot;...&quot;             # OR post into a channel</span>
+<span class="w">      </span><span class="c1"># channel_id: &quot;...&quot;</span>
+<span class="w">      </span><span class="c1"># access_token: &quot;...&quot;        # optional; falls back to MSGRAPH_* app credentials</span>
+<span class="w">      </span><span class="c1"># For delivery_mode: incoming_webhook:</span>
+<span class="w">      </span><span class="c1"># incoming_webhook_url: &quot;https://outlook.office.com/webhook/...&quot;</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Use when</th>
+<th>Trade-off</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>incoming_webhook</code></td>
+<td>Simple "post a summary into this channel" with a static Teams-generated URL.</td>
+<td>No reply threading, no reactions, shows as the webhook's configured identity.</td>
+</tr>
+<tr>
+<td><code>graph</code></td>
+<td>Threaded channel posts or 1:1/group chat posts under the bot's identity via Microsoft Graph.</td>
+<td>Requires the <a href="../../guides/microsoft-graph-app-registration.html">Graph app registration</a> with <code>ChannelMessage.Send</code> (channel) or <code>Chat.ReadWrite.All</code> (chat) application permissions.</td>
+</tr>
+</tbody>
+</table>
+<p>If the <code>teams_pipeline</code> plugin is <strong>not</strong> enabled, these settings are inert — they only wire up when the pipeline runtime binds to the Graph webhook ingress.</p>
+<hr />
+<h2 id="production-deployment">Production Deployment</h2>
+<p>For a permanent server, terminate TLS at a reverse proxy and forward requests to the plain HTTP Hermes listener, normally <code>http://127.0.0.1:3978</code>. Register the proxy's public HTTPS endpoint with Teams:</p>
+<div class="highlight"><pre><span></span><code>teams<span class="w"> </span>app<span class="w"> </span>create<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;Hermes&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--endpoint<span class="w"> </span><span class="s2">&quot;https://your-domain.com/api/messages&quot;</span>
+</code></pre></div>
+
+<p>If you've already created the bot and just need to update the endpoint:</p>
+<div class="highlight"><pre><span></span><code>teams<span class="w"> </span>app<span class="w"> </span>update<span class="w"> </span>--id<span class="w"> </span>&lt;teamsAppId&gt;<span class="w"> </span>--endpoint<span class="w"> </span><span class="s2">&quot;https://your-domain.com/api/messages&quot;</span>
+</code></pre></div>
+
+<p>Make sure the public HTTPS endpoint is reachable from the internet and uses a valid TLS certificate. Teams rejects self-signed certificates. Keep the Hermes listener behind the proxy; port <code>3978</code> does not serve HTTPS itself.</p>
+<hr />
+<h2 id="troubleshooting">Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Problem</th>
+<th>Solution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Can't find a suitable configuration file</code> from <code>docker compose</code></td>
+<td>You are not in the repo that has <code>docker-compose.yml</code>, or you are on a native install — use <code>hermes gateway restart</code> instead, or <code>cd</code> into the clone first</td>
+</tr>
+<tr>
+<td><code>requirements not met</code> / <code>Teams SDK missing</code> / <code>No adapter available for teams</code></td>
+<td>Restart gateway so lazy-install can run, or install into the <strong>Hermes venv</strong>: <code>~/.hermes/hermes-agent/venv/bin/pip install microsoft-teams-apps aiohttp</code>. System <code>pip</code> fails on Ubuntu 24.04 (PEP 668) and would not affect the service anyway</td>
+</tr>
+<tr>
+<td><code>health</code> endpoint works but bot doesn't respond</td>
+<td>Check that your tunnel is still running and the bot's messaging endpoint matches the tunnel URL</td>
+</tr>
+<tr>
+<td>Logs show <code>"UNKNOWN / HTTP/1.0" 400</code> when Teams sends a message</td>
+<td>The tunnel or reverse proxy is forwarding HTTPS to Hermes' plain HTTP listener. Terminate TLS at the proxy and forward HTTP to port <code>3978</code></td>
+</tr>
+<tr>
+<td><code>KeyError: 'teams'</code> in logs</td>
+<td>Restart the container — this is fixed in the current version</td>
+</tr>
+<tr>
+<td>Bot responds with auth errors</td>
+<td>Verify <code>TEAMS_CLIENT_ID</code>, <code>TEAMS_CLIENT_SECRET</code>, and <code>TEAMS_TENANT_ID</code> are all set correctly</td>
+</tr>
+<tr>
+<td><code>No inference provider configured</code></td>
+<td>Check that <code>ANTHROPIC_API_KEY</code> (or another provider key) is set in <code>~/.hermes/.env</code></td>
+</tr>
+<tr>
+<td>Bot receives messages but ignores them</td>
+<td>Your AAD object ID may not be in <code>TEAMS_ALLOWED_USERS</code>. Run <code>teams status --verbose</code> to find it</td>
+</tr>
+<tr>
+<td>Tunnel URL changes on restart</td>
+<td>devtunnel URLs are persistent if you use a named tunnel (<code>devtunnel create hermes-bot</code>). ngrok and cloudflared generate a new URL each run unless you have a paid plan — update the bot endpoint with <code>teams app update</code> when it changes</td>
+</tr>
+<tr>
+<td>Teams shows "This bot is not responding"</td>
+<td>The webhook returned an error. Check <code>docker logs hermes</code> / <code>hermes gateway status -l</code> for tracebacks</td>
+</tr>
+<tr>
+<td><code>[teams] Failed to connect</code> in logs</td>
+<td>The SDK failed to authenticate. Double-check your credentials and that the tenant ID matches the account you used in <code>teams login</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="security">Security</h2>
+<div class="admonition adm-warning"><p class="adm-title">Warning</p>
+<p><strong>Always set <code>TEAMS_ALLOWED_USERS</code></strong> with the AAD object IDs of authorized users. Without this, anyone who can find or install your bot can interact with it.</p>
+<p>Treat <code>TEAMS_CLIENT_SECRET</code> like a password — rotate it periodically via the Azure portal or Teams CLI.</p>
+</div>
+<ul>
+<li>Store credentials in <code>~/.hermes/.env</code> with permissions <code>600</code> (<code>chmod 600 ~/.hermes/.env</code>)</li>
+<li>The bot only accepts messages from users in <code>TEAMS_ALLOWED_USERS</code>; unauthorized messages are silently dropped</li>
+<li>Your public endpoint (<code>/api/messages</code>) is authenticated by the Teams Bot Framework — requests without valid JWTs are rejected</li>
+</ul>
+<h2 id="related-docs">Related Docs</h2>
+<ul>
+<li><a href="teams-meetings.html">Teams Meetings</a></li>
+<li><a href="../../guides/operate-teams-meeting-pipeline.html">Operate the Teams Meeting Pipeline</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/messaging/teams</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-the-bot-responds">How the Bot Responds</a></li>
+<li class="lvl2"><a href="#step-1-install-the-teams-cli">Step 1: Install the Teams CLI</a></li>
+<li class="lvl2"><a href="#step-2-expose-the-webhook-port">Step 2: Expose the Webhook Port</a></li>
+<li class="lvl2"><a href="#step-3-create-the-bot">Step 3: Create the Bot</a></li>
+<li class="lvl2"><a href="#step-4-configure-environment-variables">Step 4: Configure Environment Variables</a></li>
+<li class="lvl2"><a href="#step-5-start-the-gateway">Step 5: Start the Gateway</a></li>
+<li class="lvl2"><a href="#step-6-install-the-app-in-teams">Step 6: Install the App in Teams</a></li>
+<li class="lvl2"><a href="#configuration-reference">Configuration Reference</a></li>
+<li class="lvl3"><a href="#environment-variables">Environment Variables</a></li>
+<li class="lvl3"><a href="#configyaml">config.yaml</a></li>
+<li class="lvl2"><a href="#features">Features</a></li>
+<li class="lvl3"><a href="#interactive-approval-cards">Interactive Approval Cards</a></li>
+<li class="lvl3"><a href="#meeting-summary-delivery-teams-meeting-pipeline">Meeting Summary Delivery (Teams Meeting Pipeline)</a></li>
+<li class="lvl2"><a href="#production-deployment">Production Deployment</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl2"><a href="#security">Security</a></li>
+<li class="lvl2"><a href="#related-docs">Related Docs</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

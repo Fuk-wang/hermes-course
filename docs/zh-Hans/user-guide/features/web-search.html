@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>网页搜索与提取 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/features/web-search</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="网页搜索与提取">网页搜索与提取</h1>
+<p>Hermes Agent 内置两个可供模型调用的网页工具，由多个提供商支持：</p>
+<ul>
+<li><strong><code>web_search</code></strong> — 搜索网页并返回排序结果</li>
+<li><strong><code>web_extract</code></strong> — 从一个或多个 URL 获取并提取可读内容</li>
+</ul>
+<p>两者均通过单一后端选择进行配置。提供商可通过 <code>hermes tools</code> 选择，或直接在 <code>config.yaml</code> 中设置。</p>
+<h2 id="后端">后端</h2>
+<table>
+<thead>
+<tr>
+<th>提供商</th>
+<th>环境变量</th>
+<th>搜索</th>
+<th>提取</th>
+<th>免费层级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Firecrawl</strong>（默认）</td>
+<td><code>FIRECRAWL_API_KEY</code></td>
+<td>✔</td>
+<td>✔</td>
+<td>500 积分/月</td>
+</tr>
+<tr>
+<td><strong>SearXNG</strong></td>
+<td><code>SEARXNG_URL</code></td>
+<td>✔</td>
+<td>—</td>
+<td>✔ 免费（自托管）</td>
+</tr>
+<tr>
+<td><strong>Brave Search（免费层级）</strong></td>
+<td><code>BRAVE_SEARCH_API_KEY</code></td>
+<td>✔</td>
+<td>—</td>
+<td>2 000 次查询/月</td>
+</tr>
+<tr>
+<td><strong>DDGS (DuckDuckGo)</strong></td>
+<td>—（无需密钥）</td>
+<td>✔</td>
+<td>—</td>
+<td>✔ 免费</td>
+</tr>
+<tr>
+<td><strong>Tavily</strong></td>
+<td><code>TAVILY_API_KEY</code></td>
+<td>✔</td>
+<td>✔</td>
+<td>1 000 次搜索/月</td>
+</tr>
+<tr>
+<td><strong>Exa</strong></td>
+<td><code>EXA_API_KEY</code></td>
+<td>✔</td>
+<td>✔</td>
+<td>1 000 次搜索/月</td>
+</tr>
+<tr>
+<td><strong>Parallel</strong></td>
+<td><code>PARALLEL_API_KEY</code></td>
+<td>✔</td>
+<td>✔</td>
+<td>付费</td>
+</tr>
+<tr>
+<td><strong>xAI (Grok)</strong></td>
+<td><code>XAI_API_KEY</code> 或 <code>hermes auth login xai-oauth</code></td>
+<td>✔</td>
+<td>—</td>
+<td>付费（SuperGrok 或按 token 计费）</td>
+</tr>
+</tbody>
+</table>
+<p>Brave Search、DDGS 和 xAI 均为<strong>仅搜索</strong>——如果同时需要 <code>web_extract</code>，可将其中任意一个与 Firecrawl/Tavily/Exa/Parallel 配合使用。DDGS 底层使用 <a href="https://pypi.org/project/ddgs/" class="ext" target="_blank" rel="noopener"><code>ddgs</code> Python 包</a>；若尚未安装，请运行 <code>pip install ddgs</code>（或让 Hermes 在首次使用时懒加载安装）。xAI 通过 Responses API 运行 Grok 服务端的 <code>web_search</code> 工具——结果由 LLM 生成而非基于索引，因此标题、描述和 URL 选择均为模型输出（参见下方<a href="#xai-grok">信任模型说明</a>）。</p>
+<p><strong>按能力拆分：</strong> 搜索和提取可分别使用不同的提供商——例如搜索使用 SearXNG（免费），提取使用 Firecrawl。详见下方<a href="#per-capability-configuration">按能力配置</a>。</p>
+<div class="admonition adm-tip"><p class="adm-title">Nous 订阅用户</p>
+<p>如果您拥有付费 <a href="https://portal.nousresearch.com" class="ext" target="_blank" rel="noopener">Nous Portal</a> 订阅，网页搜索和提取可通过 <strong><a href="tool-gateway.html">Tool Gateway</a></strong> 使用托管的 Firecrawl——无需 API 密钥。新安装可运行 <code>hermes setup --portal</code> 登录并一次性开启所有 gateway 工具；现有安装可通过 <code>hermes tools</code> 单独开启网页功能。</p>
+</div>
+<hr />
+<h2 id="web_extract-如何处理长页面"><code>web_extract</code> 如何处理长页面</h2>
+<p>后端返回的原始页面 markdown 可能非常庞大（论坛帖子、文档站点、带嵌入评论的新闻文章）。为保持上下文窗口可用，<code>web_extract</code> 采用<strong>确定性字符预算</strong> —— 不涉及任何 LLM 摘要：</p>
+<table>
+<thead>
+<tr>
+<th>页面大小（字符数）</th>
+<th>处理方式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>预算以内（默认 15 000）</td>
+<td>原样返回 —— 完整 markdown 直达 agent</td>
+</tr>
+<tr>
+<td>超出预算</td>
+<td>头+尾窗口（约 75% 头部 / 25% 尾部，按 markdown 行边界切分），并附带明确的 <code>[TRUNCATED]</code> 尾注。完整的干净文本存储到磁盘，尾注告知 agent 文件路径以及分页读取被省略中间部分的确切 <code>read_file</code> 调用</td>
+</tr>
+<tr>
+<td>超过 2 000 000</td>
+<td>存储的文本上限为 2 MB</td>
+</tr>
+</tbody>
+</table>
+<p>每页预算可通过 <code>config.yaml</code> 中的 <code>web.extract_char_limit</code> 配置（默认 <code>15000</code>，范围限制在 2 000–500 000），agent 也可以通过工具的 <code>char_limit</code> 参数按调用提高。</p>
+<h3 id="当截断带来不便时">当截断带来不便时</h3>
+<p>如果您明确需要实时 DOM 而非提取的 markdown —— 例如提取内容很少的 JS 密集页面 —— 请改用 <code>browser_navigate</code> + <code>browser_snapshot</code>。浏览器工具返回实时无障碍树（超大页面受其自身快照上限约束）。</p>
+<hr />
+<h2 id="设置">设置</h2>
+<h3 id="通过-hermes-tools-快速设置">通过 <code>hermes tools</code> 快速设置</h3>
+<p>运行 <code>hermes tools</code>，导航至 <strong>Web Search &amp; Extract</strong>，选择一个提供商。向导会提示输入所需的 URL 或 API 密钥，并写入您的配置。</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>tools
+</code></pre></div>
+
+<hr />
+<h3 id="firecrawl默认">Firecrawl（默认）</h3>
+<p>功能完整的搜索和提取。推荐大多数用户使用。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">FIRECRAWL_API_KEY</span><span class="o">=</span>fc-your-key-here
+</code></pre></div>
+
+<p>在 <a href="https://firecrawl.dev" class="ext" target="_blank" rel="noopener">firecrawl.dev</a> 获取密钥。免费层级包含每月 500 积分。</p>
+<p><strong>自托管 Firecrawl：</strong> 指向您自己的实例而非云端 API：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">FIRECRAWL_API_URL</span><span class="o">=</span>http://localhost:3002
+</code></pre></div>
+
+<p>设置 <code>FIRECRAWL_API_URL</code> 后，API 密钥为可选项（使用 <code>USE_DB_AUTHENTICATION=false</code> 禁用服务器认证）。</p>
+<hr />
+<h3 id="searxng免费自托管">SearXNG（免费，自托管）</h3>
+<p>SearXNG 是一个注重隐私的开源元搜索引擎，聚合来自 70 多个搜索引擎的结果。<strong>无需 API 密钥</strong>——只需将 Hermes 指向一个运行中的 SearXNG 实例。</p>
+<p>SearXNG 为<strong>仅搜索</strong>——<code>web_extract</code> 需要单独的提取提供商。</p>
+<h4 id="方案-a--使用-docker-自托管推荐">方案 A — 使用 Docker 自托管（推荐）</h4>
+<p>这为您提供无速率限制的私有实例。</p>
+<p><strong>1. 创建工作目录：</strong></p>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/searxng/searxng
+<span class="nb">cd</span><span class="w"> </span>~/searxng
+</code></pre></div>
+
+<p><strong>2. 编写 <code>docker-compose.yml</code>：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/searxng/docker-compose.yml</span>
+<span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">searxng</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">searxng/searxng:latest</span>
+<span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">searxng</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8888:8080&quot;</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./searxng:/etc/searxng:rw</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SEARXNG_BASE_URL=http://localhost:8888/</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+</code></pre></div>
+
+<p><strong>3. 启动容器：</strong></p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
+</code></pre></div>
+
+<p><strong>4. 启用 JSON API 格式：</strong></p>
+<p>SearXNG 默认禁用 JSON 输出。复制生成的配置并启用它：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 从容器中复制自动生成的配置</span>
+docker<span class="w"> </span>cp<span class="w"> </span>searxng:/etc/searxng/settings.yml<span class="w"> </span>~/searxng/searxng/settings.yml
+</code></pre></div>
+
+<p>打开 <code>~/searxng/searxng/settings.yml</code>，找到 <code>formats</code> 块（约第 84 行）：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 修改前（默认——JSON 已禁用）：</span>
+<span class="nt">formats</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">html</span>
+
+<span class="c1"># 修改后（为 Hermes 启用 JSON）：</span>
+<span class="nt">formats</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">html</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">json</span>
+</code></pre></div>
+
+<p><strong>5. 重启以应用更改：</strong></p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>cp<span class="w"> </span>~/searxng/searxng/settings.yml<span class="w"> </span>searxng:/etc/searxng/settings.yml
+docker<span class="w"> </span>restart<span class="w"> </span>searxng
+</code></pre></div>
+
+<p><strong>6. 验证是否正常工作：</strong></p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;http://localhost:8888/search?q=test&amp;format=json&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;import sys,json; d=json.load(sys.stdin); print(f&#39;{len(d[\&quot;results\&quot;])} results&#39;)&quot;</span>
+</code></pre></div>
+
+<p>您应该看到类似 <code>10 results</code> 的输出。如果收到 <code>403 Forbidden</code>，说明 JSON 格式仍未启用——请重新检查第 4 步。</p>
+<p><strong>7. 配置 Hermes：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">SEARXNG_URL</span><span class="o">=</span>http://localhost:8888
+</code></pre></div>
+
+<p>然后在 <code>~/.hermes/config.yaml</code> 中选择 SearXNG 作为搜索后端：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">search_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;searxng&quot;</span>
+</code></pre></div>
+
+<p>或通过 <code>hermes tools</code> → Web Search &amp; Extract → SearXNG 设置。</p>
+<hr />
+<h4 id="方案-b--使用公共实例">方案 B — 使用公共实例</h4>
+<p>公共 SearXNG 实例列表见 <a href="https://searx.space/" class="ext" target="_blank" rel="noopener">searx.space</a>。筛选<strong>已启用 JSON 格式</strong>的实例（表格中有显示）。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">SEARXNG_URL</span><span class="o">=</span>https://searx.example.com
+</code></pre></div>
+
+<div class="admonition adm-caution"><p class="adm-title">公共实例</p>
+<p>公共实例有速率限制、可用性不稳定，且可能随时禁用 JSON 格式。生产环境强烈建议自托管。</p>
+</div>
+<hr />
+<h4 id="将-searxng-与提取提供商配合使用">将 SearXNG 与提取提供商配合使用</h4>
+<p>SearXNG 负责搜索；<code>web_extract</code> 需要单独的提供商。使用按能力配置的键：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">search_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;searxng&quot;</span>
+<span class="w">  </span><span class="nt">extract_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;firecrawl&quot;</span><span class="w">   </span><span class="c1"># 或 tavily、exa、parallel</span>
+</code></pre></div>
+
+<p>使用此配置，Hermes 对所有搜索查询使用 SearXNG，对 URL 提取使用 Firecrawl——将免费搜索与高质量提取相结合。</p>
+<hr />
+<h3 id="tavily">Tavily</h3>
+<p>针对 AI 优化的搜索和提取，免费层级慷慨。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">TAVILY_API_KEY</span><span class="o">=</span>tvly-your-key-here
+</code></pre></div>
+
+<p>在 <a href="https://app.tavily.com/home" class="ext" target="_blank" rel="noopener">app.tavily.com</a> 获取密钥。免费层级包含每月 1 000 次搜索。</p>
+<hr />
+<h3 id="exa">Exa</h3>
+<p>具有语义理解的神经搜索。适合研究和查找概念相关内容。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">EXA_API_KEY</span><span class="o">=</span>your-exa-key-here
+</code></pre></div>
+
+<p>在 <a href="https://exa.ai" class="ext" target="_blank" rel="noopener">exa.ai</a> 获取密钥。免费层级包含每月 1 000 次搜索。</p>
+<hr />
+<h3 id="parallel">Parallel</h3>
+<p>具备深度研究能力的 AI 原生搜索和提取。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">PARALLEL_API_KEY</span><span class="o">=</span>your-parallel-key-here
+</code></pre></div>
+
+<p>在 <a href="https://parallel.ai" class="ext" target="_blank" rel="noopener">parallel.ai</a> 申请访问权限。</p>
+<hr />
+<h3 id="xai-grok">xAI (Grok)</h3>
+<p>通过 Responses API 将 <code>web_search</code> 路由至 Grok 服务端的 <a href="https://docs.x.ai/developers/tools/web-search" class="ext" target="_blank" rel="noopener">web_search 工具</a>。Grok 执行实际搜索并以结构化 JSON 返回最佳结果。</p>
+<p>支持两种凭证路径——无需新的环境变量，无需新的设置向导：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env（环境变量路径）</span>
+<span class="nv">XAI_API_KEY</span><span class="o">=</span>sk-xai-your-key-here
+</code></pre></div>
+
+<p>或对于 SuperGrok 订阅用户：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>auth<span class="w"> </span>login<span class="w"> </span>xai-oauth
+</code></pre></div>
+
+<p>然后选择 xAI 作为搜索后端：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;xai&quot;</span>
+</code></pre></div>
+
+<p><strong>可选配置项：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;xai&quot;</span>
+<span class="w">  </span><span class="nt">xai</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">grok-build-0.1</span><span class="w">        </span><span class="c1"># web_search 所需的推理模型（默认）</span>
+<span class="w">    </span><span class="nt">allowed_domains</span><span class="p">:</span><span class="w">             </span><span class="c1"># 可选，最多 5 个——与 excluded_domains 互斥</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">arxiv.org</span>
+<span class="w">    </span><span class="nt">excluded_domains</span><span class="p">:</span><span class="w">            </span><span class="c1"># 可选，最多 5 个</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">example-spam.com</span>
+<span class="w">    </span><span class="nt">timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">90</span><span class="w">                  </span><span class="c1"># 秒（默认）</span>
+</code></pre></div>
+
+<p><strong>仅搜索</strong>——如果同时需要 <code>web_extract</code>，请与 Firecrawl / Tavily / Exa / Parallel 配合使用。遇到 401 时，提供商会执行一次强制 OAuth token 刷新并重试（覆盖窗口中途吊销和主动过期检查无法解码的不透明 token）；环境变量凭证跳过重试。</p>
+<div class="admonition adm-caution"><p class="adm-title">信任模型</p>
+<p>与基于索引的提供商（Brave、Tavily、Exa）返回逐字搜索引擎结果不同，xAI 是由 LLM 选择要呈现的 URL 并自行撰写标题和描述。查询的<em>内容</em>会影响输出，因此恶意构造的查询（例如通过 agent 获取的不可信上游输入注入）原则上可以引导 Grok 输出攻击者指定的 URL。对返回的 URL 应与对待任何模型生成链接一样——在获取前进行验证，尤其是当查询来自不可信输入时。</p>
+</div>
+<hr />
+<h2 id="配置">配置</h2>
+<h3 id="单一后端">单一后端</h3>
+<p>为所有网页功能设置一个提供商：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;searxng&quot;</span><span class="w">   </span><span class="c1"># firecrawl | searxng | brave-free | ddgs | tavily | exa | parallel | xai</span>
+</code></pre></div>
+
+<h3 id="per-capability-configuration">按能力配置</h3>
+<p>搜索和提取使用不同的提供商。这允许您将免费搜索（SearXNG）与付费提取提供商组合使用，反之亦然：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">search_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;searxng&quot;</span><span class="w">     </span><span class="c1"># 由 web_search 使用</span>
+<span class="w">  </span><span class="nt">extract_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;firecrawl&quot;</span><span class="w">  </span><span class="c1"># 由 web_extract 使用</span>
+</code></pre></div>
+
+<p>当按能力键为空时，两者均回退到 <code>web.backend</code>。当 <code>web.backend</code> 也为空时，后端根据存在的 API 密钥/URL 自动检测。</p>
+<p><strong>优先级顺序（按能力）：</strong>
+1. <code>web.search_backend</code> / <code>web.extract_backend</code>（显式按能力配置）
+2. <code>web.backend</code>（共享回退）
+3. 从环境变量自动检测</p>
+<h3 id="自动检测">自动检测</h3>
+<p>如果未显式配置后端，Hermes 根据已设置的凭证选择第一个可用的后端：</p>
+<table>
+<thead>
+<tr>
+<th>存在的凭证</th>
+<th>自动选择的后端</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FIRECRAWL_API_KEY</code> 或 <code>FIRECRAWL_API_URL</code></td>
+<td>firecrawl</td>
+</tr>
+<tr>
+<td><code>PARALLEL_API_KEY</code></td>
+<td>parallel</td>
+</tr>
+<tr>
+<td><code>TAVILY_API_KEY</code></td>
+<td>tavily</td>
+</tr>
+<tr>
+<td><code>EXA_API_KEY</code></td>
+<td>exa</td>
+</tr>
+<tr>
+<td><code>SEARXNG_URL</code></td>
+<td>searxng</td>
+</tr>
+</tbody>
+</table>
+<p>xAI Web Search <strong>不在</strong>自动检测链中——设置了 <code>XAI_API_KEY</code>（或通过 xAI Grok OAuth 登录）不会自动将网页流量路由至 xAI，因为这些凭证同时用于推理/TTS/图像生成，用户可能希望为网页使用不同的后端。请通过 <code>web.backend: "xai"</code> 显式启用。</p>
+<hr />
+<h2 id="验证设置">验证设置</h2>
+<p>运行 <code>hermes setup</code> 查看检测到的网页后端：</p>
+<div class="highlight"><pre><span></span><code>✅ Web Search &amp; Extract (searxng)
+</code></pre></div>
+
+<p>或通过 CLI 检查：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 激活 venv 并直接运行网页工具模块</span>
+<span class="nb">source</span><span class="w"> </span>~/.hermes/hermes-agent/.venv/bin/activate
+python<span class="w"> </span>-m<span class="w"> </span>tools.web_tools
+</code></pre></div>
+
+<p>这将打印活动后端及其状态：</p>
+<div class="highlight"><pre><span></span><code>✅ Web backend: searxng
+   Using SearXNG (search only): http://localhost:8888
+</code></pre></div>
+
+<hr />
+<h2 id="故障排查">故障排查</h2>
+<h3 id="web_search-返回-success-false"><code>web_search</code> 返回 <code>{"success": false}</code></h3>
+<ul>
+<li>检查 <code>SEARXNG_URL</code> 是否可达：<code>curl -s "http://localhost:8888/search?q=test&amp;format=json"</code></li>
+<li>如果收到 HTTP 403，说明 JSON 格式已禁用——在 <code>settings.yml</code> 的 <code>formats</code> 列表中添加 <code>json</code> 并重启</li>
+<li>如果收到连接错误，容器可能未运行：<code>docker ps | grep searxng</code></li>
+</ul>
+<h3 id="web_extract-提示search-only-backend"><code>web_extract</code> 提示"search-only backend"</h3>
+<p>SearXNG 无法提取 URL 内容。将 <code>web.extract_backend</code> 设置为支持提取的提供商：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">search_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;searxng&quot;</span>
+<span class="w">  </span><span class="nt">extract_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;firecrawl&quot;</span><span class="w">  </span><span class="c1"># 或 tavily / exa / parallel</span>
+</code></pre></div>
+
+<h3 id="searxng-返回-0-条结果">SearXNG 返回 0 条结果</h3>
+<p>部分公共实例禁用了某些搜索引擎或分类。请尝试：
+- 换一个查询词
+- 从 <a href="https://searx.space/" class="ext" target="_blank" rel="noopener">searx.space</a> 换一个公共实例
+- 自托管实例以获得稳定结果</p>
+<h3 id="公共实例遭遇速率限制">公共实例遭遇速率限制</h3>
+<p>切换到自托管实例（参见上方<a href="../../../user-guide/features/web-search.html#option-a--self-host-with-docker-recommended" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">方案 A</a>）。使用 Docker，您自己的实例没有速率限制。</p>
+<h3 id="web_extract-返回截断内容并附有-truncated-尾注"><code>web_extract</code> 返回截断内容并附有 <code>[TRUNCATED]</code> 尾注</h3>
+<p>对于超出字符预算的页面这是预期行为。尾注会给出保存完整干净文本的磁盘文件，以及分页读取被省略中间部分的确切 <code>read_file</code> 调用。若要内联查看更多内容，请在 <code>config.yaml</code> 中调大 <code>web.extract_char_limit</code>，或在调用时传入更大的 <code>char_limit</code>。</p>
+<hr />
+<h2 id="可选技能searxng-search">可选技能：<code>searxng-search</code></h2>
+<p>对于需要直接通过 <code>curl</code> 使用 SearXNG 的 agent（例如作为网页工具集不可用时的回退），请安装 <code>searxng-search</code> 可选技能：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>official/research/searxng-search
+</code></pre></div>
+
+<p>这将添加一个技能，教 agent 如何：
+- 通过 <code>curl</code> 或 Python 调用 SearXNG JSON API
+- 按分类筛选（<code>general</code>、<code>news</code>、<code>science</code> 等）
+- 处理分页和错误情况
+- 在 SearXNG 不可达时优雅降级</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/features/web-search</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#后端">后端</a></li>
+<li class="lvl2"><a href="#web_extract-如何处理长页面">web_extract 如何处理长页面</a></li>
+<li class="lvl3"><a href="#当截断带来不便时">当截断带来不便时</a></li>
+<li class="lvl2"><a href="#设置">设置</a></li>
+<li class="lvl3"><a href="#通过-hermes-tools-快速设置">通过 hermes tools 快速设置</a></li>
+<li class="lvl3"><a href="#firecrawl默认">Firecrawl（默认）</a></li>
+<li class="lvl3"><a href="#searxng免费自托管">SearXNG（免费，自托管）</a></li>
+<li class="lvl3"><a href="#tavily">Tavily</a></li>
+<li class="lvl3"><a href="#exa">Exa</a></li>
+<li class="lvl3"><a href="#parallel">Parallel</a></li>
+<li class="lvl3"><a href="#xai-grok">xAI (Grok)</a></li>
+<li class="lvl2"><a href="#配置">配置</a></li>
+<li class="lvl3"><a href="#单一后端">单一后端</a></li>
+<li class="lvl3"><a href="#per-capability-configuration">按能力配置</a></li>
+<li class="lvl3"><a href="#自动检测">自动检测</a></li>
+<li class="lvl2"><a href="#验证设置">验证设置</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl3"><a href="#web_search-返回-success-false">web_search 返回 {&quot;success&quot;: false}</a></li>
+<li class="lvl3"><a href="#web_extract-提示search-only-backend">web_extract 提示&quot;search-only backend&quot;</a></li>
+<li class="lvl3"><a href="#searxng-返回-0-条结果">SearXNG 返回 0 条结果</a></li>
+<li class="lvl3"><a href="#公共实例遭遇速率限制">公共实例遭遇速率限制</a></li>
+<li class="lvl3"><a href="#web_extract-返回截断内容并附有-truncated-尾注">web_extract 返回截断内容并附有 [TRUNCATED] 尾注</a></li>
+<li class="lvl2"><a href="#可选技能searxng-search">可选技能：searxng-search</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

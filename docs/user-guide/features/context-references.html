@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Context References · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/context-references</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="context-references">Context References</h1>
+<p>Type <code>@</code> followed by a reference to inject content directly into your message. Hermes expands the reference inline and appends the content under an <code>--- Attached Context ---</code> section.</p>
+<h2 id="supported-references">Supported References</h2>
+<table>
+<thead>
+<tr>
+<th>Syntax</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>@file:path/to/file.py</code></td>
+<td>Inject file contents</td>
+</tr>
+<tr>
+<td><code>@file:path/to/file.py:10-25</code></td>
+<td>Inject specific line range (1-indexed, inclusive)</td>
+</tr>
+<tr>
+<td><code>@folder:path/to/dir</code></td>
+<td>Inject directory tree listing with file metadata</td>
+</tr>
+<tr>
+<td><code>@diff</code></td>
+<td>Inject <code>git diff</code> (unstaged working tree changes)</td>
+</tr>
+<tr>
+<td><code>@staged</code></td>
+<td>Inject <code>git diff --staged</code> (staged changes)</td>
+</tr>
+<tr>
+<td><code>@git:5</code></td>
+<td>Inject last N commits with patches (max 10)</td>
+</tr>
+<tr>
+<td><code>@url:https://example.com</code></td>
+<td>Fetch and inject web page content</td>
+</tr>
+</tbody>
+</table>
+<h2 id="usage-examples">Usage Examples</h2>
+<div class="highlight"><pre><span></span><code>Review @file:src/main.py and suggest improvements
+
+What changed? @diff
+
+Compare @file:old_config.yaml and @file:new_config.yaml
+
+What&#39;s in @folder:src/components?
+
+Summarize this article @url:https://arxiv.org/abs/2301.00001
+</code></pre></div>
+
+<p>Multiple references work in a single message:</p>
+<div class="highlight"><pre><span></span><code>Check @file:main.py, and also @file:test.py.
+</code></pre></div>
+
+<p>Trailing punctuation (<code>,</code>, <code>.</code>, <code>;</code>, <code>!</code>, <code>?</code>) is automatically stripped from reference values.</p>
+<h2 id="cli-tab-completion">CLI Tab Completion</h2>
+<p>In the interactive CLI, typing <code>@</code> triggers autocomplete:</p>
+<ul>
+<li><code>@</code> shows all reference types (<code>@diff</code>, <code>@staged</code>, <code>@file:</code>, <code>@folder:</code>, <code>@git:</code>, <code>@url:</code>)</li>
+<li><code>@file:</code> and <code>@folder:</code> trigger filesystem path completion with file size metadata</li>
+<li>Bare <code>@</code> followed by partial text shows matching files and folders from the current directory</li>
+</ul>
+<h2 id="line-ranges">Line Ranges</h2>
+<p>The <code>@file:</code> reference supports line ranges for precise content injection:</p>
+<div class="highlight"><pre><span></span><code>@file:src/main.py:42        # Single line 42
+@file:src/main.py:10-25     # Lines 10 through 25 (inclusive)
+</code></pre></div>
+
+<p>Lines are 1-indexed. Invalid ranges are silently ignored (full file is returned).</p>
+<h2 id="size-limits">Size Limits</h2>
+<p>Context references are bounded to prevent overwhelming the model's context window:</p>
+<table>
+<thead>
+<tr>
+<th>Threshold</th>
+<th>Value</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Soft limit</td>
+<td>25% of context length</td>
+<td>Warning appended, expansion proceeds</td>
+</tr>
+<tr>
+<td>Hard limit</td>
+<td>50% of context length</td>
+<td>Expansion refused, original message returned unchanged</td>
+</tr>
+<tr>
+<td>Folder entries</td>
+<td>200 files max</td>
+<td>Excess entries replaced with <code>- ...</code></td>
+</tr>
+<tr>
+<td>Git commits</td>
+<td>10 max</td>
+<td><code>@git:N</code> clamped to range [1, 10]</td>
+</tr>
+</tbody>
+</table>
+<h2 id="security">Security</h2>
+<h3 id="sensitive-path-blocking">Sensitive Path Blocking</h3>
+<p>These paths are always blocked from <code>@file:</code> references to prevent credential exposure:</p>
+<ul>
+<li>SSH keys and config: <code>~/.ssh/id_rsa</code>, <code>~/.ssh/id_ed25519</code>, <code>~/.ssh/authorized_keys</code>, <code>~/.ssh/config</code></li>
+<li>Shell profiles: <code>~/.bashrc</code>, <code>~/.zshrc</code>, <code>~/.profile</code>, <code>~/.bash_profile</code>, <code>~/.zprofile</code></li>
+<li>Credential files: <code>~/.netrc</code>, <code>~/.pgpass</code>, <code>~/.npmrc</code>, <code>~/.pypirc</code></li>
+<li>Hermes env: <code>$HERMES_HOME/.env</code></li>
+</ul>
+<p>These directories are fully blocked (any file inside):
+- <code>~/.ssh/</code>, <code>~/.aws/</code>, <code>~/.gnupg/</code>, <code>~/.kube/</code>, <code>$HERMES_HOME/skills/.hub/</code></p>
+<h3 id="path-traversal-protection">Path Traversal Protection</h3>
+<p>All paths are resolved relative to the working directory. References that resolve outside the allowed workspace root are rejected.</p>
+<h3 id="binary-file-detection">Binary File Detection</h3>
+<p>Binary files are detected via MIME type and null-byte scanning. Known text extensions (<code>.py</code>, <code>.md</code>, <code>.json</code>, <code>.yaml</code>, <code>.toml</code>, <code>.js</code>, <code>.ts</code>, etc.) bypass MIME-based detection. Binary files are rejected with a warning.</p>
+<h2 id="platform-availability">Platform Availability</h2>
+<p>Context references are primarily a <strong>CLI feature</strong>. They work in the interactive CLI where <code>@</code> triggers tab completion and references are expanded before the message is sent to the agent.</p>
+<p>In <strong>messaging platforms</strong> (Telegram, Discord, etc.), the <code>@</code> syntax is not expanded by the gateway — messages are passed through as-is. The agent itself can still reference files via the <code>read_file</code>, <code>search_files</code>, and <code>web_extract</code> tools.</p>
+<h2 id="interaction-with-context-compression">Interaction with Context Compression</h2>
+<p>When conversation context is compressed, the expanded reference content is included in the compression summary. This means:</p>
+<ul>
+<li>Large file contents injected via <code>@file:</code> contribute to context usage</li>
+<li>If the conversation is later compressed, the file content is summarized (not preserved verbatim)</li>
+<li>For very large files, consider using line ranges (<code>@file:main.py:100-200</code>) to inject only relevant sections</li>
+</ul>
+<h2 id="common-patterns">Common Patterns</h2>
+<div class="highlight"><pre><span></span><code># Code review workflow
+Review @diff and check for security issues
+
+# Debug with context
+This test is failing. Here&#39;s the test @file:tests/test_auth.py
+and the implementation @file:src/auth.py:50-80
+
+# Project exploration
+What does this project do? @folder:src @file:README.md
+
+# Research
+Compare the approaches in @url:https://arxiv.org/abs/2301.00001
+and @url:https://arxiv.org/abs/2301.00002
+</code></pre></div>
+
+<h2 id="error-handling">Error Handling</h2>
+<p>Invalid references produce inline warnings rather than failures:</p>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>File not found</td>
+<td>Warning: "file not found"</td>
+</tr>
+<tr>
+<td>Binary file</td>
+<td>Warning: "binary files are not supported"</td>
+</tr>
+<tr>
+<td>Folder not found</td>
+<td>Warning: "folder not found"</td>
+</tr>
+<tr>
+<td>Git command fails</td>
+<td>Warning with git stderr</td>
+</tr>
+<tr>
+<td>URL returns no content</td>
+<td>Warning: "no content extracted"</td>
+</tr>
+<tr>
+<td>Sensitive path</td>
+<td>Warning: "path is a sensitive credential file"</td>
+</tr>
+<tr>
+<td>Path outside workspace</td>
+<td>Warning: "path is outside the allowed workspace"</td>
+</tr>
+</tbody>
+</table>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/context-references</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#supported-references">Supported References</a></li>
+<li class="lvl2"><a href="#usage-examples">Usage Examples</a></li>
+<li class="lvl2"><a href="#cli-tab-completion">CLI Tab Completion</a></li>
+<li class="lvl2"><a href="#line-ranges">Line Ranges</a></li>
+<li class="lvl2"><a href="#size-limits">Size Limits</a></li>
+<li class="lvl2"><a href="#security">Security</a></li>
+<li class="lvl3"><a href="#sensitive-path-blocking">Sensitive Path Blocking</a></li>
+<li class="lvl3"><a href="#path-traversal-protection">Path Traversal Protection</a></li>
+<li class="lvl3"><a href="#binary-file-detection">Binary File Detection</a></li>
+<li class="lvl2"><a href="#platform-availability">Platform Availability</a></li>
+<li class="lvl2"><a href="#interaction-with-context-compression">Interaction with Context Compression</a></li>
+<li class="lvl2"><a href="#common-patterns">Common Patterns</a></li>
+<li class="lvl2"><a href="#error-handling">Error Handling</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

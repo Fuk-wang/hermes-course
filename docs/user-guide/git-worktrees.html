@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Git Worktrees · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/git-worktrees</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="git-worktrees">Git Worktrees</h1>
+<p>Hermes Agent is often used on large, long‑lived repositories. When you want to:</p>
+<ul>
+<li>Run <strong>multiple agents in parallel</strong> on the same project, or</li>
+<li>Keep experimental refactors isolated from your main branch,</li>
+</ul>
+<p>Git <strong>worktrees</strong> are the safest way to give each agent its own checkout without duplicating the entire repository.</p>
+<p>This page shows how to combine worktrees with Hermes so each session has a clean, isolated working directory.</p>
+<h2 id="why-use-worktrees-with-hermes">Why Use Worktrees with Hermes?</h2>
+<p>Hermes treats the <strong>current working directory</strong> as the project root:</p>
+<ul>
+<li>CLI: the directory where you run <code>hermes</code> or <code>hermes chat</code></li>
+<li>Messaging gateways: the directory set by <code>terminal.cwd</code> in <code>~/.hermes/config.yaml</code></li>
+</ul>
+<p>If you run multiple agents in the <strong>same checkout</strong>, their changes can interfere with each other:</p>
+<ul>
+<li>One agent may delete or rewrite files the other is using.</li>
+<li>It becomes harder to understand which changes belong to which experiment.</li>
+</ul>
+<p>With worktrees, each agent gets:</p>
+<ul>
+<li>Its <strong>own branch and working directory</strong></li>
+<li>Its <strong>own Checkpoint Manager history</strong> for <code>/rollback</code></li>
+</ul>
+<p>See also: <a href="checkpoints-and-rollback.html">Checkpoints and /rollback</a>.</p>
+<h2 id="quick-start-creating-a-worktree">Quick Start: Creating a Worktree</h2>
+<h3 id="from-inside-a-session-worktree-new">From inside a session: <code>/worktree new</code></h3>
+<p>The fastest path (inspired by Copilot CLI's <code>/worktree new</code>): from an
+interactive CLI session, run</p>
+<div class="highlight"><pre><span></span><code>/worktree new my-experiment
+</code></pre></div>
+
+<p>Hermes creates <code>.worktrees/my-experiment/</code> inside the repo (branch
+<code>hermes/my-experiment</code>, based on the freshly-fetched remote tip unless
+<code>worktree_sync: false</code>), and retargets the session's terminal and file tools
+into it — no restart needed. Omit the name to get a random <code>hermes-&lt;id&gt;</code>
+tree. <code>/worktree</code> alone shows the active tree; <code>/worktree list</code> lists all of
+them. On exit the tree is kept only if it has unpushed commits, exactly like
+<code>hermes -w</code>.</p>
+<h3 id="manually-with-git">Manually with git</h3>
+<p>From your main repository (containing <code>.git/</code>), create a new worktree for a feature branch:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># From the main repo root</span>
+<span class="nb">cd</span><span class="w"> </span>/path/to/your/repo
+
+<span class="c1"># Create a new branch and worktree in ../repo-feature</span>
+git<span class="w"> </span>worktree<span class="w"> </span>add<span class="w"> </span>../repo-feature<span class="w"> </span>feature/hermes-experiment
+</code></pre></div>
+
+<p>This creates:</p>
+<ul>
+<li>A new directory: <code>../repo-feature</code></li>
+<li>A new branch: <code>feature/hermes-experiment</code> checked out in that directory</li>
+</ul>
+<p>Now you can <code>cd</code> into the new worktree and run Hermes there:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>../repo-feature
+
+<span class="c1"># Start Hermes in the worktree</span>
+hermes
+</code></pre></div>
+
+<p>Hermes will:</p>
+<ul>
+<li>See <code>../repo-feature</code> as the project root.</li>
+<li>Use that directory for context files, code edits, and tools.</li>
+<li>Use a <strong>separate checkpoint history</strong> for <code>/rollback</code> scoped to this worktree.</li>
+</ul>
+<h2 id="running-multiple-agents-in-parallel">Running Multiple Agents in Parallel</h2>
+<p>You can create multiple worktrees, each with its own branch:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>/path/to/your/repo
+
+git<span class="w"> </span>worktree<span class="w"> </span>add<span class="w"> </span>../repo-experiment-a<span class="w"> </span>feature/hermes-a
+git<span class="w"> </span>worktree<span class="w"> </span>add<span class="w"> </span>../repo-experiment-b<span class="w"> </span>feature/hermes-b
+</code></pre></div>
+
+<p>In separate terminals:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Terminal 1</span>
+<span class="nb">cd</span><span class="w"> </span>../repo-experiment-a
+hermes
+
+<span class="c1"># Terminal 2</span>
+<span class="nb">cd</span><span class="w"> </span>../repo-experiment-b
+hermes
+</code></pre></div>
+
+<p>Each Hermes process:</p>
+<ul>
+<li>Works on its own branch (<code>feature/hermes-a</code> vs <code>feature/hermes-b</code>).</li>
+<li>Writes checkpoints under a different shadow repo hash (derived from the worktree path).</li>
+<li>Can use <code>/rollback</code> independently without affecting the other.</li>
+</ul>
+<p>This is especially useful when:</p>
+<ul>
+<li>Running batch refactors.</li>
+<li>Trying different approaches to the same task.</li>
+<li>Pairing CLI + gateway sessions against the same upstream repo.</li>
+</ul>
+<h2 id="cleaning-up-worktrees-safely">Cleaning Up Worktrees Safely</h2>
+<p>When you are done with an experiment:</p>
+<ol>
+<li>Decide whether to keep or discard the work.</li>
+<li>If you want to keep it:</li>
+<li>Merge the branch into your main branch as usual.</li>
+<li>Remove the worktree:</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>/path/to/your/repo
+
+<span class="c1"># Remove the worktree directory and its reference</span>
+git<span class="w"> </span>worktree<span class="w"> </span>remove<span class="w"> </span>../repo-feature
+</code></pre></div>
+
+<p>Notes:</p>
+<ul>
+<li><code>git worktree remove</code> will refuse to remove a worktree with uncommitted changes unless you force it.</li>
+<li>Removing a worktree does <strong>not</strong> automatically delete the branch; you can delete or keep the branch using normal <code>git branch</code> commands.</li>
+<li>Hermes checkpoint data under <code>~/.hermes/checkpoints/</code> is not automatically pruned when you remove a worktree, but it is usually very small.</li>
+</ul>
+<h2 id="best-practices">Best Practices</h2>
+<ul>
+<li><strong>One worktree per Hermes experiment</strong></li>
+<li>Create a dedicated branch/worktree for each substantial change.</li>
+<li>This keeps diffs focused and PRs small and reviewable.</li>
+<li><strong>Name branches after the experiment</strong></li>
+<li>e.g. <code>feature/hermes-checkpoints-docs</code>, <code>feature/hermes-refactor-tests</code>.</li>
+<li><strong>Commit frequently</strong></li>
+<li>Use git commits for high‑level milestones.</li>
+<li>Use <a href="checkpoints-and-rollback.html">checkpoints and /rollback</a> as a safety net for tool‑driven edits in between.</li>
+<li><strong>Avoid running Hermes from the bare repo root when using worktrees</strong></li>
+<li>Prefer the worktree directories instead, so each agent has a clear scope.</li>
+</ul>
+<h2 id="using-hermes--w-automatic-worktree-mode">Using <code>hermes -w</code> (Automatic Worktree Mode)</h2>
+<p>Hermes has a built‑in <code>-w</code> flag that <strong>automatically creates a disposable git worktree</strong> with its own branch. You don't need to set up worktrees manually — just <code>cd</code> into your repo and run:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>/path/to/your/repo
+hermes<span class="w"> </span>-w
+</code></pre></div>
+
+<p>Hermes will:</p>
+<ul>
+<li>Create a temporary worktree under <code>.worktrees/</code> inside your repo.</li>
+<li>Check out an isolated branch (e.g. <code>hermes/hermes-&lt;hash&gt;</code>).</li>
+<li>Run the full CLI session inside that worktree.</li>
+</ul>
+<p>This is the easiest way to get worktree isolation. You can also combine it with a single query:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>-w<span class="w"> </span>-z<span class="w"> </span><span class="s2">&quot;Fix issue #123&quot;</span>
+</code></pre></div>
+
+<p>For parallel agents, open multiple terminals and run <code>hermes -w</code> in each — every invocation gets its own worktree and branch automatically.</p>
+<h2 id="putting-it-all-together">Putting It All Together</h2>
+<ul>
+<li>Use <strong>git worktrees</strong> to give each Hermes session its own clean checkout.</li>
+<li>Use <strong>branches</strong> to capture the high‑level history of your experiments.</li>
+<li>Use <strong>checkpoints + <code>/rollback</code></strong> to recover from mistakes inside each worktree.</li>
+</ul>
+<p>This combination gives you:</p>
+<ul>
+<li>Strong guarantees that different agents and experiments do not step on each other.</li>
+<li>Fast iteration cycles with easy recovery from bad edits.</li>
+<li>Clean, reviewable pull requests.</li>
+</ul>
+<h2 id="developing-the-ui-surfaces-across-worktrees">Developing the UI surfaces across worktrees</h2>
+<p>The TypeScript surfaces (<code>ui-tui/</code>, <code>apps/desktop/</code>) each need a <code>node_modules</code>, which a fresh <code>npm ci</code> per worktree duplicates across every branch. If you hack on the TUI or desktop app from multiple worktrees, see <a href="../developer-guide/worktree-ui-dev.html">TUI &amp; Desktop from Worktrees</a> for the <code>htui</code> / <code>hgui</code> helpers that share one install by symlink.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/git-worktrees</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#why-use-worktrees-with-hermes">Why Use Worktrees with Hermes?</a></li>
+<li class="lvl2"><a href="#quick-start-creating-a-worktree">Quick Start: Creating a Worktree</a></li>
+<li class="lvl3"><a href="#from-inside-a-session-worktree-new">From inside a session: /worktree new</a></li>
+<li class="lvl3"><a href="#manually-with-git">Manually with git</a></li>
+<li class="lvl2"><a href="#running-multiple-agents-in-parallel">Running Multiple Agents in Parallel</a></li>
+<li class="lvl2"><a href="#cleaning-up-worktrees-safely">Cleaning Up Worktrees Safely</a></li>
+<li class="lvl2"><a href="#best-practices">Best Practices</a></li>
+<li class="lvl2"><a href="#using-hermes--w-automatic-worktree-mode">Using hermes -w (Automatic Worktree Mode)</a></li>
+<li class="lvl2"><a href="#putting-it-all-together">Putting It All Together</a></li>
+<li class="lvl2"><a href="#developing-the-ui-surfaces-across-worktrees">Developing the UI surfaces across worktrees</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

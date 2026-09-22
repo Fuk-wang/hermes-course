@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Server · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/api-server</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="api-server">API Server</h1>
+<p>The API server exposes hermes-agent as an OpenAI-compatible HTTP endpoint. Any frontend that speaks the OpenAI format — Open WebUI, LobeChat, LibreChat, NextChat, ChatBox, and hundreds more — can connect to hermes-agent and use it as a backend.</p>
+<p>Your agent handles requests with its full toolset (terminal, file operations, web search, memory, skills) and returns the final response. When streaming, tool progress indicators appear inline so frontends can show what the agent is doing.</p>
+<div class="admonition adm-tip"><p class="adm-title">One backend covers models + tools</p>
+<p>Hermes itself needs a configured provider and tool backends for the API server to be useful. A <a href="tool-gateway.html">Nous Portal</a> subscription handles both — 300+ models plus web/image/TTS/browser via the Tool Gateway. Run <code>hermes setup --portal</code> once before starting the API server and frontends like Open WebUI or LobeChat get a fully tool-equipped backend.</p>
+</div>
+<h2 id="quick-start">Quick Start</h2>
+<h3 id="1-enable-the-api-server">1. Enable the API server</h3>
+<p>Add to <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">API_SERVER_ENABLED</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">API_SERVER_KEY</span><span class="o">=</span>change-me-local-dev
+<span class="c1"># Optional: only if a browser must call Hermes directly</span>
+<span class="c1"># API_SERVER_CORS_ORIGINS=http://localhost:3000</span>
+</code></pre></div>
+
+<h3 id="2-start-the-gateway">2. Start the gateway</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>You'll see:</p>
+<div class="highlight"><pre><span></span><code>[API Server] API server listening on http://127.0.0.1:8642
+</code></pre></div>
+
+<h3 id="3-connect-a-frontend">3. Connect a frontend</h3>
+<p>Point any OpenAI-compatible client at <code>http://localhost:8642/v1</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Test with curl</span>
+curl<span class="w"> </span>http://localhost:8642/v1/chat/completions<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer change-me-local-dev&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;model&quot;: &quot;hermes-agent&quot;, &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}]}&#39;</span>
+</code></pre></div>
+
+<p>Or connect Open WebUI, LobeChat, or any other frontend — see the <a href="../messaging/open-webui.html">Open WebUI integration guide</a> for step-by-step instructions.</p>
+<h2 id="endpoints">Endpoints</h2>
+<h3 id="post-v1chatcompletions">POST /v1/chat/completions</h3>
+<p>Standard OpenAI Chat Completions format. Stateless — the full conversation is included in each request via the <code>messages</code> array.</p>
+<p><strong>Request:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes-agent&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;messages&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;system&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;You are a Python expert.&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Write a fibonacci function&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;stream&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Response:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;chatcmpl-abc123&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;object&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;chat.completion&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;created&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1710000000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes-agent&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;choices&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">    </span><span class="nt">&quot;index&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assistant&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Here&#39;s a fibonacci function...&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;finish_reason&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;stop&quot;</span>
+<span class="w">  </span><span class="p">}],</span>
+<span class="w">  </span><span class="nt">&quot;usage&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;prompt_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">50</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;completion_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;total_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">250</span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Inline image input:</strong> user messages may send <code>content</code> as an array of <code>text</code> and <code>image_url</code> parts. Both remote <code>http(s)</code> URLs and <code>data:image/...</code> URLs are supported:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes-agent&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;messages&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;text&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;text&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;What is in this image?&quot;</span><span class="p">},</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;image_url&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://example.com/cat.png&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;detail&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;high&quot;</span><span class="p">}}</span>
+<span class="w">      </span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Uploaded files (<code>file</code> / <code>input_file</code> / <code>file_id</code>) and non-image <code>data:</code> URLs return <code>400 unsupported_content_type</code>.</p>
+<p><strong>Streaming</strong> (<code>"stream": true</code>): Returns Server-Sent Events (SSE) with token-by-token response chunks. For <strong>Chat Completions</strong>, the stream uses standard <code>chat.completion.chunk</code> events plus Hermes' custom <code>hermes.tool.progress</code> event for tool-start UX. For <strong>Responses</strong>, the stream uses OpenAI Responses event types such as <code>response.created</code>, <code>response.output_text.delta</code>, <code>response.output_item.added</code>, <code>response.output_item.done</code>, and <code>response.completed</code>.</p>
+<p>All SSE streams (Chat Completions, Responses, <code>/api/sessions/{id}/chat/stream</code>, <code>/v1/runs/{id}/events</code>) emit a <code>: keepalive</code> comment line whenever no event has been sent for 10 seconds, so long tool calls do not trip client idle timeouts. Standard SSE clients ignore comment lines; custom parsers must skip lines that start with <code>:</code>.</p>
+<p><strong>Tool progress in streams</strong>:
+- <strong>Chat Completions</strong>: Hermes emits <code>event: hermes.tool.progress</code> for tool-start visibility without polluting persisted assistant text.
+- <strong>Responses</strong>: Hermes emits spec-native <code>function_call</code> and <code>function_call_output</code> output items during the SSE stream, so clients can render structured tool UI in real time.</p>
+<p><strong>Model reasoning</strong> (emitted only when the model actually produces reasoning and the resolved <code>reasoning</code> config allows it; the input-side opt-out is <code>model_options.reasoning.enabled: false</code>):
+- <strong>Chat Completions</strong>: reasoning deltas arrive as <code>choices[0].delta.reasoning_content</code> chunks (the DeepSeek-style field Open WebUI, opencode and the Vercel AI SDK render as a thinking block); answer text stays in <code>delta.content</code>.
+- <strong>Responses</strong>: each thinking burst is a spec-native <code>reasoning</code> output item — <code>response.output_item.added</code> (<code>item.type: "reasoning"</code>), <code>response.reasoning_summary_part.added</code>, <code>response.reasoning_summary_text.delta</code> … <code>response.reasoning_summary_text.done</code>, <code>response.reasoning_summary_part.done</code>, <code>response.output_item.done</code> — closed before the next message or <code>function_call</code> item opens, and echoed in the <code>response.completed</code> output as <code>{"id": "rs_…", "type": "reasoning", "status": "completed", "summary": [{"type": "summary_text", "text": "…"}]}</code>. <code>sequence_number</code> stays monotonic across reasoning, text and tool events.
+- <strong>Non-streaming</strong>: <code>/v1/chat/completions</code> returns the turn's reasoning on <code>choices[0].message.reasoning_content</code>; <code>/v1/responses</code> returns the same <code>reasoning</code> output item(s) ahead of the message (and of that step's <code>function_call</code> items), also on <code>GET /v1/responses/{id}</code> replay.
+- Echoing a prior response's <code>output</code> list back as the next <code>input</code> (what Responses SDK clients do) is fine: <code>reasoning</code> items are ignored on input rather than parsed as empty user turns.
+- Support is advertised as <code>features.reasoning_streaming: true</code> on <code>GET /v1/capabilities</code>.</p>
+<h3 id="post-v1responses">POST /v1/responses</h3>
+<p>OpenAI Responses API format. Supports server-side conversation state via <code>previous_response_id</code> — the server stores full conversation history (including tool calls and results) so multi-turn context is preserved without the client managing it.</p>
+<p><strong>Request:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes-agent&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;input&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;What files are in my project?&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;instructions&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;You are a helpful coding assistant.&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;store&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Response:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;resp_abc123&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;object&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;response&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;completed&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes-agent&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;output&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;function_call&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;completed&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;terminal&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;arguments&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;{\&quot;command\&quot;: \&quot;ls\&quot;}&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;call_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;call_1&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;function_call_output&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;completed&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;call_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;call_1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;output&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;README.md src/ tests/&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;message&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assistant&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;output_text&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;text&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Your project has...&quot;</span><span class="p">}]}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;usage&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;input_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">50</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;output_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;total_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">250</span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Tool calls in the <code>output</code> array were already executed server-side by the Hermes agent — they are replayed with <code>"status": "completed"</code> for structured tool UI, never as pending calls for the client to execute.</p>
+<p>With <code>"stream": true</code>, mid-turn assistant commentary (the <code>openai-codex</code> backend's <code>phase="commentary"</code> progress preambles, or text a model writes alongside its tool calls) arrives as its own completed <code>message</code> output item carrying <code>"phase": "commentary"</code> (<code>response.output_item.added</code> + <code>response.output_item.done</code>, also listed in <code>response.completed</code>). It is never merged into the final answer item, so clients can render it as live progress and skip it when assembling the reply. Private reasoning never reaches this item. <code>display.interim_assistant_messages: false</code> (or the <code>display.platforms.api_server</code> override) suppresses it on every API-server surface.</p>
+<p><strong>Inline image input:</strong> <code>input[].content</code> can contain <code>input_text</code> and <code>input_image</code> parts. Both remote URLs and <code>data:image/...</code> URLs are supported:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes-agent&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;input&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;input_text&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;text&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Describe this screenshot.&quot;</span><span class="p">},</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;input_image&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;image_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;data:image/png;base64,iVBORw0K...&quot;</span><span class="p">}</span>
+<span class="w">      </span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Uploaded files (<code>input_file</code> / <code>file_id</code>) and non-image <code>data:</code> URLs return <code>400 unsupported_content_type</code>.</p>
+<h4 id="multi-turn-with-previous_response_id">Multi-turn with previous_response_id</h4>
+<p>Chain responses to maintain full context (including tool calls) across turns:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;input&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Now show me the README&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;previous_response_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;resp_abc123&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The server reconstructs the full conversation from the stored response chain — all previous tool calls and results are preserved. Chained requests also share the same session, so multi-turn conversations appear as a single entry in the dashboard and session history.</p>
+<p>Each response's <code>output</code> lists only that turn's items (its <code>function_call</code> / <code>function_call_output</code> entries and final <code>message</code>), never earlier turns' tool calls — including when Hermes repaired the supplied history before the call (merged consecutive <code>assistant</code> or <code>user</code> items, dropped orphan tool results) or compacted it mid-chain. The stored chain is that repaired transcript, so the history does not grow by a second copy on every turn.</p>
+<h4 id="named-conversations">Named conversations</h4>
+<p>Use the <code>conversation</code> parameter instead of tracking response IDs:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;input&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Hello&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;conversation&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-project&quot;</span><span class="p">}</span>
+<span class="p">{</span><span class="nt">&quot;input&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;What&#39;s in src/?&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;conversation&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-project&quot;</span><span class="p">}</span>
+<span class="p">{</span><span class="nt">&quot;input&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Run the tests&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;conversation&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-project&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>The server automatically chains to the latest response in that conversation. Like the <code>/title</code> command for gateway sessions.</p>
+<h3 id="get-v1responsesid">GET /v1/responses/{id}</h3>
+<p>Retrieve a previously stored response by ID.</p>
+<h3 id="delete-v1responsesid">DELETE /v1/responses/{id}</h3>
+<p>Delete a stored response.</p>
+<h3 id="get-v1models">GET /v1/models</h3>
+<p>Lists the agent as an available model. The advertised model name defaults to the <a href="../profiles.html">profile</a> name (or <code>hermes-agent</code> for the default profile). Required by most frontends for model discovery.</p>
+<p><code>/v1/models</code> is intentionally the cheap OpenAI-compat surface. It does <strong>not</strong>
+enumerate every authenticated provider/model combination Hermes can route to,
+and it does not do pricing or capability enrichment.</p>
+<h3 id="get-apimodeloptions">GET /api/model/options</h3>
+<p>Hermes-aware clients can request the same curated provider/model inventory used
+by the dashboard and TUI. This route uses the API server's normal bearer
+authentication and returns provider rows, model capability hints, and pricing
+metadata that do not belong in the OpenAI-compatible <code>/v1/models</code> response:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="nv">$API_SERVER_KEY</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;http://127.0.0.1:8642/api/model/options&quot;</span>
+</code></pre></div>
+
+<p>That payload is the same substrate the dashboard Models page and the TUI
+<code>model.options</code> RPC use. It returns authenticated providers, curated model
+lists, per-model pricing, and model capability hints.</p>
+<p>Normal opens are intentionally conservative for custom providers: Hermes probes
+only the <strong>currently selected</strong> custom endpoint so a stale or offline saved
+endpoint does not block the picker. An explicit refresh flips to full probing
+and busts the provider model cache:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="nv">$API_SERVER_KEY</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;http://127.0.0.1:8642/api/model/options?refresh=1&quot;</span>
+</code></pre></div>
+
+<p>Use <code>/v1/models</code> when an OpenAI-compatible client only needs a model name to
+send back in chat/responses requests. Use <code>/api/model/options</code> when an
+authenticated UI needs the richer Hermes-specific picker metadata.</p>
+<h3 id="get-v1capabilities">GET /v1/capabilities</h3>
+<p>Returns a machine-readable description of the API server's stable surface for external UIs, orchestrators, and plugin bridges.</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;object&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes.api_server.capabilities&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;platform&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes-agent&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes-agent&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;auth&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bearer&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;required&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;features&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;chat_completions&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;responses_api&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;run_submission&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;run_status&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;run_events_sse&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;run_stop&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;reasoning_streaming&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Use this endpoint when integrating dashboards, browser UIs, or control planes so they can discover whether the running Hermes version supports runs, streaming, cancellation, and session continuity without depending on private Python internals.</p>
+<h2 id="browser-extension-control">Browser-extension control</h2>
+<p>Hermes can route browser tools through an authenticated extension that controls
+the browser session associated with the current Hermes session. The feature is
+disabled by default; set <code>browser.extension_control.enabled</code> to <code>true</code> to opt in:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">browser</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">extension_control</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>The local API path also requires the API server bearer key. A controller may
+register only for an existing server session. Hermes derives the controller
+principal from authenticated server state; a client-supplied <code>principal_id</code> is
+ignored.</p>
+<p>Discover the live contract through <code>GET /v1/capabilities</code>. The
+<code>browser_extension_control</code> object reports whether the feature is enabled, the
+protocol version, transport names, and the exact capability allowlist:</p>
+<div class="highlight"><pre><span></span><code>controller.noop
+browser_back
+browser_click
+browser_navigate
+browser_press
+browser_screenshot
+browser_scroll
+browser_snapshot
+browser_tab_activate
+browser_tabs
+browser_type
+</code></pre></div>
+
+<p>Requested capabilities outside that list are filtered out. Raw CDP, arbitrary
+script evaluation, console access, uploads, image extraction, and vision are not
+part of the controller protocol.</p>
+<p>When a request has no bound controller identity, or when the feature is disabled,
+Hermes preserves the existing browser backend. Once the gateway binds a
+controller principal and transport family to the request, that extension lane
+is authoritative: missing, ambiguous, disconnected, or incapable controllers
+fail closed instead of silently switching to a different local/cloud browser.
+After an exact controller is selected, its result or error is authoritative and
+Hermes never retries the same action through another backend.</p>
+<h3 id="local-api-registration">Local API registration</h3>
+<ol>
+<li>Send an authenticated <code>POST /v1/browser-control/register</code> with
+   <code>protocol_version</code>, <code>session_id</code>, <code>controller_id</code>, <code>browser_profile_id</code>, and
+   the requested <code>capabilities</code>.</li>
+<li>Hermes returns a single-use ticket with a 30-second TTL and the filtered,
+   server-bound controller scope.</li>
+<li>Open <code>GET /v1/browser-control/ws</code> with both WebSocket subprotocols:
+   <code>hermes-browser-control-v1</code> and
+   <code>hermes-browser-control-ticket.&lt;ticket&gt;</code>.</li>
+</ol>
+<p>The ticket is never accepted in the query string. Unknown, expired, reused, or
+malformed tickets fail before WebSocket upgrade.</p>
+<h3 id="controller-frames">Controller frames</h3>
+<p>Hermes sends <code>browser.controller.command</code> frames containing <code>command_id</code>,
+<code>action</code>, immutable <code>arguments</code>, browser/controller ids, and the originating
+<code>tool_call_id</code>. The controller replies with <code>browser.controller.result</code>, the
+same <code>command_id</code>, an exact boolean <code>ok</code>, and either <code>result</code> or <code>error</code>.
+Cancellation and timeout emit <code>browser.controller.cancel</code>; late results are
+ignored.</p>
+<p>An unexpected socket loss marks the controller offline and preserves work
+already in flight until each command's original deadline. A reconnect with the
+same principal, profile, session, controller id, browser profile, and transport
+identity refreshes the transport without admitting new work before any deferred
+cancels are flushed. Negotiated capabilities may change on that reconnect; they
+are not an identity field. A different controller id or browser profile in the
+same authenticated session lane is a hard replacement: old pending work is
+cancelled before the successor becomes routable. Send
+<code>browser.controller.detach</code> on the authenticated controller transport for an
+intentional hard detach — that immediately cancels pending work. Merely closing
+the socket is treated as a recoverable disconnect.</p>
+<p>The authenticated dashboard transport exposes the same registration, result,
+heartbeat, capability, and ownership semantics over its Gateway RPC/event
+channel. In both transports, selection requires one unambiguous exact match on
+principal, profile, session, controller, browser profile, transport family, and
+capability. Once selected, a controller failure is authoritative and is never
+retried through a different browser backend.</p>
+<h2 id="per-request-model-selection">Per-request model selection</h2>
+<p>Authenticated clients can override Hermes' default model selection per request
+by sending:</p>
+<ul>
+<li><code>model</code> — the target model id for this turn</li>
+<li><code>provider</code> — the Hermes provider slug to resolve credentials/runtime for this turn</li>
+<li><code>model_options</code> — request-scoped reasoning / service-tier controls</li>
+</ul>
+<p>The same request fields are accepted on:</p>
+<ul>
+<li><code>POST /v1/chat/completions</code></li>
+<li><code>POST /v1/responses</code></li>
+<li><code>POST /v1/runs</code></li>
+<li><code>POST /api/sessions/{session_id}/chat</code></li>
+<li><code>POST /api/sessions/{session_id}/chat/stream</code></li>
+</ul>
+<p>Precedence is deterministic:</p>
+<ol>
+<li>Session <code>/model</code> override, if that session already has one</li>
+<li>A static <code>gateway.platforms.api_server.model_routes</code> mapping selected when
+   the request's <code>model</code> is a configured route alias</li>
+<li>Direct request <code>model</code> / <code>provider</code> when no route alias matches</li>
+<li>Global gateway config / environment defaults</li>
+</ol>
+<p><code>model_options</code> stays request-scoped regardless of which model/provider wins.
+If a request sends a <code>provider</code> that conflicts with a configured <code>model_routes</code>
+alias, Hermes rejects the request with <code>400</code> instead of silently remixing route
+credentials with another provider.</p>
+<p><strong>Bare <code>model</code> values on the OpenAI-compatible endpoints are opt-in.</strong> Generic
+OpenAI clients routinely hardcode model names (<code>gpt-4o</code>, ...), and existing
+deployments rely on those falling back to the gateway default. On
+<code>POST /v1/chat/completions</code> and <code>POST /v1/responses</code>, a <code>model</code> value sent
+WITHOUT a <code>provider</code> is therefore ignored unless you enable:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">api_server</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">direct_model_requests</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>Requests that include an explicit <code>provider</code> — and the Hermes-native
+<code>/v1/runs</code> and session-chat endpoints — always honor the requested model
+regardless of this flag.</p>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;MiniMax-M3&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;minimax&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;model_options&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;reasoning_effort&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;high&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;service_tier&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;priority&quot;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;messages&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Summarize the repo status.&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="get-health">GET /health</h3>
+<p>Health check. Returns <code>{"status": "ok"}</code>. Also available at <strong>GET /v1/health</strong> for OpenAI-compatible clients that expect the <code>/v1/</code> prefix.</p>
+<h3 id="get-healthdetailed">GET /health/detailed</h3>
+<p>Authenticated readiness check for monitoring and control planes. It reports
+bounded status for the active profile's config, state database, configured
+model, disk space, gateway/platform state, active API runs, pending process
+completions, and active delegations. The response exposes status and counts,
+not config values, credentials, paths, commands, queue payloads, or raw errors.</p>
+<p>The public <code>/health</code> route remains a cheap liveness probe and does not run
+readiness checks. A degraded readiness result still uses HTTP 200; inspect the
+top-level <code>status</code> and <code>readiness.checks</code> fields.</p>
+<h2 id="runs-api-streaming-friendly-alternative">Runs API (streaming-friendly alternative)</h2>
+<p>In addition to <code>/v1/chat/completions</code> and <code>/v1/responses</code>, the server exposes a <strong>runs</strong> API for long-form sessions where the client wants to subscribe to progress events instead of managing streaming themselves.</p>
+<h3 id="post-v1runs">POST /v1/runs</h3>
+<p>Create a new agent run. Returns a <code>run_id</code> that can be used to subscribe to progress events.</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;run_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;run_abc123&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;started&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Runs accept a simple <code>input</code> string and optional <code>session_id</code>, <code>instructions</code>, <code>conversation_history</code>, or <code>previous_response_id</code>. When <code>session_id</code> is provided, Hermes surfaces it in the run status so external UIs can correlate runs with their own conversation IDs.</p>
+<p>For safely retryable creation, send an <code>Idempotency-Key</code> header (1–255 visible ASCII characters). Hermes durably reserves the key before starting work. An identical retry returns the original <code>run_id</code> with HTTP 202 and <code>Idempotency-Replayed: true</code>, including after a gateway restart and after the run has completed, failed, or been cancelled. Reusing the same key with a different JSON payload returns HTTP 409 with code <code>idempotency_key_conflict</code>. Keys are isolated by authenticated API profile/credential and retained for 24 hours after their last status update; clients should use unique, unguessable keys and must not reuse them for unrelated operations. Requests without the header retain the legacy behavior and always create a new run.</p>
+<p>When <code>session_id</code> identifies an existing Hermes session and no explicit
+<code>conversation_history</code> or <code>previous_response_id</code> is supplied, the run loads
+that session's active transcript. Session turn leases serialize concurrent
+writers and refresh the transcript after a contended wait.</p>
+<h3 id="get-v1runsrun_id">GET /v1/runs/{run_id}</h3>
+<p>Poll the current run state. This is useful for dashboards that need status without holding an SSE connection open, or for UIs that reconnect after navigation.</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;object&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes.run&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;run_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;run_abc123&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;completed&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;space-session&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes-agent&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;output&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Done.&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;usage&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;input_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">50</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;output_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;total_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">250</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;cache_read_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">40</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;cache_write_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;runtime&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;openai&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gpt-5&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;route_source&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;global&quot;</span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><code>model</code> echoes what the request asked for. On a completed run, <code>runtime</code> is the provider/model pair that actually served the turn — after a <a href="fallback-providers.html">fallback provider</a> switch it names the fallback pair, so a cost-attribution poller books the run to the right provider. <code>usage.cache_read_tokens</code> / <code>usage.cache_write_tokens</code> are the session's prompt-cache reads and writes, so cached input is not priced as full-price input. <code>runtime</code> has the same shape as on <code>/v1/chat/completions</code> and <code>/v1/responses</code>: <code>route_source</code> says how the runtime was chosen (<code>global</code>, <code>raw_request</code>, <code>model_routes</code>), and a request that named a <code>model</code>/<code>provider</code> also gets <code>requested: {provider, model}</code> so the asked-for and served pairs can be compared. The <code>run.completed</code> event on the events stream carries the same <code>usage</code> and <code>runtime</code> fields.</p>
+<p>Statuses are retained briefly after terminal states (<code>completed</code>, <code>failed</code>, <code>cancelled</code>, or <code>interrupted</code>) for polling and UI reconciliation. When the gateway shuts down while a run is active, the run is persisted as <code>interrupted</code> (error <code>Gateway shutdown interrupted the run.</code>, terminal event <code>run.interrupted</code>) before the agent is asked to stop, so a durable run never survives a restart as <code>running</code>; a late result from the interrupted turn cannot overwrite it.</p>
+<h3 id="get-v1runsrun_idevents">GET /v1/runs/{run_id}/events</h3>
+<p>Server-Sent Events stream of the run's tool-call progress, token deltas, and lifecycle events. Designed for dashboards and thick clients that want to attach/detach without losing state.</p>
+<p>Mid-turn assistant commentary — the <code>openai-codex</code> backend's <code>phase="commentary"</code> progress
+preambles, or text a model writes alongside its tool calls — arrives as <code>message.interim</code>
+(<code>text</code>, <code>already_streamed</code>), the same contract the TUI gateway uses. <code>already_streamed: true</code>
+means the text also went out as <code>message.delta</code>, so clients that render deltas can skip it.
+The final answer still arrives only in <code>run.completed</code>; private reasoning never becomes
+<code>message.interim</code>. Gate: <code>display.interim_assistant_messages</code> (default <code>true</code>).</p>
+<p>Tool lifecycle events carry <code>tool.started</code> (<code>tool</code>, <code>preview</code> of the arguments) and
+<code>tool.completed</code> (<code>tool</code>, <code>duration</code> in seconds, <code>error</code>, and a <code>preview</code> of the result). The
+<code>error</code> flag reflects the tool's own outcome — a non-zero terminal <code>exit_code</code>, a structured
+<code>{"error": ...}</code> result, a denied approval — whether the result arrives as a JSON string or an
+already-parsed object. The completion <code>preview</code> is the result text (structured results are
+JSON-encoded), passed through forced secret redaction and then truncated to 500 characters, so a
+client can tell an approval refusal (<code>BLOCKED: ...</code>) from an ordinary failure without receiving
+the unbounded tool payload.</p>
+<p>When the agent delegates work to background subagents, the stream also carries
+<code>subagent.start</code> and <code>subagent.complete</code> lifecycle events, so clients can
+observe delegation outcomes — including timeouts and failures — instead of the
+run going silent while a child works. The <code>subagent.complete</code> payload carries
+the child's status, summary, duration, token/cost figures, a
+<code>child_session_id</code> for correlation, and the <code>delegation_id</code> of the batch it
+belongs to (so concurrent or nested fan-outs stay distinguishable); free-text fields pass forced secret
+redaction before leaving the process. Per-tool child events
+(<code>subagent.tool</code>, progress ticks) are intentionally <strong>not</strong> forwarded — they
+are high-volume UI noise; use the per-child live transcript files for
+play-by-play. These events are available while the parent stream is open; a
+late detached completion does not reopen a finished run's SSE stream or change
+its terminal status.</p>
+<h4 id="detached-results-and-session-history">Detached results and session history</h4>
+<p>Background delegation requires a continuation that reads server-side session
+history: an explicit <code>X-Hermes-Session-Id</code> on Chat Completions, a native
+<code>/api/sessions/{id}/chat</code> request, or a Runs request using session history.
+Header-less Chat Completions, Responses chains, and Runs requests with
+<code>previous_response_id</code> or caller-supplied history instead execute delegation
+synchronously, returning the result in the original turn. Merely deriving a
+session ID from request content does not enable detached delivery.</p>
+<p>For resumable requests, the completion is persisted once per delegation unit.
+It is available through <code>GET /api/sessions/{id}/messages</code> and in the next real
+client turn's session history. Retries do not insert the same result again;
+interim task-failure notices have separate identities. Delivery waits while a
+client turn owns the session lease and follows compression continuations.
+Chat Completions echoes the explicit session ID you supplied in both JSON and
+streaming responses; keep sending that ID even after compression.</p>
+<p>A completion <strong>never starts an unsolicited model turn</strong> or bypasses a pending
+human confirmation. The client owns the next turn. Clients that continue using
+their own history snapshots should use synchronous delegation rather than
+expecting a server-side delivery row to be merged into those snapshots.</p>
+<p>Unconsumed event buffers expire after five minutes so a detached client cannot
+grow memory indefinitely. This expires transport state only: a run that is
+still executing remains visible to status polling, approval, stop control, and
+concurrency accounting until its executor work actually exits. A connected SSE
+subscriber continues draining normally.</p>
+<h3 id="post-v1runsrun_idstop">POST /v1/runs/{run_id}/stop</h3>
+<p>Interrupt a running agent turn. The endpoint returns immediately with <code>{"status": "stopping"}</code> while Hermes asks the active agent to stop at the next safe interruption point.
+The run stays tracked as <code>stopping</code> until the executor-backed work exits, then
+settles as <code>cancelled</code>; requesting stop never hides a worker that is still
+running.</p>
+<h3 id="post-v1runsrun_idapproval">POST /v1/runs/{run_id}/approval</h3>
+<p>Resolve a pending approval for a run that is waiting on a human decision (for example, a tool call gated behind an approval policy). The body carries the approval decision; the run resumes once the decision is recorded. This endpoint is advertised in <code>/v1/capabilities</code> as the <code>run_approval</code> feature so external UIs can detect support before surfacing an approval prompt.</p>
+<p>MCP trust-gate consent — a write-capable tool on a server configured <code>trust: untrusted</code> — surfaces the same way: the run emits an <code>approval.request</code> event and parks in <code>waiting_for_approval</code> until this endpoint resolves it (<code>once</code> runs the tool, <code>deny</code> blocks it).</p>
+<h2 id="jobs-api-background-scheduled-work">Jobs API (background scheduled work)</h2>
+<p>The server exposes a lightweight jobs CRUD surface for managing scheduled / background agent runs from a remote client. All endpoints are gated behind the same bearer auth.</p>
+<h3 id="get-apijobs">GET /api/jobs</h3>
+<p>List all scheduled jobs.</p>
+<h3 id="post-apijobs">POST /api/jobs</h3>
+<p>Create a new scheduled job. Body accepts the same shape as <code>hermes cron</code> — prompt, schedule, skills, provider override, delivery target.</p>
+<h3 id="get-apijobsjob_id">GET /api/jobs/{job_id}</h3>
+<p>Fetch a single job's definition and last-run state.</p>
+<h3 id="patch-apijobsjob_id">PATCH /api/jobs/{job_id}</h3>
+<p>Update fields on an existing job (prompt, schedule, etc.). Partial updates are merged.</p>
+<h3 id="delete-apijobsjob_id">DELETE /api/jobs/{job_id}</h3>
+<p>Remove a job. Also cancels any in-flight run.</p>
+<h3 id="post-apijobsjob_idpause">POST /api/jobs/{job_id}/pause</h3>
+<p>Pause a job without deleting it. Next-scheduled-run timestamps are suspended until resumed.</p>
+<h3 id="post-apijobsjob_idresume">POST /api/jobs/{job_id}/resume</h3>
+<p>Resume a previously paused job.</p>
+<h3 id="post-apijobsjob_idrun">POST /api/jobs/{job_id}/run</h3>
+<p>Trigger the job to run immediately, out of schedule.</p>
+<h2 id="sessions-api-session-control-over-rest">Sessions API (session control over REST)</h2>
+<p>External UIs can manage Hermes sessions over REST without standing up the dashboard. All endpoints are gated by <code>API_SERVER_KEY</code> and live under <code>/api/sessions/*</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/sessions</code></td>
+<td>List sessions (paginated — <code>limit</code>, <code>offset</code>, <code>source</code>, <code>include_children</code>)</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/sessions</code></td>
+<td>Create an empty session</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/sessions/{id}</code></td>
+<td>Read session metadata</td>
+</tr>
+<tr>
+<td><code>PATCH</code></td>
+<td><code>/api/sessions/{id}</code></td>
+<td>Update title or <code>end_reason</code></td>
+</tr>
+<tr>
+<td><code>DELETE</code></td>
+<td><code>/api/sessions/{id}</code></td>
+<td>Delete a session</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/sessions/{id}/messages</code></td>
+<td>Message history for a session</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/sessions/{id}/fork</code></td>
+<td>Branch the session via <code>SessionDB</code> lineage (matches CLI <code>/branch</code> semantics)</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/sessions/{id}/chat</code></td>
+<td>Run one synchronous agent turn</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/sessions/{id}/chat/stream</code></td>
+<td>SSE wrapper over a single turn — emits <code>assistant.delta</code>, <code>assistant.commentary</code> (mid-turn commentary: <code>message_id</code>, <code>text</code>, <code>already_streamed</code>; never folded into <code>assistant.completed</code>), <code>tool.started</code>, <code>tool.completed</code>, then a terminal <code>run.completed</code> / <code>run.failed</code> / <code>run.cancelled</code> event that matches how the turn ended (see <a href="../../developer-guide/programmatic-integration.html#terminal-run-status">Terminal run status</a>)</td>
+</tr>
+</tbody>
+</table>
+<p><code>/v1/capabilities</code> advertises the full surface via <code>session_*</code> feature flags and <code>endpoints.session_*</code> entries so external UIs can detect support and fall back safely. Inline images are supported in <code>chat</code> and <code>chat/stream</code> payloads (multimodal-aware path).</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># fork a session and run one turn</span>
+curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8642/api/sessions/<span class="nv">$ID</span>/fork<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="nv">$API_SERVER_KEY</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;title&quot;: &quot;explore alt path&quot;}&#39;</span>
+
+<span class="c1"># stream a turn over SSE</span>
+curl<span class="w"> </span>-N<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8642/api/sessions/<span class="nv">$ID</span>/chat/stream<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="nv">$API_SERVER_KEY</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;input&quot;: &quot;what files changed in the last hour?&quot;}&#39;</span>
+</code></pre></div>
+
+<h2 id="skills-and-toolsets-discovery">Skills and toolsets discovery</h2>
+<p><code>GET /v1/skills</code> and <code>GET /v1/toolsets</code> let external clients enumerate the agent's capabilities deterministically over REST instead of asking the model. Both are read-only and gated by <code>API_SERVER_KEY</code>.</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8642/v1/skills<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="nv">$API_SERVER_KEY</span><span class="s2">&quot;</span>
+<span class="c1"># → [{&quot;name&quot;: &quot;github-pr-workflow&quot;, &quot;description&quot;: &quot;...&quot;, &quot;category&quot;: &quot;...&quot;}, ...]</span>
+
+curl<span class="w"> </span>http://localhost:8642/v1/toolsets<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="nv">$API_SERVER_KEY</span><span class="s2">&quot;</span>
+<span class="c1"># → [{&quot;name&quot;: &quot;core&quot;, &quot;label&quot;: &quot;...&quot;, &quot;description&quot;: &quot;...&quot;, &quot;enabled&quot;: true,</span>
+<span class="c1">#     &quot;configured&quot;: true, &quot;tools&quot;: [&quot;read_file&quot;, &quot;write_file&quot;, ...]}, ...]</span>
+</code></pre></div>
+
+<p><code>/v1/skills</code> returns the same metadata the skills hub uses internally. <code>/v1/toolsets</code> returns toolsets resolved for the <code>api_server</code> platform with the concrete <code>tools</code> list each one expands to. Both are advertised under <code>endpoints.*</code> in <code>/v1/capabilities</code>.</p>
+<h2 id="long-term-memory-scoping-x-hermes-session-key">Long-term memory scoping (<code>X-Hermes-Session-Key</code>)</h2>
+<p>Multi-user frontends like Open WebUI need a stable per-channel identifier for long-term memory (Honcho, etc.) that is <strong>independent</strong> of the transcript-scoped <code>X-Hermes-Session-Id</code> (which rotates on <code>/new</code>). Pass <code>X-Hermes-Session-Key</code> on <code>/v1/chat/completions</code>, <code>/v1/responses</code>, or <code>/v1/runs</code> and Hermes threads it through to <code>AIAgent(gateway_session_key=...)</code>, where the Honcho memory provider uses it to derive a stable scope.</p>
+<div class="highlight"><pre><span></span><code><span class="nf">POST</span> <span class="nn">/v1/chat/completions</span> <span class="kr">HTTP</span><span class="o">/</span><span class="m">1.1</span>
+<span class="na">Authorization</span><span class="o">:</span> <span class="l">Bearer ***</span>
+<span class="na">X-Hermes-Session-Id</span><span class="o">:</span> <span class="l">transcript-alpha</span>
+<span class="na">X-Hermes-Session-Key</span><span class="o">:</span> <span class="l">agent:main:webui:dm:user-42</span>
+</code></pre></div>
+
+<p>Rules: max 256 chars, control characters (<code>\r</code>, <code>\n</code>, <code>\x00</code>) are rejected, and the value is echoed back on responses (JSON + SSE). <code>/v1/capabilities</code> advertises support via <code>"session_key_header": "X-Hermes-Session-Key"</code>. Without the key, Honcho's <code>per-session</code> strategy produces a different scope per <code>session_id</code> — exactly the behavior Hermes had before.</p>
+<h2 id="system-prompt-handling">System Prompt Handling</h2>
+<p>When a frontend sends a <code>system</code> message (Chat Completions) or <code>instructions</code> field (Responses API), hermes-agent <strong>layers it on top</strong> of its core system prompt. Your agent keeps all its tools, memory, and skills — the frontend's system prompt adds extra instructions.</p>
+<p>This means you can customize behavior per-frontend without losing capabilities:
+- Open WebUI system prompt: "You are a Python expert. Always include type hints."
+- The agent still has terminal, file tools, web search, memory, etc.</p>
+<h2 id="authentication">Authentication</h2>
+<p>Bearer token auth via the <code>Authorization</code> header:</p>
+<div class="highlight"><pre><span></span><code>Authorization: Bearer ***
+</code></pre></div>
+
+<p>Configure the key via <code>API_SERVER_KEY</code> env var. If you need a browser to call Hermes directly, also set <code>API_SERVER_CORS_ORIGINS</code> to an explicit allowlist.</p>
+<h3 id="multi-profile-routing-pprofile">Multi-profile routing (<code>/p/&lt;profile&gt;/…</code>)</h3>
+<p>When <a href="../multi-profile-gateways.html">multi-profile gateway routing</a> is
+enabled (<code>gateway.multiplex_profiles</code>), the shared listener serves every
+profile through a <code>/p/&lt;profile&gt;/</code> URL prefix — and <strong>authentication is bound
+to the routed profile</strong>:</p>
+<ul>
+<li>Requests to <code>/p/&lt;profile&gt;/v1/...</code> must present that profile's own
+  <code>API_SERVER_KEY</code> (from <code>~/.hermes/profiles/&lt;profile&gt;/.env</code>). The default
+  listener's key is rejected on named-profile prefixes.</li>
+<li>Unprefixed routes and <code>/p/default/...</code> keep using the default profile's key.</li>
+<li>A named profile with no <code>API_SERVER_KEY</code> of its own fails closed — its
+  prefix is unreachable until you set one.</li>
+<li>Runs are per-profile scoped: <code>/v1/runs/{run_id}</code> and its <code>events</code>, <code>stop</code>,
+  <code>steer</code>, and <code>approval</code> routes only answer for the profile that created
+  the run (including runs started via <code>/api/sessions/{id}/chat/stream</code>);
+  another profile's run id returns <code>404</code>, never <code>403</code>.</li>
+</ul>
+<div class="admonition adm-warning"><p class="adm-title">Breaking change (July 2026)</p>
+<p>Before this fix, a valid default-profile key was accepted on any
+<code>/p/&lt;profile&gt;/</code> prefix. If you relied on one shared key across profile
+prefixes, set a distinct <code>API_SERVER_KEY</code> in each profile's <code>.env</code> — reused
+default keys on named prefixes now return <code>401</code>.</p>
+</div>
+<div class="admonition adm-warning"><p class="adm-title">Security</p>
+<p>The API server gives full access to hermes-agent's toolset, <strong>including terminal commands</strong>. <code>API_SERVER_KEY</code> is <strong>required for every deployment</strong>, including the default loopback bind on <code>127.0.0.1</code>. Keep <code>API_SERVER_CORS_ORIGINS</code> narrow to control browser access when you explicitly allow browser callers.</p>
+</div>
+<h2 id="configuration">Configuration</h2>
+<h3 id="environment-variables">Environment Variables</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>API_SERVER_ENABLED</code></td>
+<td><code>false</code></td>
+<td>Enable the API server</td>
+</tr>
+<tr>
+<td><code>API_SERVER_PORT</code></td>
+<td><code>8642</code></td>
+<td>HTTP server port</td>
+</tr>
+<tr>
+<td><code>API_SERVER_HOST</code></td>
+<td><code>127.0.0.1</code></td>
+<td>Bind address (localhost only by default)</td>
+</tr>
+<tr>
+<td><code>API_SERVER_KEY</code></td>
+<td><em>(required)</em></td>
+<td>Bearer token for auth</td>
+</tr>
+<tr>
+<td><code>API_SERVER_CORS_ORIGINS</code></td>
+<td><em>(none)</em></td>
+<td>Comma-separated allowed browser origins</td>
+</tr>
+<tr>
+<td><code>API_SERVER_MODEL_NAME</code></td>
+<td><em>(profile name)</em></td>
+<td>Model name on <code>/v1/models</code>. Defaults to profile name, or <code>hermes-agent</code> for default profile.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="configyaml">config.yaml</h3>
+<p>The same settings can live in <code>~/.hermes/config.yaml</code> under a nested <code>gateway.api_server:</code> section:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">api_server</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8642</span>
+<span class="w">    </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">127.0.0.1</span>
+<span class="w">    </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">your-secret-key</span>
+<span class="w">    </span><span class="nt">cors_origins</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http://localhost:3000</span>
+<span class="w">    </span><span class="nt">model_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-hermes</span>
+<span class="w">    </span><span class="nt">max_concurrent_runs</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span><span class="w">   </span><span class="c1"># concurrent-run cap; 0 disables the limit</span>
+<span class="w">    </span><span class="nt">history_tool_output_max_chars</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span><span class="w">   </span><span class="c1"># cap tool outputs in stored /v1/responses history; 0 = verbatim</span>
+</code></pre></div>
+
+<p><code>port</code>, <code>key</code>, <code>host</code>, <code>cors_origins</code>, and <code>model_name</code> are automatically bridged into the platform's <code>extra</code> settings, so they behave exactly like their <code>API_SERVER_*</code> environment-variable counterparts. Environment variables take precedence over <code>config.yaml</code> values. The block is also accepted under <code>gateway.platforms.api_server:</code> or a top-level <code>platforms.api_server:</code> section.</p>
+<h3 id="concurrent-run-cap">Concurrent-run cap</h3>
+<p>The API server limits how many agent runs may execute at once across the endpoints that start one directly: the OpenAI-compatible endpoints, the Runs endpoints, and the session-chat endpoints (<code>POST /api/sessions/{id}/chat</code> and its <code>/stream</code> variant, which carry cross-machine agent DMs). Cron-triggered runs (<code>POST /api/jobs/{id}/run</code>, <code>POST /api/cron/fire</code>) go through the cron scheduler and are governed by cron's own limits, not this cap. The cap is read from <code>gateway.api_server.max_concurrent_runs</code> (default <strong>10</strong>; <code>0</code> disables the limit, negative values clamp to 0). When the cap is reached, new run-starting requests are rejected with <strong>HTTP 429</strong> <code>Too many concurrent runs (max N)</code> — clients should back off and retry.</p>
+<h3 id="stored-history-size-for-previous_response_id-chaining">Stored history size for <code>previous_response_id</code> chaining</h3>
+<p>Each stored <code>/v1/responses</code> snapshot embeds the full cumulative conversation history (that is what <code>previous_response_id</code> and <code>conversation</code> chaining replay), including every tool output verbatim. A conversation with a few large tool outputs can therefore make a single <code>response_store.db</code> write several hundred KB. Set <code>gateway.api_server.history_tool_output_max_chars</code> (default <strong>0</strong> = store verbatim) to cap each tool output and each string tool-call argument in the <strong>stored</strong> history at that many characters; anything longer is cut to the head plus a <code>...[N more chars]</code> marker. User and assistant text is never touched, and the <code>response.completed</code> payload and incremental SSE events are unaffected. Because the stored history is what the model sees on the next chained turn, enabling the cap also trims what the model is replayed — leave it at 0 if your workflow needs complete tool outputs across turns.</p>
+<h2 id="security-headers">Security Headers</h2>
+<p>All responses include security headers:
+- <code>X-Content-Type-Options: nosniff</code> — prevents MIME type sniffing
+- <code>Referrer-Policy: no-referrer</code> — prevents referrer leakage</p>
+<h2 id="cors">CORS</h2>
+<p>The API server does <strong>not</strong> enable browser CORS by default.</p>
+<p>For direct browser access, set an explicit allowlist:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">API_SERVER_CORS_ORIGINS</span><span class="o">=</span>http://localhost:3000,http://127.0.0.1:3000
+</code></pre></div>
+
+<p>When CORS is enabled:
+- <strong>Preflight responses</strong> include <code>Access-Control-Max-Age: 600</code> (10 minute cache)
+- <strong>SSE streaming responses</strong> include CORS headers so browser EventSource clients work correctly
+- <strong><code>X-Hermes-Session-Id</code></strong> is an allowed request header, so browsers on an allowlisted origin can request session continuation.
+- <strong><code>Idempotency-Key</code></strong> is an allowed request header — clients can send it for deduplication (responses are cached by key for 5 minutes)</p>
+<p>Most documented frontends such as Open WebUI connect server-to-server and do not need CORS at all.</p>
+<h2 id="compatible-frontends">Compatible Frontends</h2>
+<p>Any frontend that supports the OpenAI API format works. Tested/documented integrations:</p>
+<table>
+<thead>
+<tr>
+<th>Frontend</th>
+<th>Stars</th>
+<th>Connection</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="../messaging/open-webui.html">Open WebUI</a></td>
+<td>126k</td>
+<td>Full guide available</td>
+</tr>
+<tr>
+<td>LobeChat</td>
+<td>73k</td>
+<td>Custom provider endpoint</td>
+</tr>
+<tr>
+<td>LibreChat</td>
+<td>34k</td>
+<td>Custom endpoint in librechat.yaml</td>
+</tr>
+<tr>
+<td>AnythingLLM</td>
+<td>56k</td>
+<td>Generic OpenAI provider</td>
+</tr>
+<tr>
+<td>NextChat</td>
+<td>87k</td>
+<td>BASE_URL env var</td>
+</tr>
+<tr>
+<td>ChatBox</td>
+<td>39k</td>
+<td>API Host setting</td>
+</tr>
+<tr>
+<td>Jan</td>
+<td>26k</td>
+<td>Remote model config</td>
+</tr>
+<tr>
+<td>HF Chat-UI</td>
+<td>8k</td>
+<td>OPENAI_BASE_URL</td>
+</tr>
+<tr>
+<td>big-AGI</td>
+<td>7k</td>
+<td>Custom endpoint</td>
+</tr>
+<tr>
+<td>OpenAI Python SDK</td>
+<td>—</td>
+<td><code>OpenAI(base_url="http://localhost:8642/v1")</code></td>
+</tr>
+<tr>
+<td>curl</td>
+<td>—</td>
+<td>Direct HTTP requests</td>
+</tr>
+</tbody>
+</table>
+<h2 id="multi-user-setup-with-profiles">Multi-User Setup with Profiles</h2>
+<p>To give multiple users their own isolated Hermes instance (separate config, memory, skills), use <a href="../profiles.html">profiles</a>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Create a profile per user</span>
+hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>alice
+hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>bob
+
+<span class="c1"># Configure each profile&#39;s API server on a different port. API_SERVER_* are env</span>
+<span class="c1"># vars (not config.yaml keys), so write them to each profile&#39;s .env:</span>
+cat<span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/profiles/alice/.env<span class="w"> </span><span class="s">&lt;&lt;EOF</span>
+<span class="s">API_SERVER_ENABLED=true</span>
+<span class="s">API_SERVER_PORT=8643</span>
+<span class="s">API_SERVER_KEY=alice-secret</span>
+<span class="s">EOF</span>
+
+cat<span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/profiles/bob/.env<span class="w"> </span><span class="s">&lt;&lt;EOF</span>
+<span class="s">API_SERVER_ENABLED=true</span>
+<span class="s">API_SERVER_PORT=8644</span>
+<span class="s">API_SERVER_KEY=bob-secret</span>
+<span class="s">EOF</span>
+
+<span class="c1"># Start each profile&#39;s gateway</span>
+hermes<span class="w"> </span>-p<span class="w"> </span>alice<span class="w"> </span>gateway<span class="w"> </span><span class="p">&amp;</span>
+hermes<span class="w"> </span>-p<span class="w"> </span>bob<span class="w"> </span>gateway<span class="w"> </span><span class="p">&amp;</span>
+</code></pre></div>
+
+<p>Each profile's API server automatically advertises the profile name as the model ID:</p>
+<ul>
+<li><code>http://localhost:8643/v1/models</code> → model <code>alice</code></li>
+<li><code>http://localhost:8644/v1/models</code> → model <code>bob</code></li>
+</ul>
+<p>In Open WebUI, add each as a separate connection. The model dropdown shows <code>alice</code> and <code>bob</code> as distinct models, each backed by a fully isolated Hermes instance. See the <a href="../messaging/open-webui.html#multi-user-setup-with-profiles">Open WebUI guide</a> for details.</p>
+<h2 id="limitations">Limitations</h2>
+<ul>
+<li><strong>Response storage</strong> — stored responses (for <code>previous_response_id</code>) are persisted in SQLite and survive gateway restarts. Max 100 stored responses (LRU eviction).</li>
+<li><strong>No file upload</strong> — inline images are supported on both <code>/v1/chat/completions</code> and <code>/v1/responses</code>, but uploaded files (<code>file</code>, <code>input_file</code>, <code>file_id</code>) and non-image document inputs are not supported through the API.</li>
+<li><strong>Simple OpenAI clients still see an alias</strong> — <code>/v1/models</code> advertises the
+  stable Hermes alias (<code>hermes-agent</code> or the active profile name). Richer
+  clients can send explicit <code>provider</code> / <code>model_options</code> overrides on requests.</li>
+</ul>
+<h2 id="proxy-mode">Proxy Mode</h2>
+<p>The API server also serves as the backend for <strong>gateway proxy mode</strong>. When another Hermes gateway instance is configured with <code>GATEWAY_PROXY_URL</code> pointing at this API server, it forwards all messages here instead of running its own agent. This enables split deployments — for example, a Docker container handling Matrix E2EE that relays to a host-side agent.</p>
+<p>See <a href="../messaging/matrix.html#proxy-mode-e2ee-on-macos">Matrix Proxy Mode</a> for the full setup guide.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#quick-start">Quick Start</a></li>
+<li class="lvl3"><a href="#1-enable-the-api-server">1. Enable the API server</a></li>
+<li class="lvl3"><a href="#2-start-the-gateway">2. Start the gateway</a></li>
+<li class="lvl3"><a href="#3-connect-a-frontend">3. Connect a frontend</a></li>
+<li class="lvl2"><a href="#endpoints">Endpoints</a></li>
+<li class="lvl3"><a href="#post-v1chatcompletions">POST /v1/chat/completions</a></li>
+<li class="lvl3"><a href="#post-v1responses">POST /v1/responses</a></li>
+<li class="lvl3"><a href="#get-v1responsesid">GET /v1/responses/{id}</a></li>
+<li class="lvl3"><a href="#delete-v1responsesid">DELETE /v1/responses/{id}</a></li>
+<li class="lvl3"><a href="#get-v1models">GET /v1/models</a></li>
+<li class="lvl3"><a href="#get-apimodeloptions">GET /api/model/options</a></li>
+<li class="lvl3"><a href="#get-v1capabilities">GET /v1/capabilities</a></li>
+<li class="lvl2"><a href="#browser-extension-control">Browser-extension control</a></li>
+<li class="lvl3"><a href="#local-api-registration">Local API registration</a></li>
+<li class="lvl3"><a href="#controller-frames">Controller frames</a></li>
+<li class="lvl2"><a href="#per-request-model-selection">Per-request model selection</a></li>
+<li class="lvl3"><a href="#get-health">GET /health</a></li>
+<li class="lvl3"><a href="#get-healthdetailed">GET /health/detailed</a></li>
+<li class="lvl2"><a href="#runs-api-streaming-friendly-alternative">Runs API (streaming-friendly alternative)</a></li>
+<li class="lvl3"><a href="#post-v1runs">POST /v1/runs</a></li>
+<li class="lvl3"><a href="#get-v1runsrun_id">GET /v1/runs/{run_id}</a></li>
+<li class="lvl3"><a href="#get-v1runsrun_idevents">GET /v1/runs/{run_id}/events</a></li>
+<li class="lvl3"><a href="#post-v1runsrun_idstop">POST /v1/runs/{run_id}/stop</a></li>
+<li class="lvl3"><a href="#post-v1runsrun_idapproval">POST /v1/runs/{run_id}/approval</a></li>
+<li class="lvl2"><a href="#jobs-api-background-scheduled-work">Jobs API (background scheduled work)</a></li>
+<li class="lvl3"><a href="#get-apijobs">GET /api/jobs</a></li>
+<li class="lvl3"><a href="#post-apijobs">POST /api/jobs</a></li>
+<li class="lvl3"><a href="#get-apijobsjob_id">GET /api/jobs/{job_id}</a></li>
+<li class="lvl3"><a href="#patch-apijobsjob_id">PATCH /api/jobs/{job_id}</a></li>
+<li class="lvl3"><a href="#delete-apijobsjob_id">DELETE /api/jobs/{job_id}</a></li>
+<li class="lvl3"><a href="#post-apijobsjob_idpause">POST /api/jobs/{job_id}/pause</a></li>
+<li class="lvl3"><a href="#post-apijobsjob_idresume">POST /api/jobs/{job_id}/resume</a></li>
+<li class="lvl3"><a href="#post-apijobsjob_idrun">POST /api/jobs/{job_id}/run</a></li>
+<li class="lvl2"><a href="#sessions-api-session-control-over-rest">Sessions API (session control over REST)</a></li>
+<li class="lvl2"><a href="#skills-and-toolsets-discovery">Skills and toolsets discovery</a></li>
+<li class="lvl2"><a href="#long-term-memory-scoping-x-hermes-session-key">Long-term memory scoping (X-Hermes-Session-Key)</a></li>
+<li class="lvl2"><a href="#system-prompt-handling">System Prompt Handling</a></li>
+<li class="lvl2"><a href="#authentication">Authentication</a></li>
+<li class="lvl3"><a href="#multi-profile-routing-pprofile">Multi-profile routing (/p/&amp;lt;profile&amp;gt;/…)</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl3"><a href="#environment-variables">Environment Variables</a></li>
+<li class="lvl3"><a href="#configyaml">config.yaml</a></li>
+<li class="lvl3"><a href="#concurrent-run-cap">Concurrent-run cap</a></li>
+<li class="lvl3"><a href="#stored-history-size-for-previous_response_id-chaining">Stored history size for previous_response_id chaining</a></li>
+<li class="lvl2"><a href="#security-headers">Security Headers</a></li>
+<li class="lvl2"><a href="#cors">CORS</a></li>
+<li class="lvl2"><a href="#compatible-frontends">Compatible Frontends</a></li>
+<li class="lvl2"><a href="#multi-user-setup-with-profiles">Multi-User Setup with Profiles</a></li>
+<li class="lvl2"><a href="#limitations">Limitations</a></li>
+<li class="lvl2"><a href="#proxy-mode">Proxy Mode</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

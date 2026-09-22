@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cron Troubleshooting · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/cron-troubleshooting</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="cron-troubleshooting">Cron Troubleshooting</h1>
+<p>When a cron job isn't behaving as expected, work through these checks in order. Most issues fall into one of four categories: timing, delivery, permissions, or skill loading.</p>
+<hr />
+<h2 id="jobs-not-firing">Jobs Not Firing</h2>
+<h3 id="check-1-verify-the-job-exists-and-is-active">Check 1: Verify the job exists and is active</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>list
+</code></pre></div>
+
+<p>Look for the job and confirm its state is <code>[active]</code> (not <code>[paused]</code> or <code>[completed]</code>). If it shows <code>[completed]</code>, the repeat count may be exhausted — edit the job to reset it.</p>
+<h3 id="check-2-confirm-the-schedule-is-correct">Check 2: Confirm the schedule is correct</h3>
+<p>A misformatted schedule silently defaults to one-shot or is rejected entirely. Test your expression:</p>
+<table>
+<thead>
+<tr>
+<th>Your expression</th>
+<th>Should evaluate to</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0 9 * * *</code></td>
+<td>9:00 AM every day</td>
+</tr>
+<tr>
+<td><code>0 9 * * 1</code></td>
+<td>9:00 AM every Monday</td>
+</tr>
+<tr>
+<td><code>every 2h</code></td>
+<td>Every 2 hours from now</td>
+</tr>
+<tr>
+<td><code>30m</code></td>
+<td>30 minutes from now</td>
+</tr>
+<tr>
+<td><code>2025-06-01T09:00:00</code></td>
+<td>June 1, 2025 at 9:00 AM UTC</td>
+</tr>
+</tbody>
+</table>
+<p>If the job fires once and then disappears from the list, it's a one-shot schedule (<code>30m</code>, <code>1d</code>, or an ISO timestamp) — expected behavior.</p>
+<h3 id="check-3-is-the-gateway-running">Check 3: Is the gateway running?</h3>
+<p>Cron jobs are fired by the gateway's background ticker thread, which ticks every 60 seconds. A regular CLI chat session does <strong>not</strong> automatically fire cron jobs.</p>
+<p>If you're expecting jobs to fire automatically, you need a running gateway (<code>hermes gateway</code> for foreground, or <code>hermes gateway start</code> for the installed service). For one-off debugging, you can manually trigger a tick with <code>hermes cron tick</code>.</p>
+<p><strong>Desktop app:</strong> the desktop's primary backend runs its own ticker, and it ticks <strong>every local profile's</strong> cron store — so jobs on a secondary profile keep firing even while that profile's backend is asleep (the desktop puts idle profile backends to sleep after ~10 minutes). You do not need to keep a profile open for its scheduled jobs to run.</p>
+<h3 id="check-4-check-the-system-clock-and-timezone">Check 4: Check the system clock and timezone</h3>
+<p>Jobs use the local timezone. If your machine's clock is wrong or in a different timezone than expected, jobs will fire at the wrong times. Verify:</p>
+<div class="highlight"><pre><span></span><code>date
+hermes<span class="w"> </span>cron<span class="w"> </span>list<span class="w">   </span><span class="c1"># Compare next_run times with local time</span>
+</code></pre></div>
+
+<hr />
+<h2 id="delivery-failures">Delivery Failures</h2>
+<h3 id="check-1-verify-the-deliver-target-is-correct">Check 1: Verify the deliver target is correct</h3>
+<p>Delivery targets are case-sensitive and require the correct platform to be configured. A misconfigured target silently drops the response.</p>
+<table>
+<thead>
+<tr>
+<th>Target</th>
+<th>Requires</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>telegram</code></td>
+<td><code>TELEGRAM_BOT_TOKEN</code> in <code>~/.hermes/.env</code></td>
+</tr>
+<tr>
+<td><code>discord</code></td>
+<td><code>DISCORD_BOT_TOKEN</code> in <code>~/.hermes/.env</code></td>
+</tr>
+<tr>
+<td><code>slack</code></td>
+<td><code>SLACK_BOT_TOKEN</code> in <code>~/.hermes/.env</code></td>
+</tr>
+<tr>
+<td><code>whatsapp</code></td>
+<td>WhatsApp gateway configured</td>
+</tr>
+<tr>
+<td><code>signal</code></td>
+<td>Signal gateway configured</td>
+</tr>
+<tr>
+<td><code>matrix</code></td>
+<td>Matrix homeserver configured</td>
+</tr>
+<tr>
+<td><code>email</code></td>
+<td>SMTP configured in <code>config.yaml</code></td>
+</tr>
+<tr>
+<td><code>sms</code></td>
+<td>SMS provider configured</td>
+</tr>
+<tr>
+<td><code>local</code></td>
+<td>Write access to <code>~/.hermes/cron/output/</code></td>
+</tr>
+<tr>
+<td><code>origin</code></td>
+<td>Delivers to the chat where the job was created</td>
+</tr>
+</tbody>
+</table>
+<p>Other supported platforms include <code>mattermost</code>, <code>homeassistant</code>, <code>dingtalk</code>, <code>feishu</code>, <code>wecom</code>, <code>weixin</code>, <code>bluebubbles</code>, <code>qqbot</code>, and <code>webhook</code>. You can also target a specific chat with <code>platform:chat_id</code> syntax (e.g., <code>telegram:-1001234567890</code>).</p>
+<p>If delivery fails, the job still runs — it just won't send anywhere. Check <code>hermes cron list</code> for updated <code>last_error</code> field (if available).</p>
+<h3 id="check-2-check-silent-usage">Check 2: Check <code>[SILENT]</code> usage</h3>
+<p>If your cron job produces no output, delivery is suppressed. If the agent response includes the cron quiet marker <code>[SILENT]</code>, delivery is also suppressed. This is intentional for monitoring jobs — but make sure your prompt is not accidentally suppressing everything.</p>
+<p>Use prompts like "respond with only [SILENT] if nothing changed." Avoid asking the agent to include <code>[SILENT]</code> inside a longer explanation, because cron treats that marker as a suppression signal.</p>
+<h3 id="check-3-platform-token-permissions">Check 3: Platform token permissions</h3>
+<p>Each messaging platform bot needs specific permissions to receive messages. If delivery silently fails:</p>
+<ul>
+<li><strong>Telegram</strong>: Bot must be an admin in the target group/channel</li>
+<li><strong>Discord</strong>: Bot must have permission to send in the target channel</li>
+<li><strong>Slack</strong>: Bot must be added to the workspace and have <code>chat:write</code> scope</li>
+</ul>
+<h3 id="check-4-response-wrapping">Check 4: Response wrapping</h3>
+<p>By default, cron responses are wrapped with a header and footer (<code>cron.wrap_response: true</code> in <code>config.yaml</code>). Some platforms or integrations may not handle this well. To disable:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">cron</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">wrap_response</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<h3 id="check-5-relay-fronted-platforms-hermes-cloud--team-gateway">Check 5: Relay-fronted platforms (Hermes Cloud / Team Gateway)</h3>
+<p>When a platform's credential lives in the relay connector (e.g. Slack or Discord fronted by a Team Gateway) rather than in your local <code>.env</code>, the <strong>running gateway's live relay adapter is the only sender</strong> — there is no standalone delivery path.</p>
+<ul>
+<li>Scheduled fires work as long as the gateway is running: its ticker owns relay-fronted delivery.</li>
+<li>A standalone <code>hermes cron run &lt;id&gt;</code> automatically <strong>forwards the run to the gateway</strong> over the api_server (<code>POST /api/jobs/{id}/run</code>). This requires the <code>api_server</code> platform to be enabled with an <code>API_SERVER_KEY</code> (16+ characters). A <code>--prompt</code> / <code>cronjob(action='run', prompt=...)</code> context is forwarded with it and applies to that single fire only.</li>
+<li>If the gateway is not reachable, the run fails with a "relay-fronted … start the gateway" error instead of the misleading <code>platform 'slack' not configured/enabled</code>. Start the gateway and retry.</li>
+</ul>
+<hr />
+<h2 id="skill-loading-failures">Skill Loading Failures</h2>
+<h3 id="check-1-verify-skills-are-installed">Check 1: Verify skills are installed</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>list
+</code></pre></div>
+
+<p>Skills must be installed before they can be attached to cron jobs. If a skill is missing, install it first with <code>hermes skills install &lt;skill-name&gt;</code> or via <code>/skills</code> in the CLI.</p>
+<h3 id="check-2-check-skill-name-vs-skill-folder-name">Check 2: Check skill name vs. skill folder name</h3>
+<p>Skill names are case-sensitive and must match the installed skill's folder name. If your job specifies <code>ai-funding-report</code> but the skill folder is <code>ai-funding-daily-report</code>, confirm the exact name from <code>hermes skills list</code>.</p>
+<h3 id="check-3-skills-that-require-interactive-tools">Check 3: Skills that require interactive tools</h3>
+<p>Cron jobs run with the <code>cronjob</code>, <code>messaging</code>, and <code>clarify</code> toolsets disabled. This prevents recursive cron creation, direct message sending (delivery is handled by the scheduler), and interactive prompts. If a skill relies on these toolsets, it won't work in a cron context.</p>
+<p>Check the skill's documentation to confirm it works in non-interactive (headless) mode.</p>
+<h3 id="check-4-multi-skill-ordering">Check 4: Multi-skill ordering</h3>
+<p>When using multiple skills, they load in order. If Skill A depends on context from Skill B, make sure B loads first:</p>
+<div class="highlight"><pre><span></span><code>/cron<span class="w"> </span>add<span class="w"> </span><span class="s2">&quot;0 9 * * *&quot;</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="w"> </span>--skill<span class="w"> </span>context-skill<span class="w"> </span>--skill<span class="w"> </span>target-skill
+</code></pre></div>
+
+<p>In this example, <code>context-skill</code> loads before <code>target-skill</code>.</p>
+<hr />
+<h2 id="job-errors-and-failures">Job Errors and Failures</h2>
+<h3 id="check-1-review-recent-job-output">Check 1: Review recent job output</h3>
+<p>If a job ran and failed, you may see error context in:</p>
+<ol>
+<li>The chat where the job delivers (if delivery succeeded)</li>
+<li><code>~/.hermes/logs/agent.log</code> for scheduler messages (or <code>errors.log</code> for warnings)</li>
+<li>The job's <code>last_run</code> metadata via <code>hermes cron list</code></li>
+</ol>
+<h3 id="check-2-common-error-patterns">Check 2: Common error patterns</h3>
+<p><strong>"No such file or directory" for scripts</strong>
+The <code>script</code> path must be an absolute path (or relative to the Hermes config directory). Verify:</p>
+<div class="highlight"><pre><span></span><code>ls<span class="w"> </span>~/.hermes/scripts/your-script.py<span class="w">   </span><span class="c1"># Must exist</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--script<span class="w"> </span>~/.hermes/scripts/your-script.py
+</code></pre></div>
+
+<p><strong>"Skill not found" at job execution</strong>
+The skill must be installed on the machine running the scheduler. If you move between machines, skills don't automatically sync — reinstall them with <code>hermes skills install &lt;skill-name&gt;</code>.</p>
+<p><strong>Job runs but delivers nothing</strong>
+Likely a delivery target issue (see Delivery Failures above), no output, or a response containing the cron quiet marker <code>[SILENT]</code>.</p>
+<p><strong>Job hangs or times out</strong>
+The scheduler uses an inactivity-based timeout (default 600s, configurable via <code>HERMES_CRON_TIMEOUT</code> env var, <code>0</code> for unlimited). The agent can run as long as it's actively calling tools — the timer only fires after sustained inactivity. Long-running jobs should use scripts to handle data collection and deliver only the result.</p>
+<h3 id="check-3-lock-contention">Check 3: Lock contention</h3>
+<p>The scheduler uses file-based locking to prevent overlapping ticks. If two gateway instances are running (or a CLI session conflicts with a gateway), jobs may be delayed or skipped.</p>
+<p>Kill duplicate gateway processes:</p>
+<div class="highlight"><pre><span></span><code>ps<span class="w"> </span>aux<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>hermes
+<span class="c1"># Kill duplicate processes, keep only one</span>
+</code></pre></div>
+
+<h3 id="check-4-permissions-on-jobsjson">Check 4: Permissions on jobs.json</h3>
+<p>Jobs are stored in <code>~/.hermes/cron/jobs.json</code>. If this file is not readable/writable by your user, the scheduler will fail silently:</p>
+<div class="highlight"><pre><span></span><code>ls<span class="w"> </span>-la<span class="w"> </span>~/.hermes/cron/jobs.json
+chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span>~/.hermes/cron/jobs.json<span class="w">   </span><span class="c1"># Your user should own it</span>
+</code></pre></div>
+
+<hr />
+<h2 id="performance-issues">Performance Issues</h2>
+<h3 id="slow-job-startup">Slow job startup</h3>
+<p>Each cron job creates a fresh AIAgent session, which may involve provider authentication and model loading. For time-sensitive schedules, add buffer time (e.g., <code>0 8 * * *</code> instead of <code>0 9 * * *</code>).</p>
+<h3 id="too-many-overlapping-jobs">Too many overlapping jobs</h3>
+<p>The scheduler executes jobs sequentially within each tick. If multiple jobs are due at the same time, they run one after another. Consider staggering schedules (e.g., <code>0 9 * * *</code> and <code>5 9 * * *</code> instead of both at <code>0 9 * * *</code>) to avoid delays.</p>
+<h3 id="large-script-output">Large script output</h3>
+<p>Scripts that dump megabytes of output will slow down the agent and may hit token limits. Filter/summarize at the script level — emit only what the agent needs to reason about.</p>
+<hr />
+<h2 id="diagnostic-commands">Diagnostic Commands</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>list<span class="w">                    </span><span class="c1"># Show all jobs, states, next_run times</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>run<span class="w"> </span>&lt;job_id&gt;<span class="w">            </span><span class="c1"># Schedule for next tick (for testing)</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w">           </span><span class="c1"># Fix configuration issues</span>
+hermes<span class="w"> </span>logs<span class="w">                         </span><span class="c1"># View recent Hermes logs</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>list<span class="w">                  </span><span class="c1"># Verify installed skills</span>
+</code></pre></div>
+
+<hr />
+<h2 id="getting-more-help">Getting More Help</h2>
+<p>If you've worked through this guide and the issue persists:</p>
+<ol>
+<li>Run the job with <code>hermes cron run &lt;job_id&gt;</code> (fires on next gateway tick) and watch for errors in the chat output</li>
+<li>Check <code>~/.hermes/logs/agent.log</code> for scheduler messages and <code>~/.hermes/logs/errors.log</code> for warnings</li>
+<li>Open an issue at <a href="https://github.com/NousResearch/hermes-agent" class="ext" target="_blank" rel="noopener">github.com/NousResearch/hermes-agent</a> with:</li>
+<li>The job ID and schedule</li>
+<li>The delivery target</li>
+<li>What you expected vs. what happened</li>
+<li>Relevant error messages from the logs</li>
+</ol>
+<hr />
+<p><em>For the complete cron reference, see <a href="automate-with-cron.html">Automate Anything with Cron</a> and <a href="../user-guide/features/cron.html">Scheduled Tasks (Cron)</a>.</em></p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/cron-troubleshooting</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#jobs-not-firing">Jobs Not Firing</a></li>
+<li class="lvl3"><a href="#check-1-verify-the-job-exists-and-is-active">Check 1: Verify the job exists and is active</a></li>
+<li class="lvl3"><a href="#check-2-confirm-the-schedule-is-correct">Check 2: Confirm the schedule is correct</a></li>
+<li class="lvl3"><a href="#check-3-is-the-gateway-running">Check 3: Is the gateway running?</a></li>
+<li class="lvl3"><a href="#check-4-check-the-system-clock-and-timezone">Check 4: Check the system clock and timezone</a></li>
+<li class="lvl2"><a href="#delivery-failures">Delivery Failures</a></li>
+<li class="lvl3"><a href="#check-1-verify-the-deliver-target-is-correct">Check 1: Verify the deliver target is correct</a></li>
+<li class="lvl3"><a href="#check-2-check-silent-usage">Check 2: Check [SILENT] usage</a></li>
+<li class="lvl3"><a href="#check-3-platform-token-permissions">Check 3: Platform token permissions</a></li>
+<li class="lvl3"><a href="#check-4-response-wrapping">Check 4: Response wrapping</a></li>
+<li class="lvl3"><a href="#check-5-relay-fronted-platforms-hermes-cloud--team-gateway">Check 5: Relay-fronted platforms (Hermes Cloud / Team Gateway)</a></li>
+<li class="lvl2"><a href="#skill-loading-failures">Skill Loading Failures</a></li>
+<li class="lvl3"><a href="#check-1-verify-skills-are-installed">Check 1: Verify skills are installed</a></li>
+<li class="lvl3"><a href="#check-2-check-skill-name-vs-skill-folder-name">Check 2: Check skill name vs. skill folder name</a></li>
+<li class="lvl3"><a href="#check-3-skills-that-require-interactive-tools">Check 3: Skills that require interactive tools</a></li>
+<li class="lvl3"><a href="#check-4-multi-skill-ordering">Check 4: Multi-skill ordering</a></li>
+<li class="lvl2"><a href="#job-errors-and-failures">Job Errors and Failures</a></li>
+<li class="lvl3"><a href="#check-1-review-recent-job-output">Check 1: Review recent job output</a></li>
+<li class="lvl3"><a href="#check-2-common-error-patterns">Check 2: Common error patterns</a></li>
+<li class="lvl3"><a href="#check-3-lock-contention">Check 3: Lock contention</a></li>
+<li class="lvl3"><a href="#check-4-permissions-on-jobsjson">Check 4: Permissions on jobs.json</a></li>
+<li class="lvl2"><a href="#performance-issues">Performance Issues</a></li>
+<li class="lvl3"><a href="#slow-job-startup">Slow job startup</a></li>
+<li class="lvl3"><a href="#too-many-overlapping-jobs">Too many overlapping jobs</a></li>
+<li class="lvl3"><a href="#large-script-output">Large script output</a></li>
+<li class="lvl2"><a href="#diagnostic-commands">Diagnostic Commands</a></li>
+<li class="lvl2"><a href="#getting-more-help">Getting More Help</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

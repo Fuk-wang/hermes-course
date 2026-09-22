@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>扩展 CLI · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/extending-the-cli</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="扩展-cli">扩展 CLI</h1>
+<p>Hermes 在 <code>HermesCLI</code> 上暴露了受保护的扩展 hook（钩子），使包装 CLI 可以添加 widget、快捷键和布局自定义，而无需覆盖超过 1000 行的 <code>run()</code> 方法。这样可以让你的扩展与内部变更解耦。</p>
+<h2 id="扩展点">扩展点</h2>
+<p>共有五个扩展接缝可用：</p>
+<table>
+<thead>
+<tr>
+<th>Hook</th>
+<th>用途</th>
+<th>何时覆盖</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>_get_extra_tui_widgets()</code></td>
+<td>向布局注入 widget</td>
+<td>需要持久 UI 元素（面板、状态栏、迷你播放器）时</td>
+</tr>
+<tr>
+<td><code>_register_extra_tui_keybindings(kb, *, input_area)</code></td>
+<td>添加键盘快捷键</td>
+<td>需要热键（切换面板、传输控制、模态快捷键）时</td>
+</tr>
+<tr>
+<td><code>_build_tui_layout_children(**widgets)</code></td>
+<td>完全控制 widget 排序</td>
+<td>需要重新排序或包装现有 widget 时（少见）</td>
+</tr>
+<tr>
+<td><code>process_command()</code></td>
+<td>添加自定义斜杠命令</td>
+<td>需要处理 <code>/mycommand</code> 时（已有 hook）</td>
+</tr>
+<tr>
+<td><code>_build_tui_style_dict()</code></td>
+<td>自定义 prompt_toolkit 样式</td>
+<td>需要自定义颜色或样式时（已有 hook）</td>
+</tr>
+</tbody>
+</table>
+<p>前三个是新增的受保护 hook，后两个已存在。</p>
+<h2 id="快速开始包装-cli">快速开始：包装 CLI</h2>
+<div class="highlight"><pre><span></span><code><span class="ch">#!/usr/bin/env python3</span>
+<span class="sd">&quot;&quot;&quot;my_cli.py — Example wrapper CLI that extends Hermes.&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">cli</span><span class="w"> </span><span class="kn">import</span> <span class="n">HermesCLI</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">prompt_toolkit.layout</span><span class="w"> </span><span class="kn">import</span> <span class="n">FormattedTextControl</span><span class="p">,</span> <span class="n">Window</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">prompt_toolkit.filters</span><span class="w"> </span><span class="kn">import</span> <span class="n">Condition</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyCLI</span><span class="p">(</span><span class="n">HermesCLI</span><span class="p">):</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_panel_visible</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_get_extra_tui_widgets</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Add a toggleable info panel above the status bar.&quot;&quot;&quot;</span>
+        <span class="n">cli_ref</span> <span class="o">=</span> <span class="bp">self</span>
+        <span class="k">return</span> <span class="p">[</span>
+            <span class="n">Window</span><span class="p">(</span>
+                <span class="n">FormattedTextControl</span><span class="p">(</span><span class="k">lambda</span><span class="p">:</span> <span class="s2">&quot;📊 My custom panel content&quot;</span><span class="p">),</span>
+                <span class="n">height</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+                <span class="nb">filter</span><span class="o">=</span><span class="n">Condition</span><span class="p">(</span><span class="k">lambda</span><span class="p">:</span> <span class="n">cli_ref</span><span class="o">.</span><span class="n">_panel_visible</span><span class="p">),</span>
+            <span class="p">),</span>
+        <span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_register_extra_tui_keybindings</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">kb</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">input_area</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;F2 toggles the custom panel.&quot;&quot;&quot;</span>
+        <span class="n">cli_ref</span> <span class="o">=</span> <span class="bp">self</span>
+
+        <span class="nd">@kb</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="s2">&quot;f2&quot;</span><span class="p">)</span>
+        <span class="k">def</span><span class="w"> </span><span class="nf">_toggle_panel</span><span class="p">(</span><span class="n">event</span><span class="p">):</span>
+            <span class="n">cli_ref</span><span class="o">.</span><span class="n">_panel_visible</span> <span class="o">=</span> <span class="ow">not</span> <span class="n">cli_ref</span><span class="o">.</span><span class="n">_panel_visible</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">process_command</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cmd</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Add a /panel slash command.&quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="n">cmd</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="o">==</span> <span class="s2">&quot;/panel&quot;</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_panel_visible</span> <span class="o">=</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_panel_visible</span>
+            <span class="n">state</span> <span class="o">=</span> <span class="s2">&quot;visible&quot;</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_panel_visible</span> <span class="k">else</span> <span class="s2">&quot;hidden&quot;</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Panel is now </span><span class="si">{</span><span class="n">state</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">True</span>
+        <span class="k">return</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">process_command</span><span class="p">(</span><span class="n">cmd</span><span class="p">)</span>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+    <span class="n">cli</span> <span class="o">=</span> <span class="n">MyCLI</span><span class="p">()</span>
+    <span class="n">cli</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</code></pre></div>
+
+<p>运行：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>~/.hermes/hermes-agent
+<span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+python<span class="w"> </span>my_cli.py
+</code></pre></div>
+
+<h2 id="hook-参考">Hook 参考</h2>
+<h3 id="_get_extra_tui_widgets"><code>_get_extra_tui_widgets()</code></h3>
+<p>返回要插入 TUI 布局的 prompt_toolkit widget 列表。Widget 出现在<strong>间隔区与状态栏之间</strong>——位于输入区上方、主输出区下方。</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">_get_extra_tui_widgets</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">:</span>
+    <span class="k">return</span> <span class="p">[]</span>  <span class="c1"># default: no extra widgets</span>
+</code></pre></div>
+
+<p>每个 widget 应为 prompt_toolkit 容器（如 <code>Window</code>、<code>ConditionalContainer</code>、<code>HSplit</code>）。使用 <code>ConditionalContainer</code> 或 <code>filter=Condition(...)</code> 可使 widget 支持切换显示。</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">prompt_toolkit.layout</span><span class="w"> </span><span class="kn">import</span> <span class="n">ConditionalContainer</span><span class="p">,</span> <span class="n">Window</span><span class="p">,</span> <span class="n">FormattedTextControl</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">prompt_toolkit.filters</span><span class="w"> </span><span class="kn">import</span> <span class="n">Condition</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_get_extra_tui_widgets</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">[</span>
+        <span class="n">ConditionalContainer</span><span class="p">(</span>
+            <span class="n">Window</span><span class="p">(</span><span class="n">FormattedTextControl</span><span class="p">(</span><span class="s2">&quot;Status: connected&quot;</span><span class="p">),</span> <span class="n">height</span><span class="o">=</span><span class="mi">1</span><span class="p">),</span>
+            <span class="nb">filter</span><span class="o">=</span><span class="n">Condition</span><span class="p">(</span><span class="k">lambda</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_show_status</span><span class="p">),</span>
+        <span class="p">),</span>
+    <span class="p">]</span>
+</code></pre></div>
+
+<h3 id="_register_extra_tui_keybindingskb--input_area"><code>_register_extra_tui_keybindings(kb, *, input_area)</code></h3>
+<p>在 Hermes 注册自身快捷键之后、布局构建之前调用。将你的快捷键添加到 <code>kb</code>。</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">_register_extra_tui_keybindings</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">kb</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">input_area</span><span class="p">):</span>
+    <span class="k">pass</span>  <span class="c1"># default: no extra keybindings</span>
+</code></pre></div>
+
+<p>参数：
+- <strong><code>kb</code></strong> — prompt_toolkit 应用的 <code>KeyBindings</code> 实例
+- <strong><code>input_area</code></strong> — 主 <code>TextArea</code> widget，用于读取或操作用户输入</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">_register_extra_tui_keybindings</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">kb</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">input_area</span><span class="p">):</span>
+    <span class="n">cli_ref</span> <span class="o">=</span> <span class="bp">self</span>
+
+    <span class="nd">@kb</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="s2">&quot;f3&quot;</span><span class="p">)</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_clear_input</span><span class="p">(</span><span class="n">event</span><span class="p">):</span>
+        <span class="n">input_area</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+
+    <span class="nd">@kb</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="s2">&quot;f4&quot;</span><span class="p">)</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_insert_template</span><span class="p">(</span><span class="n">event</span><span class="p">):</span>
+        <span class="n">input_area</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="s2">&quot;/search &quot;</span>
+</code></pre></div>
+
+<p><strong>避免与内置快捷键冲突</strong>：<code>Enter</code>（提交）、<code>Escape Enter</code>（换行）、<code>Ctrl-C</code>（中断）、<code>Ctrl-D</code>（退出）、<code>Tab</code>（接受自动建议）。F2 及以上的功能键和 Ctrl 组合键通常是安全的。</p>
+<h3 id="_build_tui_layout_childrenwidgets"><code>_build_tui_layout_children(**widgets)</code></h3>
+<p>仅在需要完全控制 widget 排序时才覆盖此方法。大多数扩展应使用 <code>_get_extra_tui_widgets()</code> 代替。</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">_build_tui_layout_children</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">sudo_widget</span><span class="p">,</span> <span class="n">secret_widget</span><span class="p">,</span>
+    <span class="n">approval_widget</span><span class="p">,</span> <span class="n">clarify_widget</span><span class="p">,</span> <span class="n">model_picker_widget</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="n">spinner_widget</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">spacer</span><span class="p">,</span> <span class="n">status_bar</span><span class="p">,</span> <span class="n">input_rule_top</span><span class="p">,</span>
+    <span class="n">image_bar</span><span class="p">,</span> <span class="n">input_area</span><span class="p">,</span> <span class="n">input_rule_bot</span><span class="p">,</span> <span class="n">voice_status_bar</span><span class="p">,</span>
+    <span class="n">completions_menu</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">:</span>
+</code></pre></div>
+
+<p>默认实现返回（值为 <code>None</code> 的 widget 会被过滤掉）：</p>
+<div class="highlight"><pre><span></span><code><span class="p">[</span>
+    <span class="n">Window</span><span class="p">(</span><span class="n">height</span><span class="o">=</span><span class="mi">0</span><span class="p">),</span>       <span class="c1"># anchor</span>
+    <span class="n">sudo_widget</span><span class="p">,</span>            <span class="c1"># sudo password prompt (conditional)</span>
+    <span class="n">secret_widget</span><span class="p">,</span>          <span class="c1"># secret input prompt (conditional)</span>
+    <span class="n">approval_widget</span><span class="p">,</span>        <span class="c1"># dangerous command approval (conditional)</span>
+    <span class="n">clarify_widget</span><span class="p">,</span>         <span class="c1"># clarify question UI (conditional)</span>
+    <span class="n">model_picker_widget</span><span class="p">,</span>    <span class="c1"># model picker overlay (conditional)</span>
+    <span class="n">spinner_widget</span><span class="p">,</span>         <span class="c1"># thinking spinner (conditional)</span>
+    <span class="n">spacer</span><span class="p">,</span>                 <span class="c1"># fills remaining vertical space</span>
+    <span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">_get_extra_tui_widgets</span><span class="p">(),</span>  <span class="c1"># YOUR WIDGETS GO HERE</span>
+    <span class="n">status_bar</span><span class="p">,</span>             <span class="c1"># model/token/context status line</span>
+    <span class="n">input_rule_top</span><span class="p">,</span>         <span class="c1"># ─── border above input</span>
+    <span class="n">image_bar</span><span class="p">,</span>              <span class="c1"># attached images indicator</span>
+    <span class="n">input_area</span><span class="p">,</span>             <span class="c1"># user text input</span>
+    <span class="n">input_rule_bot</span><span class="p">,</span>         <span class="c1"># ─── border below input</span>
+    <span class="n">voice_status_bar</span><span class="p">,</span>       <span class="c1"># voice mode status (conditional)</span>
+    <span class="n">completions_menu</span><span class="p">,</span>       <span class="c1"># autocomplete dropdown</span>
+<span class="p">]</span>
+</code></pre></div>
+
+<h2 id="布局示意图">布局示意图</h2>
+<p>默认布局从上到下：</p>
+<ol>
+<li><strong>输出区</strong> — 滚动的对话历史</li>
+<li><strong>间隔区</strong></li>
+<li><strong>额外 widget</strong> — 来自 <code>_get_extra_tui_widgets()</code></li>
+<li><strong>状态栏</strong> — 模型、上下文占比、已用时间</li>
+<li><strong>图片栏</strong> — 已附加图片数量</li>
+<li><strong>输入区</strong> — 用户 prompt（提示词）</li>
+<li><strong>语音状态</strong> — 录音指示器</li>
+<li><strong>补全菜单</strong> — 自动补全建议</li>
+</ol>
+<h2 id="使用技巧">使用技巧</h2>
+<ul>
+<li><strong>状态变更后刷新显示</strong>：调用 <code>self._invalidate()</code> 触发 prompt_toolkit 重绘。</li>
+<li><strong>访问 agent 状态</strong>：<code>self.agent</code>、<code>self.model</code>、<code>self.conversation_history</code> 均可直接使用。</li>
+<li><strong>自定义样式</strong>：覆盖 <code>_build_tui_style_dict()</code> 并为自定义样式类添加条目。</li>
+<li><strong>斜杠命令</strong>：覆盖 <code>process_command()</code>，处理自己的命令，其余一律调用 <code>super().process_command(cmd)</code>。</li>
+<li><strong>不要覆盖 <code>run()</code></strong>，除非绝对必要——扩展 hook 的存在正是为了避免这种耦合。</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/extending-the-cli</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#扩展点">扩展点</a></li>
+<li class="lvl2"><a href="#快速开始包装-cli">快速开始：包装 CLI</a></li>
+<li class="lvl2"><a href="#hook-参考">Hook 参考</a></li>
+<li class="lvl3"><a href="#_get_extra_tui_widgets">_get_extra_tui_widgets()</a></li>
+<li class="lvl3"><a href="#_register_extra_tui_keybindingskb--input_area">_register_extra_tui_keybindings(kb, *, input_area)</a></li>
+<li class="lvl3"><a href="#_build_tui_layout_childrenwidgets">_build_tui_layout_children(**widgets)</a></li>
+<li class="lvl2"><a href="#布局示意图">布局示意图</a></li>
+<li class="lvl2"><a href="#使用技巧">使用技巧</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

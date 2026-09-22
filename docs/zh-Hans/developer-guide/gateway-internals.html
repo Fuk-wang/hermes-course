@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gateway 内部机制 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/gateway-internals</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="gateway-内部机制">Gateway 内部机制</h1>
+<p>消息 gateway 是一个长期运行的进程，通过统一架构将 Hermes 连接到 20 余个外部消息平台。</p>
+<h2 id="关键文件">关键文件</h2>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gateway/run.py</code></td>
+<td><code>GatewayRunner</code> — 主循环、斜杠命令、消息分发（大文件；请查看 git 获取当前行数）</td>
+</tr>
+<tr>
+<td><code>gateway/session.py</code></td>
+<td><code>SessionStore</code> — 会话持久化与会话键构造</td>
+</tr>
+<tr>
+<td><code>gateway/delivery.py</code></td>
+<td>向目标平台/频道投递出站消息</td>
+</tr>
+<tr>
+<td><code>gateway/pairing.py</code></td>
+<td>用于用户授权的 DM 配对流程</td>
+</tr>
+<tr>
+<td><code>gateway/channel_directory.py</code></td>
+<td>将聊天 ID 映射为可读名称，用于 cron 投递</td>
+</tr>
+<tr>
+<td><code>gateway/hooks.py</code></td>
+<td>Hook（钩子）发现、加载与生命周期事件分发</td>
+</tr>
+<tr>
+<td><code>gateway/mirror.py</code></td>
+<td>为 <code>send_message</code> 提供跨会话消息镜像</td>
+</tr>
+<tr>
+<td><code>gateway/status.py</code></td>
+<td>面向 profile 范围的 gateway 实例的 token 锁管理</td>
+</tr>
+<tr>
+<td><code>gateway/builtin_hooks/</code></td>
+<td>始终注册的 hook 扩展点（当前未内置任何 hook）</td>
+</tr>
+<tr>
+<td><code>gateway/platform_registry.py</code></td>
+<td>适配器注册表、工厂，以及对捆绑平台插件的延迟（惰性）加载</td>
+</tr>
+<tr>
+<td><code>plugins/platforms/&lt;name&gt;/</code></td>
+<td>捆绑的消息适配器（多数平台：<code>adapter.py</code> + <code>plugin.yaml</code>）</td>
+</tr>
+<tr>
+<td><code>gateway/platforms/</code></td>
+<td>共享的 <code>base.py</code> 与遗留/直接适配器（Signal、API server、webhooks 等）</td>
+</tr>
+</tbody>
+</table>
+<h2 id="架构概览">架构概览</h2>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────┐
+│                  GatewayRunner                  │
+│                                                 │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+│  │ Telegram │  │ Discord  │  │  Slack   │       │
+│  │ Adapter  │  │ Adapter  │  │ Adapter  │       │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘       │
+│       │             │             │             │
+│       └─────────────┼─────────────┘             │
+│                     ▼                           │
+│              _handle_message()                  │
+│                     │                           │
+│         ┌───────────┼───────────┐               │
+│         ▼           ▼           ▼               │
+│  Slash command   AIAgent    Queue/BG            │
+│    dispatch      creation   sessions            │
+│                     │                           │
+│                     ▼                           │
+│                 SessionStore                    │
+│              (SQLite persistence)               │
+└───────┴─────────────┴─────────────┴─────────────┘
+</code></pre></div>
+
+<h2 id="消息流程">消息流程</h2>
+<p>当消息从任意平台到达时：</p>
+<ol>
+<li><strong>平台适配器</strong>接收原始事件，将其规范化为 <code>MessageEvent</code></li>
+<li><strong>基础适配器</strong>检查活跃会话守卫：</li>
+<li>若该会话的 agent 正在运行 → 将消息加入队列，设置中断事件</li>
+<li>若为 <code>/approve</code>、<code>/deny</code>、<code>/stop</code> → 绕过守卫（内联分发）</li>
+<li><strong>GatewayRunner._handle_message()</strong> 接收事件：</li>
+<li>通过 <code>_session_key_for_source()</code> 解析会话键（格式：<code>agent:main:{platform}:{chat_type}:{chat_id}</code>）</li>
+<li>检查授权（见下方授权章节）</li>
+<li>检查是否为斜杠命令 → 分发至命令处理器</li>
+<li>检查 agent 是否已在运行 → 拦截 <code>/stop</code>、<code>/status</code> 等命令</li>
+<li>否则 → 创建 <code>AIAgent</code> 实例并运行对话</li>
+<li><strong>响应</strong>通过平台适配器回传</li>
+</ol>
+<h3 id="会话键格式">会话键格式</h3>
+<p>会话键编码了完整的路由上下文：</p>
+<div class="highlight"><pre><span></span><code>agent:main:{platform}:{chat_type}:{chat_id}
+</code></pre></div>
+
+<p>示例：<code>agent:main:telegram:private:123456789</code></p>
+<p>支持线程的平台（Telegram 论坛话题、Discord 线程、Slack 线程）可能在 chat_id 部分包含线程 ID。<strong>切勿手动构造会话键</strong> — 请始终使用 <code>gateway/session.py</code> 中的 <code>build_session_key()</code>。</p>
+<h3 id="两级消息守卫">两级消息守卫</h3>
+<p>当 agent 正在运行时，传入消息会依次经过两级守卫：</p>
+<ol>
+<li>
+<p><strong>第一级 — 基础适配器</strong>（<code>gateway/platforms/base.py</code>）：检查 <code>_active_sessions</code>。若会话处于活跃状态，将消息加入 <code>_pending_messages</code> 队列并设置中断事件。此级在消息到达 gateway runner <em>之前</em>进行拦截。</p>
+</li>
+<li>
+<p><strong>第二级 — Gateway runner</strong>（<code>gateway/run.py</code>）：检查 <code>_running_agents</code>。拦截特定命令（<code>/stop</code>、<code>/new</code>、<code>/queue</code>、<code>/status</code>、<code>/approve</code>、<code>/deny</code>）并进行相应路由。其余所有消息触发 <code>running_agent.interrupt()</code>。</p>
+</li>
+</ol>
+<p>必须在 agent 被阻塞时到达 runner 的命令（如 <code>/approve</code>）通过 <code>await self._message_handler(event)</code> <strong>内联</strong>分发 — 绕过后台任务系统以避免竞态条件。</p>
+<h2 id="授权">授权</h2>
+<p>Gateway 使用多层授权检查，按顺序评估：</p>
+<ol>
+<li><strong>平台级全量放行标志</strong>（如 <code>TELEGRAM_ALLOW_ALL_USERS</code>）— 若设置，该平台所有用户均被授权</li>
+<li><strong>平台白名单</strong>（如 <code>TELEGRAM_ALLOWED_USERS</code>）— 逗号分隔的用户 ID</li>
+<li><strong>DM 配对</strong> — 已认证用户可通过配对码为新用户授权</li>
+<li><strong>全局放行标志</strong>（<code>GATEWAY_ALLOW_ALL_USERS</code>）— 若设置，所有平台的所有用户均被授权</li>
+<li><strong>默认：拒绝</strong> — 未授权用户被拒绝</li>
+</ol>
+<h3 id="dm-配对流程">DM 配对流程</h3>
+<div class="highlight"><pre><span></span><code>Admin: /pair
+Gateway: &quot;Pairing code: ABC123. Share with the user.&quot;
+New user: ABC123
+Gateway: &quot;Paired! You&#39;re now authorized.&quot;
+</code></pre></div>
+
+<p>配对状态持久化于 <code>gateway/pairing.py</code>，重启后仍然有效。</p>
+<h2 id="斜杠命令分发">斜杠命令分发</h2>
+<p>Gateway 中所有斜杠命令均经过相同的解析流程：</p>
+<ol>
+<li><code>hermes_cli/commands.py</code> 中的 <code>resolve_command()</code> 将输入映射为规范名称（处理别名、前缀匹配）</li>
+<li>规范名称与 <code>GATEWAY_KNOWN_COMMANDS</code> 进行比对</li>
+<li><code>_handle_message()</code> 中的处理器根据规范名称进行分发</li>
+<li>部分命令受配置门控（<code>CommandDef</code> 上的 <code>gateway_config_gate</code>）</li>
+</ol>
+<h3 id="运行中-agent-守卫">运行中 Agent 守卫</h3>
+<p>在 agent 处理消息期间不得执行的命令会被提前拒绝：</p>
+<div class="highlight"><pre><span></span><code><span class="k">if</span> <span class="n">_quick_key</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_running_agents</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">canonical</span> <span class="o">==</span> <span class="s2">&quot;model&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;⏳ Agent is running — wait for it to finish or /stop first.&quot;</span>
+</code></pre></div>
+
+<p>绕过命令（<code>/stop</code>、<code>/new</code>、<code>/approve</code>、<code>/deny</code>、<code>/queue</code>、<code>/status</code>）具有特殊处理逻辑。</p>
+<h2 id="配置来源">配置来源</h2>
+<p>Gateway 从多个来源读取配置：</p>
+<table>
+<thead>
+<tr>
+<th>来源</th>
+<th>提供内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>~/.hermes/.env</code></td>
+<td>API 密钥、bot token、平台凭据</td>
+</tr>
+<tr>
+<td><code>~/.hermes/config.yaml</code></td>
+<td>模型设置、工具配置、显示选项</td>
+</tr>
+<tr>
+<td>环境变量</td>
+<td>覆盖上述任意配置</td>
+</tr>
+</tbody>
+</table>
+<p>与 CLI（使用带硬编码默认值的 <code>load_cli_config()</code>）不同，gateway 通过 YAML 加载器直接读取 <code>config.yaml</code>。这意味着存在于 CLI 默认值字典但不在用户配置文件中的配置键，在 CLI 和 gateway 之间可能表现不同。</p>
+<h2 id="平台适配器">平台适配器</h2>
+<p>大多数消息平台以插件适配器形式位于 <code>plugins/platforms/&lt;name&gt;/adapter.py</code>；少数旧适配器仍直接位于 <code>gateway/platforms/</code>。它们都继承 <code>gateway/platforms/base.py</code> 中的 <code>BasePlatformAdapter</code>：</p>
+<div class="highlight"><pre><span></span><code>plugins/platforms/                  # 插件打包的适配器（每个一个目录）
+├── telegram/adapter.py     # Telegram Bot API（长轮询或 webhook）
+├── discord/adapter.py      # Discord bot（通过 discord.py）
+├── slack/adapter.py        # Slack Socket Mode
+├── whatsapp/adapter.py     # WhatsApp Business Cloud API
+├── matrix/adapter.py       # Matrix（通过 mautrix，可选 E2EE）
+├── mattermost/adapter.py   # Mattermost WebSocket API
+├── email/adapter.py        # 电子邮件（通过 IMAP/SMTP）
+├── sms/adapter.py          # 短信（通过 Twilio）
+├── dingtalk/adapter.py     # 钉钉 WebSocket
+├── feishu/adapter.py       # 飞书/Lark WebSocket 或 webhook
+├── wecom/adapter.py        # 企业微信（WeCom）回调
+├── line/adapter.py         # LINE Messaging API
+├── teams/adapter.py        # Microsoft Teams
+├── irc/adapter.py          # IRC（作用域锁的标准示例）
+├── homeassistant/adapter.py # Home Assistant 对话集成
+└── …                       # google_chat、ntfy、photon、raft、simplex 等
+
+gateway/platforms/                  # 核心 base 与旧的直接适配器
+├── base.py              # BasePlatformAdapter — 所有平台的共享逻辑
+├── signal.py            # Signal（通过 signal-cli REST API）
+├── weixin.py            # 微信（个人版，通过 iLink Bot API）
+├── bluebubbles.py       # Apple iMessage（通过 BlueBubbles macOS 服务端）
+├── qqbot/               # QQ Bot（腾讯 QQ，通过官方 API v2，子包）
+├── yuanbao.py           # 元宝（腾讯）私信/群组适配器
+├── msgraph_webhook.py   # Microsoft Graph 变更通知 webhook（Teams、Outlook 等）
+├── webhook.py           # 入站/出站 webhook 适配器
+└── api_server.py        # REST API 服务器适配器
+</code></pre></div>
+
+<p>适配器实现统一接口：
+- <code>connect()</code> / <code>disconnect()</code> — 生命周期管理
+- <code>send_message()</code> — 出站消息投递
+- <code>on_message()</code> — 入站消息规范化 → <code>MessageEvent</code></p>
+<h3 id="token-锁">Token 锁</h3>
+<p>使用唯一凭据连接的适配器在 <code>connect()</code> 中调用 <code>acquire_scoped_lock()</code>，在 <code>disconnect()</code> 中调用 <code>release_scoped_lock()</code>。这可防止两个 profile 同时使用同一 bot token。</p>
+<h2 id="投递路径">投递路径</h2>
+<p>出站投递（<code>gateway/delivery.py</code>）处理以下场景：</p>
+<ul>
+<li><strong>直接回复</strong> — 将响应发回原始聊天</li>
+<li><strong>主频道投递</strong> — 将 cron 任务输出和后台结果路由至已配置的主频道</li>
+<li><strong>显式目标投递</strong> — <code>send_message</code> 工具指定 <code>telegram:-1001234567890</code>，或通过 <a href="../guides/pipe-script-output.html"><code>hermes send</code> CLI</a> 封装同一工具供 shell 脚本使用</li>
+<li><strong>跨平台投递</strong> — 投递至与原始消息不同的平台</li>
+</ul>
+<p>Cron 任务投递<strong>不会</strong>镜像到 gateway 会话历史中 — 它们仅存在于各自的 cron 会话中。这是有意为之的设计选择，以避免消息交替违规。</p>
+<h2 id="hooks">Hooks</h2>
+<p>Gateway hook 是响应生命周期事件的 Python 模块。</p>
+<h3 id="gateway-hook-事件">Gateway Hook 事件</h3>
+<table>
+<thead>
+<tr>
+<th>事件</th>
+<th>触发时机</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gateway:startup</code></td>
+<td>Gateway 进程启动时</td>
+</tr>
+<tr>
+<td><code>session:start</code></td>
+<td>新对话会话开始时</td>
+</tr>
+<tr>
+<td><code>session:end</code></td>
+<td>会话完成或超时时</td>
+</tr>
+<tr>
+<td><code>session:reset</code></td>
+<td>用户通过 <code>/new</code> 重置会话时</td>
+</tr>
+<tr>
+<td><code>agent:start</code></td>
+<td>Agent 开始处理消息时</td>
+</tr>
+<tr>
+<td><code>agent:step</code></td>
+<td>Agent 完成一次工具调用迭代时</td>
+</tr>
+<tr>
+<td><code>agent:end</code></td>
+<td>Agent 完成并返回响应时</td>
+</tr>
+<tr>
+<td><code>command:*</code></td>
+<td>任意斜杠命令被执行时</td>
+</tr>
+</tbody>
+</table>
+<p>Hook 从 <code>gateway/builtin_hooks/</code>（扩展点 — 当前发行版中为空；<code>_register_builtin_hooks()</code> 是一个空操作存根）和 <code>~/.hermes/hooks/</code>（用户安装）中发现。每个 hook 是一个包含 <code>HOOK.yaml</code> 清单和 <code>handler.py</code> 的目录。</p>
+<h2 id="内存提供者集成">内存提供者集成</h2>
+<p>当内存提供者插件（如 Honcho）启用时：</p>
+<ol>
+<li>Gateway 为每条消息创建一个带会话 ID 的 <code>AIAgent</code></li>
+<li><code>MemoryManager</code> 使用会话上下文初始化提供者</li>
+<li>提供者工具（如 <code>honcho_profile</code>、<code>viking_search</code>）通过以下路径路由：</li>
+</ol>
+<div class="highlight"><pre><span></span><code>AIAgent._invoke_tool()
+  → self._memory_manager.handle_tool_call(name, args)
+    → provider.handle_tool_call(name, args)
+</code></pre></div>
+
+<ol>
+<li>会话结束/重置时，<code>on_session_end()</code> 触发以进行清理和最终数据刷写</li>
+</ol>
+<h3 id="内存刷写生命周期">内存刷写生命周期</h3>
+<p>显式对话边界（例如 <code>/new</code>、<code>/reset</code> 或 <code>/resume</code>）会刷新并结束原会话。空闲时间和每日时间边界不会结束会话。</p>
+<p>TTL、LRU 和内存压力触发的资源缓存淘汰会先将缓存的对话记录提交给已配置的记忆提供者，再释放 agent 客户端。它不会关闭持久化对话：下一轮会重新加载相同的对话记录和会话标识。</p>
+<h2 id="后台维护">后台维护</h2>
+<p>Gateway 在处理消息的同时运行周期性维护任务：</p>
+<ul>
+<li><strong>Cron 计时</strong> — 检查任务计划并触发到期任务</li>
+<li><strong>会话维护</strong> — 回收缓存资源，但不结束会话记录</li>
+<li><strong>内存刷写</strong> — 在软释放缓存前提交记忆</li>
+<li><strong>缓存刷新</strong> — 刷新模型列表和提供者状态</li>
+</ul>
+<h2 id="进程管理">进程管理</h2>
+<p>Gateway 作为长期运行进程运行，管理方式如下：</p>
+<ul>
+<li><code>hermes gateway start</code> / <code>hermes gateway stop</code> — 手动控制</li>
+<li><code>systemctl</code>（Linux）或 <code>launchctl</code>（macOS）— 服务管理</li>
+<li>PID 文件位于 <code>~/.hermes/gateway.pid</code> — 面向 profile 的进程追踪</li>
+</ul>
+<p><strong>Profile 范围 vs 全局</strong>：<code>start_gateway()</code> 使用 profile 范围的 PID 文件。<code>hermes gateway stop</code> 仅停止当前 profile 的 gateway。<code>hermes gateway stop --all</code> 使用全局 <code>ps aux</code> 扫描来终止所有 gateway 进程（用于更新时）。</p>
+<h2 id="相关文档">相关文档</h2>
+<ul>
+<li><a href="session-storage.html">会话存储</a></li>
+<li><a href="cron-internals.html">Cron 内部机制</a></li>
+<li><a href="acp-internals.html">ACP 内部机制</a></li>
+<li><a href="agent-loop.html">Agent 循环内部机制</a></li>
+<li><a href="../user-guide/messaging.html">消息 Gateway（用户指南）</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/gateway-internals</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#关键文件">关键文件</a></li>
+<li class="lvl2"><a href="#架构概览">架构概览</a></li>
+<li class="lvl2"><a href="#消息流程">消息流程</a></li>
+<li class="lvl3"><a href="#会话键格式">会话键格式</a></li>
+<li class="lvl3"><a href="#两级消息守卫">两级消息守卫</a></li>
+<li class="lvl2"><a href="#授权">授权</a></li>
+<li class="lvl3"><a href="#dm-配对流程">DM 配对流程</a></li>
+<li class="lvl2"><a href="#斜杠命令分发">斜杠命令分发</a></li>
+<li class="lvl3"><a href="#运行中-agent-守卫">运行中 Agent 守卫</a></li>
+<li class="lvl2"><a href="#配置来源">配置来源</a></li>
+<li class="lvl2"><a href="#平台适配器">平台适配器</a></li>
+<li class="lvl3"><a href="#token-锁">Token 锁</a></li>
+<li class="lvl2"><a href="#投递路径">投递路径</a></li>
+<li class="lvl2"><a href="#hooks">Hooks</a></li>
+<li class="lvl3"><a href="#gateway-hook-事件">Gateway Hook 事件</a></li>
+<li class="lvl2"><a href="#内存提供者集成">内存提供者集成</a></li>
+<li class="lvl3"><a href="#内存刷写生命周期">内存刷写生命周期</a></li>
+<li class="lvl2"><a href="#后台维护">后台维护</a></li>
+<li class="lvl2"><a href="#进程管理">进程管理</a></li>
+<li class="lvl2"><a href="#相关文档">相关文档</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

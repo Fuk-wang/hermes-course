@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web Search &amp; Extract · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/web-search</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="web-search--extract">Web Search &amp; Extract</h1>
+<p>Hermes Agent includes two model-callable web tools backed by multiple providers:</p>
+<ul>
+<li><strong><code>web_search</code></strong> — search the web and return ranked results</li>
+<li><strong><code>web_extract</code></strong> — fetch and extract readable content from one or more URLs</li>
+</ul>
+<p>Both are configured through a single backend selection. Providers are chosen via <code>hermes tools</code> or set directly in <code>config.yaml</code>.</p>
+<h2 id="backends">Backends</h2>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Env Var</th>
+<th>Search</th>
+<th>Extract</th>
+<th>Free tier</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Firecrawl</strong> (default)</td>
+<td><code>FIRECRAWL_API_KEY</code> (optional — keyless when selected)</td>
+<td>✔</td>
+<td>✔</td>
+<td>500 credits/mo · keyless cloud when selected</td>
+</tr>
+<tr>
+<td><strong>SearXNG</strong></td>
+<td><code>SEARXNG_URL</code></td>
+<td>✔</td>
+<td>—</td>
+<td>✔ Free (self-hosted)</td>
+</tr>
+<tr>
+<td><strong>Brave Search (free tier)</strong></td>
+<td><code>BRAVE_SEARCH_API_KEY</code></td>
+<td>✔</td>
+<td>—</td>
+<td>2 000 queries/mo</td>
+</tr>
+<tr>
+<td><strong>DDGS (DuckDuckGo)</strong></td>
+<td>— (no key)</td>
+<td>✔</td>
+<td>—</td>
+<td>✔ Free</td>
+</tr>
+<tr>
+<td><strong>Exa</strong></td>
+<td><code>EXA_API_KEY</code> (optional)</td>
+<td>✔</td>
+<td>✔</td>
+<td>✔ Keyless ring member · 1 000 searches/mo with key</td>
+</tr>
+<tr>
+<td><strong>Parallel</strong></td>
+<td><code>PARALLEL_API_KEY</code> (optional)</td>
+<td>✔</td>
+<td>✔</td>
+<td>✔ Keyless ring member · paid with key</td>
+</tr>
+<tr>
+<td><strong>Tavily</strong></td>
+<td><code>TAVILY_API_KEY</code> (optional)</td>
+<td>✔</td>
+<td>✔</td>
+<td>✔ Opt-in keyless when selected</td>
+</tr>
+<tr>
+<td><strong>Perplexity</strong></td>
+<td><code>PERPLEXITY_API_KEY</code></td>
+<td>✔</td>
+<td>✔ (query-relevant snippets)</td>
+<td>Paid (per-request Search API pricing)</td>
+</tr>
+<tr>
+<td><strong>Keenable</strong></td>
+<td><code>KEENABLE_API_KEY</code> (optional)</td>
+<td>✔</td>
+<td>✔</td>
+<td>✔ Keyless ring member · paid with key</td>
+</tr>
+<tr>
+<td><strong>xAI (Grok)</strong></td>
+<td><code>XAI_API_KEY</code> or <code>hermes auth add xai-oauth</code></td>
+<td>✔</td>
+<td>—</td>
+<td>Paid (SuperGrok or per-token)</td>
+</tr>
+<tr>
+<td><strong>OpenAI Native (Codex)</strong></td>
+<td><code>hermes auth add openai-codex</code></td>
+<td>✔</td>
+<td>—</td>
+<td>Requires a ChatGPT/Codex subscription</td>
+</tr>
+</tbody>
+</table>
+<p>Brave Search, DDGS, xAI, and OpenAI Native are <strong>search-only</strong> — pair any of them with Firecrawl/Tavily/Perplexity/Keenable/Exa/Parallel when you also need <code>web_extract</code>. DDGS uses the <a href="https://pypi.org/project/ddgs/" class="ext" target="_blank" rel="noopener"><code>ddgs</code> Python package</a> under the hood; if it isn't already installed, run <code>pip install ddgs</code> (or let Hermes lazy-install it on first use). xAI runs Grok's server-side <code>web_search</code> tool on the Responses API — results are LLM-generated rather than index-backed, so titles, descriptions, and URL choice are all model output (see the <a href="#xai-grok">trust-model caveat</a> below). OpenAI Native declares the same kind of provider-executed tool on the Codex Responses endpoint (see <a href="#openai-native">below</a>).</p>
+<p><strong>Per-capability split:</strong> you can use different providers for search and extract independently — for example SearXNG (free) for search and Firecrawl for extract. See <a href="#per-capability-configuration">Per-capability configuration</a> below.</p>
+<div class="admonition adm-info"><p class="adm-title">Works out of the box — keyless free-tier rotation</p>
+<p>A fresh install with <strong>no web credentials at all</strong> gets working <code>web_search</code> and <code>web_extract</code> out of the box: requests rotate round-robin across the ring vendors' public free tiers — <strong>Exa, Parallel, Firecrawl, and Keenable</strong> — spreading load evenly, and a rate-limited request automatically retries on the next vendor in the ring (multi-hop, until one serves or all are throttled). No signup, no key. This tier is strictly last-resort — any configured backend or present API key always wins — and requests carry no user identifiers (only a random per-process session id, rotated on restart). For guaranteed, unthrottled service, set up a keyed provider. Disable the keyless tier entirely with <code>web.keyless_fallback: false</code>.</p>
+</div>
+<p><strong>Choosing free vs paid explicitly:</strong> in <code>hermes tools</code>, Exa, Parallel, and Keenable each appear as two rows — <strong>Free (keyless)</strong> and <strong>Paid (API key)</strong>. Picking Free pins that vendor's anonymous endpoint (even if you later add a key); picking Paid pins the keyed path (a missing key then errors instead of silently downgrading to the free tier). The selection is stored as <code>web.provider_tier.&lt;name&gt;: free|paid</code>; leave it unset for auto (key present → paid, otherwise the keyless ring).</p>
+<div class="admonition adm-tip"><p class="adm-title">Nous Subscribers</p>
+<p>If you have a paid <a href="https://portal.nousresearch.com" class="ext" target="_blank" rel="noopener">Nous Portal</a> subscription, web search and extract are available through the <strong><a href="tool-gateway.html">Tool Gateway</a></strong> via managed Firecrawl — no API key needed. New installs can run <code>hermes setup --portal</code> to log in and turn on all gateway tools at once; existing installs can flip just web via <code>hermes tools</code>.</p>
+</div>
+<hr />
+<h2 id="how-web_extract-handles-long-pages">How <code>web_extract</code> handles long pages</h2>
+<p>Backends return raw page markdown, which can be huge (forum threads, docs sites, news articles with embedded comments). To keep your context window usable, <code>web_extract</code> applies a <strong>deterministic character budget</strong> — no LLM summarization is involved:</p>
+<table>
+<thead>
+<tr>
+<th>Page size (characters)</th>
+<th>What happens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>At or under the budget (default 15 000)</td>
+<td>Returned whole — full markdown reaches the agent</td>
+</tr>
+<tr>
+<td>Over the budget</td>
+<td>Head+tail window (~75% head / ~25% tail, cut on markdown line boundaries) plus an explicit <code>[TRUNCATED]</code> footer. The full clean text is stored to disk and the footer tells the agent the file path and the exact <code>read_file</code> call to page through the omitted middle</td>
+</tr>
+<tr>
+<td>Over 2 000 000</td>
+<td>Stored text is capped at 2 MB</td>
+</tr>
+</tbody>
+</table>
+<p>The per-page budget is configurable via <code>web.extract_char_limit</code> in <code>config.yaml</code> (default <code>15000</code>, clamped to 2 000–500 000), and the agent can raise it per-call with the tool's <code>char_limit</code> argument.</p>
+<p>Each provider dispatch is also bounded by a wall-clock timeout (<code>web.extract_timeout</code> in <code>config.yaml</code>, default <code>120</code> seconds; <code>0</code> disables it). A backend that keeps the response open without finishing returns per-URL timeout errors instead of stalling the tool call indefinitely.</p>
+<h3 id="when-truncation-gets-in-the-way">When truncation gets in the way</h3>
+<p>If you specifically need the live DOM rather than extracted markdown — for example, a JS-heavy page where extraction returns little content — use <code>browser_navigate</code> + <code>browser_snapshot</code> instead. The browser tool returns the live accessibility tree (subject to its own snapshot cap on huge pages).</p>
+<hr />
+<h2 id="result-caching">Result caching</h2>
+<p>Repeat web calls within a short window are served from cache instead of the paid backend — this saves credits and latency in the two patterns where duplicates are common: subagent fan-outs (several delegated agents researching the same topic) and the agent re-checking a page it read minutes ago.</p>
+<table>
+<thead>
+<tr>
+<th>Call</th>
+<th>Cache</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>web_search</code> — same query (case/whitespace-insensitive), same provider</td>
+<td>In-memory memo</td>
+<td>Per process</td>
+</tr>
+<tr>
+<td><code>web_extract</code> — same URL, same format, same provider</td>
+<td>Full text stored under <code>~/.hermes/cache/web/</code></td>
+<td>Shared across CLI, gateway, cron, and subagent processes</td>
+</tr>
+</tbody>
+</table>
+<p>Concurrent identical searches (a parallel subagent fan-out firing the same query at once) are <strong>coalesced into a single backend request</strong> — the first caller pays; the rest share the response. Requested search limits are bucketed up to 10/20/50/100 so near-identical requests (<code>limit=5</code> vs <code>limit=8</code>) share one entry, with each caller receiving its requested count.</p>
+<p>Only successful responses are cached, each under the requested URL the provider reports for it (a page the provider returns without naming a requested URL is served but not cached, so a partial or reordered batch never files one page under another URL's key). Failures always retry the backend, responses served by the one-shot keyless rescue are never cached (the next call attempts your chosen backend again), and URLs matched by your <code>security.website_blocklist</code> are never served from cache. Cached extracts re-run the normal truncation pipeline, so a different <code>char_limit</code> on the second call works off the same stored scrape.</p>
+<p><strong>Local development URLs are never cached.</strong> Anything on <code>localhost</code>, <code>127.0.0.1</code>, <code>*.local</code>, single-label LAN hostnames, or private/link-local IP ranges (<code>192.168.*</code>, <code>10.*</code>, <code>172.16-31.*</code>) bypasses the extract cache entirely — dev servers, hot-reload builds, and chat-GUI artifact previews change on every save, and a cached copy would show you a stale build. Every fetch of a local page is live. (These URLs are only reachable at all when <code>security.allow_private_urls</code> is enabled.)</p>
+<p><strong>Testing over the public internet?</strong> Staging deploys and tunnel URLs are public DNS, so the local-dev rule can't catch them — list them in <code>web.cache_exempt_hosts</code> and they're always fetched live too. Entries match exactly, as a <code>*.</code> wildcard, or as a domain suffix (<code>mysite.dev</code> also covers <code>preview.mysite.dev</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">cache_exempt_hosts</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">mysite.vercel.app</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;*.ngrok-free.app&quot;</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">cache_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">      </span><span class="c1"># default; set false to disable both caches</span>
+<span class="w">  </span><span class="nt">cache_ttl_minutes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">20</span><span class="w">    </span><span class="c1"># freshness window, clamped 1–1440</span>
+</code></pre></div>
+
+<p>If you're researching genuinely live data (scores, prices, breaking news) and need every call fresh, lower the TTL or set <code>web.cache_enabled: false</code>.</p>
+<hr />
+<h2 id="setup">Setup</h2>
+<h3 id="quick-setup-via-hermes-tools">Quick setup via <code>hermes tools</code></h3>
+<p>Run <code>hermes tools</code>, navigate to <strong>Web Search &amp; Extract</strong>, and pick a provider. The wizard prompts for the required URL or API key and writes it to your config.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>tools
+</code></pre></div>
+
+<hr />
+<h3 id="firecrawl-default">Firecrawl (default)</h3>
+<p>Full-featured search and extract. Recommended for most users.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">FIRECRAWL_API_KEY</span><span class="o">=</span>fc-your-key-here
+</code></pre></div>
+
+<p>Get a key at <a href="https://firecrawl.dev" class="ext" target="_blank" rel="noopener">firecrawl.dev</a>. The free tier includes 500 credits/month.</p>
+<p><strong>Self-hosted Firecrawl:</strong> Point at your own instance instead of the cloud API:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">FIRECRAWL_API_URL</span><span class="o">=</span>http://localhost:3002
+</code></pre></div>
+
+<p>When <code>FIRECRAWL_API_URL</code> is set, the API key is optional (disable server auth with <code>USE_DB_AUTHENTICATION=false</code>).</p>
+<hr />
+<h3 id="searxng-free-self-hosted">SearXNG (free, self-hosted)</h3>
+<p>SearXNG is a privacy-respecting, open-source metasearch engine that aggregates results from 70+ search engines. <strong>No API key required</strong> — just point Hermes at a running SearXNG instance.</p>
+<p>SearXNG is <strong>search-only</strong> — <code>web_extract</code> requires a separate extract provider.</p>
+<h4 id="option-a--self-host-with-docker-recommended">Option A — Self-host with Docker (recommended)</h4>
+<p>This gives you a private instance with no rate limits.</p>
+<p><strong>1. Create a working directory:</strong></p>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/searxng/searxng
+<span class="nb">cd</span><span class="w"> </span>~/searxng
+</code></pre></div>
+
+<p><strong>2. Write a <code>docker-compose.yml</code>:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/searxng/docker-compose.yml</span>
+<span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">searxng</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">searxng/searxng:latest</span>
+<span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">searxng</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8888:8080&quot;</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./searxng:/etc/searxng:rw</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SEARXNG_BASE_URL=http://localhost:8888/</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+</code></pre></div>
+
+<p><strong>3. Start the container:</strong></p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
+</code></pre></div>
+
+<p><strong>4. Enable the JSON API format:</strong></p>
+<p>SearXNG ships with JSON output disabled by default. Copy the generated config and enable it:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Copy the auto-generated config out of the container</span>
+docker<span class="w"> </span>cp<span class="w"> </span>searxng:/etc/searxng/settings.yml<span class="w"> </span>~/searxng/searxng/settings.yml
+</code></pre></div>
+
+<p>Open <code>~/searxng/searxng/settings.yml</code>.
+If <code>use_default_settings: true</code> is present, the file only contains your overrides. All other settings are inherited from the built-in defaults.
+To enable JSON responses for Hermes, add the following override:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">search</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">formats</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">html</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">json</span>
+</code></pre></div>
+
+<p>Your <code>settings.yml</code> should look similar to:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Read the documentation before extending the defaults:</span>
+<span class="c1"># https://docs.searxng.org/admin/settings/</span>
+
+<span class="nt">use_default_settings</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+
+<span class="nt">server</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">secret_key</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;abcdef12345678&quot;</span>
+<span class="w">  </span><span class="nt">image_proxy</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+
+<span class="nt">search</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">formats</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">html</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">json</span>
+</code></pre></div>
+
+<p><strong>5. Restart to apply:</strong></p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>cp<span class="w"> </span>~/searxng/searxng/settings.yml<span class="w"> </span>searxng:/etc/searxng/settings.yml
+docker<span class="w"> </span>restart<span class="w"> </span>searxng
+</code></pre></div>
+
+<p><strong>6. Verify it works:</strong></p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;http://localhost:8888/search?q=test&amp;format=json&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;import sys,json; d=json.load(sys.stdin); print(f&#39;{len(d[\&quot;results\&quot;])} results&#39;)&quot;</span>
+</code></pre></div>
+
+<p>You should see something like <code>10 results</code>. If you get a <code>403 Forbidden</code>, JSON format is still disabled — recheck step 4.</p>
+<p><strong>7. Configure Hermes:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">SEARXNG_URL</span><span class="o">=</span>http://localhost:8888
+</code></pre></div>
+
+<p>Then select SearXNG as the search backend in <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">search_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;searxng&quot;</span>
+</code></pre></div>
+
+<p>Or set via <code>hermes tools</code> → Web Search &amp; Extract → SearXNG.</p>
+<hr />
+<h4 id="option-b--use-a-public-instance">Option B — Use a public instance</h4>
+<p>Public SearXNG instances are listed at <a href="https://searx.space/" class="ext" target="_blank" rel="noopener">searx.space</a>. Filter by instances that have <strong>JSON format enabled</strong> (shown in the table).</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">SEARXNG_URL</span><span class="o">=</span>https://searx.example.com
+</code></pre></div>
+
+<div class="admonition adm-caution"><p class="adm-title">Public instances</p>
+<p>Public instances have rate limits, variable uptime, and may disable JSON format at any time. For production use, self-hosting is strongly recommended.</p>
+</div>
+<hr />
+<h4 id="pair-searxng-with-an-extract-provider">Pair SearXNG with an extract provider</h4>
+<p>SearXNG handles search; you need a separate provider for <code>web_extract</code>. Use the per-capability keys:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">search_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;searxng&quot;</span>
+<span class="w">  </span><span class="nt">extract_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;firecrawl&quot;</span><span class="w">   </span><span class="c1"># or tavily, perplexity, keenable, exa, parallel</span>
+</code></pre></div>
+
+<p>With this config, Hermes uses SearXNG for all search queries and Firecrawl for URL extraction — combining free search with high-quality extraction.</p>
+<hr />
+<h3 id="tavily">Tavily</h3>
+<p>AI-optimised search and extract. Select Tavily in <code>hermes tools</code> (or set <code>web.backend: tavily</code>) to use it <strong>keyless</strong> with no account (rate-limited). Set an API key when you want higher limits.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># optional — skip this for keyless access after selecting Tavily</span>
+<span class="c1"># ~/.hermes/.env</span>
+<span class="nv">TAVILY_API_KEY</span><span class="o">=</span>tvly-your-key-here
+</code></pre></div>
+
+<p>Get a key at <a href="https://app.tavily.com/home" class="ext" target="_blank" rel="noopener">app.tavily.com</a>. See <a href="https://docs.tavily.com/documentation/keyless" class="ext" target="_blank" rel="noopener">Tavily keyless</a>.</p>
+<hr />
+<h3 id="perplexity">Perplexity</h3>
+<p><a href="https://docs.perplexity.ai/docs/search/quickstart" class="ext" target="_blank" rel="noopener">Perplexity's Search API</a> returns ranked, date-stamped results from Perplexity's own index (<code>web_search</code>). For <code>web_extract</code> it uses the same query-relevant <em>snippets</em> route as the official <code>pplx</code> CLI: you get the passages of each page that matter, with elisions marked <code>…</code>, rather than a verbatim full-page dump — pick Firecrawl / Exa / Parallel as <code>web.extract_backend</code> when you need the whole page. Keyed only; there is no anonymous tier.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">PERPLEXITY_API_KEY</span><span class="o">=</span>pplx-your-key-here
+</code></pre></div>
+
+<p>Get a key at <a href="https://www.perplexity.ai/account/api" class="ext" target="_blank" rel="noopener">perplexity.ai/account/api</a>. Set <code>PERPLEXITY_BASE_URL</code> to route through a proxy.</p>
+<hr />
+<h3 id="exa">Exa</h3>
+<p>Neural search with semantic understanding. Good for research and finding conceptually related content.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">EXA_API_KEY</span><span class="o">=</span>your-exa-key-here
+</code></pre></div>
+
+<p>Get a key at <a href="https://exa.ai" class="ext" target="_blank" rel="noopener">exa.ai</a>. The free tier includes 1 000 searches/month.</p>
+<hr />
+<h3 id="parallel">Parallel</h3>
+<p>AI-native search and extraction with deep research capabilities.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">PARALLEL_API_KEY</span><span class="o">=</span>your-parallel-key-here
+</code></pre></div>
+
+<p>Get access at <a href="https://parallel.ai" class="ext" target="_blank" rel="noopener">parallel.ai</a>.</p>
+<hr />
+<h3 id="xai-grok">xAI (Grok)</h3>
+<p>Routes <code>web_search</code> through Grok's server-side <a href="https://docs.x.ai/developers/tools/web-search" class="ext" target="_blank" rel="noopener">web_search tool</a> on the Responses API. Grok runs the actual searching and returns the top results as structured JSON.</p>
+<p>Works with either credential path — no new env vars, no new setup wizard:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env (env-var path)</span>
+<span class="nv">XAI_API_KEY</span><span class="o">=</span>sk-xai-your-key-here
+</code></pre></div>
+
+<p>or for SuperGrok subscribers:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>auth<span class="w"> </span>add<span class="w"> </span>xai-oauth
+</code></pre></div>
+
+<p>Then select xAI as the search backend:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;xai&quot;</span>
+</code></pre></div>
+
+<p><strong>Optional knobs:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;xai&quot;</span>
+<span class="w">  </span><span class="nt">xai</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">grok-build-0.1</span><span class="w">        </span><span class="c1"># reasoning model required by web_search (default)</span>
+<span class="w">    </span><span class="nt">allowed_domains</span><span class="p">:</span><span class="w">             </span><span class="c1"># optional, max 5 — mutex with excluded_domains</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">arxiv.org</span>
+<span class="w">    </span><span class="nt">excluded_domains</span><span class="p">:</span><span class="w">            </span><span class="c1"># optional, max 5</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">example-spam.com</span>
+<span class="w">    </span><span class="nt">timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">90</span><span class="w">                  </span><span class="c1"># seconds (default)</span>
+</code></pre></div>
+
+<p><strong>Search-only</strong> — pair with Firecrawl / Tavily / Keenable / Exa / Parallel if you also need <code>web_extract</code>. On 401 the provider performs a single forced OAuth-token refresh and retries (covers mid-window revocation and opaque tokens the proactive expiry check can't decode); env-var credentials skip the retry.</p>
+<div class="admonition adm-caution"><p class="adm-title">Trust model</p>
+<p>Unlike index-backed providers (Brave, Tavily, Exa) which return verbatim search-engine results, xAI is an LLM choosing which URLs to surface and writing the titles and descriptions itself. The <em>content</em> of the query influences the output, so a maliciously crafted query (e.g. injected via untrusted upstream input the agent picked up) can in principle steer Grok into emitting attacker-chosen URLs. Treat returned URLs the same way you'd treat any model-generated link — validate before fetching, especially if the query came from untrusted input.</p>
+</div>
+<h3 id="openai-native">OpenAI Native (Codex Responses)</h3>
+<p>Declares OpenAI's provider-executed <code>web_search</code> tool on the Codex Responses endpoint (ChatGPT/Codex subscriptions). The model drives search server-side and folds the results into its own answer — Hermes never runs a client-side search in this mode.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">search_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;openai-native&quot;</span>
+</code></pre></div>
+
+<p>Requirements and scope:</p>
+<ul>
+<li><strong>Credentials</strong>: an openai-codex OAuth login (<code>hermes auth add openai-codex</code>). This backend has no API key of its own; without a login it is simply unavailable.</li>
+<li><strong>Transport</strong>: only the Codex Responses endpoint exposes the built-in. On any other transport — a custom OpenAI-compatible <code>base_url</code>, or a non-OpenAI model — the client-side <code>web_search</code> function is left untouched, because the endpoint cannot be relied on to host the tool. Point <code>web.search_backend</code> at an ordinary provider for those.</li>
+<li><strong>Search only</strong>: the built-in covers search, not extraction. Pair it with Firecrawl (or another extract-capable backend) through <code>web.extract_backend</code> when you also need <code>web_extract</code>.</li>
+</ul>
+<p><strong>One tool either way.</strong> Selecting this backend swaps the client-side <code>web_search</code> function for the built-in 1:1 — it is not an additive grant. A session whose toolset has no <code>web_search</code> never gets server-side search injected.</p>
+<hr />
+<h2 id="configuration">Configuration</h2>
+<h3 id="single-backend">Single backend</h3>
+<p>Set one provider for all web capabilities:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;searxng&quot;</span><span class="w">   </span><span class="c1"># firecrawl | searxng | brave-free | ddgs | tavily | perplexity | keenable | exa | parallel | xai</span>
+</code></pre></div>
+
+<h3 id="per-capability-configuration">Per-capability configuration</h3>
+<p>Use different providers for search vs extract. This lets you combine free search (SearXNG) with a paid extract provider, or vice versa:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">search_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;searxng&quot;</span><span class="w">     </span><span class="c1"># used by web_search</span>
+<span class="w">  </span><span class="nt">extract_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;firecrawl&quot;</span><span class="w">  </span><span class="c1"># used by web_extract</span>
+</code></pre></div>
+
+<p>When a per-capability key is empty, that capability falls through to <code>web.backend</code>. Only when no <strong>shared</strong> web selection has ever been written (<code>web.backend</code> or the managed <code>hermes tools</code> row) is the backend auto-detected from whichever API key/URL is present — once a shared selection exists, the runtime always uses it, and adding a key to <code>.env</code> does not reroute web traffic. A per-capability key affects only its own capability: setting <code>web.extract_backend</code> alone leaves <code>web_search</code> on its auto-detected backend.</p>
+<p><strong>Priority order (per capability):</strong>
+1. <code>web.search_backend</code> / <code>web.extract_backend</code> (explicit per-capability)
+2. <code>web.backend</code> (shared fallback; <code>nous</code> = managed Tool Gateway)
+3. Auto-detect from environment variables (no shared selection written)</p>
+<h3 id="auto-detection">Auto-detection</h3>
+<p>If no shared backend has <strong>ever</strong> been selected (no <code>web.backend</code> written by you or <code>hermes tools</code>), Hermes picks the first available one based on which credentials are set:</p>
+<table>
+<thead>
+<tr>
+<th>Credential present</th>
+<th>Auto-selected backend</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TAVILY_API_KEY</code></td>
+<td>tavily</td>
+</tr>
+<tr>
+<td><code>PERPLEXITY_API_KEY</code></td>
+<td>perplexity</td>
+</tr>
+<tr>
+<td><code>EXA_API_KEY</code></td>
+<td>exa</td>
+</tr>
+<tr>
+<td><code>PARALLEL_API_KEY</code></td>
+<td>parallel</td>
+</tr>
+<tr>
+<td><code>FIRECRAWL_API_KEY</code> or <code>FIRECRAWL_API_URL</code> (or the Nous Tool Gateway is ready)</td>
+<td>firecrawl</td>
+</tr>
+<tr>
+<td><code>SEARXNG_URL</code></td>
+<td>searxng</td>
+</tr>
+<tr>
+<td><code>BRAVE_SEARCH_API_KEY</code></td>
+<td>brave-free</td>
+</tr>
+<tr>
+<td><code>ddgs</code> package importable</td>
+<td>ddgs</td>
+</tr>
+<tr>
+<td><em>(nothing set at all)</em></td>
+<td>keyless ring: exa / parallel / firecrawl / keenable (round-robin)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Keyless free-tier ring:</strong> when <em>no</em> credential above is present, requests rotate across the ring vendors' public free tiers (Exa, Parallel, Firecrawl, Keenable) so web tools work on a fresh install with zero setup — and a rate-limited request fails over to the next vendor in the ring automatically. Pin one vendor in <code>hermes tools</code> to stop the rotation (the ring is then only used as failover succession on throttles). All free tiers are vendor-rate-limited under burst load; sustained normal usage goes through fine. Set <code>web.keyless_fallback: false</code> to turn the tier off — with it off and no credentials, web tools are unavailable until a provider is configured.</p>
+<p><strong>One-shot keyless rescue for keyed backends:</strong> when your chosen/keyed backend — including the Nous Tool Gateway route (<code>web.backend: nous</code>) — fails a call (bad key, outage, unreachable gateway, upstream 5xx), that single call automatically retries on the keyless free-tier ring instead of erroring — the result notes which vendor served it and why (<code>rescued_from</code> / <code>backend_error</code>). The failover is never sticky: the very next <code>web_search</code>/<code>web_extract</code> call attempts your chosen backend again. Disable with <code>web.keyless_rescue: false</code> (also off whenever <code>keyless_fallback</code> is off).</p>
+<p>xAI Web Search is <strong>not</strong> in the auto-detection chain — having <code>XAI_API_KEY</code> set (or being signed in via xAI Grok OAuth) does not automatically route web traffic through xAI, since those credentials are also used for inference / TTS / image gen and the user may want a different backend for web. Opt in explicitly with <code>web.backend: "xai"</code>.</p>
+<hr />
+<h2 id="verify-your-setup">Verify your setup</h2>
+<p>Run <code>hermes setup</code> to see which web backend is detected:</p>
+<div class="highlight"><pre><span></span><code>✅ Web Search &amp; Extract (searxng)
+</code></pre></div>
+
+<p>Or check via the CLI:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Activate the venv and run the web tools module directly</span>
+<span class="nb">source</span><span class="w"> </span>~/.hermes/hermes-agent/.venv/bin/activate
+python<span class="w"> </span>-m<span class="w"> </span>tools.web_tools
+</code></pre></div>
+
+<p>This prints the active backend and its status:</p>
+<div class="highlight"><pre><span></span><code>✅ Web backend: searxng
+   Using SearXNG (search only): http://localhost:8888
+</code></pre></div>
+
+<hr />
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="web_search-returns-success-false"><code>web_search</code> returns <code>{"success": false}</code></h3>
+<ul>
+<li>Check <code>SEARXNG_URL</code> is reachable: <code>curl -s "http://localhost:8888/search?q=test&amp;format=json"</code></li>
+<li>If you get HTTP 403, JSON format is disabled — add <code>json</code> to the <code>formats</code> list in <code>settings.yml</code> and restart</li>
+<li>If you get a connection error, the container may not be running: <code>docker ps | grep searxng</code></li>
+</ul>
+<h3 id="web_extract-says-search-only-backend"><code>web_extract</code> says "search-only backend"</h3>
+<p>SearXNG cannot extract URL content. Set <code>web.extract_backend</code> to a provider that supports extraction:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">web</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">search_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;searxng&quot;</span>
+<span class="w">  </span><span class="nt">extract_backend</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;firecrawl&quot;</span><span class="w">  </span><span class="c1"># or tavily / perplexity / keenable / exa / parallel</span>
+</code></pre></div>
+
+<h3 id="searxng-returns-0-results">SearXNG returns 0 results</h3>
+<p>Some public instances disable certain search engines or categories. Try:
+- A different query
+- A different public instance from <a href="https://searx.space/" class="ext" target="_blank" rel="noopener">searx.space</a>
+- Self-hosting your own instance for reliable results</p>
+<h3 id="rate-limited-on-a-public-instance">Rate limited on a public instance</h3>
+<p>Switch to a self-hosted instance (see <a href="#option-a--self-host-with-docker-recommended">Option A</a> above). With Docker, your own instance has no rate limits.</p>
+<h3 id="web_extract-returns-truncated-content-with-a-truncated-footer"><code>web_extract</code> returns truncated content with a <code>[TRUNCATED]</code> footer</h3>
+<p>That's expected for pages over the character budget. The footer names the on-disk file holding the full clean text and the exact <code>read_file</code> call to page through the omitted middle. To see more inline, raise <code>web.extract_char_limit</code> in <code>config.yaml</code> or pass a larger <code>char_limit</code> on the call.</p>
+<hr />
+<h2 id="optional-skill-searxng-search">Optional skill: <code>searxng-search</code></h2>
+<p>For agents that need to use SearXNG via <code>curl</code> directly (e.g. as a fallback when the web toolset isn't available), install the <code>searxng-search</code> optional skill:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>official/research/searxng-search
+</code></pre></div>
+
+<p>This adds a skill that teaches the agent how to:
+- Call the SearXNG JSON API via <code>curl</code> or Python
+- Filter by category (<code>general</code>, <code>news</code>, <code>science</code>, etc.)
+- Handle pagination and error cases
+- Fall back gracefully when SearXNG is unreachable</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/web-search</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#backends">Backends</a></li>
+<li class="lvl2"><a href="#how-web_extract-handles-long-pages">How web_extract handles long pages</a></li>
+<li class="lvl3"><a href="#when-truncation-gets-in-the-way">When truncation gets in the way</a></li>
+<li class="lvl2"><a href="#result-caching">Result caching</a></li>
+<li class="lvl2"><a href="#setup">Setup</a></li>
+<li class="lvl3"><a href="#quick-setup-via-hermes-tools">Quick setup via hermes tools</a></li>
+<li class="lvl3"><a href="#firecrawl-default">Firecrawl (default)</a></li>
+<li class="lvl3"><a href="#searxng-free-self-hosted">SearXNG (free, self-hosted)</a></li>
+<li class="lvl3"><a href="#tavily">Tavily</a></li>
+<li class="lvl3"><a href="#perplexity">Perplexity</a></li>
+<li class="lvl3"><a href="#exa">Exa</a></li>
+<li class="lvl3"><a href="#parallel">Parallel</a></li>
+<li class="lvl3"><a href="#xai-grok">xAI (Grok)</a></li>
+<li class="lvl3"><a href="#openai-native">OpenAI Native (Codex Responses)</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl3"><a href="#single-backend">Single backend</a></li>
+<li class="lvl3"><a href="#per-capability-configuration">Per-capability configuration</a></li>
+<li class="lvl3"><a href="#auto-detection">Auto-detection</a></li>
+<li class="lvl2"><a href="#verify-your-setup">Verify your setup</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl3"><a href="#web_search-returns-success-false">web_search returns {&quot;success&quot;: false}</a></li>
+<li class="lvl3"><a href="#web_extract-says-search-only-backend">web_extract says &quot;search-only backend&quot;</a></li>
+<li class="lvl3"><a href="#searxng-returns-0-results">SearXNG returns 0 results</a></li>
+<li class="lvl3"><a href="#rate-limited-on-a-public-instance">Rate limited on a public instance</a></li>
+<li class="lvl3"><a href="#web_extract-returns-truncated-content-with-a-truncated-footer">web_extract returns truncated content with a [TRUNCATED] footer</a></li>
+<li class="lvl2"><a href="#optional-skill-searxng-search">Optional skill: searxng-search</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Image Generation Provider Plugins · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/image-gen-provider-plugin</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="building-an-image-generation-provider-plugin">Building an Image Generation Provider Plugin</h1>
+<p>Image-gen provider plugins register a backend that services every <code>image_generate</code> tool call — DALL·E, gpt-image, Grok, Flux, Imagen, Stable Diffusion, fal, Replicate, a local ComfyUI rig, anything. Built-in providers (OpenAI, OpenAI-Codex, xAI, FAL, Krea, DeepInfra, OpenRouter, Meta Model API) all ship as plugins. You can add a new one, or override a bundled one, by dropping a directory into <code>plugins/image_gen/&lt;name&gt;/</code>.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Image-gen is one of several <strong>backend plugins</strong> Hermes supports. The others (with more specialized ABCs) are <a href="memory-provider-plugin.html">Memory Provider Plugins</a>, <a href="context-engine-plugin.html">Context Engine Plugins</a>, and <a href="model-provider-plugin.html">Model Provider Plugins</a>. General tool/hook/CLI plugins live in <a href="plugins.html">Build a Hermes Plugin</a>.</p>
+</div>
+<h2 id="how-discovery-works">How discovery works</h2>
+<p>Hermes scans for image-gen backends in three places:</p>
+<ol>
+<li><strong>Bundled</strong> — <code>&lt;repo&gt;/plugins/image_gen/&lt;name&gt;/</code> (auto-loaded with <code>kind: backend</code>, always available)</li>
+<li><strong>User</strong> — <code>~/.hermes/plugins/image_gen/&lt;name&gt;/</code> (opt-in via <code>plugins.enabled</code>)</li>
+<li><strong>Pip</strong> — packages declaring a <code>hermes_agent.plugins</code> entry point</li>
+</ol>
+<p>Each plugin's <code>register(ctx)</code> function calls <code>ctx.register_image_gen_provider(...)</code> — that puts it into the registry in <code>agent/image_gen_registry.py</code>. The active provider is picked by <code>image_gen.provider</code> in <code>config.yaml</code>; <code>hermes tools</code> walks users through selection.</p>
+<p>The <code>image_generate</code> tool wrapper asks the registry for the active provider and dispatches there. If no provider is registered, the tool surfaces a helpful error pointing at <code>hermes tools</code>.</p>
+<h2 id="directory-structure">Directory structure</h2>
+<div class="highlight"><pre><span></span><code>plugins/image_gen/my-backend/
+├── __init__.py      # ImageGenProvider subclass + register()
+└── plugin.yaml      # Manifest with kind: backend
+</code></pre></div>
+
+<p>A bundled plugin is complete at this point. User plugins at <code>~/.hermes/plugins/image_gen/&lt;name&gt;/</code> need to be added to <code>plugins.enabled</code> in <code>config.yaml</code> (or run <code>hermes plugins enable &lt;name&gt;</code>).</p>
+<h2 id="the-imagegenprovider-abc">The ImageGenProvider ABC</h2>
+<p>Subclass <code>agent.image_gen_provider.ImageGenProvider</code>. The only required members are the <code>name</code> property and the <code>generate()</code> method — everything else has sane defaults:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/image_gen/my-backend/__init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.image_gen_provider</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">DEFAULT_ASPECT_RATIO</span><span class="p">,</span>
+    <span class="n">ImageGenProvider</span><span class="p">,</span>
+    <span class="n">error_response</span><span class="p">,</span>
+    <span class="n">normalize_reference_images</span><span class="p">,</span>
+    <span class="n">resolve_aspect_ratio</span><span class="p">,</span>
+    <span class="n">save_b64_image</span><span class="p">,</span>
+    <span class="n">success_response</span><span class="p">,</span>
+<span class="p">)</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyBackendImageGenProvider</span><span class="p">(</span><span class="n">ImageGenProvider</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="c1"># Stable id used in image_gen.provider config. Lowercase, no spaces.</span>
+        <span class="k">return</span> <span class="s2">&quot;my-backend&quot;</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">display_name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="c1"># Human label shown in `hermes tools`. Defaults to name.title() if omitted.</span>
+        <span class="k">return</span> <span class="s2">&quot;My Backend&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_available</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="c1"># Return False if credentials or deps are missing.</span>
+        <span class="c1"># The tool&#39;s availability gate calls this before dispatch.</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MY_BACKEND_API_KEY&quot;</span><span class="p">):</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="kn">import</span><span class="w"> </span><span class="nn">my_backend_sdk</span>  <span class="c1"># noqa: F401</span>
+        <span class="k">except</span> <span class="ne">ImportError</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="k">return</span> <span class="kc">True</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">list_models</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]:</span>
+        <span class="c1"># Catalog shown in `hermes tools` model picker.</span>
+        <span class="k">return</span> <span class="p">[</span>
+            <span class="p">{</span>
+                <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;my-model-fast&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;display&quot;</span><span class="p">:</span> <span class="s2">&quot;My Model (Fast)&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;speed&quot;</span><span class="p">:</span> <span class="s2">&quot;~5s&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;strengths&quot;</span><span class="p">:</span> <span class="s2">&quot;Quick iteration&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;price&quot;</span><span class="p">:</span> <span class="s2">&quot;$0.01/image&quot;</span><span class="p">,</span>
+            <span class="p">},</span>
+            <span class="p">{</span>
+                <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;my-model-hq&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;display&quot;</span><span class="p">:</span> <span class="s2">&quot;My Model (HQ)&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;speed&quot;</span><span class="p">:</span> <span class="s2">&quot;~30s&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;strengths&quot;</span><span class="p">:</span> <span class="s2">&quot;Highest fidelity&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;price&quot;</span><span class="p">:</span> <span class="s2">&quot;$0.04/image&quot;</span><span class="p">,</span>
+            <span class="p">},</span>
+        <span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">default_model</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="s2">&quot;my-model-fast&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_setup_schema</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="c1"># Metadata for the `hermes tools` picker — keys to prompt for at setup.</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;My Backend&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;badge&quot;</span><span class="p">:</span> <span class="s2">&quot;paid&quot;</span><span class="p">,</span>        <span class="c1"># optional; shown as a short tag in the picker</span>
+            <span class="s2">&quot;tag&quot;</span><span class="p">:</span> <span class="s2">&quot;One-line description shown under the name&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;env_vars&quot;</span><span class="p">:</span> <span class="p">[</span>
+                <span class="p">{</span>
+                    <span class="s2">&quot;key&quot;</span><span class="p">:</span> <span class="s2">&quot;MY_BACKEND_API_KEY&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;prompt&quot;</span><span class="p">:</span> <span class="s2">&quot;My Backend API key&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="s2">&quot;https://my-backend.example.com/api-keys&quot;</span><span class="p">,</span>
+                <span class="p">},</span>
+            <span class="p">],</span>
+        <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">capabilities</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="c1"># Declare whether this backend supports image-to-image / editing.</span>
+        <span class="c1"># The tool layer surfaces this in the dynamic schema so the model</span>
+        <span class="c1"># knows when `image_url` is honored. Default (if you omit this) is</span>
+        <span class="c1"># text-only: {&quot;modalities&quot;: [&quot;text&quot;], &quot;max_reference_images&quot;: 0}.</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;modalities&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="s2">&quot;image&quot;</span><span class="p">],</span> <span class="s2">&quot;max_reference_images&quot;</span><span class="p">:</span> <span class="mi">4</span><span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">generate</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">prompt</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+        <span class="n">aspect_ratio</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">DEFAULT_ASPECT_RATIO</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">image_url</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">reference_image_urls</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="n">prompt</span> <span class="o">=</span> <span class="p">(</span><span class="n">prompt</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+        <span class="n">aspect_ratio</span> <span class="o">=</span> <span class="n">resolve_aspect_ratio</span><span class="p">(</span><span class="n">aspect_ratio</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">prompt</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">error_response</span><span class="p">(</span>
+                <span class="n">error</span><span class="o">=</span><span class="s2">&quot;Prompt is required&quot;</span><span class="p">,</span>
+                <span class="n">error_type</span><span class="o">=</span><span class="s2">&quot;invalid_input&quot;</span><span class="p">,</span>
+                <span class="n">provider</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+                <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">,</span>
+                <span class="n">aspect_ratio</span><span class="o">=</span><span class="n">aspect_ratio</span><span class="p">,</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Routing: if image_url (or reference_image_urls) is set, the call is</span>
+        <span class="c1"># an image-to-image / edit request; otherwise text-to-image. Report</span>
+        <span class="c1"># which path you took via the `modality` field of success_response.</span>
+        <span class="n">sources</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">if</span> <span class="n">image_url</span><span class="p">:</span>
+            <span class="n">sources</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">image_url</span><span class="p">)</span>
+        <span class="n">sources</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">normalize_reference_images</span><span class="p">(</span><span class="n">reference_image_urls</span><span class="p">)</span> <span class="ow">or</span> <span class="p">[])</span>
+        <span class="n">modality</span> <span class="o">=</span> <span class="s2">&quot;image&quot;</span> <span class="k">if</span> <span class="n">sources</span> <span class="k">else</span> <span class="s2">&quot;text&quot;</span>
+
+        <span class="c1"># Model selection precedence: env var → config → default. The helper</span>
+        <span class="c1"># _resolve_model() in the built-in openai plugin is a good reference.</span>
+        <span class="n">model_id</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;model&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">default_model</span><span class="p">()</span> <span class="ow">or</span> <span class="s2">&quot;my-model-fast&quot;</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="kn">import</span><span class="w"> </span><span class="nn">my_backend_sdk</span>
+            <span class="n">client</span> <span class="o">=</span> <span class="n">my_backend_sdk</span><span class="o">.</span><span class="n">Client</span><span class="p">(</span><span class="n">api_key</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;MY_BACKEND_API_KEY&quot;</span><span class="p">])</span>
+            <span class="k">if</span> <span class="n">modality</span> <span class="o">==</span> <span class="s2">&quot;image&quot;</span><span class="p">:</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">edit</span><span class="p">(</span>
+                    <span class="n">prompt</span><span class="o">=</span><span class="n">prompt</span><span class="p">,</span>
+                    <span class="n">model</span><span class="o">=</span><span class="n">model_id</span><span class="p">,</span>
+                    <span class="n">image_urls</span><span class="o">=</span><span class="n">sources</span><span class="p">,</span>
+                <span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span>
+                    <span class="n">prompt</span><span class="o">=</span><span class="n">prompt</span><span class="p">,</span>
+                    <span class="n">model</span><span class="o">=</span><span class="n">model_id</span><span class="p">,</span>
+                    <span class="n">aspect_ratio</span><span class="o">=</span><span class="n">aspect_ratio</span><span class="p">,</span>
+                <span class="p">)</span>
+
+            <span class="c1"># Two shapes supported:</span>
+            <span class="c1">#   - URL string: return it as `image`</span>
+            <span class="c1">#   - base64 data: save under $HERMES_HOME/cache/images/ via save_b64_image()</span>
+            <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;image_b64&quot;</span><span class="p">):</span>
+                <span class="n">path</span> <span class="o">=</span> <span class="n">save_b64_image</span><span class="p">(</span>
+                    <span class="n">result</span><span class="p">[</span><span class="s2">&quot;image_b64&quot;</span><span class="p">],</span>
+                    <span class="n">prefix</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+                    <span class="n">extension</span><span class="o">=</span><span class="s2">&quot;png&quot;</span><span class="p">,</span>
+                <span class="p">)</span>
+                <span class="n">image</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">image</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="s2">&quot;image_url&quot;</span><span class="p">]</span>
+
+            <span class="k">return</span> <span class="n">success_response</span><span class="p">(</span>
+                <span class="n">image</span><span class="o">=</span><span class="n">image</span><span class="p">,</span>
+                <span class="n">model</span><span class="o">=</span><span class="n">model_id</span><span class="p">,</span>
+                <span class="n">prompt</span><span class="o">=</span><span class="n">prompt</span><span class="p">,</span>
+                <span class="n">aspect_ratio</span><span class="o">=</span><span class="n">aspect_ratio</span><span class="p">,</span>
+                <span class="n">provider</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+                <span class="n">modality</span><span class="o">=</span><span class="n">modality</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">error_response</span><span class="p">(</span>
+                <span class="n">error</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="n">exc</span><span class="p">),</span>
+                <span class="n">error_type</span><span class="o">=</span><span class="nb">type</span><span class="p">(</span><span class="n">exc</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="p">,</span>
+                <span class="n">provider</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+                <span class="n">model</span><span class="o">=</span><span class="n">model_id</span><span class="p">,</span>
+                <span class="n">prompt</span><span class="o">=</span><span class="n">prompt</span><span class="p">,</span>
+                <span class="n">aspect_ratio</span><span class="o">=</span><span class="n">aspect_ratio</span><span class="p">,</span>
+            <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Plugin entry point — called once at load time.&quot;&quot;&quot;</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_image_gen_provider</span><span class="p">(</span><span class="n">MyBackendImageGenProvider</span><span class="p">())</span>
+</code></pre></div>
+
+<h2 id="pluginyaml">plugin.yaml</h2>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-backend</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My image backend — text-to-image via My Backend SDK</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backend</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_BACKEND_API_KEY</span>
+</code></pre></div>
+
+<p><code>kind: backend</code> is what routes the plugin to the image-gen registration path. <code>requires_env</code> is prompted during <code>hermes plugins install</code>.</p>
+<h2 id="abc-reference">ABC reference</h2>
+<p>Full contract in <code>agent/image_gen_provider.py</code>. The methods you'll typically override:</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th>Required</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>✅</td>
+<td>—</td>
+<td>Stable id used in <code>image_gen.provider</code> config</td>
+</tr>
+<tr>
+<td><code>display_name</code></td>
+<td>—</td>
+<td><code>name.title()</code></td>
+<td>Label shown in <code>hermes tools</code></td>
+</tr>
+<tr>
+<td><code>is_available()</code></td>
+<td>—</td>
+<td><code>True</code></td>
+<td>Gate for missing creds/deps</td>
+</tr>
+<tr>
+<td><code>list_models()</code></td>
+<td>—</td>
+<td><code>[]</code></td>
+<td>Catalog for <code>hermes tools</code> model picker</td>
+</tr>
+<tr>
+<td><code>default_model()</code></td>
+<td>—</td>
+<td>first from <code>list_models()</code></td>
+<td>Fallback when no model is configured</td>
+</tr>
+<tr>
+<td><code>get_setup_schema()</code></td>
+<td>—</td>
+<td>minimal</td>
+<td>Picker metadata + env-var prompts</td>
+</tr>
+<tr>
+<td><code>generate(prompt, aspect_ratio, **kwargs)</code></td>
+<td>✅</td>
+<td>—</td>
+<td>The call</td>
+</tr>
+</tbody>
+</table>
+<h2 id="response-format">Response format</h2>
+<p><code>generate()</code> must return a dict built via <code>success_response()</code> or <code>error_response()</code>. Both live in <code>agent/image_gen_provider.py</code>.</p>
+<p><strong>Success:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="n">success_response</span><span class="p">(</span>
+    <span class="n">image</span><span class="o">=&lt;</span><span class="n">url</span><span class="o">-</span><span class="ow">or</span><span class="o">-</span><span class="n">absolute</span><span class="o">-</span><span class="n">path</span><span class="o">&gt;</span><span class="p">,</span>
+    <span class="n">model</span><span class="o">=&lt;</span><span class="n">model</span><span class="o">-</span><span class="nb">id</span><span class="o">&gt;</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="o">=&lt;</span><span class="n">echoed</span><span class="o">-</span><span class="n">prompt</span><span class="o">&gt;</span><span class="p">,</span>
+    <span class="n">aspect_ratio</span><span class="o">=</span><span class="s2">&quot;landscape&quot;</span> <span class="o">|</span> <span class="s2">&quot;square&quot;</span> <span class="o">|</span> <span class="s2">&quot;portrait&quot;</span><span class="p">,</span>
+    <span class="n">provider</span><span class="o">=&lt;</span><span class="n">your</span><span class="o">-</span><span class="n">provider</span><span class="o">-</span><span class="n">name</span><span class="o">&gt;</span><span class="p">,</span>
+    <span class="n">extra</span><span class="o">=</span><span class="p">{</span><span class="o">...</span><span class="p">},</span>  <span class="c1"># optional backend-specific fields</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Error:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="n">error_response</span><span class="p">(</span>
+    <span class="n">error</span><span class="o">=</span><span class="s2">&quot;human-readable message&quot;</span><span class="p">,</span>
+    <span class="n">error_type</span><span class="o">=</span><span class="s2">&quot;provider_error&quot;</span> <span class="o">|</span> <span class="s2">&quot;invalid_input&quot;</span> <span class="o">|</span> <span class="s2">&quot;&lt;exception class name&gt;&quot;</span><span class="p">,</span>
+    <span class="n">provider</span><span class="o">=&lt;</span><span class="n">your</span><span class="o">-</span><span class="n">provider</span><span class="o">-</span><span class="n">name</span><span class="o">&gt;</span><span class="p">,</span>
+    <span class="n">model</span><span class="o">=&lt;</span><span class="n">model</span><span class="o">-</span><span class="nb">id</span><span class="o">&gt;</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="o">=&lt;</span><span class="n">prompt</span><span class="o">&gt;</span><span class="p">,</span>
+    <span class="n">aspect_ratio</span><span class="o">=&lt;</span><span class="n">resolved</span> <span class="n">aspect</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>The tool wrapper JSON-serializes the dict and hands it to the LLM. Errors are surfaced as the tool result; the LLM decides how to explain them to the user.</p>
+<h2 id="handling-base64-vs-url-output">Handling base64 vs URL output</h2>
+<p>Some backends return image URLs (fal, Replicate); others return base64 payloads (OpenAI gpt-image-2). For the base64 case, use <code>save_b64_image()</code> — it writes to <code>$HERMES_HOME/cache/images/&lt;prefix&gt;_&lt;timestamp&gt;_&lt;uuid&gt;.&lt;ext&gt;</code> and returns the absolute <code>Path</code>. Pass that path (as <code>str</code>) as <code>image=</code> in <code>success_response()</code>. Gateway delivery (Telegram photo bubble, Discord attachment) recognizes both URLs and absolute paths.</p>
+<h2 id="user-overrides">User overrides</h2>
+<p>Drop a user plugin at <code>~/.hermes/plugins/image_gen/&lt;name&gt;/</code> with the same <code>name</code> property as a bundled one and enable it via <code>hermes plugins enable &lt;name&gt;</code> — the registry is last-writer-wins, so your version replaces the built-in. Useful for pointing an <code>openai</code> plugin at a private proxy, or swapping in a custom model catalog.</p>
+<h2 id="testing">Testing</h2>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_HOME</span><span class="o">=</span><span class="nv">$HOME</span>/.hermes/cache/scratch/hermes-imggen-test
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="nv">$HERMES_HOME</span>/plugins/image_gen/my-backend
+<span class="c1"># …copy __init__.py + plugin.yaml into that dir…</span>
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">MY_BACKEND_API_KEY</span><span class="o">=</span>your-test-key
+hermes<span class="w"> </span>plugins<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>my-backend
+
+<span class="c1"># Pick it as the active provider</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;image_gen:&quot;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span><span class="nv">$HERMES_HOME</span>/config.yaml
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;  provider: my-backend&quot;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span><span class="nv">$HERMES_HOME</span>/config.yaml
+
+<span class="c1"># Exercise it</span>
+hermes<span class="w"> </span>-z<span class="w"> </span><span class="s2">&quot;Generate an image of a corgi in a spacesuit&quot;</span>
+</code></pre></div>
+
+<p>Or interactively: <code>hermes tools</code> → "Image Generation" → select <code>my-backend</code> → enter API key if prompted.</p>
+<h2 id="reference-implementations">Reference implementations</h2>
+<ul>
+<li><strong><code>plugins/image_gen/openai/__init__.py</code></strong> — gpt-image-2 at low/medium/high tiers as three virtual model IDs sharing one API model with different <code>quality</code> params. Good example of tiered models under a single backend + config.yaml precedence chain.</li>
+<li><strong><code>plugins/image_gen/xai/__init__.py</code></strong> — Grok Imagine via xAI. Different shape (URL output, simpler catalog).</li>
+<li><strong><code>plugins/image_gen/openai-codex/__init__.py</code></strong> — same catalog as <code>openai</code>, but authenticated with the ChatGPT/Codex OAuth token and posted with plain <code>httpx</code> to the Codex backend's native <code>images/generations</code> / <code>images/edits</code> endpoints. Good example of a provider that fetches remote source images client-side and inlines them as data URLs, and that reports backend-returned metadata separately from the request.</li>
+</ul>
+<h2 id="distribute-via-pip">Distribute via pip</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># pyproject.toml</span>
+<span class="k">[project.entry-points.</span><span class="s2">&quot;hermes_agent.plugins&quot;</span><span class="k">]</span>
+<span class="n">my-backend-imggen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;my_backend_imggen_package&quot;</span>
+</code></pre></div>
+
+<p><code>my_backend_imggen_package</code> must expose a top-level <code>register</code> function. See <a href="plugins.html#distribute-via-pip">Distribute via pip</a> in the general plugin guide for the full setup.</p>
+<h2 id="related-pages">Related pages</h2>
+<ul>
+<li><a href="../user-guide/features/image-generation.html">Image Generation</a> — user-facing feature documentation</li>
+<li><a href="../user-guide/features/plugins.html">Plugins overview</a> — all plugin types at a glance</li>
+<li><a href="plugins.html">Build a Hermes Plugin</a> — general tools/hooks/slash commands guide</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/image-gen-provider-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-discovery-works">How discovery works</a></li>
+<li class="lvl2"><a href="#directory-structure">Directory structure</a></li>
+<li class="lvl2"><a href="#the-imagegenprovider-abc">The ImageGenProvider ABC</a></li>
+<li class="lvl2"><a href="#pluginyaml">plugin.yaml</a></li>
+<li class="lvl2"><a href="#abc-reference">ABC reference</a></li>
+<li class="lvl2"><a href="#response-format">Response format</a></li>
+<li class="lvl2"><a href="#handling-base64-vs-url-output">Handling base64 vs URL output</a></li>
+<li class="lvl2"><a href="#user-overrides">User overrides</a></li>
+<li class="lvl2"><a href="#testing">Testing</a></li>
+<li class="lvl2"><a href="#reference-implementations">Reference implementations</a></li>
+<li class="lvl2"><a href="#distribute-via-pip">Distribute via pip</a></li>
+<li class="lvl2"><a href="#related-pages">Related pages</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

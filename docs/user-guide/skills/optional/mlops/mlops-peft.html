@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peft — Fine-tune large LLMs with LoRA on limited GPU memory · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/mlops/mlops-peft</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="peft">Peft</h1>
+<p>Fine-tune large LLMs with LoRA on limited GPU memory.</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/mlops/peft</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/mlops\peft</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>Orchestra Research</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Dependencies</td>
+<td><code>peft&gt;=0.13.0</code>, <code>transformers&gt;=4.45.0</code>, <code>torch&gt;=2.0.0</code>, <code>bitsandbytes&gt;=0.43.0</code></td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>Fine-Tuning</code>, <code>PEFT</code>, <code>LoRA</code>, <code>QLoRA</code>, <code>Parameter-Efficient</code>, <code>Adapters</code>, <code>Low-Rank</code>, <code>Memory Optimization</code>, <code>Multi-Adapter</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="peft-parameter-efficient-fine-tuning">PEFT (Parameter-Efficient Fine-Tuning)</h1>
+<p>Fine-tune LLMs by training &lt;1% of parameters using LoRA, QLoRA, and 25+ adapter methods.</p>
+<h2 id="when-to-use-peft">When to use PEFT</h2>
+<p><strong>Use PEFT/LoRA when:</strong>
+- Fine-tuning 7B-70B models on consumer GPUs (RTX 4090, A100)
+- Need to train &lt;1% parameters (6MB adapters vs 14GB full model)
+- Want fast iteration with multiple task-specific adapters
+- Deploying multiple fine-tuned variants from one base model</p>
+<p><strong>Use QLoRA (PEFT + quantization) when:</strong>
+- Fine-tuning 70B models on single 24GB GPU
+- Memory is the primary constraint
+- Can accept ~5% quality trade-off vs full fine-tuning</p>
+<p><strong>Use full fine-tuning instead when:</strong>
+- Training small models (&lt;1B parameters)
+- Need maximum quality and have compute budget
+- Significant domain shift requires updating all weights</p>
+<h2 id="quick-start">Quick start</h2>
+<h3 id="installation">Installation</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Basic installation</span>
+pip<span class="w"> </span>install<span class="w"> </span>peft
+
+<span class="c1"># With quantization support (recommended)</span>
+pip<span class="w"> </span>install<span class="w"> </span>peft<span class="w"> </span>bitsandbytes
+
+<span class="c1"># Full stack</span>
+pip<span class="w"> </span>install<span class="w"> </span>peft<span class="w"> </span>transformers<span class="w"> </span>accelerate<span class="w"> </span>bitsandbytes<span class="w"> </span>datasets
+</code></pre></div>
+
+<h3 id="lora-fine-tuning-standard">LoRA fine-tuning (standard)</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoModelForCausalLM</span><span class="p">,</span> <span class="n">AutoTokenizer</span><span class="p">,</span> <span class="n">TrainingArguments</span><span class="p">,</span> <span class="n">Trainer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_peft_model</span><span class="p">,</span> <span class="n">LoraConfig</span><span class="p">,</span> <span class="n">TaskType</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">datasets</span><span class="w"> </span><span class="kn">import</span> <span class="n">load_dataset</span>
+
+<span class="c1"># Load base model</span>
+<span class="n">model_name</span> <span class="o">=</span> <span class="s2">&quot;meta-llama/Llama-3.1-8B&quot;</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="n">model_name</span><span class="p">,</span> <span class="n">torch_dtype</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span><span class="p">,</span> <span class="n">device_map</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span><span class="p">)</span>
+<span class="n">tokenizer</span> <span class="o">=</span> <span class="n">AutoTokenizer</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="n">model_name</span><span class="p">)</span>
+<span class="n">tokenizer</span><span class="o">.</span><span class="n">pad_token</span> <span class="o">=</span> <span class="n">tokenizer</span><span class="o">.</span><span class="n">eos_token</span>
+
+<span class="c1"># LoRA configuration</span>
+<span class="n">lora_config</span> <span class="o">=</span> <span class="n">LoraConfig</span><span class="p">(</span>
+    <span class="n">task_type</span><span class="o">=</span><span class="n">TaskType</span><span class="o">.</span><span class="n">CAUSAL_LM</span><span class="p">,</span>
+    <span class="n">r</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span>                          <span class="c1"># Rank (8-64, higher = more capacity)</span>
+    <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span>                 <span class="c1"># Scaling factor (typically 2*r)</span>
+    <span class="n">lora_dropout</span><span class="o">=</span><span class="mf">0.05</span><span class="p">,</span>             <span class="c1"># Dropout for regularization</span>
+    <span class="n">target_modules</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;q_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;v_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;k_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;o_proj&quot;</span><span class="p">],</span>  <span class="c1"># Attention layers</span>
+    <span class="n">bias</span><span class="o">=</span><span class="s2">&quot;none&quot;</span>                    <span class="c1"># Don&#39;t train biases</span>
+<span class="p">)</span>
+
+<span class="c1"># Apply LoRA</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">get_peft_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">lora_config</span><span class="p">)</span>
+<span class="n">model</span><span class="o">.</span><span class="n">print_trainable_parameters</span><span class="p">()</span>
+<span class="c1"># Output: trainable params: 13,631,488 || all params: 8,043,307,008 || trainable%: 0.17%</span>
+
+<span class="c1"># Prepare dataset</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">load_dataset</span><span class="p">(</span><span class="s2">&quot;databricks/databricks-dolly-15k&quot;</span><span class="p">,</span> <span class="n">split</span><span class="o">=</span><span class="s2">&quot;train&quot;</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">tokenize</span><span class="p">(</span><span class="n">example</span><span class="p">):</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;### Instruction:</span><span class="se">\n</span><span class="si">{</span><span class="n">example</span><span class="p">[</span><span class="s1">&#39;instruction&#39;</span><span class="p">]</span><span class="si">}</span><span class="se">\n\n</span><span class="s2">### Response:</span><span class="se">\n</span><span class="si">{</span><span class="n">example</span><span class="p">[</span><span class="s1">&#39;response&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="k">return</span> <span class="n">tokenizer</span><span class="p">(</span><span class="n">text</span><span class="p">,</span> <span class="n">truncation</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">max_length</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span> <span class="n">padding</span><span class="o">=</span><span class="s2">&quot;max_length&quot;</span><span class="p">)</span>
+
+<span class="n">tokenized</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">tokenize</span><span class="p">,</span> <span class="n">remove_columns</span><span class="o">=</span><span class="n">dataset</span><span class="o">.</span><span class="n">column_names</span><span class="p">)</span>
+
+<span class="c1"># Training</span>
+<span class="n">training_args</span> <span class="o">=</span> <span class="n">TrainingArguments</span><span class="p">(</span>
+    <span class="n">output_dir</span><span class="o">=</span><span class="s2">&quot;./lora-llama&quot;</span><span class="p">,</span>
+    <span class="n">num_train_epochs</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+    <span class="n">per_device_train_batch_size</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+    <span class="n">gradient_accumulation_steps</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+    <span class="n">learning_rate</span><span class="o">=</span><span class="mf">2e-4</span><span class="p">,</span>
+    <span class="n">fp16</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">logging_steps</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span>
+    <span class="n">save_strategy</span><span class="o">=</span><span class="s2">&quot;epoch&quot;</span>
+<span class="p">)</span>
+
+<span class="n">trainer</span> <span class="o">=</span> <span class="n">Trainer</span><span class="p">(</span>
+    <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+    <span class="n">args</span><span class="o">=</span><span class="n">training_args</span><span class="p">,</span>
+    <span class="n">train_dataset</span><span class="o">=</span><span class="n">tokenized</span><span class="p">,</span>
+    <span class="n">data_collator</span><span class="o">=</span><span class="k">lambda</span> <span class="n">data</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;input_ids&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">f</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">data</span><span class="p">]),</span>
+                                 <span class="s2">&quot;attention_mask&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">f</span><span class="p">[</span><span class="s2">&quot;attention_mask&quot;</span><span class="p">]</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">data</span><span class="p">]),</span>
+                                 <span class="s2">&quot;labels&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">f</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">data</span><span class="p">])}</span>
+<span class="p">)</span>
+
+<span class="n">trainer</span><span class="o">.</span><span class="n">train</span><span class="p">()</span>
+
+<span class="c1"># Save adapter only (6MB vs 16GB)</span>
+<span class="n">model</span><span class="o">.</span><span class="n">save_pretrained</span><span class="p">(</span><span class="s2">&quot;./lora-llama-adapter&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="qlora-fine-tuning-memory-efficient">QLoRA fine-tuning (memory-efficient)</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoModelForCausalLM</span><span class="p">,</span> <span class="n">BitsAndBytesConfig</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_peft_model</span><span class="p">,</span> <span class="n">LoraConfig</span><span class="p">,</span> <span class="n">prepare_model_for_kbit_training</span>
+
+<span class="c1"># 4-bit quantization config</span>
+<span class="n">bnb_config</span> <span class="o">=</span> <span class="n">BitsAndBytesConfig</span><span class="p">(</span>
+    <span class="n">load_in_4bit</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">bnb_4bit_quant_type</span><span class="o">=</span><span class="s2">&quot;nf4&quot;</span><span class="p">,</span>           <span class="c1"># NormalFloat4 (best for LLMs)</span>
+    <span class="n">bnb_4bit_compute_dtype</span><span class="o">=</span><span class="s2">&quot;bfloat16&quot;</span><span class="p">,</span>   <span class="c1"># Compute in bf16</span>
+    <span class="n">bnb_4bit_use_double_quant</span><span class="o">=</span><span class="kc">True</span>       <span class="c1"># Nested quantization</span>
+<span class="p">)</span>
+
+<span class="c1"># Load quantized model</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+    <span class="s2">&quot;meta-llama/Llama-3.1-70B&quot;</span><span class="p">,</span>
+    <span class="n">quantization_config</span><span class="o">=</span><span class="n">bnb_config</span><span class="p">,</span>
+    <span class="n">device_map</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span>
+<span class="p">)</span>
+
+<span class="c1"># Prepare for training (enables gradient checkpointing)</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">prepare_model_for_kbit_training</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+
+<span class="c1"># LoRA config for QLoRA</span>
+<span class="n">lora_config</span> <span class="o">=</span> <span class="n">LoraConfig</span><span class="p">(</span>
+    <span class="n">r</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>                              <span class="c1"># Higher rank for 70B</span>
+    <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span>
+    <span class="n">lora_dropout</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>
+    <span class="n">target_modules</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;q_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;v_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;k_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;o_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;gate_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;up_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;down_proj&quot;</span><span class="p">],</span>
+    <span class="n">bias</span><span class="o">=</span><span class="s2">&quot;none&quot;</span><span class="p">,</span>
+    <span class="n">task_type</span><span class="o">=</span><span class="s2">&quot;CAUSAL_LM&quot;</span>
+<span class="p">)</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">get_peft_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">lora_config</span><span class="p">)</span>
+<span class="c1"># 70B model now fits on single 24GB GPU!</span>
+</code></pre></div>
+
+<h2 id="lora-parameter-selection">LoRA parameter selection</h2>
+<h3 id="rank-r---capacity-vs-efficiency">Rank (r) - capacity vs efficiency</h3>
+<table>
+<thead>
+<tr>
+<th>Rank</th>
+<th>Trainable Params</th>
+<th>Memory</th>
+<th>Quality</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>4</td>
+<td>~3M</td>
+<td>Minimal</td>
+<td>Lower</td>
+<td>Simple tasks, prototyping</td>
+</tr>
+<tr>
+<td><strong>8</strong></td>
+<td>~7M</td>
+<td>Low</td>
+<td>Good</td>
+<td><strong>Recommended starting point</strong></td>
+</tr>
+<tr>
+<td><strong>16</strong></td>
+<td>~14M</td>
+<td>Medium</td>
+<td>Better</td>
+<td><strong>General fine-tuning</strong></td>
+</tr>
+<tr>
+<td>32</td>
+<td>~27M</td>
+<td>Higher</td>
+<td>High</td>
+<td>Complex tasks</td>
+</tr>
+<tr>
+<td>64</td>
+<td>~54M</td>
+<td>High</td>
+<td>Highest</td>
+<td>Domain adaptation, 70B models</td>
+</tr>
+</tbody>
+</table>
+<h3 id="alpha-lora_alpha---scaling-factor">Alpha (lora_alpha) - scaling factor</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Rule of thumb: alpha = 2 * rank</span>
+<span class="n">LoraConfig</span><span class="p">(</span><span class="n">r</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span> <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">32</span><span class="p">)</span>  <span class="c1"># Standard</span>
+<span class="n">LoraConfig</span><span class="p">(</span><span class="n">r</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span> <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">16</span><span class="p">)</span>  <span class="c1"># Conservative (lower learning rate effect)</span>
+<span class="n">LoraConfig</span><span class="p">(</span><span class="n">r</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span> <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">64</span><span class="p">)</span>  <span class="c1"># Aggressive (higher learning rate effect)</span>
+</code></pre></div>
+
+<h3 id="target-modules-by-architecture">Target modules by architecture</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Llama / Mistral / Qwen</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;q_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;v_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;k_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;o_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;gate_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;up_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;down_proj&quot;</span><span class="p">]</span>
+
+<span class="c1"># GPT-2 / GPT-Neo</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;c_attn&quot;</span><span class="p">,</span> <span class="s2">&quot;c_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;c_fc&quot;</span><span class="p">]</span>
+
+<span class="c1"># Falcon</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;query_key_value&quot;</span><span class="p">,</span> <span class="s2">&quot;dense&quot;</span><span class="p">,</span> <span class="s2">&quot;dense_h_to_4h&quot;</span><span class="p">,</span> <span class="s2">&quot;dense_4h_to_h&quot;</span><span class="p">]</span>
+
+<span class="c1"># BLOOM</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;query_key_value&quot;</span><span class="p">,</span> <span class="s2">&quot;dense&quot;</span><span class="p">,</span> <span class="s2">&quot;dense_h_to_4h&quot;</span><span class="p">,</span> <span class="s2">&quot;dense_4h_to_h&quot;</span><span class="p">]</span>
+
+<span class="c1"># Auto-detect all linear layers</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="s2">&quot;all-linear&quot;</span>  <span class="c1"># PEFT 0.6.0+</span>
+</code></pre></div>
+
+<h2 id="loading-and-merging-adapters">Loading and merging adapters</h2>
+<h3 id="load-trained-adapter">Load trained adapter</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">PeftModel</span><span class="p">,</span> <span class="n">AutoPeftModelForCausalLM</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoModelForCausalLM</span>
+
+<span class="c1"># Option 1: Load with PeftModel</span>
+<span class="n">base_model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;meta-llama/Llama-3.1-8B&quot;</span><span class="p">)</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">PeftModel</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="n">base_model</span><span class="p">,</span> <span class="s2">&quot;./lora-llama-adapter&quot;</span><span class="p">)</span>
+
+<span class="c1"># Option 2: Load directly (recommended)</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoPeftModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+    <span class="s2">&quot;./lora-llama-adapter&quot;</span><span class="p">,</span>
+    <span class="n">device_map</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="merge-adapter-into-base-model">Merge adapter into base model</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Merge for deployment (no adapter overhead)</span>
+<span class="n">merged_model</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">merge_and_unload</span><span class="p">()</span>
+
+<span class="c1"># Save merged model</span>
+<span class="n">merged_model</span><span class="o">.</span><span class="n">save_pretrained</span><span class="p">(</span><span class="s2">&quot;./llama-merged&quot;</span><span class="p">)</span>
+<span class="n">tokenizer</span><span class="o">.</span><span class="n">save_pretrained</span><span class="p">(</span><span class="s2">&quot;./llama-merged&quot;</span><span class="p">)</span>
+
+<span class="c1"># Push to Hub</span>
+<span class="n">merged_model</span><span class="o">.</span><span class="n">push_to_hub</span><span class="p">(</span><span class="s2">&quot;username/llama-finetuned&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="multi-adapter-serving">Multi-adapter serving</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">PeftModel</span>
+
+<span class="c1"># Load base with first adapter</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoPeftModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;./adapter-task1&quot;</span><span class="p">)</span>
+
+<span class="c1"># Load additional adapters</span>
+<span class="n">model</span><span class="o">.</span><span class="n">load_adapter</span><span class="p">(</span><span class="s2">&quot;./adapter-task2&quot;</span><span class="p">,</span> <span class="n">adapter_name</span><span class="o">=</span><span class="s2">&quot;task2&quot;</span><span class="p">)</span>
+<span class="n">model</span><span class="o">.</span><span class="n">load_adapter</span><span class="p">(</span><span class="s2">&quot;./adapter-task3&quot;</span><span class="p">,</span> <span class="n">adapter_name</span><span class="o">=</span><span class="s2">&quot;task3&quot;</span><span class="p">)</span>
+
+<span class="c1"># Switch between adapters at runtime</span>
+<span class="n">model</span><span class="o">.</span><span class="n">set_adapter</span><span class="p">(</span><span class="s2">&quot;task1&quot;</span><span class="p">)</span>  <span class="c1"># Use task1 adapter</span>
+<span class="n">output1</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="o">**</span><span class="n">inputs</span><span class="p">)</span>
+
+<span class="n">model</span><span class="o">.</span><span class="n">set_adapter</span><span class="p">(</span><span class="s2">&quot;task2&quot;</span><span class="p">)</span>  <span class="c1"># Switch to task2</span>
+<span class="n">output2</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="o">**</span><span class="n">inputs</span><span class="p">)</span>
+
+<span class="c1"># Disable adapters (use base model)</span>
+<span class="k">with</span> <span class="n">model</span><span class="o">.</span><span class="n">disable_adapter</span><span class="p">():</span>
+    <span class="n">base_output</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="o">**</span><span class="n">inputs</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="peft-methods-comparison">PEFT methods comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Trainable %</th>
+<th>Memory</th>
+<th>Speed</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>LoRA</strong></td>
+<td>0.1-1%</td>
+<td>Low</td>
+<td>Fast</td>
+<td>General fine-tuning</td>
+</tr>
+<tr>
+<td><strong>QLoRA</strong></td>
+<td>0.1-1%</td>
+<td>Very Low</td>
+<td>Medium</td>
+<td>Memory-constrained</td>
+</tr>
+<tr>
+<td>AdaLoRA</td>
+<td>0.1-1%</td>
+<td>Low</td>
+<td>Medium</td>
+<td>Automatic rank selection</td>
+</tr>
+<tr>
+<td>IA3</td>
+<td>0.01%</td>
+<td>Minimal</td>
+<td>Fastest</td>
+<td>Few-shot adaptation</td>
+</tr>
+<tr>
+<td>Prefix Tuning</td>
+<td>0.1%</td>
+<td>Low</td>
+<td>Medium</td>
+<td>Generation control</td>
+</tr>
+<tr>
+<td>Prompt Tuning</td>
+<td>0.001%</td>
+<td>Minimal</td>
+<td>Fast</td>
+<td>Simple task adaptation</td>
+</tr>
+<tr>
+<td>P-Tuning v2</td>
+<td>0.1%</td>
+<td>Low</td>
+<td>Medium</td>
+<td>NLU tasks</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ia3-minimal-parameters">IA3 (minimal parameters)</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">IA3Config</span>
+
+<span class="n">ia3_config</span> <span class="o">=</span> <span class="n">IA3Config</span><span class="p">(</span>
+    <span class="n">target_modules</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;q_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;v_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;k_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;down_proj&quot;</span><span class="p">],</span>
+    <span class="n">feedforward_modules</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;down_proj&quot;</span><span class="p">]</span>
+<span class="p">)</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">get_peft_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">ia3_config</span><span class="p">)</span>
+<span class="c1"># Trains only 0.01% of parameters!</span>
+</code></pre></div>
+
+<h3 id="prefix-tuning">Prefix Tuning</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">PrefixTuningConfig</span>
+
+<span class="n">prefix_config</span> <span class="o">=</span> <span class="n">PrefixTuningConfig</span><span class="p">(</span>
+    <span class="n">task_type</span><span class="o">=</span><span class="s2">&quot;CAUSAL_LM&quot;</span><span class="p">,</span>
+    <span class="n">num_virtual_tokens</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span>      <span class="c1"># Prepended tokens</span>
+    <span class="n">prefix_projection</span><span class="o">=</span><span class="kc">True</span>       <span class="c1"># Use MLP projection</span>
+<span class="p">)</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">get_peft_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">prefix_config</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="integration-patterns">Integration patterns</h2>
+<h3 id="with-trl-sfttrainer">With TRL (SFTTrainer)</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">trl</span><span class="w"> </span><span class="kn">import</span> <span class="n">SFTTrainer</span><span class="p">,</span> <span class="n">SFTConfig</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">LoraConfig</span>
+
+<span class="n">lora_config</span> <span class="o">=</span> <span class="n">LoraConfig</span><span class="p">(</span><span class="n">r</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span> <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span> <span class="n">target_modules</span><span class="o">=</span><span class="s2">&quot;all-linear&quot;</span><span class="p">)</span>
+
+<span class="n">trainer</span> <span class="o">=</span> <span class="n">SFTTrainer</span><span class="p">(</span>
+    <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+    <span class="n">args</span><span class="o">=</span><span class="n">SFTConfig</span><span class="p">(</span><span class="n">output_dir</span><span class="o">=</span><span class="s2">&quot;./output&quot;</span><span class="p">,</span> <span class="n">max_seq_length</span><span class="o">=</span><span class="mi">512</span><span class="p">),</span>
+    <span class="n">train_dataset</span><span class="o">=</span><span class="n">dataset</span><span class="p">,</span>
+    <span class="n">peft_config</span><span class="o">=</span><span class="n">lora_config</span><span class="p">,</span>  <span class="c1"># Pass LoRA config directly</span>
+<span class="p">)</span>
+<span class="n">trainer</span><span class="o">.</span><span class="n">train</span><span class="p">()</span>
+</code></pre></div>
+
+<h3 id="with-axolotl-yaml-config">With Axolotl (YAML config)</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># axolotl config.yaml</span>
+<span class="nt">adapter</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">lora</span>
+<span class="nt">lora_r</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">16</span>
+<span class="nt">lora_alpha</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">32</span>
+<span class="nt">lora_dropout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.05</span>
+<span class="nt">lora_target_modules</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">q_proj</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">v_proj</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">k_proj</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">o_proj</span>
+<span class="nt">lora_target_linear</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">  </span><span class="c1"># Target all linear layers</span>
+</code></pre></div>
+
+<h3 id="with-vllm-inference">With vLLM (inference)</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">vllm</span><span class="w"> </span><span class="kn">import</span> <span class="n">LLM</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">vllm.lora.request</span><span class="w"> </span><span class="kn">import</span> <span class="n">LoRARequest</span>
+
+<span class="c1"># Load base model with LoRA support</span>
+<span class="n">llm</span> <span class="o">=</span> <span class="n">LLM</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;meta-llama/Llama-3.1-8B&quot;</span><span class="p">,</span> <span class="n">enable_lora</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="c1"># Serve with adapter</span>
+<span class="n">outputs</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span>
+    <span class="n">prompts</span><span class="p">,</span>
+    <span class="n">lora_request</span><span class="o">=</span><span class="n">LoRARequest</span><span class="p">(</span><span class="s2">&quot;adapter1&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;./lora-adapter&quot;</span><span class="p">)</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h2 id="performance-benchmarks">Performance benchmarks</h2>
+<h3 id="memory-usage-llama-31-8b">Memory usage (Llama 3.1 8B)</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>GPU Memory</th>
+<th>Trainable Params</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Full fine-tuning</td>
+<td>60+ GB</td>
+<td>8B (100%)</td>
+</tr>
+<tr>
+<td>LoRA r=16</td>
+<td>18 GB</td>
+<td>14M (0.17%)</td>
+</tr>
+<tr>
+<td>QLoRA r=16</td>
+<td>6 GB</td>
+<td>14M (0.17%)</td>
+</tr>
+<tr>
+<td>IA3</td>
+<td>16 GB</td>
+<td>800K (0.01%)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="training-speed-a100-80gb">Training speed (A100 80GB)</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Tokens/sec</th>
+<th>vs Full FT</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Full FT</td>
+<td>2,500</td>
+<td>1x</td>
+</tr>
+<tr>
+<td>LoRA</td>
+<td>3,200</td>
+<td>1.3x</td>
+</tr>
+<tr>
+<td>QLoRA</td>
+<td>2,100</td>
+<td>0.84x</td>
+</tr>
+</tbody>
+</table>
+<h3 id="quality-mmlu-benchmark">Quality (MMLU benchmark)</h3>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Full FT</th>
+<th>LoRA</th>
+<th>QLoRA</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Llama 2-7B</td>
+<td>45.3</td>
+<td>44.8</td>
+<td>44.1</td>
+</tr>
+<tr>
+<td>Llama 2-13B</td>
+<td>54.8</td>
+<td>54.2</td>
+<td>53.5</td>
+</tr>
+</tbody>
+</table>
+<h2 id="common-issues">Common issues</h2>
+<h3 id="cuda-oom-during-training">CUDA OOM during training</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Solution 1: Enable gradient checkpointing</span>
+<span class="n">model</span><span class="o">.</span><span class="n">gradient_checkpointing_enable</span><span class="p">()</span>
+
+<span class="c1"># Solution 2: Reduce batch size + increase accumulation</span>
+<span class="n">TrainingArguments</span><span class="p">(</span>
+    <span class="n">per_device_train_batch_size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+    <span class="n">gradient_accumulation_steps</span><span class="o">=</span><span class="mi">16</span>
+<span class="p">)</span>
+
+<span class="c1"># Solution 3: Use QLoRA</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">BitsAndBytesConfig</span>
+<span class="n">bnb_config</span> <span class="o">=</span> <span class="n">BitsAndBytesConfig</span><span class="p">(</span><span class="n">load_in_4bit</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">bnb_4bit_quant_type</span><span class="o">=</span><span class="s2">&quot;nf4&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="adapter-not-applying">Adapter not applying</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Verify adapter is active</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">active_adapters</span><span class="p">)</span>  <span class="c1"># Should show adapter name</span>
+
+<span class="c1"># Check trainable parameters</span>
+<span class="n">model</span><span class="o">.</span><span class="n">print_trainable_parameters</span><span class="p">()</span>
+
+<span class="c1"># Ensure model in training mode</span>
+<span class="n">model</span><span class="o">.</span><span class="n">train</span><span class="p">()</span>
+</code></pre></div>
+
+<h3 id="quality-degradation">Quality degradation</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Increase rank</span>
+<span class="n">LoraConfig</span><span class="p">(</span><span class="n">r</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span> <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">64</span><span class="p">)</span>
+
+<span class="c1"># Target more modules</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="s2">&quot;all-linear&quot;</span>
+
+<span class="c1"># Use more training data and epochs</span>
+<span class="n">TrainingArguments</span><span class="p">(</span><span class="n">num_train_epochs</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+
+<span class="c1"># Lower learning rate</span>
+<span class="n">TrainingArguments</span><span class="p">(</span><span class="n">learning_rate</span><span class="o">=</span><span class="mf">1e-4</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="best-practices">Best practices</h2>
+<ol>
+<li><strong>Start with r=8-16</strong>, increase if quality insufficient</li>
+<li><strong>Use alpha = 2 * rank</strong> as starting point</li>
+<li><strong>Target attention + MLP layers</strong> for best quality/efficiency</li>
+<li><strong>Enable gradient checkpointing</strong> for memory savings</li>
+<li><strong>Save adapters frequently</strong> (small files, easy rollback)</li>
+<li><strong>Evaluate on held-out data</strong> before merging</li>
+<li><strong>Use QLoRA for 70B+ models</strong> on consumer hardware</li>
+</ol>
+<h2 id="references">References</h2>
+<ul>
+<li><strong><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops\peft/references/advanced-usage.md" class="ext" target="_blank" rel="noopener">Advanced Usage</a></strong> - DoRA, LoftQ, rank stabilization, custom modules</li>
+<li><strong><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops\peft/references/troubleshooting.md" class="ext" target="_blank" rel="noopener">Troubleshooting</a></strong> - Common errors, debugging, optimization</li>
+</ul>
+<h2 id="resources">Resources</h2>
+<ul>
+<li><strong>GitHub</strong>: https://github.com/huggingface/peft</li>
+<li><strong>Docs</strong>: https://huggingface.co/docs/peft</li>
+<li><strong>LoRA Paper</strong>: arXiv:2106.09685</li>
+<li><strong>QLoRA Paper</strong>: arXiv:2305.14314</li>
+<li><strong>Models</strong>: https://huggingface.co/models?library=peft</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/mlops/mlops-peft</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#when-to-use-peft">When to use PEFT</a></li>
+<li class="lvl2"><a href="#quick-start">Quick start</a></li>
+<li class="lvl3"><a href="#installation">Installation</a></li>
+<li class="lvl3"><a href="#lora-fine-tuning-standard">LoRA fine-tuning (standard)</a></li>
+<li class="lvl3"><a href="#qlora-fine-tuning-memory-efficient">QLoRA fine-tuning (memory-efficient)</a></li>
+<li class="lvl2"><a href="#lora-parameter-selection">LoRA parameter selection</a></li>
+<li class="lvl3"><a href="#rank-r---capacity-vs-efficiency">Rank (r) - capacity vs efficiency</a></li>
+<li class="lvl3"><a href="#alpha-lora_alpha---scaling-factor">Alpha (lora_alpha) - scaling factor</a></li>
+<li class="lvl3"><a href="#target-modules-by-architecture">Target modules by architecture</a></li>
+<li class="lvl2"><a href="#loading-and-merging-adapters">Loading and merging adapters</a></li>
+<li class="lvl3"><a href="#load-trained-adapter">Load trained adapter</a></li>
+<li class="lvl3"><a href="#merge-adapter-into-base-model">Merge adapter into base model</a></li>
+<li class="lvl3"><a href="#multi-adapter-serving">Multi-adapter serving</a></li>
+<li class="lvl2"><a href="#peft-methods-comparison">PEFT methods comparison</a></li>
+<li class="lvl3"><a href="#ia3-minimal-parameters">IA3 (minimal parameters)</a></li>
+<li class="lvl3"><a href="#prefix-tuning">Prefix Tuning</a></li>
+<li class="lvl2"><a href="#integration-patterns">Integration patterns</a></li>
+<li class="lvl3"><a href="#with-trl-sfttrainer">With TRL (SFTTrainer)</a></li>
+<li class="lvl3"><a href="#with-axolotl-yaml-config">With Axolotl (YAML config)</a></li>
+<li class="lvl3"><a href="#with-vllm-inference">With vLLM (inference)</a></li>
+<li class="lvl2"><a href="#performance-benchmarks">Performance benchmarks</a></li>
+<li class="lvl3"><a href="#memory-usage-llama-31-8b">Memory usage (Llama 3.1 8B)</a></li>
+<li class="lvl3"><a href="#training-speed-a100-80gb">Training speed (A100 80GB)</a></li>
+<li class="lvl3"><a href="#quality-mmlu-benchmark">Quality (MMLU benchmark)</a></li>
+<li class="lvl2"><a href="#common-issues">Common issues</a></li>
+<li class="lvl3"><a href="#cuda-oom-during-training">CUDA OOM during training</a></li>
+<li class="lvl3"><a href="#adapter-not-applying">Adapter not applying</a></li>
+<li class="lvl3"><a href="#quality-degradation">Quality degradation</a></li>
+<li class="lvl2"><a href="#best-practices">Best practices</a></li>
+<li class="lvl2"><a href="#references">References</a></li>
+<li class="lvl2"><a href="#resources">Resources</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

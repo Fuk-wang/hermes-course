@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Automated GitHub PR Comments with Webhooks · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/webhook-github-pr-review</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="automated-github-pr-comments-with-webhooks">Automated GitHub PR Comments with Webhooks</h1>
+<p>This guide walks you through connecting Hermes Agent to GitHub so it automatically fetches a pull request's diff, analyzes the code changes, and posts a comment — triggered by a webhook event with no manual prompting.</p>
+<p>When a PR is opened or updated, GitHub sends a webhook POST to your Hermes instance. Hermes runs the agent with a prompt that instructs it to retrieve the diff via the <code>gh</code> CLI, and the response is posted back to the PR thread.</p>
+<div class="admonition adm-tip"><p class="adm-title">Want a simpler setup without a public endpoint?</p>
+<p>If you don't have a public URL or just want to get started quickly, check out <a href="github-pr-review-agent.html">Build a GitHub PR Review Agent</a> — uses cron jobs to poll for PRs on a schedule, works behind NAT and firewalls.</p>
+</div>
+<div class="admonition adm-info"><p class="adm-title">Reference docs</p>
+<p>For the full webhook platform reference (all config options, delivery types, dynamic subscriptions, security model) see <a href="../user-guide/messaging/webhooks.html">Webhooks</a>.</p>
+</div>
+<div class="admonition adm-warning"><p class="adm-title">Prompt injection risk</p>
+<p>Webhook payloads contain attacker-controlled data — PR titles, commit messages, and descriptions can contain malicious instructions. When your webhook endpoint is exposed to the internet, run the gateway in a sandboxed environment (Docker, SSH backend). See the <a href="#security-notes">security section</a> below.</p>
+</div>
+<hr />
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>Hermes Agent installed and running (<code>hermes gateway</code>)</li>
+<li><a href="https://cli.github.com/" class="ext" target="_blank" rel="noopener"><code>gh</code> CLI</a> installed and authenticated on the gateway host (<code>gh auth login</code>)</li>
+<li>A publicly reachable URL for your Hermes instance (see <a href="#local-testing-with-ngrok">Local testing with ngrok</a> if running locally)</li>
+<li>Admin access to the GitHub repository (required to manage webhooks)</li>
+</ul>
+<hr />
+<h2 id="step-1--enable-the-webhook-platform">Step 1 — Enable the webhook platform</h2>
+<p>Add the following to your <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8644</span><span class="w">          </span><span class="c1"># default; change if another service occupies this port</span>
+<span class="w">      </span><span class="nt">rate_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span><span class="w">      </span><span class="c1"># max requests per minute per route (not a global cap)</span>
+
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">github-pr-review</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-webhook-secret-here&quot;</span><span class="w">   </span><span class="c1"># must match the GitHub webhook secret exactly</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pull_request</span>
+
+<span class="w">          </span><span class="c1"># The agent is instructed to fetch the actual diff before reviewing.</span>
+<span class="w">          </span><span class="c1"># {number} and {repository.full_name} are resolved from the GitHub payload.</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">            </span><span class="no">A pull request event was received (action: {action}).</span>
+
+<span class="w">            </span><span class="no">PR #{number}: {pull_request.title}</span>
+<span class="w">            </span><span class="no">Author: {pull_request.user.login}</span>
+<span class="w">            </span><span class="no">Branch: {pull_request.head.ref} → {pull_request.base.ref}</span>
+<span class="w">            </span><span class="no">Description: {pull_request.body}</span>
+<span class="w">            </span><span class="no">URL: {pull_request.html_url}</span>
+
+<span class="w">            </span><span class="no">If the action is &quot;closed&quot; or &quot;labeled&quot;, stop here and do not post a comment.</span>
+
+<span class="w">            </span><span class="no">Otherwise:</span>
+<span class="w">            </span><span class="no">1. Run: gh pr diff {number} --repo {repository.full_name}</span>
+<span class="w">            </span><span class="no">2. Review the code changes for correctness, security issues, and clarity.</span>
+<span class="w">            </span><span class="no">3. Write a concise, actionable review comment and post it.</span>
+
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">github_comment</span>
+<span class="w">          </span><span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">repo</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{repository.full_name}&quot;</span>
+<span class="w">            </span><span class="nt">pr_number</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{number}&quot;</span>
+</code></pre></div>
+
+<p><strong>Key fields:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>secret</code> (route-level)</td>
+<td>HMAC secret for this route. Falls back to <code>extra.secret</code> global if omitted.</td>
+</tr>
+<tr>
+<td><code>events</code></td>
+<td>List of <code>X-GitHub-Event</code> header values to accept. Empty list = accept all.</td>
+</tr>
+<tr>
+<td><code>prompt</code></td>
+<td>Template; <code>{field}</code> and <code>{nested.field}</code> resolve from the GitHub payload.</td>
+</tr>
+<tr>
+<td><code>deliver</code></td>
+<td><code>github_comment</code> posts via <code>gh pr comment</code>. <code>log</code> just writes to the gateway log.</td>
+</tr>
+<tr>
+<td><code>deliver_extra.repo</code></td>
+<td>Resolves to e.g. <code>org/repo</code> from the payload.</td>
+</tr>
+<tr>
+<td><code>deliver_extra.pr_number</code></td>
+<td>Resolves to the PR number from the payload.</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition adm-note"><p class="adm-title">The payload does not contain code</p>
+<p>The GitHub webhook payload includes PR metadata (title, description, branch names, URLs) but <strong>not the diff</strong>. The prompt above instructs the agent to run <code>gh pr diff</code> to fetch the actual changes. The default <code>hermes-webhook</code> toolset is deliberately constrained (web search/extract, vision, clarify — <strong>no terminal</strong>) because webhook payloads can carry untrusted content. To let this route run <code>gh</code>, add a per-route toolset grant: <code>toolsets: ["terminal", "web"]</code> on the route config — see <a href="../user-guide/messaging/webhooks.html#per-route-toolsets">Per-route toolsets</a>.</p>
+</div>
+<hr />
+<h2 id="step-2--start-the-gateway">Step 2 — Start the gateway</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>You should see:</p>
+<div class="highlight"><pre><span></span><code>[webhook] Listening on 0.0.0.0:8644 — routes: github-pr-review
+</code></pre></div>
+
+<p>Verify it's running:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8644/health
+<span class="c1"># {&quot;status&quot;: &quot;ok&quot;, &quot;platform&quot;: &quot;webhook&quot;}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="step-3--register-the-webhook-on-github">Step 3 — Register the webhook on GitHub</h2>
+<ol>
+<li>Go to your repository → <strong>Settings</strong> → <strong>Webhooks</strong> → <strong>Add webhook</strong></li>
+<li>Fill in:</li>
+<li><strong>Payload URL:</strong> <code>https://your-public-url.example.com/webhooks/github-pr-review</code></li>
+<li><strong>Content type:</strong> <code>application/json</code></li>
+<li><strong>Secret:</strong> the same value you set for <code>secret</code> in the route config</li>
+<li><strong>Which events?</strong> → Select individual events → check <strong>Pull requests</strong></li>
+<li>Click <strong>Add webhook</strong></li>
+</ol>
+<p>GitHub will immediately send a <code>ping</code> event to confirm the connection. It is safely ignored — <code>ping</code> is not in your <code>events</code> list — and returns <code>{"status": "ignored", "event": "ping"}</code>. It is only logged at DEBUG level, so it won't appear in the console at the default log level.</p>
+<hr />
+<h2 id="step-4--open-a-test-pr">Step 4 — Open a test PR</h2>
+<p>Create a branch, push a change, and open a PR. Within 30–90 seconds (depending on PR size and model), Hermes should post a review comment.</p>
+<p>To follow the agent's progress in real time:</p>
+<div class="highlight"><pre><span></span><code>tail<span class="w"> </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">HERMES_HOME</span><span class="k">:-</span><span class="nv">$HOME</span><span class="p">/.hermes</span><span class="si">}</span><span class="s2">/logs/gateway.log&quot;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="local-testing-with-ngrok">Local testing with ngrok</h2>
+<p>If Hermes is running on your laptop, use <a href="https://ngrok.com/" class="ext" target="_blank" rel="noopener">ngrok</a> to expose it:</p>
+<div class="highlight"><pre><span></span><code>ngrok<span class="w"> </span>http<span class="w"> </span><span class="m">8644</span>
+</code></pre></div>
+
+<p>Copy the <code>https://...ngrok-free.app</code> URL and use it as your GitHub Payload URL. On the free ngrok tier the URL changes each time ngrok restarts — update your GitHub webhook each session. Paid ngrok accounts get a static domain.</p>
+<p>You can smoke-test a static route directly with <code>curl</code> — no GitHub account or real PR needed.</p>
+<div class="admonition adm-tip"><p class="adm-title">Use `deliver: log` when testing locally</p>
+<p>Change <code>deliver: github_comment</code> to <code>deliver: log</code> in your config while testing. Otherwise the agent will attempt to post a comment to the fake <code>org/repo#99</code> repo in the test payload, which will fail. Switch back to <code>deliver: github_comment</code> once you're satisfied with the prompt output.</p>
+</div>
+<div class="highlight"><pre><span></span><code><span class="nv">SECRET</span><span class="o">=</span><span class="s2">&quot;your-webhook-secret-here&quot;</span>
+<span class="nv">BODY</span><span class="o">=</span><span class="s1">&#39;{&quot;action&quot;:&quot;opened&quot;,&quot;number&quot;:99,&quot;pull_request&quot;:{&quot;title&quot;:&quot;Test PR&quot;,&quot;body&quot;:&quot;Adds a feature.&quot;,&quot;user&quot;:{&quot;login&quot;:&quot;testuser&quot;},&quot;head&quot;:{&quot;ref&quot;:&quot;feat/x&quot;},&quot;base&quot;:{&quot;ref&quot;:&quot;main&quot;},&quot;html_url&quot;:&quot;https://github.com/org/repo/pull/99&quot;},&quot;repository&quot;:{&quot;full_name&quot;:&quot;org/repo&quot;}}&#39;</span>
+<span class="nv">SIG</span><span class="o">=</span><span class="k">$(</span><span class="nb">printf</span><span class="w"> </span><span class="s1">&#39;%s&#39;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$BODY</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>openssl<span class="w"> </span>dgst<span class="w"> </span>-sha256<span class="w"> </span>-hmac<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$SECRET</span><span class="s2">&quot;</span><span class="w"> </span>-hex<span class="w"> </span><span class="p">|</span><span class="w"> </span>awk<span class="w"> </span><span class="s1">&#39;{print &quot;sha256=&quot;$2}&#39;</span><span class="k">)</span>
+
+curl<span class="w"> </span>-s<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8644/webhooks/github-pr-review<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-GitHub-Event: pull_request&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-Hub-Signature-256: </span><span class="nv">$SIG</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$BODY</span><span class="s2">&quot;</span>
+<span class="c1"># Expected: {&quot;status&quot;:&quot;accepted&quot;,&quot;route&quot;:&quot;github-pr-review&quot;,&quot;event&quot;:&quot;pull_request&quot;,&quot;delivery_id&quot;:&quot;...&quot;}</span>
+</code></pre></div>
+
+<p>Then watch the agent run:</p>
+<div class="highlight"><pre><span></span><code>tail<span class="w"> </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">HERMES_HOME</span><span class="k">:-</span><span class="nv">$HOME</span><span class="p">/.hermes</span><span class="si">}</span><span class="s2">/logs/gateway.log&quot;</span>
+</code></pre></div>
+
+<div class="admonition adm-note"><p class="adm-title">Note</p>
+<p><code>hermes webhook test &lt;name&gt;</code> only works for <strong>dynamic subscriptions</strong> created with <code>hermes webhook subscribe</code>. It does not read routes from <code>config.yaml</code>.</p>
+</div>
+<hr />
+<h2 id="filtering-to-specific-actions">Filtering to specific actions</h2>
+<p>GitHub sends <code>pull_request</code> events for many actions: <code>opened</code>, <code>synchronize</code>, <code>reopened</code>, <code>closed</code>, <code>labeled</code>, etc. The <code>events</code> list filters by the <code>X-GitHub-Event</code> header value, and route-level <code>filters</code> can narrow by payload fields such as <code>action</code>.</p>
+<p>The prompt in Step 1 already handles this by instructing the agent to stop early for <code>closed</code> and <code>labeled</code> events.</p>
+<div class="admonition adm-warning"><p class="adm-title">The agent still runs and consumes tokens</p>
+<p>The "stop here" instruction prevents a meaningful review, but the agent still runs to completion for every <code>pull_request</code> event regardless of action. Prefer filtering before the agent wakes:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">filters</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;action&quot;</span>
+<span class="w">    </span><span class="nt">in</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;opened&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;synchronize&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;reopened&quot;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<p>For high-volume repositories, you can still filter upstream with a GitHub Actions workflow that calls your webhook URL conditionally.</p>
+</div>
+<blockquote>
+<p>There is no Jinja2 or conditional template syntax. <code>{field}</code> and <code>{nested.field}</code> are the only substitutions supported. Anything else is passed verbatim to the agent.</p>
+</blockquote>
+<hr />
+<h2 id="using-a-skill-for-consistent-review-style">Using a skill for consistent review style</h2>
+<p>Load a <a href="../user-guide/features/skills.html">Hermes skill</a> to give the agent a consistent review persona. Add <code>skills</code> to your route inside <code>platforms.webhook.extra.routes</code> in <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">github-pr-review</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-webhook-secret-here&quot;</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">pull_request</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">            </span><span class="no">A pull request event was received (action: {action}).</span>
+<span class="w">            </span><span class="no">PR #{number}: {pull_request.title} by {pull_request.user.login}</span>
+<span class="w">            </span><span class="no">URL: {pull_request.html_url}</span>
+
+<span class="w">            </span><span class="no">If the action is &quot;closed&quot; or &quot;labeled&quot;, stop here and do not post a comment.</span>
+
+<span class="w">            </span><span class="no">Otherwise:</span>
+<span class="w">            </span><span class="no">1. Run: gh pr diff {number} --repo {repository.full_name}</span>
+<span class="w">            </span><span class="no">2. Review the diff using your review guidelines.</span>
+<span class="w">            </span><span class="no">3. Write a concise, actionable review comment and post it.</span>
+<span class="w">          </span><span class="nt">skills</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">review</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">github_comment</span>
+<span class="w">          </span><span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">repo</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{repository.full_name}&quot;</span>
+<span class="w">            </span><span class="nt">pr_number</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{number}&quot;</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>Note:</strong> Only the first skill in the list that is found is loaded. Hermes does not stack multiple skills — subsequent entries are ignored.</p>
+</blockquote>
+<hr />
+<h2 id="sending-responses-to-slack-or-discord-instead">Sending responses to Slack or Discord instead</h2>
+<p>Replace the <code>deliver</code> and <code>deliver_extra</code> fields inside your route with your target platform:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Inside platforms.webhook.extra.routes.&lt;route-name&gt;:</span>
+
+<span class="c1"># Slack</span>
+<span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">slack</span>
+<span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;C0123456789&quot;</span><span class="w">   </span><span class="c1"># Slack channel ID (omit to use the configured home channel)</span>
+
+<span class="c1"># Discord</span>
+<span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">discord</span>
+<span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;987654321012345678&quot;</span><span class="w">  </span><span class="c1"># Discord channel ID (omit to use home channel)</span>
+</code></pre></div>
+
+<p>The target platform must also be enabled and connected in the gateway. If <code>chat_id</code> is omitted, the response is sent to that platform's configured home channel.</p>
+<p>Valid <code>deliver</code> values: <code>log</code> · <code>github_comment</code> · <code>telegram</code> · <code>discord</code> · <code>slack</code> · <code>signal</code> · <code>sms</code></p>
+<hr />
+<h2 id="gitlab-support">GitLab support</h2>
+<p>The same adapter works with GitLab. GitLab uses <code>X-Gitlab-Token</code> for authentication (plain string match, not HMAC) — Hermes handles both automatically.</p>
+<p>For event filtering, GitLab sets <code>X-GitLab-Event</code> to values like <code>Merge Request Hook</code>, <code>Push Hook</code>, <code>Pipeline Hook</code>. Use the exact header value in <code>events</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">events</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Merge Request Hook</span>
+</code></pre></div>
+
+<p>GitLab payload fields differ from GitHub's — e.g. <code>{object_attributes.title}</code> for the MR title and <code>{object_attributes.iid}</code> for the MR number. The easiest way to discover the full payload structure is GitLab's <strong>Test</strong> button in your webhook settings, combined with the <strong>Recent Deliveries</strong> log. Alternatively, omit <code>prompt</code> from your route config — Hermes will then pass the full payload as formatted JSON directly to the agent, and the agent's response (visible in the gateway log with <code>deliver: log</code>) will describe its structure.</p>
+<hr />
+<h2 id="security-notes">Security notes</h2>
+<ul>
+<li><strong>Never use <code>INSECURE_NO_AUTH</code></strong> in production — it disables signature validation entirely. It is only for local development.</li>
+<li><strong>Rotate your webhook secret</strong> periodically and update it in both GitHub (webhook settings) and your <code>config.yaml</code>.</li>
+<li><strong>Rate limiting</strong> is 30 req/min per route by default (configurable via <code>extra.rate_limit</code>). Exceeding it returns <code>429</code>.</li>
+<li><strong>Duplicate deliveries</strong> (webhook retries) are deduplicated via a 1-hour idempotency cache. The cache key is <code>X-GitHub-Delivery</code> if present, then <code>X-Request-ID</code>, then a millisecond timestamp. When neither delivery ID header is set, retries are <strong>not</strong> deduplicated.</li>
+<li><strong>Prompt injection:</strong> PR titles, descriptions, and commit messages are attacker-controlled. Malicious PRs could attempt to manipulate the agent's actions. Run the gateway in a sandboxed environment (Docker, VM) when exposed to the public internet.</li>
+</ul>
+<hr />
+<h2 id="troubleshooting">Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Check</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>401 Invalid signature</code></td>
+<td>Secret in config.yaml doesn't match GitHub webhook secret</td>
+</tr>
+<tr>
+<td><code>404 Unknown route</code></td>
+<td>Route name in the URL doesn't match the key in <code>routes:</code></td>
+</tr>
+<tr>
+<td><code>429 Rate limit exceeded</code></td>
+<td>30 req/min per route exceeded — common when re-delivering test events from GitHub's UI; wait a minute or raise <code>extra.rate_limit</code></td>
+</tr>
+<tr>
+<td>No comment posted</td>
+<td><code>gh</code> not installed, not on PATH, or not authenticated (<code>gh auth login</code>)</td>
+</tr>
+<tr>
+<td>Agent runs but no comment</td>
+<td>Check the gateway log — if the agent output was empty or just "SKIP", delivery is still attempted</td>
+</tr>
+<tr>
+<td>Port already in use</td>
+<td>Change <code>extra.port</code> in config.yaml</td>
+</tr>
+<tr>
+<td>Agent runs but reviews only the PR description</td>
+<td>The prompt isn't including the <code>gh pr diff</code> instruction — the diff is not in the webhook payload</td>
+</tr>
+<tr>
+<td>Can't see the ping event</td>
+<td>Ignored events return <code>{"status":"ignored","event":"ping"}</code> at DEBUG log level only — check GitHub's delivery log (repo → Settings → Webhooks → your webhook → Recent Deliveries)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>GitHub's Recent Deliveries tab</strong> (repo → Settings → Webhooks → your webhook) shows the exact request headers, payload, HTTP status, and response body for every delivery. It is the fastest way to diagnose failures without touching your server logs.</p>
+<hr />
+<h2 id="full-config-reference">Full config reference</h2>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8644</span><span class="w">               </span><span class="c1"># listen port (default: 8644)</span>
+<span class="w">      </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">               </span><span class="c1"># optional global fallback secret</span>
+<span class="w">      </span><span class="nt">rate_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span><span class="w">           </span><span class="c1"># requests per minute per route</span>
+<span class="w">      </span><span class="nt">max_body_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1048576</span><span class="w">  </span><span class="c1"># payload size limit in bytes (default: 1 MB)</span>
+
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">&lt;route-name&gt;</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;required-per-route&quot;</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">            </span><span class="c1"># [] = accept all; otherwise list X-GitHub-Event values</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">            </span><span class="c1"># {field} / {nested.field} resolved from payload</span>
+<span class="w">          </span><span class="nt">skills</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">            </span><span class="c1"># first matching skill is loaded (only one)</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;log&quot;</span><span class="w">        </span><span class="c1"># log | github_comment | telegram | discord | slack | signal | sms</span>
+<span class="w">          </span><span class="nt">deliver_extra</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span><span class="w">     </span><span class="c1"># repo + pr_number for github_comment; chat_id for others</span>
+</code></pre></div>
+
+<hr />
+<h2 id="whats-next">What's Next?</h2>
+<ul>
+<li><strong><a href="github-pr-review-agent.html">Cron-Based PR Reviews</a></strong> — poll for PRs on a schedule, no public endpoint needed</li>
+<li><strong><a href="../user-guide/messaging/webhooks.html">Webhook Reference</a></strong> — full config reference for the webhook platform</li>
+<li><strong><a href="../developer-guide/plugins.html">Build a Plugin</a></strong> — package review logic into a shareable plugin</li>
+<li><strong><a href="../user-guide/profiles.html">Profiles</a></strong> — run a dedicated reviewer profile with its own memory and config</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/webhook-github-pr-review</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#step-1--enable-the-webhook-platform">Step 1 — Enable the webhook platform</a></li>
+<li class="lvl2"><a href="#step-2--start-the-gateway">Step 2 — Start the gateway</a></li>
+<li class="lvl2"><a href="#step-3--register-the-webhook-on-github">Step 3 — Register the webhook on GitHub</a></li>
+<li class="lvl2"><a href="#step-4--open-a-test-pr">Step 4 — Open a test PR</a></li>
+<li class="lvl2"><a href="#local-testing-with-ngrok">Local testing with ngrok</a></li>
+<li class="lvl2"><a href="#filtering-to-specific-actions">Filtering to specific actions</a></li>
+<li class="lvl2"><a href="#using-a-skill-for-consistent-review-style">Using a skill for consistent review style</a></li>
+<li class="lvl2"><a href="#sending-responses-to-slack-or-discord-instead">Sending responses to Slack or Discord instead</a></li>
+<li class="lvl2"><a href="#gitlab-support">GitLab support</a></li>
+<li class="lvl2"><a href="#security-notes">Security notes</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl2"><a href="#full-config-reference">Full config reference</a></li>
+<li class="lvl2"><a href="#whats-next">What&#x27;s Next?</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

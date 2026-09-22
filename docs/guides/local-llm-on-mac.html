@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Run Local LLMs on Mac · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/local-llm-on-mac</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="run-local-llms-on-mac">Run Local LLMs on Mac</h1>
+<div class="admonition adm-tip"><p class="adm-title">Desktop users: there&#x27;s a one-click path</p>
+<p>On the Hermes desktop app, <strong>Settings → Providers → Local Models</strong> installs
+and manages a local llama.cpp server for you — model downloads, memory
+fitting, and context sizing included. See <a href="../user-guide/local-models.html">Local Models</a>.
+This guide is for manual setup: MLX, custom builds, or servers you want to
+run yourself.</p>
+</div>
+<p>This guide walks you through running a local LLM server on macOS with an OpenAI-compatible API. You get full privacy, zero API costs, and surprisingly good performance on Apple Silicon.</p>
+<p>We cover two backends:</p>
+<table>
+<thead>
+<tr>
+<th>Backend</th>
+<th>Install</th>
+<th>Best at</th>
+<th>Format</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>llama.cpp</strong></td>
+<td><code>brew install llama.cpp</code></td>
+<td>Fastest time-to-first-token, quantized KV cache for low memory</td>
+<td>GGUF</td>
+</tr>
+<tr>
+<td><strong>omlx</strong></td>
+<td><a href="https://omlx.ai" class="ext" target="_blank" rel="noopener">omlx.ai</a></td>
+<td>Fastest token generation, native Metal optimization</td>
+<td>MLX (safetensors)</td>
+</tr>
+</tbody>
+</table>
+<p>Both expose an OpenAI-compatible <code>/v1/chat/completions</code> endpoint. Hermes works with either one — just point it at <code>http://localhost:8080</code> or <code>http://localhost:8000</code>.</p>
+<div class="admonition adm-info"><p class="adm-title">Apple Silicon only</p>
+<p>This guide targets Macs with Apple Silicon (M1 and later). Intel Macs will work with llama.cpp but without GPU acceleration — expect significantly slower performance.</p>
+</div>
+<hr />
+<h2 id="choosing-a-model">Choosing a model</h2>
+<p>For getting started, we recommend <strong>Qwen3.5-9B</strong> — it's a strong reasoning model that fits comfortably in 8GB+ of unified memory with quantization.</p>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Size on disk</th>
+<th>RAM needed (128K context)</th>
+<th>Backend</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Qwen3.5-9B-Q4_K_M (GGUF)</td>
+<td>5.3 GB</td>
+<td>~10 GB with quantized KV cache</td>
+<td>llama.cpp</td>
+</tr>
+<tr>
+<td>Qwen3.5-9B-mlx-lm-mxfp4 (MLX)</td>
+<td>~5 GB</td>
+<td>~12 GB</td>
+<td>omlx</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Memory rule of thumb:</strong> model size + KV cache. A 9B Q4 model is ~5 GB. The KV cache at 128K context with Q4 quantization adds ~4-5 GB. With default (f16) KV cache, that balloons to ~16 GB. The quantized KV cache flags in llama.cpp are the key trick for memory-constrained systems.</p>
+<p>For larger models (27B, 35B), you'll need 32 GB+ of unified memory. The 9B is the sweet spot for 8-16 GB machines.</p>
+<hr />
+<h2 id="option-a-llamacpp">Option A: llama.cpp</h2>
+<p>llama.cpp is the most portable local LLM runtime. On macOS it uses Metal for GPU acceleration out of the box.</p>
+<h3 id="install">Install</h3>
+<div class="highlight"><pre><span></span><code>brew<span class="w"> </span>install<span class="w"> </span>llama.cpp
+</code></pre></div>
+
+<p>This gives you the <code>llama-server</code> command globally.</p>
+<h3 id="download-the-model">Download the model</h3>
+<p>You need a GGUF-format model. The easiest source is Hugging Face via the <code>huggingface-cli</code>:</p>
+<div class="highlight"><pre><span></span><code>brew<span class="w"> </span>install<span class="w"> </span>huggingface-cli
+</code></pre></div>
+
+<p>Then download:</p>
+<div class="highlight"><pre><span></span><code>huggingface-cli<span class="w"> </span>download<span class="w"> </span>unsloth/Qwen3.5-9B-GGUF<span class="w"> </span>Qwen3.5-9B-Q4_K_M.gguf<span class="w"> </span>--local-dir<span class="w"> </span>~/models
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">Gated models</p>
+<p>Some models on Hugging Face require authentication. Run <code>huggingface-cli login</code> first if you get a 401 or 404 error.</p>
+</div>
+<h3 id="start-the-server">Start the server</h3>
+<div class="highlight"><pre><span></span><code>llama-server<span class="w"> </span>-m<span class="w"> </span>~/models/Qwen3.5-9B-Q4_K_M.gguf<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-ngl<span class="w"> </span><span class="m">99</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-c<span class="w"> </span><span class="m">131072</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-np<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-fa<span class="w"> </span>on<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cache-type-k<span class="w"> </span>q4_0<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cache-type-v<span class="w"> </span>q4_0<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--host<span class="w"> </span><span class="m">0</span>.0.0.0
+</code></pre></div>
+
+<p>Here's what each flag does:</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-ngl 99</code></td>
+<td>Offload all layers to GPU (Metal). Use a high number to ensure nothing stays on CPU.</td>
+</tr>
+<tr>
+<td><code>-c 131072</code></td>
+<td>Context window size (128K tokens). Reduce this if you're low on memory.</td>
+</tr>
+<tr>
+<td><code>-np 1</code></td>
+<td>Number of parallel slots. Keep at 1 for single-user use — more slots split your memory budget.</td>
+</tr>
+<tr>
+<td><code>-fa on</code></td>
+<td>Flash attention. Reduces memory usage and speeds up long-context inference.</td>
+</tr>
+<tr>
+<td><code>--cache-type-k q4_0</code></td>
+<td>Quantize the key cache to 4-bit. <strong>This is the big memory saver.</strong></td>
+</tr>
+<tr>
+<td><code>--cache-type-v q4_0</code></td>
+<td>Quantize the value cache to 4-bit. Together with the above, this cuts KV cache memory by ~75% vs f16.</td>
+</tr>
+<tr>
+<td><code>--host 0.0.0.0</code></td>
+<td>Listen on all interfaces. Use <code>127.0.0.1</code> if you don't need network access.</td>
+</tr>
+</tbody>
+</table>
+<p>The server is ready when you see:</p>
+<div class="highlight"><pre><span></span><code>main: server is listening on http://0.0.0.0:8080
+srv  update_slots: all slots are idle
+</code></pre></div>
+
+<h3 id="memory-optimization-for-constrained-systems">Memory optimization for constrained systems</h3>
+<p>The <code>--cache-type-k q4_0 --cache-type-v q4_0</code> flags are the most important optimization for systems with limited memory. Here's the impact at 128K context:</p>
+<table>
+<thead>
+<tr>
+<th>KV cache type</th>
+<th>KV cache memory (128K ctx, 9B model)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>f16 (default)</td>
+<td>~16 GB</td>
+</tr>
+<tr>
+<td>q8_0</td>
+<td>~8 GB</td>
+</tr>
+<tr>
+<td><strong>q4_0</strong></td>
+<td><strong>~4 GB</strong></td>
+</tr>
+</tbody>
+</table>
+<p>On an 8 GB Mac, use <code>q4_0</code> KV cache and choose a smaller model that can still fit Hermes' 64K minimum context. On 16 GB, you can comfortably do 128K context. On 32 GB+, you can run larger models or multiple parallel slots.</p>
+<p>If you're still running out of memory, reduce context only while staying at or above Hermes' 64K minimum; otherwise switch to a smaller model or smaller quantization (Q3_K_M instead of Q4_K_M).</p>
+<h3 id="test-it">Test it</h3>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://localhost:8080/v1/chat/completions<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;model&quot;: &quot;Qwen3.5-9B-Q4_K_M.gguf&quot;,</span>
+<span class="s1">    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}],</span>
+<span class="s1">    &quot;max_tokens&quot;: 50</span>
+<span class="s1">  }&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.choices<span class="o">[</span><span class="m">0</span><span class="o">]</span>.message.content
+</code></pre></div>
+
+<h3 id="get-the-model-name">Get the model name</h3>
+<p>If you forget the model name, query the models endpoint:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://localhost:8080/v1/models<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.data[].id&#39;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="option-b-mlx-via-omlx">Option B: MLX via omlx</h2>
+<p><a href="https://omlx.ai" class="ext" target="_blank" rel="noopener">omlx</a> is a macOS-native app that manages and serves MLX models. MLX is Apple's own machine learning framework, optimized specifically for Apple Silicon's unified memory architecture.</p>
+<h3 id="install_1">Install</h3>
+<p>Download and install from <a href="https://omlx.ai" class="ext" target="_blank" rel="noopener">omlx.ai</a>. It provides a GUI for model management and a built-in server.</p>
+<h3 id="download-the-model_1">Download the model</h3>
+<p>Use the omlx app to browse and download models. Search for <code>Qwen3.5-9B-mlx-lm-mxfp4</code> and download it. Models are stored locally (typically in <code>~/.omlx/models/</code>).</p>
+<h3 id="start-the-server_1">Start the server</h3>
+<p>omlx serves models on <code>http://127.0.0.1:8000</code> by default. Start serving from the app UI, or use the CLI if available.</p>
+<h3 id="test-it_1">Test it</h3>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8000/v1/chat/completions<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;model&quot;: &quot;Qwen3.5-9B-mlx-lm-mxfp4&quot;,</span>
+<span class="s1">    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}],</span>
+<span class="s1">    &quot;max_tokens&quot;: 50</span>
+<span class="s1">  }&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.choices<span class="o">[</span><span class="m">0</span><span class="o">]</span>.message.content
+</code></pre></div>
+
+<h3 id="list-available-models">List available models</h3>
+<p>omlx can serve multiple models simultaneously:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8000/v1/models<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.data[].id&#39;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="benchmarks-llamacpp-vs-mlx">Benchmarks: llama.cpp vs MLX</h2>
+<p>Both backends tested on the same machine (Apple M5 Max, 128 GB unified memory) running the same model (Qwen3.5-9B) at comparable quantization levels (Q4_K_M for GGUF, mxfp4 for MLX). Five diverse prompts, three runs each, backends tested sequentially to avoid resource contention.</p>
+<h3 id="results">Results</h3>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>llama.cpp (Q4_K_M)</th>
+<th>MLX (mxfp4)</th>
+<th>Winner</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>TTFT (avg)</strong></td>
+<td><strong>67 ms</strong></td>
+<td>289 ms</td>
+<td>llama.cpp (4.3x faster)</td>
+</tr>
+<tr>
+<td><strong>TTFT (p50)</strong></td>
+<td><strong>66 ms</strong></td>
+<td>286 ms</td>
+<td>llama.cpp (4.3x faster)</td>
+</tr>
+<tr>
+<td><strong>Generation (avg)</strong></td>
+<td>70 tok/s</td>
+<td><strong>96 tok/s</strong></td>
+<td>MLX (37% faster)</td>
+</tr>
+<tr>
+<td><strong>Generation (p50)</strong></td>
+<td>70 tok/s</td>
+<td><strong>96 tok/s</strong></td>
+<td>MLX (37% faster)</td>
+</tr>
+<tr>
+<td><strong>Total time (512 tokens)</strong></td>
+<td>7.3s</td>
+<td><strong>5.5s</strong></td>
+<td>MLX (25% faster)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="what-this-means">What this means</h3>
+<ul>
+<li>
+<p><strong>llama.cpp</strong> excels at prompt processing — its flash attention + quantized KV cache pipeline gets you the first token in ~66ms. If you're building interactive applications where perceived responsiveness matters (chatbots, autocomplete), this is a meaningful advantage.</p>
+</li>
+<li>
+<p><strong>MLX</strong> generates tokens ~37% faster once it gets going. For batch workloads, long-form generation, or any task where total completion time matters more than initial latency, MLX finishes sooner.</p>
+</li>
+<li>
+<p>Both backends are <strong>extremely consistent</strong> — variance across runs was negligible. You can rely on these numbers.</p>
+</li>
+</ul>
+<h3 id="which-one-should-you-pick">Which one should you pick?</h3>
+<table>
+<thead>
+<tr>
+<th>Use case</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Interactive chat, low-latency tools</td>
+<td>llama.cpp</td>
+</tr>
+<tr>
+<td>Long-form generation, bulk processing</td>
+<td>MLX (omlx)</td>
+</tr>
+<tr>
+<td>Memory-constrained (8-16 GB)</td>
+<td>llama.cpp (quantized KV cache is unmatched)</td>
+</tr>
+<tr>
+<td>Serving multiple models simultaneously</td>
+<td>omlx (built-in multi-model support)</td>
+</tr>
+<tr>
+<td>Maximum compatibility (Linux too)</td>
+<td>llama.cpp</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="connect-to-hermes">Connect to Hermes</h2>
+<p>Once your local server is running:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>model
+</code></pre></div>
+
+<p>Select <strong>Custom endpoint</strong> and follow the prompts. It will ask for the base URL and model name — use the values from whichever backend you set up above.</p>
+<hr />
+<h2 id="timeouts">Timeouts</h2>
+<p>Hermes automatically detects local endpoints (localhost, LAN IPs) and relaxes its streaming timeouts. No configuration needed for most setups.</p>
+<p>If you still hit timeout errors (e.g. very large contexts on slow hardware), you can override the streaming read timeout:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># In your .env — raise from the 120s default to 30 minutes</span>
+<span class="nv">HERMES_STREAM_READ_TIMEOUT</span><span class="o">=</span><span class="m">1800</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Timeout</th>
+<th>Default</th>
+<th>Local auto-adjustment</th>
+<th>Env var override</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Stream read (socket-level)</td>
+<td>120s</td>
+<td>Raised to 1800s</td>
+<td><code>HERMES_STREAM_READ_TIMEOUT</code></td>
+</tr>
+<tr>
+<td>Stale stream detection</td>
+<td>180s</td>
+<td>Disabled entirely</td>
+<td><code>HERMES_STREAM_STALE_TIMEOUT</code></td>
+</tr>
+<tr>
+<td>API call (non-streaming)</td>
+<td>1800s</td>
+<td>No change needed</td>
+<td><code>HERMES_API_TIMEOUT</code></td>
+</tr>
+</tbody>
+</table>
+<p>The stream read timeout is the one most likely to cause issues — it's the socket-level deadline for receiving the next chunk of data. During prefill on large contexts, local models may produce no output for minutes while processing the prompt. The auto-detection handles this transparently.</p>
+<div class="admonition adm-tip"><p class="adm-title">A silent first turn is usually prefill, not a hang</p>
+<p>Hermes sends its system prompt and tool schemas on every call, so on slower hardware the first turn can involve minutes of silence while the model processes that prompt before generating anything. That's prefill at work, not a stalled session. See <a href="local-ollama-setup.html#slow-first-response-prefill">Slow first response (prefill)</a> in the Ollama guide for mitigations like keeping the model loaded and trimming the fixed prompt with <code>hermes prompt-size</code>.</p>
+</div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/local-llm-on-mac</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#choosing-a-model">Choosing a model</a></li>
+<li class="lvl2"><a href="#option-a-llamacpp">Option A: llama.cpp</a></li>
+<li class="lvl3"><a href="#install">Install</a></li>
+<li class="lvl3"><a href="#download-the-model">Download the model</a></li>
+<li class="lvl3"><a href="#start-the-server">Start the server</a></li>
+<li class="lvl3"><a href="#memory-optimization-for-constrained-systems">Memory optimization for constrained systems</a></li>
+<li class="lvl3"><a href="#test-it">Test it</a></li>
+<li class="lvl3"><a href="#get-the-model-name">Get the model name</a></li>
+<li class="lvl2"><a href="#option-b-mlx-via-omlx">Option B: MLX via omlx</a></li>
+<li class="lvl3"><a href="#install_1">Install</a></li>
+<li class="lvl3"><a href="#download-the-model_1">Download the model</a></li>
+<li class="lvl3"><a href="#start-the-server_1">Start the server</a></li>
+<li class="lvl3"><a href="#test-it_1">Test it</a></li>
+<li class="lvl3"><a href="#list-available-models">List available models</a></li>
+<li class="lvl2"><a href="#benchmarks-llamacpp-vs-mlx">Benchmarks: llama.cpp vs MLX</a></li>
+<li class="lvl3"><a href="#results">Results</a></li>
+<li class="lvl3"><a href="#what-this-means">What this means</a></li>
+<li class="lvl3"><a href="#which-one-should-you-pick">Which one should you pick?</a></li>
+<li class="lvl2"><a href="#connect-to-hermes">Connect to Hermes</a></li>
+<li class="lvl2"><a href="#timeouts">Timeouts</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

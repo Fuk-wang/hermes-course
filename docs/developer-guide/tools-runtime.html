@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tools Runtime · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/tools-runtime</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="tools-runtime">Tools Runtime</h1>
+<p>Hermes tools are self-registering functions grouped into toolsets and executed through a central registry/dispatch system.</p>
+<p>Primary files:</p>
+<ul>
+<li><code>tools/registry.py</code></li>
+<li><code>model_tools.py</code></li>
+<li><code>toolsets.py</code></li>
+<li><code>tools/terminal_tool.py</code></li>
+<li><code>tools/environments/*</code></li>
+</ul>
+<h2 id="tool-registration-model">Tool registration model</h2>
+<p>Each tool module calls <code>registry.register(...)</code> at import time.</p>
+<p><code>model_tools.py</code> is responsible for importing/discovering tool modules and building the schema list used by the model.</p>
+<h3 id="how-registryregister-works">How <code>registry.register()</code> works</h3>
+<p>Every tool file in <code>tools/</code> calls <code>registry.register()</code> at module level to declare itself. The function signature is:</p>
+<div class="highlight"><pre><span></span><code><span class="n">registry</span><span class="o">.</span><span class="n">register</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;terminal&quot;</span><span class="p">,</span>               <span class="c1"># Unique tool name (used in API schemas)</span>
+    <span class="n">toolset</span><span class="o">=</span><span class="s2">&quot;terminal&quot;</span><span class="p">,</span>            <span class="c1"># Toolset this tool belongs to</span>
+    <span class="n">schema</span><span class="o">=</span><span class="p">{</span><span class="o">...</span><span class="p">},</span>                  <span class="c1"># Model-facing schema (description, parameters)</span>
+    <span class="n">handler</span><span class="o">=</span><span class="n">handle_terminal</span><span class="p">,</span>       <span class="c1"># The function that executes when the tool is called</span>
+    <span class="n">check_fn</span><span class="o">=</span><span class="n">check_terminal</span><span class="p">,</span>       <span class="c1"># Optional: returns True/False for availability</span>
+    <span class="n">requires_env</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;SOME_VAR&quot;</span><span class="p">],</span>     <span class="c1"># Optional: env vars needed (for UI display)</span>
+    <span class="n">is_async</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>                <span class="c1"># Whether the handler is an async coroutine</span>
+    <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Run commands&quot;</span><span class="p">,</span>    <span class="c1"># Optional ToolEntry registry metadata</span>
+    <span class="n">emoji</span><span class="o">=</span><span class="s2">&quot;💻&quot;</span><span class="p">,</span>                    <span class="c1"># Emoji for spinner/progress display</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>Each call creates a <code>ToolEntry</code> stored in the singleton <code>ToolRegistry._tools</code> dict keyed by tool name. A registration that would shadow an existing tool from a <strong>different</strong> toolset is rejected (with an error log) unless the caller passes <code>override=True</code>; plugin overrides of built-in tools additionally require the operator opt-in <code>plugins.entries.&lt;plugin_id&gt;.allow_tool_override: true</code> in <code>config.yaml</code>.</p>
+<p><code>schema["description"]</code> is the authoritative model-facing description. The separate <code>description=</code> argument populates <code>ToolEntry.description</code>; when it is omitted, the registry metadata falls back to the schema description. <code>get_definitions()</code> builds the OpenAI function definition from <code>entry.schema</code> and does not copy <code>entry.description</code> into a schema that lacks <code>description</code>. Therefore, <code>description=</code> alone does not describe the tool to the model, and when both values differ the model sees the schema value. Prefer defining the description once in the schema unless a registry consumer intentionally needs different metadata.</p>
+<h3 id="discovery-discover_builtin_tools">Discovery: <code>discover_builtin_tools()</code></h3>
+<p>When <code>model_tools.py</code> is imported, it calls <code>discover_builtin_tools()</code> from <code>tools/registry.py</code>. This function scans every <code>tools/*.py</code> file using AST parsing to find modules that contain top-level <code>registry.register()</code> calls, then imports them:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># tools/registry.py (simplified)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">discover_builtin_tools</span><span class="p">(</span><span class="n">tools_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+    <span class="n">tools_path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">tools_dir</span><span class="p">)</span> <span class="k">if</span> <span class="n">tools_dir</span> <span class="k">else</span> <span class="n">Path</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span><span class="o">.</span><span class="n">parent</span>
+    <span class="k">for</span> <span class="n">path</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">tools_path</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="s2">&quot;*.py&quot;</span><span class="p">)):</span>
+        <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">name</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;__init__.py&quot;</span><span class="p">,</span> <span class="s2">&quot;registry.py&quot;</span><span class="p">,</span> <span class="s2">&quot;mcp_tool.py&quot;</span><span class="p">}:</span>
+            <span class="k">continue</span>
+        <span class="k">if</span> <span class="n">_module_registers_tools</span><span class="p">(</span><span class="n">path</span><span class="p">):</span>  <span class="c1"># AST check for top-level registry.register()</span>
+            <span class="n">importlib</span><span class="o">.</span><span class="n">import_module</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;tools.</span><span class="si">{</span><span class="n">path</span><span class="o">.</span><span class="n">stem</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>This auto-discovery means new tool files are picked up automatically — no manual list to maintain. The AST check only matches top-level <code>registry.register()</code> calls (not calls inside functions), so helper modules in <code>tools/</code> are not imported.</p>
+<p>Each import triggers the module's <code>registry.register()</code> calls. Errors in optional tools (e.g., missing <code>fal_client</code> for image generation) are caught and logged — they don't prevent other tools from loading.</p>
+<p>After core tool discovery, MCP tools and plugin tools are also discovered:</p>
+<ol>
+<li><strong>MCP tools</strong> — <code>tools.mcp_tool_discovery.discover_mcp_tools()</code> (re-exported by the <code>tools.mcp_tool</code> facade) reads MCP server config and registers tools from external servers.</li>
+<li><strong>Plugin tools</strong> — <code>hermes_cli.plugins.discover_plugins()</code> loads user/project/pip plugins that may register additional tools.</li>
+</ol>
+<h2 id="tool-availability-checking-check_fn">Tool availability checking (<code>check_fn</code>)</h2>
+<p>Each tool can optionally provide a <code>check_fn</code> — a callable that returns <code>True</code> when the tool is available and <code>False</code> otherwise. Typical checks include:</p>
+<ul>
+<li><strong>API key present</strong> — e.g., <code>lambda: bool(os.environ.get("SERP_API_KEY"))</code> for web search</li>
+<li><strong>Service running</strong> — e.g., checking if the Honcho server is configured</li>
+<li><strong>Binary installed</strong> — e.g., verifying <code>playwright</code> is available for browser tools</li>
+</ul>
+<p>When <code>registry.get_definitions()</code> builds the schema list for the model, it runs each tool's <code>check_fn()</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Simplified from registry.py</span>
+<span class="k">if</span> <span class="n">entry</span><span class="o">.</span><span class="n">check_fn</span><span class="p">:</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">available</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">check_fn</span><span class="p">())</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="n">available</span> <span class="o">=</span> <span class="kc">False</span>   <span class="c1"># Exceptions = unavailable</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">available</span><span class="p">:</span>
+        <span class="k">continue</span>            <span class="c1"># Skip this tool entirely</span>
+</code></pre></div>
+
+<p>Key behaviors:
+- Check results are <strong>cached per-call</strong> — if multiple tools share the same <code>check_fn</code>, it only runs once.
+- Exceptions in <code>check_fn()</code> are treated as "unavailable" (fail-safe).
+- The <code>is_toolset_available()</code> method checks whether a toolset's <code>check_fn</code> passes, used for UI display and toolset resolution.</p>
+<h2 id="toolset-resolution">Toolset resolution</h2>
+<p>Toolsets are named bundles of tools. Hermes resolves them through:</p>
+<ul>
+<li>explicit enabled/disabled toolset lists</li>
+<li>platform presets (<code>hermes-cli</code>, <code>hermes-telegram</code>, etc.)</li>
+<li>dynamic MCP toolsets</li>
+<li>curated special-purpose sets like <code>hermes-acp</code></li>
+</ul>
+<h3 id="how-get_tool_definitions-filters-tools">How <code>get_tool_definitions()</code> filters tools</h3>
+<p>The main entry point is <code>model_tools.get_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)</code>:</p>
+<ol>
+<li>
+<p><strong>If <code>enabled_toolsets</code> is provided</strong> — only tools from those toolsets are included. Each toolset name is resolved via <code>resolve_toolset()</code> which expands composite toolsets into individual tool names.</p>
+</li>
+<li>
+<p><strong>If <code>disabled_toolsets</code> is provided</strong> — start with ALL toolsets, then subtract the disabled ones.</p>
+</li>
+<li>
+<p><strong>If neither</strong> — include all known toolsets.</p>
+</li>
+<li>
+<p><strong>Registry filtering</strong> — the resolved tool name set is passed to <code>registry.get_definitions()</code>, which applies <code>check_fn</code> filtering and returns OpenAI-format schemas.</p>
+</li>
+<li>
+<p><strong>Dynamic schema patching</strong> — after filtering, <code>execute_code</code> and <code>browser_navigate</code> schemas are dynamically adjusted to only reference tools that actually passed filtering (prevents model hallucination of unavailable tools).</p>
+</li>
+</ol>
+<h3 id="legacy-toolset-names">Legacy toolset names</h3>
+<p>Old toolset names with <code>_tools</code> suffixes (e.g., <code>web_tools</code>, <code>terminal_tools</code>) are mapped to their modern tool names via <code>_LEGACY_TOOLSET_MAP</code> for backward compatibility.</p>
+<h2 id="dispatch">Dispatch</h2>
+<p>At runtime, tools are dispatched through the central registry, with agent-loop exceptions for some agent-level tools such as memory/todo/session-search handling.</p>
+<h3 id="dispatch-flow-model-tool_call--handler-execution">Dispatch flow: model tool_call → handler execution</h3>
+<p>When the model returns a <code>tool_call</code>, the flow is:</p>
+<div class="highlight"><pre><span></span><code>Model response with tool_call
+    ↓
+agent loop (`agent/conversation_loop.py`, via `run_agent.py`&#39;s `AIAgent` facade)
+    ↓
+model_tools.handle_function_call(name, args, task_id, user_task)
+    ↓
+[Agent-loop tools?] → handled directly by agent loop (todo, memory, session_search, delegate_task)
+    ↓
+[Plugin pre-hook] → invoke_hook(&quot;pre_tool_call&quot;, ...)
+    ↓
+registry.dispatch(name, args, **kwargs)
+    ↓
+Look up ToolEntry by name
+    ↓
+[Async handler?] → bridge via _run_async()
+[Sync handler?]  → call directly
+    ↓
+Return result string (or JSON error)
+    ↓
+[Plugin post-hook] → invoke_hook(&quot;post_tool_call&quot;, ...)
+</code></pre></div>
+
+<h3 id="error-wrapping">Error wrapping</h3>
+<p>All tool execution is wrapped in error handling at two levels:</p>
+<ol>
+<li>
+<p><strong><code>registry.dispatch()</code></strong> — catches any exception from the handler and returns <code>{"error": "Tool execution failed: ExceptionType: message"}</code> as JSON.</p>
+</li>
+<li>
+<p><strong><code>handle_function_call()</code></strong> — wraps the entire dispatch in a secondary try/except that returns <code>{"error": "Error executing tool_name: message"}</code>.</p>
+</li>
+</ol>
+<p>This ensures the model always receives a well-formed JSON string, never an unhandled exception.</p>
+<h3 id="agent-loop-tools">Agent-loop tools</h3>
+<p>Four tools are intercepted before registry dispatch because they need agent-level state (TodoStore, MemoryStore, etc.):</p>
+<ul>
+<li><code>todo</code> — planning/task tracking</li>
+<li><code>memory</code> — persistent memory writes</li>
+<li><code>session_search</code> — cross-session recall</li>
+<li><code>delegate_task</code> — spawns subagent sessions</li>
+</ul>
+<p>These tools' schemas are still registered in the registry (for <code>get_tool_definitions</code>), but their handlers return a stub error if dispatch somehow reaches them directly.</p>
+<h3 id="async-bridging">Async bridging</h3>
+<p>When a tool handler is async, <code>_run_async()</code> bridges it to the sync dispatch path:</p>
+<ul>
+<li><strong>CLI path (no running loop)</strong> — uses a persistent event loop to keep cached async clients alive</li>
+<li><strong>Gateway path (running loop)</strong> — spins up a disposable thread with <code>asyncio.run()</code></li>
+<li><strong>Worker threads (parallel tools)</strong> — uses per-thread persistent loops stored in thread-local storage</li>
+</ul>
+<h2 id="the-dangerous_patterns-approval-flow">The DANGEROUS_PATTERNS approval flow</h2>
+<p>The terminal tool integrates a dangerous-command approval system defined in <code>tools/approval.py</code>:</p>
+<ol>
+<li><strong>Pattern detection</strong> — <code>DANGEROUS_PATTERNS</code> is a list of <code>(regex, description)</code> tuples covering destructive operations:</li>
+<li>Recursive deletes (<code>rm -rf</code>)</li>
+<li>Filesystem formatting (<code>mkfs</code>, <code>dd</code>)</li>
+<li>SQL destructive operations (<code>DROP TABLE</code>, <code>DELETE FROM</code> without <code>WHERE</code>)</li>
+<li>System config overwrites (<code>&gt; /etc/</code>)</li>
+<li>Service manipulation (<code>systemctl stop</code>)</li>
+<li>Remote code execution (<code>curl | sh</code>)</li>
+<li>
+<p>Fork bombs, process kills, etc.</p>
+</li>
+<li>
+<p><strong>Detection</strong> — before executing any terminal command, <code>detect_dangerous_command(command)</code> checks against all patterns.</p>
+</li>
+<li>
+<p><strong>Approval prompt</strong> — if a match is found:</p>
+</li>
+<li><strong>CLI mode</strong> — an interactive prompt asks the user to approve, deny, or allow permanently</li>
+<li><strong>Gateway mode</strong> — an async approval callback sends the request to the messaging platform</li>
+<li>
+<p><strong>Smart approval</strong> — optionally, an auxiliary LLM can auto-approve low-risk commands that match patterns (e.g., <code>rm -rf node_modules/</code> is safe but matches "recursive delete")</p>
+</li>
+<li>
+<p><strong>Session state</strong> — approvals are tracked per-session. Once you approve "recursive delete" for a session, subsequent <code>rm -rf</code> commands don't re-prompt.</p>
+</li>
+<li>
+<p><strong>Permanent allowlist</strong> — the "allow permanently" option writes the pattern to <code>config.yaml</code>'s <code>command_allowlist</code>, persisting across sessions.</p>
+</li>
+</ol>
+<h2 id="terminalruntime-environments">Terminal/runtime environments</h2>
+<p>The terminal system supports multiple backends:</p>
+<ul>
+<li>local</li>
+<li>docker</li>
+<li>ssh</li>
+<li>singularity</li>
+<li>modal</li>
+<li>daytona</li>
+<li>vercel_sandbox</li>
+</ul>
+<p>It also supports:</p>
+<ul>
+<li>per-task cwd overrides</li>
+<li>background process management</li>
+<li>PTY mode</li>
+<li>approval callbacks for dangerous commands</li>
+</ul>
+<p><code>tools/process_registry_checkpoint.py</code> owns running-process checkpoints and
+PID-safe adoption. Completed output is separate: <code>tools/process_registry_results.py</code>
+writes one atomic, redacted receipt per process under the profile's
+<code>logs/process-results/</code>. Producers cannot overwrite another parent's results by
+rewriting the shared PID checkpoint. The registry persists the receipt before
+releasing its completion event; one-shot linger waits on that event. The existing
+process query methods load retained snapshots without adopting PIDs or enqueuing
+notifications. Reads require the commissioning durable session or its compression
+continuation; knowing a handle alone does not authorize a retained result read.
+The registry captures that owner before starting any output reader, including on
+CLI and non-notifying processes, and preserves the producer's profile context in
+reader threads. Receipt redaction is forced independently of live-output opt-out;
+retention is bounded by age and count.</p>
+<h2 id="concurrency">Concurrency</h2>
+<p>Tool calls may execute sequentially or concurrently depending on the tool mix and interaction requirements.</p>
+<h2 id="related-docs">Related docs</h2>
+<ul>
+<li><a href="../reference/toolsets-reference.html">Toolsets Reference</a></li>
+<li><a href="../reference/tools-reference.html">Built-in Tools Reference</a></li>
+<li><a href="agent-loop.html">Agent Loop Internals</a></li>
+<li><a href="acp-internals.html">ACP Internals</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/tools-runtime</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#tool-registration-model">Tool registration model</a></li>
+<li class="lvl3"><a href="#how-registryregister-works">How registry.register() works</a></li>
+<li class="lvl3"><a href="#discovery-discover_builtin_tools">Discovery: discover_builtin_tools()</a></li>
+<li class="lvl2"><a href="#tool-availability-checking-check_fn">Tool availability checking (check_fn)</a></li>
+<li class="lvl2"><a href="#toolset-resolution">Toolset resolution</a></li>
+<li class="lvl3"><a href="#how-get_tool_definitions-filters-tools">How get_tool_definitions() filters tools</a></li>
+<li class="lvl3"><a href="#legacy-toolset-names">Legacy toolset names</a></li>
+<li class="lvl2"><a href="#dispatch">Dispatch</a></li>
+<li class="lvl3"><a href="#dispatch-flow-model-tool_call--handler-execution">Dispatch flow: model tool_call → handler execution</a></li>
+<li class="lvl3"><a href="#error-wrapping">Error wrapping</a></li>
+<li class="lvl3"><a href="#agent-loop-tools">Agent-loop tools</a></li>
+<li class="lvl3"><a href="#async-bridging">Async bridging</a></li>
+<li class="lvl2"><a href="#the-dangerous_patterns-approval-flow">The DANGEROUS_PATTERNS approval flow</a></li>
+<li class="lvl2"><a href="#terminalruntime-environments">Terminal/runtime environments</a></li>
+<li class="lvl2"><a href="#concurrency">Concurrency</a></li>
+<li class="lvl2"><a href="#related-docs">Related docs</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

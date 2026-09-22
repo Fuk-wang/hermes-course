@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>教程：团队 Telegram 助手 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / guides/team-telegram-assistant</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="搭建团队-telegram-助手">搭建团队 Telegram 助手</h1>
+<p>本教程将引导你搭建一个由 Hermes Agent 驱动的 Telegram 机器人，供多名团队成员使用。完成后，你的团队将拥有一个共享 AI 助手，可以向它发消息寻求代码、研究、系统管理等方面的帮助——并通过按用户授权保障安全。</p>
+<h2 id="我们要构建什么">我们要构建什么</h2>
+<p>一个 Telegram 机器人，具备以下能力：</p>
+<ul>
+<li><strong>任何已授权的团队成员</strong>都可以私信寻求帮助——代码审查、研究、Shell 命令、调试</li>
+<li><strong>运行在你的服务器上</strong>，拥有完整工具访问权限——终端、文件编辑、网络搜索、代码执行</li>
+<li><strong>按用户会话隔离</strong>——每个人拥有独立的对话上下文</li>
+<li><strong>默认安全</strong>——只有经过审批的用户才能交互，支持两种授权方式</li>
+<li><strong>定时任务</strong>——每日站会、健康检查和提醒推送到团队频道</li>
+</ul>
+<hr />
+<h2 id="前提条件">前提条件</h2>
+<p>开始前，请确保你已具备：</p>
+<ul>
+<li><strong>已在服务器或 VPS 上安装 Hermes Agent</strong>（不是你的笔记本——机器人需要持续运行）。如尚未安装，请参阅<a href="../getting-started/installation.html">安装指南</a>。</li>
+<li><strong>一个 Telegram 账号</strong>（机器人所有者）</li>
+<li><strong>已配置 LLM 提供商</strong>——至少在 <code>~/.hermes/.env</code> 中配置了 OpenAI、Anthropic 或其他受支持提供商的 API 密钥</li>
+</ul>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>一台 $5/月的 VPS 足以运行 gateway（网关）。Hermes 本身很轻量——花钱的是 LLM API 调用，而那些调用发生在远端。</p>
+</div>
+<hr />
+<h2 id="第一步创建-telegram-机器人">第一步：创建 Telegram 机器人</h2>
+<p>每个 Telegram 机器人都从 <strong>@BotFather</strong> 开始——这是 Telegram 官方用于创建机器人的机器人。</p>
+<ol>
+<li>
+<p><strong>打开 Telegram</strong>，搜索 <code>@BotFather</code>，或访问 <a href="https://t.me/BotFather" class="ext" target="_blank" rel="noopener">t.me/BotFather</a></p>
+</li>
+<li>
+<p><strong>发送 <code>/newbot</code></strong>——BotFather 会询问两件事：</p>
+</li>
+<li><strong>显示名称</strong>——用户看到的名字（例如 <code>Team Hermes Assistant</code>）</li>
+<li>
+<p><strong>用户名</strong>——必须以 <code>bot</code> 结尾（例如 <code>myteam_hermes_bot</code>）</p>
+</li>
+<li>
+<p><strong>复制机器人 token</strong>——BotFather 会回复类似内容：
+   <code>Use this token to access the HTTP API:
+   7123456789:AAH1bGciOiJSUzI1NiIsInR5cCI6Ikp...</code>
+   保存此 token——下一步会用到。</p>
+</li>
+<li>
+<p><strong>设置描述</strong>（可选，但推荐）：
+   <code>/setdescription</code>
+   选择你的机器人，然后输入类似内容：
+   <code>Team AI assistant powered by Hermes Agent. DM me for help with code, research, debugging, and more.</code></p>
+</li>
+<li>
+<p><strong>设置机器人命令</strong>（可选——为用户提供命令菜单）：
+   <code>/setcommands</code>
+   选择你的机器人，然后粘贴：
+   <code>new - Start a fresh conversation
+   model - Show or change the AI model
+   status - Show session info
+   help - Show available commands
+   stop - Stop the current task</code></p>
+</li>
+</ol>
+<div class="admonition adm-warning"><p class="adm-title">警告</p>
+<p>请妥善保管你的机器人 token。任何持有该 token 的人都可以控制机器人。如果泄露，请在 BotFather 中使用 <code>/revoke</code> 生成新 token。</p>
+</div>
+<hr />
+<h2 id="第二步配置-gateway">第二步：配置 Gateway</h2>
+<p>你有两种选择：交互式设置向导（推荐）或手动配置。</p>
+<h3 id="方式-a交互式设置推荐">方式 A：交互式设置（推荐）</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>setup
+</code></pre></div>
+
+<p>通过方向键选择完成所有配置。选择 <strong>Telegram</strong>，粘贴你的机器人 token，并在提示时输入你的用户 ID。</p>
+<h3 id="方式-b手动配置">方式 B：手动配置</h3>
+<p>在 <code>~/.hermes/.env</code> 中添加以下内容：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Telegram bot token from BotFather</span>
+<span class="nv">TELEGRAM_BOT_TOKEN</span><span class="o">=</span><span class="m">7123456789</span>:AAH1bGciOiJSUzI1NiIsInR5cCI6Ikp...
+
+<span class="c1"># Your Telegram user ID (numeric)</span>
+<span class="nv">TELEGRAM_ALLOWED_USERS</span><span class="o">=</span><span class="m">123456789</span>
+</code></pre></div>
+
+<h3 id="查找你的用户-id">查找你的用户 ID</h3>
+<p>你的 Telegram 用户 ID 是一个数字值（不是你的用户名）。查找方式：</p>
+<ol>
+<li>在 Telegram 上给 <a href="https://t.me/userinfobot" class="ext" target="_blank" rel="noopener">@userinfobot</a> 发消息</li>
+<li>它会立即回复你的数字用户 ID</li>
+<li>将该数字填入 <code>TELEGRAM_ALLOWED_USERS</code></li>
+</ol>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>Telegram 用户 ID 是永久性数字，例如 <code>123456789</code>。它与可以更改的 <code>@username</code> 不同。白名单中请始终使用数字 ID。</p>
+</div>
+<hr />
+<h2 id="第三步启动-gateway">第三步：启动 Gateway</h2>
+<h3 id="快速测试">快速测试</h3>
+<p>先在前台运行 gateway，确认一切正常：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>你应该看到类似输出：</p>
+<div class="highlight"><pre><span></span><code>[Gateway] Starting Hermes Gateway...
+[Gateway] Telegram adapter connected
+[Gateway] Cron scheduler started (tick every 60s)
+</code></pre></div>
+
+<p>打开 Telegram，找到你的机器人，发送一条消息。如果它回复了，说明一切正常。按 <code>Ctrl+C</code> 停止。</p>
+<h3 id="生产环境安装为服务">生产环境：安装为服务</h3>
+<p>若要持久部署并在重启后自动恢复：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>install
+sudo<span class="w"> </span>hermes<span class="w"> </span>gateway<span class="w"> </span>install<span class="w"> </span>--system<span class="w">   </span><span class="c1"># 仅 Linux：开机启动的系统服务</span>
+</code></pre></div>
+
+<p>这会创建一个后台服务：Linux 上默认为用户级 <strong>systemd</strong> 服务，macOS 上为 <strong>launchd</strong> 服务，传入 <code>--system</code> 则创建开机启动的 Linux 系统服务。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Linux——管理默认用户服务</span>
+hermes<span class="w"> </span>gateway<span class="w"> </span>start
+hermes<span class="w"> </span>gateway<span class="w"> </span>stop
+hermes<span class="w"> </span>gateway<span class="w"> </span>status
+
+<span class="c1"># 查看实时日志</span>
+journalctl<span class="w"> </span>--user<span class="w"> </span>-u<span class="w"> </span>hermes-gateway<span class="w"> </span>-f
+
+<span class="c1"># SSH 退出后保持运行</span>
+sudo<span class="w"> </span>loginctl<span class="w"> </span>enable-linger<span class="w"> </span><span class="nv">$USER</span>
+
+<span class="c1"># Linux 服务器——显式系统服务命令</span>
+sudo<span class="w"> </span>hermes<span class="w"> </span>gateway<span class="w"> </span>start<span class="w"> </span>--system
+sudo<span class="w"> </span>hermes<span class="w"> </span>gateway<span class="w"> </span>status<span class="w"> </span>--system
+journalctl<span class="w"> </span>-u<span class="w"> </span>hermes-gateway<span class="w"> </span>-f
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># macOS——管理服务</span>
+hermes<span class="w"> </span>gateway<span class="w"> </span>start
+hermes<span class="w"> </span>gateway<span class="w"> </span>stop
+tail<span class="w"> </span>-f<span class="w"> </span>~/.hermes/logs/gateway.log
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">macOS PATH</p>
+<p>launchd plist 在安装时捕获你的 Shell PATH，以便 gateway 子进程能找到 Node.js 和 ffmpeg 等工具。如果之后安装了新工具，请重新运行 <code>hermes gateway install</code> 以更新 plist。</p>
+</div>
+<h3 id="验证运行状态">验证运行状态</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>status
+</code></pre></div>
+
+<p>然后在 Telegram 上向你的机器人发送测试消息。几秒内应收到回复。</p>
+<hr />
+<h2 id="第四步设置团队访问权限">第四步：设置团队访问权限</h2>
+<p>现在让你的队友获得访问权限。有两种方式。</p>
+<h3 id="方式-a静态白名单">方式 A：静态白名单</h3>
+<p>收集每位团队成员的 Telegram 用户 ID（让他们给 <a href="https://t.me/userinfobot" class="ext" target="_blank" rel="noopener">@userinfobot</a> 发消息），然后以逗号分隔的列表形式添加：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 在 ~/.hermes/.env 中</span>
+<span class="nv">TELEGRAM_ALLOWED_USERS</span><span class="o">=</span><span class="m">123456789</span>,987654321,555555555
+</code></pre></div>
+
+<p>修改后重启 gateway：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>stop<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>hermes<span class="w"> </span>gateway<span class="w"> </span>start
+</code></pre></div>
+
+<h3 id="方式-b私信配对推荐用于团队">方式 B：私信配对（推荐用于团队）</h3>
+<p>私信配对更灵活——无需提前收集用户 ID。工作流程如下：</p>
+<ol>
+<li>
+<p><strong>队友私信机器人</strong>——由于不在白名单中，机器人会回复一次性配对码：
+   <code>🔐 Pairing code: XKGH5N7P
+   Send this code to the bot owner for approval.</code></p>
+</li>
+<li>
+<p><strong>队友将配对码发给你</strong>（通过任何渠道——Slack、邮件或当面）</p>
+</li>
+<li>
+<p><strong>你在服务器上审批</strong>：
+   <code>bash
+   hermes pairing approve telegram XKGH5N7P</code></p>
+</li>
+<li>
+<p><strong>他们即可使用</strong>——机器人立即开始响应他们的消息</p>
+</li>
+</ol>
+<p><strong>管理已配对用户：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 查看所有待审批和已审批用户</span>
+hermes<span class="w"> </span>pairing<span class="w"> </span>list
+
+<span class="c1"># 撤销某人的访问权限</span>
+hermes<span class="w"> </span>pairing<span class="w"> </span>revoke<span class="w"> </span>telegram<span class="w"> </span><span class="m">987654321</span>
+
+<span class="c1"># 清除已过期的待审批码</span>
+hermes<span class="w"> </span>pairing<span class="w"> </span>clear-pending
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>私信配对非常适合团队使用，因为添加新用户时无需重启 gateway。审批立即生效。</p>
+</div>
+<h3 id="安全注意事项">安全注意事项</h3>
+<ul>
+<li><strong>切勿在拥有终端访问权限的机器人上设置 <code>GATEWAY_ALLOW_ALL_USERS=true</code></strong>——任何找到你机器人的人都可能在你的服务器上执行命令</li>
+<li>配对码在 <strong>1 小时</strong>后过期，并使用密码学随机数生成</li>
+<li>速率限制防止暴力破解：每用户每 10 分钟 1 次请求，每平台最多 3 个待审批码</li>
+<li>5 次审批失败后，该平台进入 1 小时锁定状态</li>
+<li>所有配对数据以 <code>chmod 0600</code> 权限存储</li>
+</ul>
+<hr />
+<h2 id="第五步配置机器人">第五步：配置机器人</h2>
+<h3 id="设置主频道">设置主频道</h3>
+<p><strong>主频道</strong>是机器人投递 cron 任务结果和主动消息的地方。没有主频道，定时任务将无处发送输出。</p>
+<p><strong>方式 1：</strong> 在机器人所在的任意 Telegram 群组或聊天中使用 <code>/sethome</code> 命令。</p>
+<p><strong>方式 2：</strong> 在 <code>~/.hermes/.env</code> 中手动设置：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">TELEGRAM_HOME_CHANNEL</span><span class="o">=</span>-1001234567890
+<span class="nv">TELEGRAM_HOME_CHANNEL_NAME</span><span class="o">=</span><span class="s2">&quot;Team Updates&quot;</span>
+</code></pre></div>
+
+<p>要查找频道 ID，可将 <a href="https://t.me/userinfobot" class="ext" target="_blank" rel="noopener">@userinfobot</a> 添加到群组——它会报告该群组的聊天 ID。</p>
+<h3 id="配置工具进度显示">配置工具进度显示</h3>
+<p>控制机器人在使用工具时显示的详细程度。在 <code>~/.hermes/config.yaml</code> 中：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">display</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">tool_progress</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">new</span><span class="w">    </span><span class="c1"># off | new | all | verbose</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>显示内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>off</code></td>
+<td>仅显示干净的回复——无工具活动</td>
+</tr>
+<tr>
+<td><code>new</code></td>
+<td>每次新工具调用的简短状态（推荐用于消息场景）</td>
+</tr>
+<tr>
+<td><code>all</code></td>
+<td>每次工具调用及其详情</td>
+</tr>
+<tr>
+<td><code>verbose</code></td>
+<td>完整工具输出，包括命令结果</td>
+</tr>
+</tbody>
+</table>
+<p>用户也可以在聊天中使用 <code>/verbose</code> 命令按会话更改此设置。</p>
+<h3 id="使用-soulmd-设置个性">使用 SOUL.md 设置个性</h3>
+<p>通过编辑 <code>~/.hermes/SOUL.md</code> 自定义机器人的沟通方式：</p>
+<p>完整指南请参阅<a href="use-soul-with-hermes.html">在 Hermes 中使用 SOUL.md</a>。</p>
+<div class="highlight"><pre><span></span><code><span class="gh"># Soul</span>
+You are a helpful team assistant. Be concise and technical.
+Use code blocks for any code. Skip pleasantries — the team
+values directness. When debugging, always ask for error logs
+before guessing at solutions.
+</code></pre></div>
+
+<h3 id="添加项目上下文">添加项目上下文</h3>
+<p>如果你的团队在特定项目上工作，可以创建上下文文件，让机器人了解你们的技术栈：</p>
+<div class="highlight"><pre><span></span><code>&lt;!-- ~/.hermes/AGENTS.md --&gt;
+<span class="gh"># Team Context</span>
+<span class="k">-</span><span class="w"> </span>We use Python 3.12 with FastAPI and SQLAlchemy
+<span class="k">-</span><span class="w"> </span>Frontend is React with TypeScript
+<span class="k">-</span><span class="w"> </span>CI/CD runs on GitHub Actions
+<span class="k">-</span><span class="w"> </span>Production deploys to AWS ECS
+<span class="k">-</span><span class="w"> </span>Always suggest writing tests for new code
+</code></pre></div>
+
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>上下文文件会注入到每个会话的系统 prompt（提示词）中。请保持简洁——每个字符都会占用你的 token 预算。</p>
+</div>
+<hr />
+<h2 id="第六步设置定时任务">第六步：设置定时任务</h2>
+<p>gateway 运行后，你可以安排定期任务，将结果投递到团队频道。</p>
+<h3 id="每日站会摘要">每日站会摘要</h3>
+<p>在 Telegram 上给机器人发消息：</p>
+<div class="highlight"><pre><span></span><code>Every weekday at 9am, check the GitHub repository at
+github.com/myorg/myproject for:
+1. Pull requests opened/merged in the last 24 hours
+2. Issues created or closed
+3. Any CI/CD failures on the main branch
+Format as a brief standup-style summary.
+</code></pre></div>
+
+<p>Agent 会自动创建一个 cron 任务，并将结果投递到你提问的聊天（或主频道）。</p>
+<h3 id="服务器健康检查">服务器健康检查</h3>
+<div class="highlight"><pre><span></span><code>Every 6 hours, check disk usage with &#39;df -h&#39;, memory with &#39;free -h&#39;,
+and Docker container status with &#39;docker ps&#39;. Report anything unusual —
+partitions above 80%, containers that have restarted, or high memory usage.
+</code></pre></div>
+
+<h3 id="管理定时任务">管理定时任务</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 通过 CLI</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>list<span class="w">          </span><span class="c1"># 查看所有定时任务</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>status<span class="w">        </span><span class="c1"># 检查调度器是否运行</span>
+
+<span class="c1"># 通过 Telegram 聊天</span>
+/cron<span class="w"> </span>list<span class="w">                </span><span class="c1"># 查看任务</span>
+/cron<span class="w"> </span>remove<span class="w"> </span>&lt;job_id&gt;<span class="w">     </span><span class="c1"># 删除任务</span>
+</code></pre></div>
+
+<div class="admonition adm-warning"><p class="adm-title">警告</p>
+<p>Cron 任务的 prompt 在完全全新的会话中运行，不保留任何先前对话的记忆。请确保每个 prompt 包含 agent 所需的<strong>全部</strong>上下文——文件路径、URL、服务器地址以及清晰的指令。</p>
+</div>
+<hr />
+<h2 id="生产环境建议">生产环境建议</h2>
+<h3 id="使用-docker-保障安全">使用 Docker 保障安全</h3>
+<p>在共享团队机器人上，使用 Docker 作为终端后端，让 agent 命令在容器中运行，而非直接在宿主机上运行：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 在 ~/.hermes/.env 中</span>
+<span class="nv">TERMINAL_BACKEND</span><span class="o">=</span>docker
+<span class="nv">TERMINAL_DOCKER_IMAGE</span><span class="o">=</span>nikolaik/python-nodejs:python3.11-nodejs20
+</code></pre></div>
+
+<p>或在 <code>~/.hermes/config.yaml</code> 中：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">terminal</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">docker</span>
+<span class="w">  </span><span class="nt">container_cpu</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<span class="w">  </span><span class="nt">container_memory</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5120</span>
+<span class="w">  </span><span class="nt">container_persistent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>这样即使有人要求机器人执行破坏性操作，你的宿主系统也受到保护。</p>
+<h3 id="监控-gateway">监控 Gateway</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 检查 gateway 是否运行</span>
+hermes<span class="w"> </span>gateway<span class="w"> </span>status
+
+<span class="c1"># 查看实时日志（Linux）</span>
+journalctl<span class="w"> </span>--user<span class="w"> </span>-u<span class="w"> </span>hermes-gateway<span class="w"> </span>-f
+
+<span class="c1"># 查看实时日志（macOS）</span>
+tail<span class="w"> </span>-f<span class="w"> </span>~/.hermes/logs/gateway.log
+</code></pre></div>
+
+<h3 id="保持-hermes-更新">保持 Hermes 更新</h3>
+<p>在 Telegram 中向机器人发送 <code>/update</code>——它会拉取最新版本并重启。或在服务器上执行：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>update
+hermes<span class="w"> </span>gateway<span class="w"> </span>stop<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>hermes<span class="w"> </span>gateway<span class="w"> </span>start
+</code></pre></div>
+
+<h3 id="日志位置">日志位置</h3>
+<table>
+<thead>
+<tr>
+<th>内容</th>
+<th>位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gateway 日志</td>
+<td><code>journalctl --user -u hermes-gateway</code>（Linux）或 <code>~/.hermes/logs/gateway.log</code>（macOS）</td>
+</tr>
+<tr>
+<td>Cron 任务输出</td>
+<td><code>~/.hermes/cron/output/{job_id}/{timestamp}.md</code></td>
+</tr>
+<tr>
+<td>Cron 任务定义</td>
+<td><code>~/.hermes/cron/jobs.json</code></td>
+</tr>
+<tr>
+<td>配对数据</td>
+<td><code>~/.hermes/pairing/</code></td>
+</tr>
+<tr>
+<td>会话历史</td>
+<td><code>~/.hermes/sessions/</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="进一步探索">进一步探索</h2>
+<p>你已经拥有一个可用的团队 Telegram 助手。以下是一些后续步骤：</p>
+<ul>
+<li><strong><a href="../user-guide/security.html">安全指南</a></strong>——深入了解授权、容器隔离和命令审批</li>
+<li><strong><a href="../user-guide/messaging.html">消息 Gateway</a></strong>——gateway 架构、会话管理和聊天命令的完整参考</li>
+<li><strong><a href="../user-guide/messaging/telegram.html">Telegram 设置</a></strong>——平台专属详情，包括语音消息和 TTS</li>
+<li><strong><a href="../user-guide/features/cron.html">定时任务</a></strong>——高级 cron 调度，含投递选项和 cron 表达式</li>
+<li><strong><a href="../user-guide/features/context-files.html">上下文文件</a></strong>——用于项目知识的 AGENTS.md、SOUL.md 和 .cursorrules</li>
+<li><strong><a href="../user-guide/features/personality.html">个性设置</a></strong>——内置个性预设和自定义角色定义</li>
+<li><strong>添加更多平台</strong>——同一 gateway 可同时运行 <a href="../user-guide/messaging/discord.html">Discord</a>、<a href="../user-guide/messaging/slack.html">Slack</a> 和 <a href="../user-guide/messaging/whatsapp.html">WhatsApp</a></li>
+</ul>
+<hr />
+<p><em>有问题或遇到问题？请在 GitHub 上提 issue——欢迎贡献。</em></p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/guides/team-telegram-assistant</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#我们要构建什么">我们要构建什么</a></li>
+<li class="lvl2"><a href="#前提条件">前提条件</a></li>
+<li class="lvl2"><a href="#第一步创建-telegram-机器人">第一步：创建 Telegram 机器人</a></li>
+<li class="lvl2"><a href="#第二步配置-gateway">第二步：配置 Gateway</a></li>
+<li class="lvl3"><a href="#方式-a交互式设置推荐">方式 A：交互式设置（推荐）</a></li>
+<li class="lvl3"><a href="#方式-b手动配置">方式 B：手动配置</a></li>
+<li class="lvl3"><a href="#查找你的用户-id">查找你的用户 ID</a></li>
+<li class="lvl2"><a href="#第三步启动-gateway">第三步：启动 Gateway</a></li>
+<li class="lvl3"><a href="#快速测试">快速测试</a></li>
+<li class="lvl3"><a href="#生产环境安装为服务">生产环境：安装为服务</a></li>
+<li class="lvl3"><a href="#验证运行状态">验证运行状态</a></li>
+<li class="lvl2"><a href="#第四步设置团队访问权限">第四步：设置团队访问权限</a></li>
+<li class="lvl3"><a href="#方式-a静态白名单">方式 A：静态白名单</a></li>
+<li class="lvl3"><a href="#方式-b私信配对推荐用于团队">方式 B：私信配对（推荐用于团队）</a></li>
+<li class="lvl3"><a href="#安全注意事项">安全注意事项</a></li>
+<li class="lvl2"><a href="#第五步配置机器人">第五步：配置机器人</a></li>
+<li class="lvl3"><a href="#设置主频道">设置主频道</a></li>
+<li class="lvl3"><a href="#配置工具进度显示">配置工具进度显示</a></li>
+<li class="lvl3"><a href="#使用-soulmd-设置个性">使用 SOUL.md 设置个性</a></li>
+<li class="lvl3"><a href="#添加项目上下文">添加项目上下文</a></li>
+<li class="lvl2"><a href="#第六步设置定时任务">第六步：设置定时任务</a></li>
+<li class="lvl3"><a href="#每日站会摘要">每日站会摘要</a></li>
+<li class="lvl3"><a href="#服务器健康检查">服务器健康检查</a></li>
+<li class="lvl3"><a href="#管理定时任务">管理定时任务</a></li>
+<li class="lvl2"><a href="#生产环境建议">生产环境建议</a></li>
+<li class="lvl3"><a href="#使用-docker-保障安全">使用 Docker 保障安全</a></li>
+<li class="lvl3"><a href="#监控-gateway">监控 Gateway</a></li>
+<li class="lvl3"><a href="#保持-hermes-更新">保持 Hermes 更新</a></li>
+<li class="lvl3"><a href="#日志位置">日志位置</a></li>
+<li class="lvl2"><a href="#进一步探索">进一步探索</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

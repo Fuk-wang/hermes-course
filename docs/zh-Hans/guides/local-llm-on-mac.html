@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>在 Mac 上运行本地 LLM · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / guides/local-llm-on-mac</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="在-mac-上运行本地-llm">在 Mac 上运行本地 LLM</h1>
+<p>本指南介绍如何在 macOS 上运行一个兼容 OpenAI API 的本地 LLM 服务器。你将获得完整的隐私保护、零 API 费用，以及 Apple Silicon 上出乎意料的出色性能。</p>
+<p>我们涵盖两个后端：</p>
+<table>
+<thead>
+<tr>
+<th>后端</th>
+<th>安装方式</th>
+<th>优势</th>
+<th>格式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>llama.cpp</strong></td>
+<td><code>brew install llama.cpp</code></td>
+<td>首 token 延迟最低，量化 KV 缓存节省内存</td>
+<td>GGUF</td>
+</tr>
+<tr>
+<td><strong>omlx</strong></td>
+<td><a href="https://omlx.ai" class="ext" target="_blank" rel="noopener">omlx.ai</a></td>
+<td>token 生成速度最快，原生 Metal 优化</td>
+<td>MLX (safetensors)</td>
+</tr>
+</tbody>
+</table>
+<p>两者均暴露兼容 OpenAI 的 <code>/v1/chat/completions</code> 端点。Hermes 支持任意一个——只需将其指向 <code>http://localhost:8080</code> 或 <code>http://localhost:8000</code>。</p>
+<div class="admonition adm-info"><p class="adm-title">仅限 Apple Silicon</p>
+<p>本指南面向搭载 Apple Silicon（M1 及更新）的 Mac。Intel Mac 可使用 llama.cpp，但无 GPU 加速——性能会明显更慢。</p>
+</div>
+<hr />
+<h2 id="选择模型">选择模型</h2>
+<p>入门推荐 <strong>Qwen3.5-9B</strong>——这是一个强推理模型，量化后可在 8GB+ 统一内存上轻松运行。</p>
+<table>
+<thead>
+<tr>
+<th>变体</th>
+<th>磁盘占用</th>
+<th>所需内存（128K 上下文）</th>
+<th>后端</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Qwen3.5-9B-Q4_K_M (GGUF)</td>
+<td>5.3 GB</td>
+<td>~10 GB（含量化 KV 缓存）</td>
+<td>llama.cpp</td>
+</tr>
+<tr>
+<td>Qwen3.5-9B-mlx-lm-mxfp4 (MLX)</td>
+<td>~5 GB</td>
+<td>~12 GB</td>
+<td>omlx</td>
+</tr>
+</tbody>
+</table>
+<p><strong>内存估算规则：</strong> 模型大小 + KV 缓存。9B Q4 模型约 5 GB。128K 上下文下 Q4 量化的 KV 缓存额外占用约 4–5 GB。若使用默认（f16）KV 缓存，则会膨胀至约 16 GB。llama.cpp 中的量化 KV 缓存参数是内存受限系统的关键技巧。</p>
+<p>对于更大的模型（27B、35B），你需要 32 GB+ 的统一内存。9B 是 8–16 GB 机器的最佳选择。</p>
+<hr />
+<h2 id="方案-allamacpp">方案 A：llama.cpp</h2>
+<p>llama.cpp 是移植性最强的本地 LLM 运行时。在 macOS 上，它开箱即用地通过 Metal 进行 GPU 加速。</p>
+<h3 id="安装">安装</h3>
+<div class="highlight"><pre><span></span><code>brew<span class="w"> </span>install<span class="w"> </span>llama.cpp
+</code></pre></div>
+
+<p>安装后即可全局使用 <code>llama-server</code> 命令。</p>
+<h3 id="下载模型">下载模型</h3>
+<p>你需要 GGUF 格式的模型。最简便的来源是通过 <code>huggingface-cli</code> 从 Hugging Face 下载：</p>
+<div class="highlight"><pre><span></span><code>brew<span class="w"> </span>install<span class="w"> </span>huggingface-cli
+</code></pre></div>
+
+<p>然后下载：</p>
+<div class="highlight"><pre><span></span><code>huggingface-cli<span class="w"> </span>download<span class="w"> </span>unsloth/Qwen3.5-9B-GGUF<span class="w"> </span>Qwen3.5-9B-Q4_K_M.gguf<span class="w"> </span>--local-dir<span class="w"> </span>~/models
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">受限模型</p>
+<p>Hugging Face 上的部分模型需要身份验证。如果遇到 401 或 404 错误，请先运行 <code>huggingface-cli login</code>。</p>
+</div>
+<h3 id="启动服务器">启动服务器</h3>
+<div class="highlight"><pre><span></span><code>llama-server<span class="w"> </span>-m<span class="w"> </span>~/models/Qwen3.5-9B-Q4_K_M.gguf<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-ngl<span class="w"> </span><span class="m">99</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-c<span class="w"> </span><span class="m">131072</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-np<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-fa<span class="w"> </span>on<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cache-type-k<span class="w"> </span>q4_0<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cache-type-v<span class="w"> </span>q4_0<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--host<span class="w"> </span><span class="m">0</span>.0.0.0
+</code></pre></div>
+
+<p>各参数说明：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-ngl 99</code></td>
+<td>将所有层卸载到 GPU（Metal）。设置较大的数值以确保没有层留在 CPU 上。</td>
+</tr>
+<tr>
+<td><code>-c 131072</code></td>
+<td>上下文窗口大小（128K token）。内存不足时可减小此值。</td>
+</tr>
+<tr>
+<td><code>-np 1</code></td>
+<td>并行槽数量。单用户使用时保持为 1——更多槽会分摊内存预算。</td>
+</tr>
+<tr>
+<td><code>-fa on</code></td>
+<td>Flash attention。减少内存占用并加速长上下文推理。</td>
+</tr>
+<tr>
+<td><code>--cache-type-k q4_0</code></td>
+<td>将 key 缓存量化为 4-bit。<strong>这是最大的内存节省手段。</strong></td>
+</tr>
+<tr>
+<td><code>--cache-type-v q4_0</code></td>
+<td>将 value 缓存量化为 4-bit。与上一项合用，相比 f16 可将 KV 缓存内存减少约 75%。</td>
+</tr>
+<tr>
+<td><code>--host 0.0.0.0</code></td>
+<td>监听所有网络接口。若不需要网络访问，可改为 <code>127.0.0.1</code>。</td>
+</tr>
+</tbody>
+</table>
+<p>当你看到以下输出时，服务器已就绪：</p>
+<div class="highlight"><pre><span></span><code>main: server is listening on http://0.0.0.0:8080
+srv  update_slots: all slots are idle
+</code></pre></div>
+
+<h3 id="内存受限系统的优化">内存受限系统的优化</h3>
+<p><code>--cache-type-k q4_0 --cache-type-v q4_0</code> 参数是内存有限系统最重要的优化手段。以下是 128K 上下文下的影响对比：</p>
+<table>
+<thead>
+<tr>
+<th>KV 缓存类型</th>
+<th>KV 缓存内存（128K 上下文，9B 模型）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>f16（默认）</td>
+<td>~16 GB</td>
+</tr>
+<tr>
+<td>q8_0</td>
+<td>~8 GB</td>
+</tr>
+<tr>
+<td><strong>q4_0</strong></td>
+<td><strong>~4 GB</strong></td>
+</tr>
+</tbody>
+</table>
+<p>在 8 GB Mac 上，使用 <code>q4_0</code> KV 缓存并将上下文缩减为 <code>-c 32768</code>（32K）。在 16 GB 上，可以轻松使用 128K 上下文。在 32 GB+ 上，可以运行更大的模型或多个并行槽。</p>
+<p>如果仍然内存不足，优先减小上下文大小（<code>-c</code>），然后尝试更小的量化级别（Q3_K_M 代替 Q4_K_M）。</p>
+<h3 id="测试">测试</h3>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://localhost:8080/v1/chat/completions<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;model&quot;: &quot;Qwen3.5-9B-Q4_K_M.gguf&quot;,</span>
+<span class="s1">    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}],</span>
+<span class="s1">    &quot;max_tokens&quot;: 50</span>
+<span class="s1">  }&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.choices<span class="o">[</span><span class="m">0</span><span class="o">]</span>.message.content
+</code></pre></div>
+
+<h3 id="获取模型名称">获取模型名称</h3>
+<p>如果忘记了模型名称，可查询 models 端点：</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://localhost:8080/v1/models<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.data[].id&#39;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="方案-b通过-omlx-使用-mlx">方案 B：通过 omlx 使用 MLX</h2>
+<p><a href="https://omlx.ai" class="ext" target="_blank" rel="noopener">omlx</a> 是一款 macOS 原生应用，用于管理和提供 MLX 模型服务。MLX 是 Apple 自研的机器学习框架，专为 Apple Silicon 统一内存架构优化。</p>
+<h3 id="安装_1">安装</h3>
+<p>从 <a href="https://omlx.ai" class="ext" target="_blank" rel="noopener">omlx.ai</a> 下载并安装。它提供图形界面用于模型管理，并内置服务器。</p>
+<h3 id="下载模型_1">下载模型</h3>
+<p>使用 omlx 应用浏览并下载模型。搜索 <code>Qwen3.5-9B-mlx-lm-mxfp4</code> 并下载。模型存储在本地（通常位于 <code>~/.omlx/models/</code>）。</p>
+<h3 id="启动服务器_1">启动服务器</h3>
+<p>omlx 默认在 <code>http://127.0.0.1:8000</code> 上提供服务。通过应用 UI 启动服务，或在可用时使用 CLI。</p>
+<h3 id="测试_1">测试</h3>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8000/v1/chat/completions<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;model&quot;: &quot;Qwen3.5-9B-mlx-lm-mxfp4&quot;,</span>
+<span class="s1">    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}],</span>
+<span class="s1">    &quot;max_tokens&quot;: 50</span>
+<span class="s1">  }&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.choices<span class="o">[</span><span class="m">0</span><span class="o">]</span>.message.content
+</code></pre></div>
+
+<h3 id="列出可用模型">列出可用模型</h3>
+<p>omlx 可同时提供多个模型的服务：</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8000/v1/models<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.data[].id&#39;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="基准测试llamacpp-vs-mlx">基准测试：llama.cpp vs MLX</h2>
+<p>两个后端在同一台机器（Apple M5 Max，128 GB 统一内存）上测试，使用相同模型（Qwen3.5-9B），量化级别相当（GGUF 使用 Q4_K_M，MLX 使用 mxfp4）。五个不同 prompt，每个运行三次，后端顺序测试以避免资源竞争。</p>
+<h3 id="结果">结果</h3>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>llama.cpp (Q4_K_M)</th>
+<th>MLX (mxfp4)</th>
+<th>胜者</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>TTFT（首 token 延迟，均值）</strong></td>
+<td><strong>67 ms</strong></td>
+<td>289 ms</td>
+<td>llama.cpp（快 4.3 倍）</td>
+</tr>
+<tr>
+<td><strong>TTFT（p50）</strong></td>
+<td><strong>66 ms</strong></td>
+<td>286 ms</td>
+<td>llama.cpp（快 4.3 倍）</td>
+</tr>
+<tr>
+<td><strong>生成速度（均值）</strong></td>
+<td>70 tok/s</td>
+<td><strong>96 tok/s</strong></td>
+<td>MLX（快 37%）</td>
+</tr>
+<tr>
+<td><strong>生成速度（p50）</strong></td>
+<td>70 tok/s</td>
+<td><strong>96 tok/s</strong></td>
+<td>MLX（快 37%）</td>
+</tr>
+<tr>
+<td><strong>总耗时（512 token）</strong></td>
+<td>7.3s</td>
+<td><strong>5.5s</strong></td>
+<td>MLX（快 25%）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="含义解读">含义解读</h3>
+<ul>
+<li>
+<p><strong>llama.cpp</strong> 在 prompt 处理上表现突出——其 flash attention + 量化 KV 缓存流水线可在约 66ms 内返回第一个 token。如果你在构建对响应速度敏感的交互式应用（聊天机器人、自动补全），这是显著优势。</p>
+</li>
+<li>
+<p><strong>MLX</strong> 一旦开始生成，token 速度快约 37%。对于批量任务、长文本生成，或任何更关注总完成时间而非初始延迟的场景，MLX 完成得更快。</p>
+</li>
+<li>
+<p>两个后端都<strong>极为稳定</strong>——多次运行间的方差可忽略不计。这些数据可作为可靠参考。</p>
+</li>
+</ul>
+<h3 id="如何选择">如何选择？</h3>
+<table>
+<thead>
+<tr>
+<th>使用场景</th>
+<th>推荐</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>交互式聊天、低延迟工具</td>
+<td>llama.cpp</td>
+</tr>
+<tr>
+<td>长文本生成、批量处理</td>
+<td>MLX (omlx)</td>
+</tr>
+<tr>
+<td>内存受限（8–16 GB）</td>
+<td>llama.cpp（量化 KV 缓存无可匹敌）</td>
+</tr>
+<tr>
+<td>同时提供多个模型服务</td>
+<td>omlx（内置多模型支持）</td>
+</tr>
+<tr>
+<td>最大兼容性（含 Linux）</td>
+<td>llama.cpp</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="连接-hermes">连接 Hermes</h2>
+<p>本地服务器启动后：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>model
+</code></pre></div>
+
+<p>选择 <strong>Custom endpoint</strong>，按提示操作。系统会询问 base URL 和模型名称——使用你所配置的后端对应的值即可。</p>
+<hr />
+<h2 id="超时设置">超时设置</h2>
+<p>Hermes 会自动检测本地端点（localhost、局域网 IP）并放宽其流式传输超时限制。大多数情况下无需额外配置。</p>
+<p>如果仍然遇到超时错误（例如在慢速硬件上使用超大上下文），可以覆盖流式读取超时：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 在 .env 中——将默认的 120s 提高到 30 分钟</span>
+<span class="nv">HERMES_STREAM_READ_TIMEOUT</span><span class="o">=</span><span class="m">1800</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>超时类型</th>
+<th>默认值</th>
+<th>本地自动调整</th>
+<th>环境变量覆盖</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>流式读取（socket 级别）</td>
+<td>120s</td>
+<td>提升至 1800s</td>
+<td><code>HERMES_STREAM_READ_TIMEOUT</code></td>
+</tr>
+<tr>
+<td>停滞流检测</td>
+<td>180s</td>
+<td>完全禁用</td>
+<td><code>HERMES_STREAM_STALE_TIMEOUT</code></td>
+</tr>
+<tr>
+<td>API 调用（非流式）</td>
+<td>1800s</td>
+<td>无需调整</td>
+<td><code>HERMES_API_TIMEOUT</code></td>
+</tr>
+</tbody>
+</table>
+<p>流式读取超时最容易引发问题——它是接收下一个数据块的 socket 级别截止时间。在大上下文的预填充（prefill）阶段，本地模型可能在处理 prompt 时数分钟内没有任何输出。自动检测机制会透明地处理这一情况。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/guides/local-llm-on-mac</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#选择模型">选择模型</a></li>
+<li class="lvl2"><a href="#方案-allamacpp">方案 A：llama.cpp</a></li>
+<li class="lvl3"><a href="#安装">安装</a></li>
+<li class="lvl3"><a href="#下载模型">下载模型</a></li>
+<li class="lvl3"><a href="#启动服务器">启动服务器</a></li>
+<li class="lvl3"><a href="#内存受限系统的优化">内存受限系统的优化</a></li>
+<li class="lvl3"><a href="#测试">测试</a></li>
+<li class="lvl3"><a href="#获取模型名称">获取模型名称</a></li>
+<li class="lvl2"><a href="#方案-b通过-omlx-使用-mlx">方案 B：通过 omlx 使用 MLX</a></li>
+<li class="lvl3"><a href="#安装_1">安装</a></li>
+<li class="lvl3"><a href="#下载模型_1">下载模型</a></li>
+<li class="lvl3"><a href="#启动服务器_1">启动服务器</a></li>
+<li class="lvl3"><a href="#测试_1">测试</a></li>
+<li class="lvl3"><a href="#列出可用模型">列出可用模型</a></li>
+<li class="lvl2"><a href="#基准测试llamacpp-vs-mlx">基准测试：llama.cpp vs MLX</a></li>
+<li class="lvl3"><a href="#结果">结果</a></li>
+<li class="lvl3"><a href="#含义解读">含义解读</a></li>
+<li class="lvl3"><a href="#如何选择">如何选择？</a></li>
+<li class="lvl2"><a href="#连接-hermes">连接 Hermes</a></li>
+<li class="lvl2"><a href="#超时设置">超时设置</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

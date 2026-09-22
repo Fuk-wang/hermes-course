@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Provider Runtime Resolution · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/provider-runtime</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="provider-runtime-resolution">Provider Runtime Resolution</h1>
+<p>Hermes has a shared provider runtime resolver used across:</p>
+<ul>
+<li>CLI</li>
+<li>gateway</li>
+<li>cron jobs</li>
+<li>ACP</li>
+<li>auxiliary model calls</li>
+</ul>
+<p>Primary implementation:</p>
+<ul>
+<li><code>hermes_cli/runtime_provider.py</code> — credential resolution, custom-endpoint runtime resolution</li>
+<li><code>hermes_cli/auth.py</code> — provider registry, <code>resolve_provider()</code></li>
+<li><code>hermes_cli/model_switch.py</code> — shared <code>/model</code> switch pipeline (CLI + gateway)</li>
+<li><code>agent/auxiliary_client.py</code> — auxiliary model routing</li>
+<li><code>providers/</code> — ABC + registry entry points (<code>ProviderProfile</code>, <code>register_provider</code>, <code>get_provider_profile</code>, <code>list_providers</code>)</li>
+<li><code>plugins/model-providers/&lt;name&gt;/</code> — per-provider plugins (bundled) that declare <code>api_mode</code>, <code>base_url</code>, <code>env_vars</code>, <code>fallback_models</code> and register themselves into the registry on first access. User plugins at <code>$HERMES_HOME/plugins/model-providers/&lt;name&gt;/</code> override bundled ones of the same name.</li>
+</ul>
+<p><code>get_provider_profile()</code> in <code>providers/</code> returns a <code>ProviderProfile</code> for a given provider id. <code>runtime_provider.py</code> calls this at resolution time to get the canonical <code>base_url</code>, <code>env_vars</code> priority list, <code>api_mode</code>, and <code>fallback_models</code> without needing to duplicate that data in multiple files. Adding a new plugin under <code>plugins/model-providers/&lt;your-provider&gt;/</code> (or <code>$HERMES_HOME/plugins/model-providers/&lt;your-provider&gt;/</code>) that calls <code>register_provider()</code> is enough for <code>runtime_provider.py</code> to pick it up — no branch needed in the resolver itself.</p>
+<p>If you are trying to add a new first-class inference provider, read <a href="adding-providers.html">Adding Providers</a> and the <a href="model-provider-plugin.html">Model Provider Plugin guide</a> alongside this page.</p>
+<h2 id="chat-completions-reasoning-shapes">Chat-completions reasoning shapes</h2>
+<p>OpenAI-compatible relays can return <code>reasoning</code> or <code>reasoning_content</code> as strings,
+text-part dictionaries, or lists of text parts and string fragments. Hermes flattens
+these fields before string operations in the main stream, Relay recording, synchronous
+and asynchronous auxiliary streams, and completed-response reasoning extraction.
+Fragments retain their explicit whitespace; normalization adds no intra-field separator.
+Main-stream and Relay recording retain the existing paragraph breaks between complete
+bold reasoning headings. Reasoning stays separate from the visible answer.</p>
+<h2 id="resolution-precedence">Resolution precedence</h2>
+<p>At a high level, provider resolution uses:</p>
+<ol>
+<li>explicit CLI/runtime request</li>
+<li><code>config.yaml</code> model/provider config</li>
+<li>environment variables</li>
+<li>provider-specific defaults or auto resolution</li>
+</ol>
+<p>That ordering matters because Hermes treats the saved model/provider choice as the source of truth for normal runs. This prevents a stale shell export from silently overriding the endpoint a user last selected in <code>hermes model</code>.</p>
+<h2 id="providers">Providers</h2>
+<p>Current provider families include (see <code>plugins/model-providers/</code> for the complete bundled set):</p>
+<ul>
+<li>AI Gateway (Vercel)</li>
+<li>OpenRouter</li>
+<li>Nous Portal</li>
+<li>OpenAI Codex</li>
+<li>Copilot / Copilot ACP</li>
+<li>Anthropic (native)</li>
+<li>Google / Gemini (<code>gemini</code>)</li>
+<li>Alibaba / DashScope (<code>alibaba</code>, <code>alibaba-coding-plan</code>)</li>
+<li>DeepSeek</li>
+<li>Z.AI</li>
+<li>Kimi / Moonshot (<code>kimi-coding</code>, <code>kimi-coding-cn</code>)</li>
+<li>MiniMax (<code>minimax</code>, <code>minimax-cn</code>, <code>minimax-oauth</code>)</li>
+<li>Kilo Code</li>
+<li>Hugging Face</li>
+<li>OpenCode Zen / OpenCode Go</li>
+<li>AWS Bedrock</li>
+<li>Azure Foundry</li>
+<li>NVIDIA NIM</li>
+<li>xAI (Grok)</li>
+<li>Arcee</li>
+<li>GMI Cloud</li>
+<li>StepFun</li>
+<li>Qwen OAuth</li>
+<li>Xiaomi</li>
+<li>Ollama Cloud</li>
+<li>LM Studio</li>
+<li>Tencent TokenHub</li>
+<li>Custom (<code>provider: custom</code>) — first-class provider for any OpenAI-compatible endpoint</li>
+<li>Named custom providers (<code>providers:</code> dict in config.yaml; the legacy <code>custom_providers</code> list is still read for backward compatibility)</li>
+</ul>
+<h2 id="output-of-runtime-resolution">Output of runtime resolution</h2>
+<p>The runtime resolver returns data such as:</p>
+<ul>
+<li><code>provider</code></li>
+<li><code>api_mode</code></li>
+<li><code>base_url</code></li>
+<li><code>api_key</code></li>
+<li><code>source</code></li>
+<li>provider-specific metadata like expiry/refresh info</li>
+</ul>
+<h2 id="why-this-matters">Why this matters</h2>
+<p>This resolver is the main reason Hermes can share auth/runtime logic between:</p>
+<ul>
+<li><code>hermes chat</code></li>
+<li>gateway message handling</li>
+<li>cron jobs running in fresh sessions</li>
+<li>ACP editor sessions</li>
+<li>auxiliary model tasks</li>
+</ul>
+<h2 id="ai-gateway">AI Gateway</h2>
+<p>Set <code>AI_GATEWAY_API_KEY</code> in <code>~/.hermes/.env</code> and run with <code>--provider ai-gateway</code>. Hermes fetches available models from the gateway's <code>/models</code> endpoint, filtering to language models with tool-use support.</p>
+<h2 id="openrouter-ai-gateway-and-custom-openai-compatible-base-urls">OpenRouter, AI Gateway, and custom OpenAI-compatible base URLs</h2>
+<p>Hermes contains logic to avoid leaking the wrong API key to a custom endpoint when multiple provider keys exist (e.g. <code>OPENROUTER_API_KEY</code>, <code>AI_GATEWAY_API_KEY</code>, and <code>OPENAI_API_KEY</code>).</p>
+<p>Each provider's API key is scoped to its own base URL:</p>
+<ul>
+<li><code>OPENROUTER_API_KEY</code> is only sent to <code>openrouter.ai</code> endpoints</li>
+<li><code>AI_GATEWAY_API_KEY</code> is only sent to <code>ai-gateway.vercel.sh</code> endpoints</li>
+<li><code>OPENAI_API_KEY</code> is used for custom endpoints and as a fallback</li>
+</ul>
+<p>Hermes also distinguishes between:</p>
+<ul>
+<li>a real custom endpoint selected by the user</li>
+<li>the OpenRouter fallback path used when no custom endpoint is configured</li>
+</ul>
+<p>That distinction is especially important for:</p>
+<ul>
+<li>local model servers</li>
+<li>non-OpenRouter/non-AI Gateway OpenAI-compatible APIs</li>
+<li>switching providers without re-running setup</li>
+<li>config-saved custom endpoints that should keep working even when <code>OPENAI_BASE_URL</code> is not exported in the current shell</li>
+</ul>
+<h2 id="native-anthropic-path">Native Anthropic path</h2>
+<p>Anthropic is not just "via OpenRouter" anymore.</p>
+<p>When provider resolution selects <code>anthropic</code>, Hermes uses:</p>
+<ul>
+<li><code>api_mode = anthropic_messages</code></li>
+<li>the native Anthropic Messages API</li>
+<li><code>agent/anthropic_adapter.py</code> for translation</li>
+</ul>
+<p>Credential resolution for native Anthropic now prefers refreshable Claude Code credentials over copied env tokens when both are present. In practice that means:</p>
+<ul>
+<li>Claude Code credential files are treated as the preferred source when they include refreshable auth</li>
+<li>manual <code>ANTHROPIC_TOKEN</code> / <code>CLAUDE_CODE_OAUTH_TOKEN</code> values still work as explicit overrides</li>
+<li>Hermes preflights Anthropic credential refresh before native Messages API calls</li>
+<li>Hermes still retries once on a 401 after rebuilding the Anthropic client, as a fallback path</li>
+</ul>
+<h2 id="openai-codex-path">OpenAI Codex path</h2>
+<p>Codex uses a separate Responses API path:</p>
+<ul>
+<li><code>api_mode = codex_responses</code></li>
+<li>dedicated credential resolution and auth store support</li>
+<li>a resumed session whose lingering Codex reasoning items (<code>encrypted_content</code>) are rejected — as a 400 <code>invalid_encrypted_content</code> or as a 401 <code>token_expired</code> — self-heals by stripping the cached items and replaying once, before any credential refresh or pool rotation</li>
+</ul>
+<h2 id="auxiliary-model-routing">Auxiliary model routing</h2>
+<p>Auxiliary tasks such as:</p>
+<ul>
+<li>vision</li>
+<li>web extraction summarization</li>
+<li>context compression summaries</li>
+<li>skills hub operations</li>
+<li>MCP helper operations</li>
+<li>memory flushes</li>
+</ul>
+<p>can use their own provider/model routing rather than the main conversational model.</p>
+<p>When an auxiliary task is configured with provider <code>main</code>, Hermes resolves that through the same shared runtime path as normal chat. In practice that means:</p>
+<ul>
+<li>env-driven custom endpoints still work</li>
+<li>custom endpoints saved via <code>hermes model</code> / <code>config.yaml</code> also work</li>
+<li>auxiliary routing can tell the difference between a real saved custom endpoint and the OpenRouter fallback</li>
+</ul>
+<h2 id="fallback-models">Fallback models</h2>
+<p>Hermes supports a configured fallback provider chain — a list of <code>(provider, model)</code> entries tried in order when the primary model encounters errors. The legacy single-pair <code>fallback_model</code> dict is still accepted for back-compat (and migrated on first write).</p>
+<h3 id="how-it-works-internally">How it works internally</h3>
+<ol>
+<li>
+<p><strong>Storage</strong>: <code>AIAgent.__init__</code> stores the <code>fallback_model</code> dict and sets <code>_fallback_activated = False</code>.</p>
+</li>
+<li>
+<p><strong>Trigger points</strong>: <code>_try_activate_fallback()</code> (forwarded to <code>try_activate_fallback()</code> in <code>agent/chat_completion_helpers.py</code>) is called from three places in the turn phases (<code>agent/turn_api_error.py</code>, <code>agent/turn_response_check.py</code>, <code>agent/turn_recovery.py</code>):</p>
+</li>
+<li>After max retries on invalid API responses (None choices, missing content)</li>
+<li>On non-retryable client errors (HTTP 401, 403, 404)</li>
+<li>
+<p>After max retries on transient errors (HTTP 429, 500, 502, 503)</p>
+</li>
+<li>
+<p><strong>Activation flow</strong> (<code>_try_activate_fallback</code>):</p>
+</li>
+<li>Returns <code>False</code> immediately if already activated or not configured</li>
+<li>Calls <code>resolve_provider_client()</code> from <code>auxiliary_client.py</code> to build a new client with proper auth</li>
+<li>Determines <code>api_mode</code>: <code>codex_responses</code> for openai-codex, <code>anthropic_messages</code> for anthropic, <code>chat_completions</code> for everything else</li>
+<li>Swaps in-place: <code>self.model</code>, <code>self.provider</code>, <code>self.base_url</code>, <code>self.api_mode</code>, <code>self.client</code>, <code>self._client_kwargs</code></li>
+<li>For anthropic fallback: builds a native Anthropic client instead of OpenAI-compatible</li>
+<li>Re-evaluates prompt caching (enabled for Claude models on OpenRouter)</li>
+<li>Sets <code>_fallback_activated = True</code> — prevents firing again</li>
+<li>
+<p>Resets retry count to 0 and continues the loop</p>
+</li>
+<li>
+<p><strong>Config flow</strong>:</p>
+</li>
+<li>CLI: reads the fallback chain via <code>hermes_cli/fallback_config.get_fallback_chain()</code> → passes to <code>AIAgent(fallback_model=...)</code></li>
+<li>Gateway: <code>gateway/run_config_loaders.py._load_fallback_model()</code> reads <code>config.yaml</code> → passes to <code>AIAgent</code></li>
+<li>Validation: both <code>provider</code> and <code>model</code> keys must be non-empty, or fallback is disabled</li>
+</ol>
+<h3 id="what-does-not-support-fallback">What does NOT support fallback</h3>
+<ul>
+<li><strong>Subagent delegation</strong> (<code>tools/delegate_tool.py</code>): subagents inherit the parent's provider but not the fallback config</li>
+<li><strong>Auxiliary tasks</strong>: use their own independent provider auto-detection chain (see Auxiliary model routing above)</li>
+</ul>
+<p>Cron jobs <strong>do</strong> support fallback: <code>run_job()</code> reads <code>fallback_providers</code> (or legacy <code>fallback_model</code>) from <code>config.yaml</code> and passes it to <code>AIAgent(fallback_model=...)</code>, matching the gateway's <code>_load_fallback_model()</code> pattern. See <a href="cron-internals.html">Cron Internals</a>.</p>
+<h3 id="test-coverage">Test coverage</h3>
+<p>Fallback behavior is exercised across several suites:</p>
+<ul>
+<li><code>tests/agent/test_fallback_credential_isolation.py</code> — credential isolation between primary and fallback</li>
+<li><code>tests/hermes_cli/test_fallback_cmd.py</code> — the <code>/fallback</code> CLI command</li>
+<li><code>tests/gateway/test_fallback_eviction.py</code> — gateway eviction of failed providers</li>
+</ul>
+<h2 id="related-docs">Related docs</h2>
+<ul>
+<li><a href="agent-loop.html">Agent Loop Internals</a></li>
+<li><a href="acp-internals.html">ACP Internals</a></li>
+<li><a href="context-compression-and-caching.html">Context Compression &amp; Prompt Caching</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/provider-runtime</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#chat-completions-reasoning-shapes">Chat-completions reasoning shapes</a></li>
+<li class="lvl2"><a href="#resolution-precedence">Resolution precedence</a></li>
+<li class="lvl2"><a href="#providers">Providers</a></li>
+<li class="lvl2"><a href="#output-of-runtime-resolution">Output of runtime resolution</a></li>
+<li class="lvl2"><a href="#why-this-matters">Why this matters</a></li>
+<li class="lvl2"><a href="#ai-gateway">AI Gateway</a></li>
+<li class="lvl2"><a href="#openrouter-ai-gateway-and-custom-openai-compatible-base-urls">OpenRouter, AI Gateway, and custom OpenAI-compatible base URLs</a></li>
+<li class="lvl2"><a href="#native-anthropic-path">Native Anthropic path</a></li>
+<li class="lvl2"><a href="#openai-codex-path">OpenAI Codex path</a></li>
+<li class="lvl2"><a href="#auxiliary-model-routing">Auxiliary model routing</a></li>
+<li class="lvl2"><a href="#fallback-models">Fallback models</a></li>
+<li class="lvl3"><a href="#how-it-works-internally">How it works internally</a></li>
+<li class="lvl3"><a href="#what-does-not-support-fallback">What does NOT support fallback</a></li>
+<li class="lvl3"><a href="#test-coverage">Test coverage</a></li>
+<li class="lvl2"><a href="#related-docs">Related docs</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

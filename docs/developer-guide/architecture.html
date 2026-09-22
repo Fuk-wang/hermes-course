@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/architecture</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="architecture">Architecture</h1>
+<p>This page is the top-level map of Hermes Agent internals. Use it to orient yourself in the codebase, then dive into subsystem-specific docs for implementation details.</p>
+<h2 id="system-overview">System Overview</h2>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────────────────────────┐
+│                        Entry Points                                  │
+│                                                                      │
+│  CLI (cli.py)    Gateway (gateway/run.py)    ACP (acp_adapter/)     │
+│  Batch Runner    API Server                  Python Library          │
+└──────────┬──────────────┬───────────────────────┬───────────────────┘
+           │              │                       │
+           ▼              ▼                       ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     AIAgent (run_agent.py)                          │
+│                                                                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐               │
+│  │ Prompt       │  │ Provider     │  │ Tool         │               │
+│  │ Builder      │  │ Resolution   │  │ Dispatch     │               │
+│  │ (prompt_     │  │ (runtime_    │  │ (model_      │               │
+│  │  builder.py) │  │  provider.py)│  │  tools.py)   │               │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘               │
+│         │                 │                 │                       │
+│  ┌──────┴───────┐  ┌──────┴───────┐  ┌──────┴───────┐               │
+│  │ Compression  │  │ 3 API Modes  │  │ Tool Registry│               │
+│  │ &amp; Caching    │  │ chat_compl.  │  │ (registry.py)│               │
+│  │              │  │ codex_resp.  │  │ 70+ tools    │               │
+│  │              │  │ anthropic    │  │ 28 toolsets  │               │
+│  └──────────────┘  └──────────────┘  └──────────────┘               │
+└─────────┴─────────────────┴─────────────────┴───────────────────────┘
+           │                                    │
+           ▼                                    ▼
+┌───────────────────┐              ┌──────────────────────┐
+│ Session Storage   │              │ Tool Backends         │
+│ (SQLite + FTS5)   │              │ Terminal (7 backends) │
+│ hermes_state.py   │              │ Browser (5 backends)  │
+│ gateway/session.py│              │ Web (4 backends)      │
+└───────────────────┘              │ MCP (dynamic)         │
+                                   │ File, Vision, etc.    │
+                                   └──────────────────────┘
+</code></pre></div>
+
+<h2 id="directory-structure">Directory Structure</h2>
+<div class="highlight"><pre><span></span><code>hermes-agent/
+├── run_agent.py              # AIAgent facade — loop lives in agent/conversation_loop.py + agent/turn_*.py
+├── cli.py                    # HermesCLI facade — mixins in hermes_cli/cli_*_mixin.py
+├── model_tools.py            # Tool discovery, schema collection, dispatch
+├── toolsets.py               # Tool groupings and platform presets
+├── hermes_state.py           # SQLite session/state database facade (+ hermes_state_*.py siblings)
+├── hermes_constants.py       # HERMES_HOME, profile-aware paths
+├── batch_runner.py           # Batch trajectory generation
+│
+├── agent/                    # Agent internals
+│   ├── prompt_builder.py     # System prompt assembly
+│   ├── context_engine.py     # ContextEngine ABC (pluggable)
+│   ├── context_compressor.py # Default engine — lossy summarization
+│   ├── prompt_caching.py     # Anthropic prompt caching
+│   ├── auxiliary_client.py   # Auxiliary LLM for side tasks (vision, summarization)
+│   ├── model_metadata.py     # Model context lengths, token estimation
+│   ├── models_dev.py         # models.dev registry integration
+│   ├── anthropic_adapter.py  # Anthropic Messages API format conversion
+│   ├── display.py            # KawaiiSpinner, tool preview formatting
+│   ├── skill_commands.py     # Skill slash commands
+│   ├── memory_manager.py    # Memory manager orchestration
+│   ├── memory_provider.py   # Memory provider ABC
+│   └── trajectory.py         # Trajectory saving helpers
+│
+├── hermes_cli/               # CLI subcommands and setup
+│   ├── main.py               # Entry point — `hermes` subcommands (parsers in subcommands/, main_*.py)
+│   ├── config.py             # DEFAULT_CONFIG, OPTIONAL_ENV_VARS, migration
+│   ├── commands.py           # COMMAND_REGISTRY — central slash command definitions
+│   ├── auth.py               # PROVIDER_REGISTRY, credential resolution (+ auth_*.py siblings)
+│   ├── runtime_provider.py   # Provider → api_mode + credentials
+│   ├── models.py             # Model catalog, provider model lists
+│   ├── model_switch.py       # /model command logic (CLI + gateway shared)
+│   ├── setup.py              # Interactive setup wizard (+ setup_*.py siblings)
+│   ├── skin_engine.py        # CLI theming engine
+│   ├── skills_config.py      # hermes skills — enable/disable per platform
+│   ├── skills_hub.py         # /skills slash command
+│   ├── tools_config.py       # hermes tools — enable/disable per platform
+│   ├── plugins.py            # PluginManager — discovery, loading, hooks
+│   ├── callbacks.py          # Terminal callbacks (clarify, sudo, approval)
+│   └── gateway.py            # hermes gateway start/stop
+│
+├── tools/                    # Tool implementations (one file per tool)
+│   ├── registry.py           # Central tool registry
+│   ├── approval.py           # Dangerous command detection
+│   ├── terminal_tool.py      # Terminal orchestration
+│   ├── process_registry.py   # Background process management
+│   ├── file_tools.py         # read_file, write_file, patch, search_files
+│   ├── web_tools.py          # web_search, web_extract
+│   ├── browser_tool.py       # Browser automation tools facade (+ browser_tool_*.py siblings)
+│   ├── code_execution_tool.py # execute_code sandbox
+│   ├── delegate_tool.py      # Subagent delegation
+│   ├── mcp_tool.py           # MCP client facade (+ mcp_tool_*.py siblings)
+│   ├── credential_files.py   # File-based credential passthrough
+│   ├── env_passthrough.py    # Env var passthrough for sandboxes
+│   ├── ansi_strip.py         # ANSI escape stripping
+│   └── environments/         # Terminal backends (local, docker, ssh, modal, daytona, singularity)
+│
+├── gateway/                  # Messaging platform gateway
+│   ├── run.py                # GatewayRunner facade — message dispatch (+ run_*.py siblings)
+│   ├── session.py            # SessionStore — conversation persistence
+│   ├── delivery.py           # Outbound message delivery
+│   ├── pairing.py            # DM pairing authorization
+│   ├── hooks.py              # Hook discovery and lifecycle events
+│   ├── mirror.py             # Cross-session message mirroring
+│   ├── status.py             # Token locks, profile-scoped process tracking
+│   ├── builtin_hooks/        # Extension point for always-registered hooks (none shipped)
+│   └── platforms/            # Built-in adapters: signal, weixin, bluebubbles,
+│                             #   qqbot, whatsapp_cloud, yuanbao, webhook, api_server
+│
+├── plugins/platforms/        # Bundled platform plugins: telegram, discord, slack,
+│                             #   whatsapp, matrix, mattermost, email, sms, dingtalk,
+│                             #   feishu, wecom, homeassistant, irc, line, teams,
+│                             #   google_chat, buzz, ntfy, photon, raft, simplex
+│
+├── acp_adapter/              # ACP server (VS Code / Zed / JetBrains)
+├── cron/                     # Scheduler (jobs.py, scheduler.py)
+├── plugins/memory/           # Memory provider plugins
+├── plugins/context_engine/   # Context engine plugins
+├── skills/                   # Bundled skills (always available)
+├── optional-skills/          # Official optional skills (install explicitly)
+├── website/                  # Docusaurus documentation site
+└── tests/                    # Pytest suite (~25,000 tests across ~1,250 files)
+</code></pre></div>
+
+<h2 id="data-flow">Data Flow</h2>
+<h3 id="cli-session">CLI Session</h3>
+<div class="highlight"><pre><span></span><code>User input → HermesCLI.process_input()
+  → AIAgent.run_conversation()
+    → prompt_builder.build_system_prompt()
+    → runtime_provider.resolve_runtime_provider()
+    → API call (chat_completions / codex_responses / anthropic_messages)
+    → tool_calls? → model_tools.handle_function_call() → loop
+    → final response → display → save to SessionDB
+</code></pre></div>
+
+<h3 id="gateway-message">Gateway Message</h3>
+<div class="highlight"><pre><span></span><code>Platform event → Adapter.on_message() → MessageEvent
+  → GatewayRunner._handle_message()
+    → authorize user
+    → resolve session key
+    → create AIAgent with session history
+    → AIAgent.run_conversation()
+    → deliver response back through adapter
+</code></pre></div>
+
+<h3 id="cron-job">Cron Job</h3>
+<div class="highlight"><pre><span></span><code>Scheduler tick → load due jobs from jobs.json
+  → create fresh AIAgent (no history)
+  → inject attached skills as context
+  → run job prompt
+  → deliver response to target platform
+  → update job state and next_run
+</code></pre></div>
+
+<h2 id="recommended-reading-order">Recommended Reading Order</h2>
+<p>If you are new to the codebase:</p>
+<ol>
+<li><strong>This page</strong> — orient yourself</li>
+<li><strong><a href="agent-loop.html">Agent Loop Internals</a></strong> — how AIAgent works</li>
+<li><strong><a href="prompt-assembly.html">Prompt Assembly</a></strong> — system prompt construction</li>
+<li><strong><a href="provider-runtime.html">Provider Runtime Resolution</a></strong> — how providers are selected</li>
+<li><strong><a href="adding-providers.html">Adding Providers</a></strong> — practical guide to adding a new provider</li>
+<li><strong><a href="tools-runtime.html">Tools Runtime</a></strong> — tool registry, dispatch, environments</li>
+<li><strong><a href="session-storage.html">Session Storage</a></strong> — SQLite schema, FTS5, session lineage</li>
+<li><strong><a href="gateway-internals.html">Gateway Internals</a></strong> — messaging platform gateway</li>
+<li><strong><a href="context-compression-and-caching.html">Context Compression &amp; Prompt Caching</a></strong> — compression and caching</li>
+<li><strong><a href="acp-internals.html">ACP Internals</a></strong> — IDE integration</li>
+</ol>
+<h2 id="major-subsystems">Major Subsystems</h2>
+<h3 id="agent-loop">Agent Loop</h3>
+<p>The synchronous orchestration engine (<code>AIAgent</code>, exposed by the <code>run_agent.py</code> facade; the loop lives in <code>agent/conversation_loop.py</code> and <code>agent/turn_*.py</code>). Handles provider selection, prompt construction, tool execution, retries, fallback, callbacks, compression, and persistence. Supports three API modes for different provider backends.</p>
+<p>→ <a href="agent-loop.html">Agent Loop Internals</a></p>
+<h3 id="prompt-system">Prompt System</h3>
+<p>Prompt construction and maintenance across the conversation lifecycle:</p>
+<ul>
+<li><strong><code>system_prompt.py</code> + <code>prompt_builder.py</code></strong> — assembles the ordered system-prompt tiers (<code>stable</code> → <code>context</code> → <code>volatile</code>): identity/tool guidance/skills, context files, then memory/profile/timestamp blocks</li>
+<li><strong><code>prompt_caching.py</code></strong> — Applies Anthropic cache breakpoints for prefix caching</li>
+<li><strong><code>context_compressor.py</code></strong> — Summarizes middle conversation turns when context exceeds thresholds</li>
+</ul>
+<p>→ <a href="prompt-assembly.html">Prompt Assembly</a>, <a href="context-compression-and-caching.html">Context Compression &amp; Prompt Caching</a></p>
+<h3 id="provider-resolution">Provider Resolution</h3>
+<p>A shared runtime resolver used by CLI, gateway, cron, ACP, and auxiliary calls. Maps <code>(provider, model)</code> tuples to <code>(api_mode, api_key, base_url)</code>. Handles 18+ providers, OAuth flows, credential pools, and alias resolution.</p>
+<p>→ <a href="provider-runtime.html">Provider Runtime Resolution</a></p>
+<h3 id="tool-system">Tool System</h3>
+<p>Central tool registry (<code>tools/registry.py</code>) with 70+ registered tools across ~28 toolsets. Each tool file self-registers at import time. The registry handles schema collection, dispatch, availability checking, and error wrapping. Terminal tools support 7 backends (local, Docker, SSH, Daytona, Modal, Singularity, Vercel Sandbox).</p>
+<p>→ <a href="tools-runtime.html">Tools Runtime</a></p>
+<h3 id="session-persistence">Session Persistence</h3>
+<p>SQLite-based session storage with FTS5 full-text search. Sessions have lineage tracking (parent/child across compressions), per-platform isolation, and atomic writes with contention handling.</p>
+<p>→ <a href="session-storage.html">Session Storage</a></p>
+<h3 id="messaging-gateway">Messaging Gateway</h3>
+<p>Long-running process with 25+ platform adapters (built-in + bundled plugins), unified session routing, user authorization (allowlists + DM pairing), slash command dispatch, hook system, cron ticking, and background maintenance.</p>
+<p>→ <a href="gateway-internals.html">Gateway Internals</a></p>
+<h3 id="plugin-system">Plugin System</h3>
+<p>Three discovery sources: <code>~/.hermes/plugins/</code> (user), <code>.hermes/plugins/</code> (project), and pip entry points. Plugins register tools, hooks, and CLI commands through a context API. Two specialized plugin types exist: memory providers (<code>plugins/memory/</code>) and context engines (<code>plugins/context_engine/</code>). Both are single-select — only one of each can be active at a time, configured via <code>hermes plugins</code> or <code>config.yaml</code>.</p>
+<p>→ <a href="plugins.html">Plugin Guide</a>, <a href="memory-provider-plugin.html">Memory Provider Plugin</a></p>
+<h3 id="cron">Cron</h3>
+<p>First-class agent tasks (not shell tasks). Jobs store in JSON, support multiple schedule formats, can attach skills and scripts, and deliver to any platform.</p>
+<p>→ <a href="cron-internals.html">Cron Internals</a></p>
+<h3 id="acp-integration">ACP Integration</h3>
+<p>Exposes Hermes as an editor-native agent over stdio/JSON-RPC for VS Code, Zed, and JetBrains.</p>
+<p>→ <a href="acp-internals.html">ACP Internals</a></p>
+<h3 id="trajectories">Trajectories</h3>
+<p>Generates ShareGPT-format trajectories from agent sessions for training data generation.</p>
+<p>→ <a href="trajectory-format.html">Trajectories &amp; Training Format</a></p>
+<h2 id="design-principles">Design Principles</h2>
+<table>
+<thead>
+<tr>
+<th>Principle</th>
+<th>What it means in practice</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Prompt stability</strong></td>
+<td>System prompt doesn't change mid-conversation. No cache-breaking mutations except explicit user actions (<code>/model</code>).</td>
+</tr>
+<tr>
+<td><strong>Observable execution</strong></td>
+<td>Every tool call is visible to the user via callbacks. Progress updates in CLI (spinner) and gateway (chat messages).</td>
+</tr>
+<tr>
+<td><strong>Interruptible</strong></td>
+<td>API calls and tool execution can be cancelled mid-flight by user input or signals.</td>
+</tr>
+<tr>
+<td><strong>Platform-agnostic core</strong></td>
+<td>One AIAgent class serves CLI, gateway, ACP, batch, and API server. Platform differences live in the entry point, not the agent.</td>
+</tr>
+<tr>
+<td><strong>Loose coupling</strong></td>
+<td>Optional subsystems (MCP, plugins, memory providers, RL environments) use registry patterns and check_fn gating, not hard dependencies.</td>
+</tr>
+<tr>
+<td><strong>Profile isolation</strong></td>
+<td>Each profile (<code>hermes -p &lt;name&gt;</code>) gets its own HERMES_HOME, config, memory, sessions, and gateway PID. Multiple profiles run concurrently.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="file-dependency-chain">File Dependency Chain</h2>
+<div class="highlight"><pre><span></span><code>tools/registry.py  (no deps — imported by all tool files)
+       ↑
+tools/*.py  (each calls registry.register() at import time)
+       ↑
+model_tools.py  (imports tools/registry + triggers tool discovery)
+       ↑
+run_agent.py, cli.py, batch_runner.py, environments/
+</code></pre></div>
+
+<p>This chain means tool registration happens at import time, before any agent instance is created. Any <code>tools/*.py</code> file with a top-level <code>registry.register()</code> call is auto-discovered — no manual import list needed.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/architecture</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#system-overview">System Overview</a></li>
+<li class="lvl2"><a href="#directory-structure">Directory Structure</a></li>
+<li class="lvl2"><a href="#data-flow">Data Flow</a></li>
+<li class="lvl3"><a href="#cli-session">CLI Session</a></li>
+<li class="lvl3"><a href="#gateway-message">Gateway Message</a></li>
+<li class="lvl3"><a href="#cron-job">Cron Job</a></li>
+<li class="lvl2"><a href="#recommended-reading-order">Recommended Reading Order</a></li>
+<li class="lvl2"><a href="#major-subsystems">Major Subsystems</a></li>
+<li class="lvl3"><a href="#agent-loop">Agent Loop</a></li>
+<li class="lvl3"><a href="#prompt-system">Prompt System</a></li>
+<li class="lvl3"><a href="#provider-resolution">Provider Resolution</a></li>
+<li class="lvl3"><a href="#tool-system">Tool System</a></li>
+<li class="lvl3"><a href="#session-persistence">Session Persistence</a></li>
+<li class="lvl3"><a href="#messaging-gateway">Messaging Gateway</a></li>
+<li class="lvl3"><a href="#plugin-system">Plugin System</a></li>
+<li class="lvl3"><a href="#cron">Cron</a></li>
+<li class="lvl3"><a href="#acp-integration">ACP Integration</a></li>
+<li class="lvl3"><a href="#trajectories">Trajectories</a></li>
+<li class="lvl2"><a href="#design-principles">Design Principles</a></li>
+<li class="lvl2"><a href="#file-dependency-chain">File Dependency Chain</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

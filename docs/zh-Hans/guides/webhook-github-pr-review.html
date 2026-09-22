@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>使用 Webhook 自动发布 GitHub PR 评论 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / guides/webhook-github-pr-review</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="使用-webhook-自动发布-github-pr-评论">使用 Webhook 自动发布 GitHub PR 评论</h1>
+<p>本指南介绍如何将 Hermes Agent 连接到 GitHub，使其自动获取 pull request 的 diff、分析代码变更并发布评论——由 webhook 事件触发，无需手动 prompt（提示词）。</p>
+<p>当 PR 被打开或更新时，GitHub 会向你的 Hermes 实例发送一个 webhook POST 请求。Hermes 使用一个 prompt 运行 agent，该 prompt 指示其通过 <code>gh</code> CLI 获取 diff，并将响应发布回 PR 线程。</p>
+<div class="admonition adm-tip"><p class="adm-title">想要无需公网端点的更简单配置？</p>
+<p>如果你没有公网 URL，或只是想快速上手，请查看 <a href="github-pr-review-agent.html">构建 GitHub PR 审查 Agent</a> —— 使用 cron 作业按计划轮询 PR，可在 NAT 和防火墙后运行。</p>
+</div>
+<div class="admonition adm-info"><p class="adm-title">参考文档</p>
+<p>完整的 webhook 平台参考（所有配置选项、投递类型、动态订阅、安全模型），请参阅 <a href="../user-guide/messaging/webhooks.html">Webhooks</a>。</p>
+</div>
+<div class="admonition adm-warning"><p class="adm-title">Prompt 注入风险</p>
+<p>Webhook payload 包含攻击者可控的数据——PR 标题、commit 消息和描述中可能包含恶意指令。当你的 webhook 端点暴露在公网时，请在沙箱环境（Docker、SSH 后端）中运行 gateway。请参阅下方的<a href="../../guides/webhook-github-pr-review.html#security-notes" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">安全说明</a>。</p>
+</div>
+<hr />
+<h2 id="前提条件">前提条件</h2>
+<ul>
+<li>Hermes Agent 已安装并运行（<code>hermes gateway</code>）</li>
+<li><a href="https://cli.github.com/" class="ext" target="_blank" rel="noopener"><code>gh</code> CLI</a> 已安装并在 gateway 主机上完成认证（<code>gh auth login</code>）</li>
+<li>你的 Hermes 实例有一个可公网访问的 URL（如果在本地运行，请参阅<a href="../../guides/webhook-github-pr-review.html#local-testing-with-ngrok" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">使用 ngrok 进行本地测试</a>）</li>
+<li>对 GitHub 仓库的管理员权限（管理 webhook 所需）</li>
+</ul>
+<hr />
+<h2 id="第一步启用-webhook-平台">第一步——启用 webhook 平台</h2>
+<p>在你的 <code>~/.hermes/config.yaml</code> 中添加以下内容：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8644</span><span class="w">          </span><span class="c1"># 默认值；如果该端口被其他服务占用，请修改</span>
+<span class="w">      </span><span class="nt">rate_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span><span class="w">      </span><span class="c1"># 每条路由每分钟最大请求数（非全局上限）</span>
+
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">github-pr-review</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-webhook-secret-here&quot;</span><span class="w">   </span><span class="c1"># 必须与 GitHub webhook secret 完全一致</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pull_request</span>
+
+<span class="w">          </span><span class="c1"># agent 被指示在审查前先获取实际的 diff。</span>
+<span class="w">          </span><span class="c1"># {number} 和 {repository.full_name} 从 GitHub payload 中解析。</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">            </span><span class="no">A pull request event was received (action: {action}).</span>
+
+<span class="w">            </span><span class="no">PR #{number}: {pull_request.title}</span>
+<span class="w">            </span><span class="no">Author: {pull_request.user.login}</span>
+<span class="w">            </span><span class="no">Branch: {pull_request.head.ref} → {pull_request.base.ref}</span>
+<span class="w">            </span><span class="no">Description: {pull_request.body}</span>
+<span class="w">            </span><span class="no">URL: {pull_request.html_url}</span>
+
+<span class="w">            </span><span class="no">If the action is &quot;closed&quot; or &quot;labeled&quot;, stop here and do not post a comment.</span>
+
+<span class="w">            </span><span class="no">Otherwise:</span>
+<span class="w">            </span><span class="no">1. Run: gh pr diff {number} --repo {repository.full_name}</span>
+<span class="w">            </span><span class="no">2. Review the code changes for correctness, security issues, and clarity.</span>
+<span class="w">            </span><span class="no">3. Write a concise, actionable review comment and post it.</span>
+
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">github_comment</span>
+<span class="w">          </span><span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">repo</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{repository.full_name}&quot;</span>
+<span class="w">            </span><span class="nt">pr_number</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{number}&quot;</span>
+</code></pre></div>
+
+<p><strong>关键字段：</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>secret</code>（路由级别）</td>
+<td>该路由的 HMAC secret。如果省略，则回退到 <code>extra.secret</code> 全局配置。</td>
+</tr>
+<tr>
+<td><code>events</code></td>
+<td>要接受的 <code>X-GitHub-Event</code> 请求头值列表。空列表 = 接受所有。</td>
+</tr>
+<tr>
+<td><code>prompt</code></td>
+<td>模板；<code>{field}</code> 和 <code>{nested.field}</code> 从 GitHub payload 中解析。</td>
+</tr>
+<tr>
+<td><code>deliver</code></td>
+<td><code>github_comment</code> 通过 <code>gh pr comment</code> 发布。<code>log</code> 仅写入 gateway 日志。</td>
+</tr>
+<tr>
+<td><code>deliver_extra.repo</code></td>
+<td>从 payload 中解析为例如 <code>org/repo</code>。</td>
+</tr>
+<tr>
+<td><code>deliver_extra.pr_number</code></td>
+<td>从 payload 中解析为 PR 编号。</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition adm-note"><p class="adm-title">Payload 中不包含代码</p>
+<p>GitHub webhook payload 包含 PR 元数据（标题、描述、分支名、URL），但<strong>不包含 diff</strong>。上方的 prompt 指示 agent 运行 <code>gh pr diff</code> 来获取实际变更。<code>terminal</code> 工具已包含在默认的 <code>hermes-webhook</code> 工具集中，无需额外配置。</p>
+</div>
+<hr />
+<h2 id="第二步启动-gateway">第二步——启动 gateway</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>你应该看到：</p>
+<div class="highlight"><pre><span></span><code>[webhook] Listening on 0.0.0.0:8644 — routes: github-pr-review
+</code></pre></div>
+
+<p>验证其是否正在运行：</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8644/health
+<span class="c1"># {&quot;status&quot;: &quot;ok&quot;, &quot;platform&quot;: &quot;webhook&quot;}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="第三步在-github-上注册-webhook">第三步——在 GitHub 上注册 webhook</h2>
+<ol>
+<li>进入你的仓库 → <strong>Settings</strong> → <strong>Webhooks</strong> → <strong>Add webhook</strong></li>
+<li>填写：</li>
+<li><strong>Payload URL：</strong> <code>https://your-public-url.example.com/webhooks/github-pr-review</code></li>
+<li><strong>Content type：</strong> <code>application/json</code></li>
+<li><strong>Secret：</strong> 与路由配置中 <code>secret</code> 设置的值相同</li>
+<li><strong>Which events?</strong> → 选择单个事件 → 勾选 <strong>Pull requests</strong></li>
+<li>点击 <strong>Add webhook</strong></li>
+</ol>
+<p>GitHub 会立即发送一个 <code>ping</code> 事件以确认连接。该事件会被安全忽略——<code>ping</code> 不在你的 <code>events</code> 列表中——并返回 <code>{"status": "ignored", "event": "ping"}</code>。它仅在 DEBUG 级别记录日志，因此不会在默认日志级别的控制台中显示。</p>
+<hr />
+<h2 id="第四步打开一个测试-pr">第四步——打开一个测试 PR</h2>
+<p>创建一个分支，推送一个变更，并打开一个 PR。在 30–90 秒内（取决于 PR 大小和模型），Hermes 应该会发布一条审查评论。</p>
+<p>要实时跟踪 agent 的进度：</p>
+<div class="highlight"><pre><span></span><code>tail<span class="w"> </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">HERMES_HOME</span><span class="k">:-</span><span class="nv">$HOME</span><span class="p">/.hermes</span><span class="si">}</span><span class="s2">/logs/gateway.log&quot;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="使用-ngrok-进行本地测试">使用 ngrok 进行本地测试</h2>
+<p>如果 Hermes 在你的笔记本上运行，使用 <a href="https://ngrok.com/" class="ext" target="_blank" rel="noopener">ngrok</a> 将其暴露到公网：</p>
+<div class="highlight"><pre><span></span><code>ngrok<span class="w"> </span>http<span class="w"> </span><span class="m">8644</span>
+</code></pre></div>
+
+<p>复制 <code>https://...ngrok-free.app</code> URL 并将其用作你的 GitHub Payload URL。在 ngrok 免费版中，每次 ngrok 重启后 URL 都会变化——每次会话都需要更新你的 GitHub webhook。付费 ngrok 账户可获得静态域名。</p>
+<p>你可以直接用 <code>curl</code> 对静态路由进行冒烟测试——无需 GitHub 账户或真实 PR。</p>
+<div class="admonition adm-tip"><p class="adm-title">本地测试时使用 `deliver: log`</p>
+<p>在测试时，将配置中的 <code>deliver: github_comment</code> 改为 <code>deliver: log</code>。否则 agent 将尝试向测试 payload 中的假 <code>org/repo#99</code> 仓库发布评论，这将会失败。对 prompt 输出满意后，再切换回 <code>deliver: github_comment</code>。</p>
+</div>
+<div class="highlight"><pre><span></span><code><span class="nv">SECRET</span><span class="o">=</span><span class="s2">&quot;your-webhook-secret-here&quot;</span>
+<span class="nv">BODY</span><span class="o">=</span><span class="s1">&#39;{&quot;action&quot;:&quot;opened&quot;,&quot;number&quot;:99,&quot;pull_request&quot;:{&quot;title&quot;:&quot;Test PR&quot;,&quot;body&quot;:&quot;Adds a feature.&quot;,&quot;user&quot;:{&quot;login&quot;:&quot;testuser&quot;},&quot;head&quot;:{&quot;ref&quot;:&quot;feat/x&quot;},&quot;base&quot;:{&quot;ref&quot;:&quot;main&quot;},&quot;html_url&quot;:&quot;https://github.com/org/repo/pull/99&quot;},&quot;repository&quot;:{&quot;full_name&quot;:&quot;org/repo&quot;}}&#39;</span>
+<span class="nv">SIG</span><span class="o">=</span><span class="k">$(</span><span class="nb">printf</span><span class="w"> </span><span class="s1">&#39;%s&#39;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$BODY</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>openssl<span class="w"> </span>dgst<span class="w"> </span>-sha256<span class="w"> </span>-hmac<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$SECRET</span><span class="s2">&quot;</span><span class="w"> </span>-hex<span class="w"> </span><span class="p">|</span><span class="w"> </span>awk<span class="w"> </span><span class="s1">&#39;{print &quot;sha256=&quot;$2}&#39;</span><span class="k">)</span>
+
+curl<span class="w"> </span>-s<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8644/webhooks/github-pr-review<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-GitHub-Event: pull_request&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-Hub-Signature-256: </span><span class="nv">$SIG</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$BODY</span><span class="s2">&quot;</span>
+<span class="c1"># Expected: {&quot;status&quot;:&quot;accepted&quot;,&quot;route&quot;:&quot;github-pr-review&quot;,&quot;event&quot;:&quot;pull_request&quot;,&quot;delivery_id&quot;:&quot;...&quot;}</span>
+</code></pre></div>
+
+<p>然后观察 agent 运行：</p>
+<div class="highlight"><pre><span></span><code>tail<span class="w"> </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">HERMES_HOME</span><span class="k">:-</span><span class="nv">$HOME</span><span class="p">/.hermes</span><span class="si">}</span><span class="s2">/logs/gateway.log&quot;</span>
+</code></pre></div>
+
+<div class="admonition adm-note"><p class="adm-title">注意</p>
+<p><code>hermes webhook test &lt;name&gt;</code> 仅适用于通过 <code>hermes webhook subscribe</code> 创建的<strong>动态订阅</strong>。它不读取 <code>config.yaml</code> 中的路由。</p>
+</div>
+<hr />
+<h2 id="过滤特定-action">过滤特定 action</h2>
+<p>GitHub 会针对多种 action 发送 <code>pull_request</code> 事件：<code>opened</code>、<code>synchronize</code>、<code>reopened</code>、<code>closed</code>、<code>labeled</code> 等。<code>events</code> 列表仅按 <code>X-GitHub-Event</code> 请求头值过滤——无法在路由级别按 action 子类型过滤。</p>
+<p>第一步中的 prompt 已通过指示 agent 对 <code>closed</code> 和 <code>labeled</code> 事件提前停止来处理这一问题。</p>
+<div class="admonition adm-warning"><p class="adm-title">Agent 仍会运行并消耗 token（令牌）</p>
+<p>"stop here" 指令会阻止有意义的审查，但无论 action 如何，agent 仍会对每个 <code>pull_request</code> 事件运行至完成。GitHub webhook 只能按事件类型（<code>pull_request</code>、<code>push</code>、<code>issues</code> 等）过滤——无法按 action 子类型（<code>opened</code>、<code>closed</code>、<code>labeled</code>）过滤。路由级别没有针对子 action 的过滤器。对于高流量仓库，请接受这一成本，或通过 GitHub Actions workflow 在上游进行过滤，有条件地调用你的 webhook URL。</p>
+</div>
+<blockquote>
+<p>不支持 Jinja2 或条件模板语法。<code>{field}</code> 和 <code>{nested.field}</code> 是唯一支持的替换方式。其他内容会原样传递给 agent。</p>
+</blockquote>
+<hr />
+<h2 id="使用-skill-保持一致的审查风格">使用 skill 保持一致的审查风格</h2>
+<p>加载一个 <a href="../user-guide/features/skills.html">Hermes skill</a> 以赋予 agent 一致的审查风格。在 <code>config.yaml</code> 的 <code>platforms.webhook.extra.routes</code> 中，向你的路由添加 <code>skills</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">github-pr-review</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-webhook-secret-here&quot;</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">pull_request</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">            </span><span class="no">A pull request event was received (action: {action}).</span>
+<span class="w">            </span><span class="no">PR #{number}: {pull_request.title} by {pull_request.user.login}</span>
+<span class="w">            </span><span class="no">URL: {pull_request.html_url}</span>
+
+<span class="w">            </span><span class="no">If the action is &quot;closed&quot; or &quot;labeled&quot;, stop here and do not post a comment.</span>
+
+<span class="w">            </span><span class="no">Otherwise:</span>
+<span class="w">            </span><span class="no">1. Run: gh pr diff {number} --repo {repository.full_name}</span>
+<span class="w">            </span><span class="no">2. Review the diff using your review guidelines.</span>
+<span class="w">            </span><span class="no">3. Write a concise, actionable review comment and post it.</span>
+<span class="w">          </span><span class="nt">skills</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">review</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">github_comment</span>
+<span class="w">          </span><span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">repo</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{repository.full_name}&quot;</span>
+<span class="w">            </span><span class="nt">pr_number</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{number}&quot;</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>注意：</strong> 列表中只有第一个找到的 skill 会被加载。Hermes 不会叠加多个 skill——后续条目会被忽略。</p>
+</blockquote>
+<hr />
+<h2 id="将响应发送到-slack-或-discord">将响应发送到 Slack 或 Discord</h2>
+<p>将路由中的 <code>deliver</code> 和 <code>deliver_extra</code> 字段替换为你的目标平台：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 在 platforms.webhook.extra.routes.&lt;route-name&gt; 内部：</span>
+
+<span class="c1"># Slack</span>
+<span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">slack</span>
+<span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;C0123456789&quot;</span><span class="w">   </span><span class="c1"># Slack 频道 ID（省略则使用配置的默认频道）</span>
+
+<span class="c1"># Discord</span>
+<span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">discord</span>
+<span class="nt">deliver_extra</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;987654321012345678&quot;</span><span class="w">  </span><span class="c1"># Discord 频道 ID（省略则使用默认频道）</span>
+</code></pre></div>
+
+<p>目标平台也必须在 gateway 中启用并连接。如果省略 <code>chat_id</code>，响应将发送到该平台配置的默认频道。</p>
+<p>有效的 <code>deliver</code> 值：<code>log</code> · <code>github_comment</code> · <code>telegram</code> · <code>discord</code> · <code>slack</code> · <code>signal</code> · <code>sms</code></p>
+<hr />
+<h2 id="gitlab-支持">GitLab 支持</h2>
+<p>同一适配器也适用于 GitLab。GitLab 使用 <code>X-Gitlab-Token</code> 进行认证（纯字符串匹配，非 HMAC）——Hermes 会自动处理两者。</p>
+<p>对于事件过滤，GitLab 将 <code>X-GitLab-Event</code> 设置为 <code>Merge Request Hook</code>、<code>Push Hook</code>、<code>Pipeline Hook</code> 等值。在 <code>events</code> 中使用精确的请求头值：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">events</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Merge Request Hook</span>
+</code></pre></div>
+
+<p>GitLab 的 payload 字段与 GitHub 不同——例如，MR 标题使用 <code>{object_attributes.title}</code>，MR 编号使用 <code>{object_attributes.iid}</code>。发现完整 payload 结构最简单的方式是使用 GitLab webhook 设置中的 <strong>Test</strong> 按钮，结合 <strong>Recent Deliveries</strong> 日志。或者，在路由配置中省略 <code>prompt</code>——Hermes 将把完整 payload 作为格式化 JSON 直接传递给 agent，agent 的响应（在 gateway 日志中通过 <code>deliver: log</code> 可见）将描述其结构。</p>
+<hr />
+<h2 id="安全说明">安全说明</h2>
+<ul>
+<li><strong>永远不要在生产环境中使用 <code>INSECURE_NO_AUTH</code></strong>——它会完全禁用签名验证。仅用于本地开发。</li>
+<li><strong>定期轮换你的 webhook secret</strong>，并在 GitHub（webhook 设置）和你的 <code>config.yaml</code> 中同步更新。</li>
+<li><strong>速率限制</strong>默认为每条路由每分钟 30 次请求（可通过 <code>extra.rate_limit</code> 配置）。超出限制返回 <code>429</code>。</li>
+<li><strong>重复投递</strong>（webhook 重试）通过 1 小时的幂等性缓存进行去重。缓存键依次为 <code>X-GitHub-Delivery</code>（如果存在）、<code>X-Request-ID</code>、毫秒级时间戳。当两个投递 ID 请求头都未设置时，重试<strong>不会</strong>去重。</li>
+<li><strong>Prompt 注入：</strong> PR 标题、描述和 commit 消息均为攻击者可控内容。恶意 PR 可能尝试操纵 agent 的行为。当暴露在公网时，请在沙箱环境（Docker、VM）中运行 gateway。</li>
+</ul>
+<hr />
+<h2 id="故障排查">故障排查</h2>
+<table>
+<thead>
+<tr>
+<th>现象</th>
+<th>检查项</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>401 Invalid signature</code></td>
+<td>config.yaml 中的 secret 与 GitHub webhook secret 不匹配</td>
+</tr>
+<tr>
+<td><code>404 Unknown route</code></td>
+<td>URL 中的路由名称与 <code>routes:</code> 中的键不匹配</td>
+</tr>
+<tr>
+<td><code>429 Rate limit exceeded</code></td>
+<td>每条路由每分钟 30 次请求已超出——在 GitHub UI 中重新投递测试事件时常见；等待一分钟或提高 <code>extra.rate_limit</code></td>
+</tr>
+<tr>
+<td>未发布评论</td>
+<td><code>gh</code> 未安装、不在 PATH 中，或未完成认证（<code>gh auth login</code>）</td>
+</tr>
+<tr>
+<td>Agent 运行但无评论</td>
+<td>检查 gateway 日志——如果 agent 输出为空或仅为"SKIP"，投递仍会被尝试</td>
+</tr>
+<tr>
+<td>端口已被占用</td>
+<td>在 config.yaml 中修改 <code>extra.port</code></td>
+</tr>
+<tr>
+<td>Agent 运行但仅审查了 PR 描述</td>
+<td>prompt 中未包含 <code>gh pr diff</code> 指令——diff 不在 webhook payload 中</td>
+</tr>
+<tr>
+<td>看不到 ping 事件</td>
+<td>被忽略的事件仅在 DEBUG 日志级别返回 <code>{"status":"ignored","event":"ping"}</code>——检查 GitHub 的投递日志（仓库 → Settings → Webhooks → 你的 webhook → Recent Deliveries）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>GitHub 的 Recent Deliveries 标签页</strong>（仓库 → Settings → Webhooks → 你的 webhook）显示每次投递的精确请求头、payload、HTTP 状态和响应体。这是无需查看服务器日志即可诊断故障的最快方式。</p>
+<hr />
+<h2 id="完整配置参考">完整配置参考</h2>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;0.0.0.0&quot;</span><span class="w">         </span><span class="c1"># 绑定地址（默认：0.0.0.0）</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8644</span><span class="w">               </span><span class="c1"># 监听端口（默认：8644）</span>
+<span class="w">      </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">               </span><span class="c1"># 可选的全局回退 secret</span>
+<span class="w">      </span><span class="nt">rate_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span><span class="w">           </span><span class="c1"># 每条路由每分钟请求数</span>
+<span class="w">      </span><span class="nt">max_body_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1048576</span><span class="w">  </span><span class="c1"># payload 大小限制，单位字节（默认：1 MB）</span>
+
+<span class="w">      </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">&lt;route-name&gt;</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;required-per-route&quot;</span>
+<span class="w">          </span><span class="nt">events</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">            </span><span class="c1"># [] = 接受所有；否则列出 X-GitHub-Event 值</span>
+<span class="w">          </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">            </span><span class="c1"># {field} / {nested.field} 从 payload 中解析</span>
+<span class="w">          </span><span class="nt">skills</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">            </span><span class="c1"># 加载第一个匹配的 skill（仅一个）</span>
+<span class="w">          </span><span class="nt">deliver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;log&quot;</span><span class="w">        </span><span class="c1"># log | github_comment | telegram | discord | slack | signal | sms</span>
+<span class="w">          </span><span class="nt">deliver_extra</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span><span class="w">     </span><span class="c1"># github_comment 需要 repo + pr_number；其他平台需要 chat_id</span>
+</code></pre></div>
+
+<hr />
+<h2 id="下一步">下一步</h2>
+<ul>
+<li><strong><a href="github-pr-review-agent.html">基于 Cron 的 PR 审查</a></strong> —— 按计划轮询 PR，无需公网端点</li>
+<li><strong><a href="../user-guide/messaging/webhooks.html">Webhook 参考</a></strong> —— webhook 平台的完整配置参考</li>
+<li><strong><a href="../developer-guide/plugins.html">构建 Plugin</a></strong> —— 将审查逻辑打包为可共享的 plugin</li>
+<li><strong><a href="../user-guide/profiles.html">Profiles</a></strong> —— 运行一个拥有独立内存和配置的专属审查者 profile</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/guides/webhook-github-pr-review</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#前提条件">前提条件</a></li>
+<li class="lvl2"><a href="#第一步启用-webhook-平台">第一步——启用 webhook 平台</a></li>
+<li class="lvl2"><a href="#第二步启动-gateway">第二步——启动 gateway</a></li>
+<li class="lvl2"><a href="#第三步在-github-上注册-webhook">第三步——在 GitHub 上注册 webhook</a></li>
+<li class="lvl2"><a href="#第四步打开一个测试-pr">第四步——打开一个测试 PR</a></li>
+<li class="lvl2"><a href="#使用-ngrok-进行本地测试">使用 ngrok 进行本地测试</a></li>
+<li class="lvl2"><a href="#过滤特定-action">过滤特定 action</a></li>
+<li class="lvl2"><a href="#使用-skill-保持一致的审查风格">使用 skill 保持一致的审查风格</a></li>
+<li class="lvl2"><a href="#将响应发送到-slack-或-discord">将响应发送到 Slack 或 Discord</a></li>
+<li class="lvl2"><a href="#gitlab-支持">GitLab 支持</a></li>
+<li class="lvl2"><a href="#安全说明">安全说明</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl2"><a href="#完整配置参考">完整配置参考</a></li>
+<li class="lvl2"><a href="#下一步">下一步</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

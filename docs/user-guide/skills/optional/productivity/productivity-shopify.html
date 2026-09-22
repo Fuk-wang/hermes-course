@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shopify — Query Shopify Admin/Storefront GraphQL APIs via curl · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/productivity/productivity-shopify</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="shopify">Shopify</h1>
+<p>Query Shopify Admin/Storefront GraphQL APIs via curl.</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/productivity/shopify</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/productivity\shopify</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>community</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>Shopify</code>, <code>E-commerce</code>, <code>Commerce</code>, <code>API</code>, <code>GraphQL</code></td>
+</tr>
+<tr>
+<td>Related skills</td>
+<td><a href="../../bundled/productivity/productivity-airtable.html"><code>airtable</code></a>, <a href="../../bundled/social-media/social-media-xurl.html"><code>xurl</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="shopify--admin--storefront-graphql-apis">Shopify — Admin &amp; Storefront GraphQL APIs</h1>
+<p>Work with Shopify stores directly through <code>curl</code>: list products, manage inventory, pull orders, update customers, read metafields. No SDK, no app framework — just the GraphQL endpoint and a custom-app access token.</p>
+<p>The REST Admin API is legacy since 2024-04 and only receives security fixes. <strong>Use GraphQL Admin</strong> for all admin work. Use <strong>Storefront GraphQL</strong> for read-only customer-facing queries (products, collections, cart).</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ol>
+<li>In Shopify admin: <strong>Settings → Apps and sales channels → Develop apps → Create an app</strong>.</li>
+<li>Click <strong>Configure Admin API scopes</strong>, select what you need (examples below), save.</li>
+<li><strong>Install app</strong> → the Admin API access token appears ONCE. Copy it immediately — Shopify will never show it again. Tokens start with <code>shpat_</code>.</li>
+<li>Save to <code>${HERMES_HOME:-~/.hermes}/.env</code>:
+   <code>SHOPIFY_ACCESS_TOKEN=shpat_xxxxxxxxxxxxxxxxxxxx
+   SHOPIFY_STORE_DOMAIN=my-store.myshopify.com
+   SHOPIFY_API_VERSION=2026-01</code></li>
+</ol>
+<blockquote>
+<p><strong>Heads up:</strong> As of January 1, 2026, new "legacy custom apps" created in the Shopify admin are gone. New setups should use the <strong>Dev Dashboard</strong> (<code>shopify.dev/docs/apps/build/dev-dashboard</code>). Existing admin-created apps keep working. If the user's shop has no existing custom app and it's after 2026-01-01, direct them to Dev Dashboard instead of the admin flow.</p>
+</blockquote>
+<p>Common scopes by task:
+- Products / collections: <code>read_products</code>, <code>write_products</code>
+- Inventory: <code>read_inventory</code>, <code>write_inventory</code>, <code>read_locations</code>
+- Orders: <code>read_orders</code>, <code>write_orders</code> (30 most recent without <code>read_all_orders</code>)
+- Customers: <code>read_customers</code>, <code>write_customers</code>
+- Draft orders: <code>read_draft_orders</code>, <code>write_draft_orders</code>
+- Fulfillments: <code>read_fulfillments</code>, <code>write_fulfillments</code>
+- Metafields / metaobjects: covered by the matching resource scopes</p>
+<h2 id="api-basics">API Basics</h2>
+<ul>
+<li><strong>Endpoint:</strong> <code>https://$SHOPIFY_STORE_DOMAIN/admin/api/$SHOPIFY_API_VERSION/graphql.json</code></li>
+<li><strong>Auth header:</strong> <code>X-Shopify-Access-Token: $SHOPIFY_ACCESS_TOKEN</code> (NOT <code>Authorization: Bearer</code>)</li>
+<li><strong>Method:</strong> always <code>POST</code>, always <code>Content-Type: application/json</code>, body is <code>{"query": "...", "variables": {...}}</code></li>
+<li><strong>HTTP 200 does not mean success.</strong> GraphQL returns errors in a top-level <code>errors</code> array and per-field <code>userErrors</code>. Always check both.</li>
+<li><strong>IDs are GID strings:</strong> <code>gid://shopify/Product/10079467700516</code>, <code>gid://shopify/Variant/...</code>, <code>gid://shopify/Order/...</code>. Pass these verbatim — don't strip the prefix.</li>
+<li><strong>Rate limit:</strong> calculated via query cost (leaky bucket). Each response has <code>extensions.cost</code> with <code>requestedQueryCost</code>, <code>actualQueryCost</code>, <code>throttleStatus.{currentlyAvailable, maximumAvailable, restoreRate}</code>. Back off when <code>currentlyAvailable</code> drops below your next query's cost. Standard shops = 100 points bucket, 50/s restore; Plus = 1000/100.</li>
+</ul>
+<p>Base curl pattern (reusable):</p>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">  </span><span class="nb">local</span><span class="w"> </span><span class="nv">query</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$1</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nb">local</span><span class="w"> </span><span class="nv">variables</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">2</span><span class="k">:-</span><span class="p">{</span><span class="si">}</span><span class="s2">}&quot;</span>
+<span class="w">  </span>curl<span class="w"> </span>-sS<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="s2">&quot;https://</span><span class="si">${</span><span class="nv">SHOPIFY_STORE_DOMAIN</span><span class="si">}</span><span class="s2">/admin/api/</span><span class="si">${</span><span class="nv">SHOPIFY_API_VERSION</span><span class="k">:-</span><span class="nv">2026</span><span class="p">-01</span><span class="si">}</span><span class="s2">/graphql.json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-H<span class="w"> </span><span class="s2">&quot;X-Shopify-Access-Token: </span><span class="si">${</span><span class="nv">SHOPIFY_ACCESS_TOKEN</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--data<span class="w"> </span><span class="s2">&quot;</span><span class="k">$(</span>jq<span class="w"> </span>-nc<span class="w"> </span>--arg<span class="w"> </span>q<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$query</span><span class="s2">&quot;</span><span class="w"> </span>--argjson<span class="w"> </span>v<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$variables</span><span class="s2">&quot;</span><span class="w"> </span><span class="s1">&#39;{query: $q, variables: $v}&#39;</span><span class="k">)</span><span class="s2">&quot;</span>
+<span class="o">}</span>
+</code></pre></div>
+
+<p>Pipe through <code>jq</code> for readable output. <code>-sS</code> keeps errors visible but hides the progress bar.</p>
+<h2 id="discovery">Discovery</h2>
+<h3 id="shop-info--current-api-version">Shop info + current API version</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;{ shop { name myshopifyDomain primaryDomain { url } currencyCode plan { displayName } } }&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h3 id="list-all-supported-api-versions">List all supported API versions</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;{ publicApiVersions { handle supported } }&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.data.publicApiVersions[] | select(.supported)&#39;</span>
+</code></pre></div>
+
+<h2 id="products">Products</h2>
+<h3 id="search-products-first-20-matching-query">Search products (first 20 matching query)</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($q: String!) {</span>
+<span class="s1">  products(first: 20, query: $q) {</span>
+<span class="s1">    edges { node { id title handle status totalInventory variants(first: 5) { edges { node { id sku price inventoryQuantity } } } } }</span>
+<span class="s1">    pageInfo { hasNextPage endCursor }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;q&quot;:&quot;hoodie status:active&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>Query syntax supports <code>title:</code>, <code>sku:</code>, <code>vendor:</code>, <code>product_type:</code>, <code>status:active</code>, <code>tag:</code>, <code>created_at:&gt;2025-01-01</code>. Full grammar: https://shopify.dev/docs/api/usage/search-syntax</p>
+<h3 id="paginate-products-cursor">Paginate products (cursor)</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($cursor: String) {</span>
+<span class="s1">  products(first: 100, after: $cursor) {</span>
+<span class="s1">    edges { cursor node { id handle } }</span>
+<span class="s1">    pageInfo { hasNextPage endCursor }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;cursor&quot;:null}&#39;</span>
+<span class="c1"># subsequent calls: pass the previous endCursor</span>
+</code></pre></div>
+
+<h3 id="get-a-product-with-variants--metafields">Get a product with variants + metafields</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($id: ID!) {</span>
+<span class="s1">  product(id: $id) {</span>
+<span class="s1">    id title handle descriptionHtml tags status</span>
+<span class="s1">    variants(first: 20) { edges { node { id sku price compareAtPrice inventoryQuantity selectedOptions { name value } } } }</span>
+<span class="s1">    metafields(first: 20) { edges { node { namespace key type value } } }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;id&quot;:&quot;gid://shopify/Product/10079467700516&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h3 id="create-a-product-with-one-variant">Create a product with one variant</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($input: ProductCreateInput!) {</span>
+<span class="s1">  productCreate(product: $input) {</span>
+<span class="s1">    product { id handle }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;input&quot;:{&quot;title&quot;:&quot;Test Hoodie&quot;,&quot;status&quot;:&quot;DRAFT&quot;,&quot;vendor&quot;:&quot;Hermes&quot;,&quot;productType&quot;:&quot;Apparel&quot;,&quot;tags&quot;:[&quot;test&quot;]}}&#39;</span>
+</code></pre></div>
+
+<p>Variants now have their own mutations in recent versions:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Add variants after creating the product</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {</span>
+<span class="s1">  productVariantsBulkCreate(productId: $productId, variants: $variants) {</span>
+<span class="s1">    productVariants { id sku price }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;productId&quot;:&quot;gid://shopify/Product/...&quot;,&quot;variants&quot;:[{&quot;optionValues&quot;:[{&quot;optionName&quot;:&quot;Size&quot;,&quot;name&quot;:&quot;M&quot;}],&quot;price&quot;:&quot;49.00&quot;,&quot;inventoryItem&quot;:{&quot;sku&quot;:&quot;HD-M&quot;,&quot;tracked&quot;:true}}]}&#39;</span>
+</code></pre></div>
+
+<h3 id="update-price--sku">Update price / SKU</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {</span>
+<span class="s1">  productVariantsBulkUpdate(productId: $productId, variants: $variants) {</span>
+<span class="s1">    productVariants { id sku price }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;productId&quot;:&quot;gid://shopify/Product/...&quot;,&quot;variants&quot;:[{&quot;id&quot;:&quot;gid://shopify/ProductVariant/...&quot;,&quot;price&quot;:&quot;55.00&quot;}]}&#39;</span>
+</code></pre></div>
+
+<h2 id="orders">Orders</h2>
+<h3 id="list-recent-orders-last-30-by-default-without-read_all_orders">List recent orders (last 30 by default without <code>read_all_orders</code>)</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">{</span>
+<span class="s1">  orders(first: 20, reverse: true, query: &quot;financial_status:paid&quot;) {</span>
+<span class="s1">    edges { node {</span>
+<span class="s1">      id name createdAt displayFinancialStatus displayFulfillmentStatus</span>
+<span class="s1">      totalPriceSet { shopMoney { amount currencyCode } }</span>
+<span class="s1">      customer { id displayName email }</span>
+<span class="s1">      lineItems(first: 10) { edges { node { title quantity sku } } }</span>
+<span class="s1">    } }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>Useful order query filters: <code>financial_status:paid|pending|refunded</code>, <code>fulfillment_status:unfulfilled|fulfilled</code>, <code>created_at:&gt;2025-01-01</code>, <code>tag:gift</code>, <code>email:foo@example.com</code>.</p>
+<h3 id="fetch-a-single-order-with-shipping-address">Fetch a single order with shipping address</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($id: ID!) {</span>
+<span class="s1">  order(id: $id) {</span>
+<span class="s1">    id name email</span>
+<span class="s1">    shippingAddress { name address1 address2 city province country zip phone }</span>
+<span class="s1">    lineItems(first: 50) { edges { node { title quantity variant { sku } originalUnitPriceSet { shopMoney { amount currencyCode } } } } }</span>
+<span class="s1">    transactions { id kind status amountSet { shopMoney { amount currencyCode } } }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;id&quot;:&quot;gid://shopify/Order/....&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h2 id="customers">Customers</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># Search</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">{</span>
+<span class="s1">  customers(first: 10, query: &quot;email:*@example.com&quot;) {</span>
+<span class="s1">    edges { node { id email displayName numberOfOrders amountSpent { amount currencyCode } } }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span>
+
+<span class="c1"># Create</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($input: CustomerInput!) {</span>
+<span class="s1">  customerCreate(input: $input) {</span>
+<span class="s1">    customer { id email }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;input&quot;:{&quot;email&quot;:&quot;test@example.com&quot;,&quot;firstName&quot;:&quot;Test&quot;,&quot;lastName&quot;:&quot;User&quot;,&quot;tags&quot;:[&quot;api-created&quot;]}}&#39;</span>
+</code></pre></div>
+
+<h2 id="inventory">Inventory</h2>
+<p>Inventory lives on <strong>inventory items</strong> tied to variants, quantities tracked per <strong>location</strong>.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Get inventory for a variant across all locations</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($id: ID!) {</span>
+<span class="s1">  productVariant(id: $id) {</span>
+<span class="s1">    id sku</span>
+<span class="s1">    inventoryItem {</span>
+<span class="s1">      id tracked</span>
+<span class="s1">      inventoryLevels(first: 10) {</span>
+<span class="s1">        edges { node { location { id name } quantities(names: [&quot;available&quot;,&quot;on_hand&quot;,&quot;committed&quot;]) { name quantity } } }</span>
+<span class="s1">      }</span>
+<span class="s1">    }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;id&quot;:&quot;gid://shopify/ProductVariant/...&quot;}&#39;</span>
+</code></pre></div>
+
+<p>Adjust stock (delta) — uses <code>inventoryAdjustQuantities</code>:</p>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($input: InventoryAdjustQuantitiesInput!) {</span>
+<span class="s1">  inventoryAdjustQuantities(input: $input) {</span>
+<span class="s1">    inventoryAdjustmentGroup { reason changes { name delta } }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">  &quot;input&quot;: {</span>
+<span class="s1">    &quot;reason&quot;: &quot;correction&quot;,</span>
+<span class="s1">    &quot;name&quot;: &quot;available&quot;,</span>
+<span class="s1">    &quot;changes&quot;: [{&quot;delta&quot;: 5, &quot;inventoryItemId&quot;: &quot;gid://shopify/InventoryItem/...&quot;, &quot;locationId&quot;: &quot;gid://shopify/Location/...&quot;}]</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span>
+</code></pre></div>
+
+<p>Set absolute stock (not delta) — <code>inventorySetQuantities</code>:</p>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($input: InventorySetQuantitiesInput!) {</span>
+<span class="s1">  inventorySetQuantities(input: $input) {</span>
+<span class="s1">    inventoryAdjustmentGroup { id }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;input&quot;:{&quot;reason&quot;:&quot;correction&quot;,&quot;name&quot;:&quot;available&quot;,&quot;ignoreCompareQuantity&quot;:true,&quot;quantities&quot;:[{&quot;inventoryItemId&quot;:&quot;gid://shopify/InventoryItem/...&quot;,&quot;locationId&quot;:&quot;gid://shopify/Location/...&quot;,&quot;quantity&quot;:100}]}}&#39;</span>
+</code></pre></div>
+
+<h2 id="metafields--metaobjects">Metafields &amp; Metaobjects</h2>
+<p>Metafields attach custom data to resources (products, customers, orders, shop).</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Read</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($id: ID!) {</span>
+<span class="s1">  product(id: $id) {</span>
+<span class="s1">    metafields(first: 10, namespace: &quot;custom&quot;) {</span>
+<span class="s1">      edges { node { key type value } }</span>
+<span class="s1">    }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;id&quot;:&quot;gid://shopify/Product/...&quot;}&#39;</span>
+
+<span class="c1"># Write (works for any owner type)</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($metafields: [MetafieldsSetInput!]!) {</span>
+<span class="s1">  metafieldsSet(metafields: $metafields) {</span>
+<span class="s1">    metafields { id key namespace }</span>
+<span class="s1">    userErrors { field message code }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;metafields&quot;:[{&quot;ownerId&quot;:&quot;gid://shopify/Product/...&quot;,&quot;namespace&quot;:&quot;custom&quot;,&quot;key&quot;:&quot;care_instructions&quot;,&quot;type&quot;:&quot;multi_line_text_field&quot;,&quot;value&quot;:&quot;Wash cold. Tumble dry low.&quot;}]}&#39;</span>
+</code></pre></div>
+
+<h2 id="storefront-api-public-read-only">Storefront API (public read-only)</h2>
+<p>Different endpoint, different token, used for customer-facing apps/hydrogen-style headless setups. Headers differ:</p>
+<ul>
+<li><strong>Endpoint:</strong> <code>https://$SHOPIFY_STORE_DOMAIN/api/$SHOPIFY_API_VERSION/graphql.json</code></li>
+<li><strong>Auth header (public):</strong> <code>X-Shopify-Storefront-Access-Token: &lt;public token&gt;</code> — embeddable in browser</li>
+<li><strong>Auth header (private):</strong> <code>Shopify-Storefront-Private-Token: &lt;private token&gt;</code> — server-only</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sS<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;https://</span><span class="si">${</span><span class="nv">SHOPIFY_STORE_DOMAIN</span><span class="si">}</span><span class="s2">/api/</span><span class="si">${</span><span class="nv">SHOPIFY_API_VERSION</span><span class="k">:-</span><span class="nv">2026</span><span class="p">-01</span><span class="si">}</span><span class="s2">/graphql.json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-Shopify-Storefront-Access-Token: </span><span class="si">${</span><span class="nv">SHOPIFY_STOREFRONT_TOKEN</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;query&quot;:&quot;{ shop { name } products(first: 5) { edges { node { id title handle } } } }&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h2 id="bulk-operations">Bulk Operations</h2>
+<p>For dumps larger than rate limits allow (full product catalog, all orders for a year):</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. Start bulk query</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation {</span>
+<span class="s1">  bulkOperationRunQuery(query: &quot;&quot;&quot;</span>
+<span class="s1">    { products { edges { node { id title handle variants { edges { node { sku price } } } } } } }</span>
+<span class="s1">  &quot;&quot;&quot;) {</span>
+<span class="s1">    bulkOperation { id status }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span>
+
+<span class="c1"># 2. Poll status</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;{ currentBulkOperation { id status errorCode objectCount fileSize url partialDataUrl } }&#39;</span>
+
+<span class="c1"># 3. When status=COMPLETED, download the JSONL file</span>
+curl<span class="w"> </span>-sS<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$URL</span><span class="s2">&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>products.jsonl
+</code></pre></div>
+
+<p>Each JSONL line is a node, and nested connections are emitted as separate lines with <code>__parentId</code>. Reassemble client-side if needed.</p>
+<h2 id="webhooks">Webhooks</h2>
+<p>Subscribe to events so you don't have to poll:</p>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($topic: WebhookSubscriptionTopic!, $sub: WebhookSubscriptionInput!) {</span>
+<span class="s1">  webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) {</span>
+<span class="s1">    webhookSubscription { id topic endpoint { __typename ... on WebhookHttpEndpoint { callbackUrl } } }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;topic&quot;:&quot;ORDERS_CREATE&quot;,&quot;sub&quot;:{&quot;callbackUrl&quot;:&quot;https://example.com/webhook&quot;,&quot;format&quot;:&quot;JSON&quot;}}&#39;</span>
+</code></pre></div>
+
+<p>Verify incoming webhook HMAC using the app's client secret (not the access token):</p>
+<div class="highlight"><pre><span></span><code><span class="nb">echo</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$REQUEST_BODY</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>openssl<span class="w"> </span>dgst<span class="w"> </span>-sha256<span class="w"> </span>-hmac<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$APP_SECRET</span><span class="s2">&quot;</span><span class="w"> </span>-binary<span class="w"> </span><span class="p">|</span><span class="w"> </span>base64
+<span class="c1"># Compare to X-Shopify-Hmac-Sha256 header</span>
+</code></pre></div>
+
+<h2 id="pitfalls">Pitfalls</h2>
+<ul>
+<li><strong>REST endpoints still exist but are frozen.</strong> Don't write new integrations against <code>/admin/api/.../products.json</code>. Use GraphQL.</li>
+<li><strong>Token format check.</strong> Admin tokens start with <code>shpat_</code>. Storefront public tokens with <code>shpua_</code>. If you have one and the wrong header, every request returns 401 without a useful error body.</li>
+<li><strong>403 with a valid token = missing scope.</strong> Shopify returns <code>{"errors":[{"message":"Access denied for ..."}]}</code>. Re-configure Admin API scopes on the app, then reinstall to regenerate the token.</li>
+<li><strong><code>userErrors</code> is empty != success.</strong> Also check <code>data.&lt;mutation&gt;.&lt;resource&gt;</code> is non-null. Some failures populate neither — inspect the whole response.</li>
+<li><strong>GID vs numeric ID.</strong> Legacy REST gave numeric IDs; GraphQL wants full GID strings. To convert: <code>gid://shopify/Product/&lt;numeric&gt;</code>.</li>
+<li><strong>Rate limit surprise.</strong> A single <code>products(first: 250)</code> with deep nesting can cost 1000+ points and throttle immediately on a standard-plan shop. Start narrow, read <code>extensions.cost</code>, adjust.</li>
+<li><strong>Pagination order.</strong> <code>products(first: N, reverse: true)</code> sorts by <code>id DESC</code>, not <code>created_at</code>. Use <code>sortKey: CREATED_AT, reverse: true</code> for "newest first."</li>
+<li><strong><code>read_all_orders</code> for historical data.</strong> Without it, <code>orders(...)</code> silently caps at the 60-day window. You won't get an error, just fewer results than expected. For Shopify Plus merchants with many orders, request this scope via the app's protected-data settings.</li>
+<li><strong>Currencies are strings.</strong> Amounts come back as <code>"49.00"</code> not <code>49.0</code>. Don't <code>jq tonumber</code> blindly if you care about zero-padding.</li>
+<li><strong>Multi-currency Money fields</strong> have <code>shopMoney</code> (store's currency) AND <code>presentmentMoney</code> (customer's). Pick one consistently.</li>
+</ul>
+<h2 id="safety">Safety</h2>
+<p>Mutations in Shopify are real — they create products, charge refunds, cancel orders, ship fulfillments. Before running <code>productDelete</code>, <code>orderCancel</code>, <code>refundCreate</code>, or any bulk mutation: state clearly what the change is, on which shop, and confirm with the user. There is no staging clone of production data unless the user has a separate dev store.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/productivity/productivity-shopify</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#api-basics">API Basics</a></li>
+<li class="lvl2"><a href="#discovery">Discovery</a></li>
+<li class="lvl3"><a href="#shop-info--current-api-version">Shop info + current API version</a></li>
+<li class="lvl3"><a href="#list-all-supported-api-versions">List all supported API versions</a></li>
+<li class="lvl2"><a href="#products">Products</a></li>
+<li class="lvl3"><a href="#search-products-first-20-matching-query">Search products (first 20 matching query)</a></li>
+<li class="lvl3"><a href="#paginate-products-cursor">Paginate products (cursor)</a></li>
+<li class="lvl3"><a href="#get-a-product-with-variants--metafields">Get a product with variants + metafields</a></li>
+<li class="lvl3"><a href="#create-a-product-with-one-variant">Create a product with one variant</a></li>
+<li class="lvl3"><a href="#update-price--sku">Update price / SKU</a></li>
+<li class="lvl2"><a href="#orders">Orders</a></li>
+<li class="lvl3"><a href="#list-recent-orders-last-30-by-default-without-read_all_orders">List recent orders (last 30 by default without read_all_orders)</a></li>
+<li class="lvl3"><a href="#fetch-a-single-order-with-shipping-address">Fetch a single order with shipping address</a></li>
+<li class="lvl2"><a href="#customers">Customers</a></li>
+<li class="lvl2"><a href="#inventory">Inventory</a></li>
+<li class="lvl2"><a href="#metafields--metaobjects">Metafields &amp;amp; Metaobjects</a></li>
+<li class="lvl2"><a href="#storefront-api-public-read-only">Storefront API (public read-only)</a></li>
+<li class="lvl2"><a href="#bulk-operations">Bulk Operations</a></li>
+<li class="lvl2"><a href="#webhooks">Webhooks</a></li>
+<li class="lvl2"><a href="#pitfalls">Pitfalls</a></li>
+<li class="lvl2"><a href="#safety">Safety</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Automate Anything with Cron · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/automate-with-cron</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="automate-anything-with-cron">Automate Anything with Cron</h1>
+<p>The <a href="daily-briefing-bot.html">daily briefing bot tutorial</a> covers the basics. This guide goes further — five real-world automation patterns you can adapt for your own workflows.</p>
+<p>For the full feature reference, see <a href="../user-guide/features/cron.html">Scheduled Tasks (Cron)</a>.</p>
+<div class="admonition adm-info"><p class="adm-title">Key Concept</p>
+<p>Cron jobs run in fresh agent sessions with no memory of your current chat. Prompts must be <strong>completely self-contained</strong> — include everything the agent needs to know.</p>
+</div>
+<div class="admonition adm-tip"><p class="adm-title">Don&#x27;t need the LLM? You have two zero-token options.</p>
+<ul>
+<li><strong>Recurring watchdog</strong> where the script already produces the exact message (memory alerts, disk alerts, heartbeats): use <a href="cron-script-only.html">script-only cron jobs</a>. Same scheduler, no LLM. You can ask Hermes to set one up for you in chat — the <code>cronjob</code> tool knows when to pick <code>no_agent=True</code> and writes the script for you.</li>
+<li><strong>One-shot from a script that's already running</strong> (CI step, post-commit hook, deploy script, externally-scheduled monitor): use <a href="pipe-script-output.html"><code>hermes send</code></a> to pipe stdout or a file straight to Telegram / Discord / Slack / etc. without setting up a cron entry.</li>
+</ul>
+</div>
+<hr />
+<h2 id="pattern-1-website-change-monitor">Pattern 1: Website Change Monitor</h2>
+<p>Watch a URL for changes and get notified only when something is different.</p>
+<p>The <code>script</code> parameter is the secret weapon here. A Python script runs before each execution, and its stdout becomes context for the agent. The script handles the mechanical work (fetching, diffing); the agent handles the reasoning (is this change interesting?).</p>
+<p>Create the monitoring script:</p>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.hermes/scripts
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="n">URL</span> <span class="o">=</span> <span class="s2">&quot;https://example.com/pricing&quot;</span>
+<span class="n">STATE_FILE</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">expanduser</span><span class="p">(</span><span class="s2">&quot;~/.hermes/scripts/.watch-site-state.json&quot;</span><span class="p">)</span>
+
+<span class="c1"># Fetch current content</span>
+<span class="n">req</span> <span class="o">=</span> <span class="n">urllib</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">Request</span><span class="p">(</span><span class="n">URL</span><span class="p">,</span> <span class="n">headers</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;User-Agent&quot;</span><span class="p">:</span> <span class="s2">&quot;Hermes-Monitor/1.0&quot;</span><span class="p">})</span>
+<span class="n">content</span> <span class="o">=</span> <span class="n">urllib</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">urlopen</span><span class="p">(</span><span class="n">req</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()</span><span class="o">.</span><span class="n">decode</span><span class="p">()</span>
+<span class="n">current_hash</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">(</span><span class="n">content</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()</span>
+
+<span class="c1"># Load previous state</span>
+<span class="n">prev_hash</span> <span class="o">=</span> <span class="kc">None</span>
+<span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">STATE_FILE</span><span class="p">):</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">STATE_FILE</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">prev_hash</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;hash&quot;</span><span class="p">)</span>
+
+<span class="c1"># Save current state</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">STATE_FILE</span><span class="p">,</span> <span class="s2">&quot;w&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">json</span><span class="o">.</span><span class="n">dump</span><span class="p">({</span><span class="s2">&quot;hash&quot;</span><span class="p">:</span> <span class="n">current_hash</span><span class="p">,</span> <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="n">URL</span><span class="p">},</span> <span class="n">f</span><span class="p">)</span>
+
+<span class="c1"># Output for the agent</span>
+<span class="k">if</span> <span class="n">prev_hash</span> <span class="ow">and</span> <span class="n">prev_hash</span> <span class="o">!=</span> <span class="n">current_hash</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;CHANGE DETECTED on </span><span class="si">{</span><span class="n">URL</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Previous hash: </span><span class="si">{</span><span class="n">prev_hash</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Current hash: </span><span class="si">{</span><span class="n">current_hash</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">Current content (first 2000 chars):</span><span class="se">\n</span><span class="si">{</span><span class="n">content</span><span class="p">[:</span><span class="mi">2000</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;NO_CHANGE&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Set up the cron job:</p>
+<div class="highlight"><pre><span></span><code>/cron<span class="w"> </span>add<span class="w"> </span><span class="s2">&quot;every 1h&quot;</span><span class="w"> </span><span class="s2">&quot;If the script output says CHANGE DETECTED, summarize what changed on the page and why it might matter. If it says NO_CHANGE, respond with just [SILENT].&quot;</span><span class="w"> </span>--script<span class="w"> </span>~/.hermes/scripts/watch-site.py<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;Pricing monitor&quot;</span><span class="w"> </span>--deliver<span class="w"> </span>telegram
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">The [SILENT] Trick</p>
+<p>For cron monitoring jobs, instruct the agent to respond with only <code>[SILENT]</code> when nothing changed. Cron delivery treats <code>[SILENT]</code> as the quiet marker, so you only get notified when something actually happens — no spam on quiet hours.</p>
+</div>
+<div class="admonition adm-tip"><p class="adm-title">Keeping failure notices out of shared channels</p>
+<p><code>[SILENT]</code> only applies to successful runs — when a job hard-fails, the engine posts a <code>⚠️ Cron 'X' failed…</code> notice to the job's delivery target. For jobs that deliver into busy shared channels, set <code>--failure-deliver local</code> to suppress those notices entirely (run state stays visible in <code>hermes cron list</code> and run history), or point failures at an ops channel with <code>--failure-deliver slack:C_OPS</code>. Same grammar as <code>--deliver</code>; omit it and failures follow <code>--deliver</code> as before.</p>
+</div>
+<hr />
+<h2 id="pattern-2-weekly-report">Pattern 2: Weekly Report</h2>
+<p>Compile information from multiple sources into a formatted summary. This runs once a week and delivers to your home channel.</p>
+<div class="highlight"><pre><span></span><code>/cron<span class="w"> </span>add<span class="w"> </span><span class="s2">&quot;0 9 * * 1&quot;</span><span class="w"> </span><span class="s2">&quot;Generate a weekly report covering:</span>
+
+<span class="s2">1. Search the web for the top 5 AI news stories from the past week</span>
+<span class="s2">2. Search GitHub for trending repositories in the &#39;machine-learning&#39; topic</span>
+<span class="s2">3. Check Hacker News for the most discussed AI/ML posts</span>
+
+<span class="s2">Format as a clean summary with sections for each source. Include links.</span>
+<span class="s2">Keep it under 500 words — highlight only what matters.&quot;</span><span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;Weekly AI digest&quot;</span><span class="w"> </span>--deliver<span class="w"> </span>telegram
+</code></pre></div>
+
+<p>From the CLI:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;0 9 * * 1&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;Generate a weekly report covering the top AI news, trending ML GitHub repos, and most-discussed HN posts. Format with sections, include links, keep under 500 words.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;Weekly AI digest&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram
+</code></pre></div>
+
+<p>The <code>0 9 * * 1</code> is a standard cron expression: 9:00 AM every Monday.</p>
+<hr />
+<h2 id="pattern-3-github-repository-watcher">Pattern 3: GitHub Repository Watcher</h2>
+<p>Monitor a repository for new issues, PRs, or releases.</p>
+<div class="highlight"><pre><span></span><code>/cron<span class="w"> </span>add<span class="w"> </span><span class="s2">&quot;every 6h&quot;</span><span class="w"> </span><span class="s2">&quot;Check the GitHub repository NousResearch/hermes-agent for:</span>
+<span class="s2">- New issues opened in the last 6 hours</span>
+<span class="s2">- New PRs opened or merged in the last 6 hours</span>
+<span class="s2">- Any new releases</span>
+
+<span class="s2">Use the terminal to run gh commands:</span>
+<span class="s2">  gh issue list --repo NousResearch/hermes-agent --state open --json number,title,author,createdAt --limit 10</span>
+<span class="s2">  gh pr list --repo NousResearch/hermes-agent --state all --json number,title,author,createdAt,mergedAt --limit 10</span>
+
+<span class="s2">Filter to only items from the last 6 hours. If nothing new, respond with [SILENT].</span>
+<span class="s2">Otherwise, provide a concise summary of the activity.&quot;</span><span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;Repo watcher&quot;</span><span class="w"> </span>--deliver<span class="w"> </span>discord
+</code></pre></div>
+
+<div class="admonition adm-warning"><p class="adm-title">Self-Contained Prompts</p>
+<p>Notice how the prompt includes the exact <code>gh</code> commands. The cron agent has no conversation history from previous runs — spell everything out. (Persistent memory does load, so durable preferences saved to MEMORY.md carry over, but don't rely on it for job-critical details.)</p>
+</div>
+<hr />
+<h2 id="pattern-4-data-collection-pipeline">Pattern 4: Data Collection Pipeline</h2>
+<p>Scrape data at regular intervals, save to files, and detect trends over time. This pattern combines a script (for collection) with the agent (for analysis).</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">datetime</span>
+
+<span class="n">DATA_DIR</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">expanduser</span><span class="p">(</span><span class="s2">&quot;~/.hermes/data/prices&quot;</span><span class="p">)</span>
+<span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="n">DATA_DIR</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="c1"># Fetch current data (example: crypto prices)</span>
+<span class="n">url</span> <span class="o">=</span> <span class="s2">&quot;https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&amp;vs_currencies=usd&quot;</span>
+<span class="n">data</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">urllib</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">urlopen</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+
+<span class="c1"># Append to history file</span>
+<span class="n">entry</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;timestamp&quot;</span><span class="p">:</span> <span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span><span class="o">.</span><span class="n">isoformat</span><span class="p">(),</span> <span class="s2">&quot;prices&quot;</span><span class="p">:</span> <span class="n">data</span><span class="p">}</span>
+<span class="n">history_file</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">DATA_DIR</span><span class="p">,</span> <span class="s2">&quot;history.jsonl&quot;</span><span class="p">)</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">history_file</span><span class="p">,</span> <span class="s2">&quot;a&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">entry</span><span class="p">)</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="c1"># Load recent history for analysis</span>
+<span class="n">lines</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="n">history_file</span><span class="p">)</span><span class="o">.</span><span class="n">readlines</span><span class="p">()</span>
+<span class="n">recent</span> <span class="o">=</span> <span class="p">[</span><span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">l</span><span class="p">)</span> <span class="k">for</span> <span class="n">l</span> <span class="ow">in</span> <span class="n">lines</span><span class="p">[</span><span class="o">-</span><span class="mi">24</span><span class="p">:]]</span>  <span class="c1"># Last 24 data points</span>
+
+<span class="c1"># Output for the agent</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Current: BTC=$</span><span class="si">{</span><span class="n">data</span><span class="p">[</span><span class="s1">&#39;bitcoin&#39;</span><span class="p">][</span><span class="s1">&#39;usd&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">, ETH=$</span><span class="si">{</span><span class="n">data</span><span class="p">[</span><span class="s1">&#39;ethereum&#39;</span><span class="p">][</span><span class="s1">&#39;usd&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Data points collected: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">lines</span><span class="p">)</span><span class="si">}</span><span class="s2"> total, showing last </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">recent</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">Recent history:&quot;</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">recent</span><span class="p">[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  </span><span class="si">{</span><span class="n">r</span><span class="p">[</span><span class="s1">&#39;timestamp&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">: BTC=$</span><span class="si">{</span><span class="n">r</span><span class="p">[</span><span class="s1">&#39;prices&#39;</span><span class="p">][</span><span class="s1">&#39;bitcoin&#39;</span><span class="p">][</span><span class="s1">&#39;usd&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">, ETH=$</span><span class="si">{</span><span class="n">r</span><span class="p">[</span><span class="s1">&#39;prices&#39;</span><span class="p">][</span><span class="s1">&#39;ethereum&#39;</span><span class="p">][</span><span class="s1">&#39;usd&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>/cron<span class="w"> </span>add<span class="w"> </span><span class="s2">&quot;every 1h&quot;</span><span class="w"> </span><span class="s2">&quot;Analyze the price data from the script output. Report:</span>
+<span class="s2">1. Current prices</span>
+<span class="s2">2. Trend direction over the last 6 data points (up/down/flat)</span>
+<span class="s2">3. Any notable movements (&gt;5% change)</span>
+
+<span class="s2">If prices are flat and nothing notable, respond with [SILENT].</span>
+<span class="s2">If there&#39;s a significant move, explain what happened.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--script<span class="w"> </span>~/.hermes/scripts/collect-prices.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;Price tracker&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span>telegram
+</code></pre></div>
+
+<p>The script does the mechanical collection; the agent adds the reasoning layer.</p>
+<hr />
+<h2 id="pattern-5-multi-skill-workflow">Pattern 5: Multi-Skill Workflow</h2>
+<p>Chain skills together for complex scheduled tasks. Skills are loaded in order before the prompt executes.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Use the arxiv skill to find papers, then the obsidian skill to save notes</span>
+/cron<span class="w"> </span>add<span class="w"> </span><span class="s2">&quot;0 8 * * *&quot;</span><span class="w"> </span><span class="s2">&quot;Search arXiv for the 3 most interesting papers on &#39;language model reasoning&#39; from the past day. For each paper, create an Obsidian note with the title, authors, abstract summary, and key contribution.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>arxiv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>obsidian<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;Paper digest&quot;</span>
+</code></pre></div>
+
+<p>From the tool directly:</p>
+<div class="highlight"><pre><span></span><code><span class="n">cronjob</span><span class="p">(</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;create&quot;</span><span class="p">,</span>
+    <span class="n">skills</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;arxiv&quot;</span><span class="p">,</span> <span class="s2">&quot;obsidian&quot;</span><span class="p">],</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;Search arXiv for papers on &#39;language model reasoning&#39; from the past day. Save the top 3 as Obsidian notes.&quot;</span><span class="p">,</span>
+    <span class="n">schedule</span><span class="o">=</span><span class="s2">&quot;0 8 * * *&quot;</span><span class="p">,</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Paper digest&quot;</span><span class="p">,</span>
+    <span class="n">deliver</span><span class="o">=</span><span class="s2">&quot;local&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>Skills are loaded in order — <code>arxiv</code> first (teaches the agent how to search papers), then <code>obsidian</code> (teaches how to write notes). The prompt ties them together.</p>
+<hr />
+<h2 id="managing-your-jobs">Managing Your Jobs</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># List all active jobs</span>
+/cron<span class="w"> </span>list
+
+<span class="c1"># Trigger a job immediately (for testing)</span>
+/cron<span class="w"> </span>run<span class="w"> </span>&lt;job_id&gt;
+
+<span class="c1"># Pause a job without deleting it</span>
+/cron<span class="w"> </span>pause<span class="w"> </span>&lt;job_id&gt;
+
+<span class="c1"># Edit a running job&#39;s schedule or prompt</span>
+/cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--schedule<span class="w"> </span><span class="s2">&quot;every 4h&quot;</span>
+/cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--prompt<span class="w"> </span><span class="s2">&quot;Updated task description&quot;</span>
+
+<span class="c1"># Add or remove skills from an existing job</span>
+/cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--skill<span class="w"> </span>arxiv<span class="w"> </span>--skill<span class="w"> </span>obsidian
+/cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w"> </span>--clear-skills
+
+<span class="c1"># Remove a job permanently</span>
+/cron<span class="w"> </span>remove<span class="w"> </span>&lt;job_id&gt;
+</code></pre></div>
+
+<hr />
+<h2 id="delivery-targets">Delivery Targets</h2>
+<p>The <code>--deliver</code> flag controls where results go:</p>
+<table>
+<thead>
+<tr>
+<th>Target</th>
+<th>Example</th>
+<th>Use case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>origin</code></td>
+<td><code>--deliver origin</code></td>
+<td>Same chat that created the job (default)</td>
+</tr>
+<tr>
+<td><code>local</code></td>
+<td><code>--deliver local</code></td>
+<td>Save to local file only</td>
+</tr>
+<tr>
+<td><code>telegram</code></td>
+<td><code>--deliver telegram</code></td>
+<td>Your Telegram home channel</td>
+</tr>
+<tr>
+<td><code>discord</code></td>
+<td><code>--deliver discord</code></td>
+<td>Your Discord home channel</td>
+</tr>
+<tr>
+<td><code>slack</code></td>
+<td><code>--deliver slack</code></td>
+<td>Your Slack home channel</td>
+</tr>
+<tr>
+<td>Specific chat</td>
+<td><code>--deliver telegram:-1001234567890</code></td>
+<td>A specific Telegram group</td>
+</tr>
+<tr>
+<td>Threaded</td>
+<td><code>--deliver telegram:-1001234567890:17585</code></td>
+<td>A specific Telegram topic thread</td>
+</tr>
+<tr>
+<td>Bot Chat</td>
+<td><code>--deliver bot-chat</code></td>
+<td>Inject output into this profile's canonical Bot Chat — the bot reads it and responds</td>
+</tr>
+<tr>
+<td>Bot Chat (named)</td>
+<td><code>--deliver bot-chat:research</code></td>
+<td>Another local profile's Bot Chat</td>
+</tr>
+</tbody>
+</table>
+<h3 id="bot-chat-delivery">Bot Chat delivery</h3>
+<p><code>bot-chat</code> targets deliver the job's output <strong>into a profile's canonical "Bot
+Chat" session as a real message</strong> — the bot receives it like any other message,
+acts on anything that needs action, and responds in that chat. This is the
+target to use when you want a bot to <em>see and react to</em> scheduled output
+instead of just having it archived in Run history.</p>
+<p>Things to know:</p>
+<ul>
+<li><strong>Machine-local.</strong> The profile must exist on the machine running the
+  scheduler (<code>hermes profile list</code>). Names are validated at create time;
+  profiles on other gateways/machines cannot be targeted.</li>
+<li><strong>Costs a bot turn.</strong> Each delivery runs a full agent turn in the target
+  bot's Bot Chat — budget accordingly for high-frequency jobs.</li>
+<li><strong>Combinable.</strong> <code>--deliver bot-chat,telegram</code> posts to the bot AND your
+  Telegram home channel. The <code>all</code> token never expands to bot-chat targets.</li>
+<li>The delivered message is prefixed so the bot knows it came from a scheduled
+  job, not from you.</li>
+</ul>
+<hr />
+<h2 id="tips">Tips</h2>
+<p><strong>Make prompts self-contained.</strong> The agent in a cron job has no memory of your conversations. Include URLs, repo names, format preferences, and delivery instructions directly in the prompt.</p>
+<p><strong>Use <code>[SILENT]</code> deliberately.</strong> For monitoring jobs, include instructions like "if nothing changed, respond with only <code>[SILENT]</code>." Do not ask the agent to explain the token in quiet cases — cron treats <code>[SILENT]</code> as the delivery-suppression marker.</p>
+<p><strong>Use scripts for data collection.</strong> The <code>script</code> parameter lets a Python script handle the boring parts (HTTP requests, file I/O, state tracking). The agent only sees the script's stdout and applies reasoning to it. This is cheaper and more reliable than having the agent do the fetching itself.</p>
+<p><strong>Test with <code>/cron run</code>.</strong> Before waiting for the schedule to trigger, use <code>/cron run &lt;job_id&gt;</code> to execute immediately and verify the output looks right.</p>
+<p><strong>Schedule expressions.</strong> Supported formats: relative delays (<code>30m</code>), intervals (<code>every 2h</code>), standard cron expressions (<code>0 9 * * *</code>), and ISO timestamps (<code>2025-06-15T09:00:00</code>). Natural language like <code>daily at 9am</code> is not supported — use <code>0 9 * * *</code> instead.</p>
+<hr />
+<p><em>For the complete cron reference — all parameters, edge cases, and internals — see <a href="../user-guide/features/cron.html">Scheduled Tasks (Cron)</a>.</em></p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/automate-with-cron</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#pattern-1-website-change-monitor">Pattern 1: Website Change Monitor</a></li>
+<li class="lvl2"><a href="#pattern-2-weekly-report">Pattern 2: Weekly Report</a></li>
+<li class="lvl2"><a href="#pattern-3-github-repository-watcher">Pattern 3: GitHub Repository Watcher</a></li>
+<li class="lvl2"><a href="#pattern-4-data-collection-pipeline">Pattern 4: Data Collection Pipeline</a></li>
+<li class="lvl2"><a href="#pattern-5-multi-skill-workflow">Pattern 5: Multi-Skill Workflow</a></li>
+<li class="lvl2"><a href="#managing-your-jobs">Managing Your Jobs</a></li>
+<li class="lvl2"><a href="#delivery-targets">Delivery Targets</a></li>
+<li class="lvl3"><a href="#bot-chat-delivery">Bot Chat delivery</a></li>
+<li class="lvl2"><a href="#tips">Tips</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

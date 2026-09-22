@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delegation &amp; Parallel Work · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/delegation-patterns</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="delegation--parallel-work">Delegation &amp; Parallel Work</h1>
+<p>Hermes can spawn isolated child agents to work on tasks in parallel. Each subagent gets its own conversation, terminal session, and toolset. Only the final summary comes back — intermediate tool calls never enter your context window.</p>
+<p>For the full feature reference, see <a href="../user-guide/features/delegation.html">Subagent Delegation</a>.</p>
+<hr />
+<h2 id="when-to-delegate">When to Delegate</h2>
+<p><strong>Good candidates for delegation:</strong>
+- Reasoning-heavy subtasks (debugging, code review, research synthesis)
+- Tasks that would flood your context with intermediate data
+- Parallel independent workstreams (research A and B simultaneously)
+- Fresh-context tasks where you want the agent to approach without bias</p>
+<p><strong>Use something else:</strong>
+- Single tool call → just use the tool directly
+- Mechanical multi-step work with logic between steps → <code>execute_code</code>
+- Tasks needing user interaction → subagents can't use <code>clarify</code>
+- Quick file edits → do them directly
+- Durable long-running work that must survive session closure or process restart → <code>cronjob</code> or <code>terminal(background=True, notify_on_complete=True)</code>. Top-level delegation is asynchronous but still process-local.</p>
+<hr />
+<h2 id="pattern-parallel-research">Pattern: Parallel Research</h2>
+<p>Research three topics simultaneously and get structured summaries back:</p>
+<div class="highlight"><pre><span></span><code>Research these three topics in parallel:
+1. Current state of WebAssembly outside the browser
+2. RISC-V server chip adoption in 2025
+3. Practical quantum computing applications
+
+Focus on recent developments and key players.
+</code></pre></div>
+
+<p>Behind the scenes, Hermes uses:</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span><span class="n">tasks</span><span class="o">=</span><span class="p">[</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Research WebAssembly outside the browser in 2025&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Focus on: runtimes (Wasmtime, Wasmer), cloud/edge use cases, WASI progress&quot;</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Research RISC-V server chip adoption&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Focus on: server chips shipping, cloud providers adopting, software ecosystem&quot;</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Research practical quantum computing applications&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Focus on: error correction breakthroughs, real-world use cases, key companies&quot;</span>
+    <span class="p">}</span>
+<span class="p">])</span>
+</code></pre></div>
+
+<p>All three run concurrently. Each subagent searches the web independently and returns a summary. The parent agent then synthesizes them into a coherent briefing.</p>
+<hr />
+<h2 id="pattern-code-review">Pattern: Code Review</h2>
+<p>Delegate a security review to a fresh-context subagent that approaches the code without preconceptions:</p>
+<div class="highlight"><pre><span></span><code>Review the authentication module at src/auth/ for security issues.
+Check for SQL injection, JWT validation problems, password handling,
+and session management. Fix anything you find and run the tests.
+</code></pre></div>
+
+<p>The key is the <code>context</code> field — it must include everything the subagent needs:</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Review src/auth/ for security issues and fix any found&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;Project at /home/user/webapp. Python 3.11, Flask, PyJWT, bcrypt.</span>
+<span class="s2">    Auth files: src/auth/login.py, src/auth/jwt.py, src/auth/middleware.py</span>
+<span class="s2">    Test command: pytest tests/auth/ -v</span>
+<span class="s2">    Focus on: SQL injection, JWT validation, password hashing, session management.</span>
+<span class="s2">    Fix issues found and verify tests pass.&quot;&quot;&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<div class="admonition adm-warning"><p class="adm-title">The Context Problem</p>
+<p>Subagents know <strong>absolutely nothing</strong> about your conversation. They start completely fresh. If you delegate "fix the bug we were discussing," the subagent has no idea what bug you mean. Always pass file paths, error messages, project structure, and constraints explicitly.</p>
+</div>
+<hr />
+<h2 id="pattern-compare-alternatives">Pattern: Compare Alternatives</h2>
+<p>Evaluate multiple approaches to the same problem in parallel, then pick the best:</p>
+<div class="highlight"><pre><span></span><code>I need to add full-text search to our Django app. Evaluate three approaches
+in parallel:
+1. PostgreSQL tsvector (built-in)
+2. Elasticsearch via django-elasticsearch-dsl
+3. Meilisearch via meilisearch-python
+
+For each: setup complexity, query capabilities, resource requirements,
+and maintenance overhead. Compare them and recommend one.
+</code></pre></div>
+
+<p>Each subagent researches one option independently. Because they're isolated, there's no cross-contamination — each evaluation stands on its own merits. The parent agent gets all three summaries and makes the comparison.</p>
+<hr />
+<h2 id="pattern-multi-file-refactoring">Pattern: Multi-File Refactoring</h2>
+<p>Split a large refactoring task across parallel subagents, each handling a different part of the codebase:</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span><span class="n">tasks</span><span class="o">=</span><span class="p">[</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Refactor all API endpoint handlers to use the new response format&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;&quot;Project at /home/user/api-server.</span>
+<span class="s2">        Files: src/handlers/users.py, src/handlers/auth.py, src/handlers/billing.py</span>
+<span class="s2">        Old format: return {&quot;data&quot;: result, &quot;status&quot;: &quot;ok&quot;}</span>
+<span class="s2">        New format: return APIResponse(data=result, status=200).to_dict()</span>
+<span class="s2">        Import: from src.responses import APIResponse</span>
+<span class="s2">        Run tests after: pytest tests/handlers/ -v&quot;&quot;&quot;</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Update all client SDK methods to handle the new response format&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;&quot;Project at /home/user/api-server.</span>
+<span class="s2">        Files: sdk/python/client.py, sdk/python/models.py</span>
+<span class="s2">        Old parsing: result = response.json()[&quot;data&quot;]</span>
+<span class="s2">        New parsing: result = response.json()[&quot;data&quot;] (same key, but add status code checking)</span>
+<span class="s2">        Also update sdk/python/tests/test_client.py&quot;&quot;&quot;</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Update API documentation to reflect the new response format&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;&quot;Project at /home/user/api-server.</span>
+<span class="s2">        Docs at: docs/api/. Format: Markdown with code examples.</span>
+<span class="s2">        Update all response examples from old format to new format.</span>
+<span class="s2">        Add a &#39;Response Format&#39; section to docs/api/overview.md explaining the schema.&quot;&quot;&quot;</span>
+    <span class="p">}</span>
+<span class="p">])</span>
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Each subagent gets its own terminal session. They can work on the same project directory without stepping on each other — as long as they're editing different files. If two subagents might touch the same file, handle that file yourself after the parallel work completes.</p>
+</div>
+<hr />
+<h2 id="pattern-gather-then-analyze">Pattern: Gather Then Analyze</h2>
+<p>Use <code>execute_code</code> for mechanical data gathering, then delegate the reasoning-heavy analysis:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Step 1: Mechanical gathering (execute_code is better here — no reasoning needed)</span>
+<span class="n">execute_code</span><span class="p">(</span><span class="s2">&quot;&quot;&quot;</span>
+<span class="s2">from hermes_tools import web_search, web_extract</span>
+
+<span class="s2">results = []</span>
+<span class="s2">for query in [&quot;AI funding Q1 2026&quot;, &quot;AI startup acquisitions 2026&quot;, &quot;AI IPOs 2026&quot;]:</span>
+<span class="s2">    r = web_search(query, limit=5)</span>
+<span class="s2">    for item in r[&quot;data&quot;][&quot;web&quot;]:</span>
+<span class="s2">        results.append({&quot;title&quot;: item[&quot;title&quot;], &quot;url&quot;: item[&quot;url&quot;], &quot;desc&quot;: item[&quot;description&quot;]})</span>
+
+<span class="s2"># Extract full content from top 5 most relevant</span>
+<span class="s2">urls = [r[&quot;url&quot;] for r in results[:5]]</span>
+<span class="s2">content = web_extract(urls)</span>
+
+<span class="s2"># Save for the analysis step</span>
+
+<span class="s2">with open(os.path.expanduser(&quot;~/.hermes/cache/scratch/ai-funding-data.json&quot;), &quot;w&quot;) as f:</span>
+<span class="s2">    json.dump({&quot;search_results&quot;: results, &quot;extracted&quot;: content[&quot;results&quot;]}, f)</span>
+<span class="s2">print(f&quot;Collected {len(results)} results, extracted {len(content[&#39;results&#39;])} pages&quot;)</span>
+<span class="s2">&quot;&quot;&quot;</span><span class="p">)</span>
+
+<span class="c1"># Step 2: Reasoning-heavy analysis (delegation is better here)</span>
+<span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Analyze AI funding data and write a market report&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;Raw data at ~/.hermes/cache/scratch/ai-funding-data.json contains search results and</span>
+<span class="s2">    extracted web pages about AI funding, acquisitions, and IPOs in Q1 2026.</span>
+<span class="s2">    Write a structured market report: key deals, trends, notable players,</span>
+<span class="s2">    and outlook. Focus on deals over $100M.&quot;&quot;&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>This is often the most efficient pattern: <code>execute_code</code> handles the 10+ sequential tool calls cheaply, then a subagent does the single expensive reasoning task with a clean context.</p>
+<hr />
+<h2 id="inherited-tool-access">Inherited Tool Access</h2>
+<p>Subagents inherit the parent's enabled toolsets. <code>delegate_task</code> does not accept a model-facing <code>toolsets</code> parameter, so delegated work cannot grant itself capabilities that the parent does not have. Configure the parent's tools before starting the conversation when a delegated task needs web, terminal, file, or other access. Hermes still strips child-blocked tools such as <code>clarify</code>, <code>memory</code>, and <code>send_message</code>; children keep <code>execute_code</code> for programmatic tool calling.</p>
+<hr />
+<h2 id="constraints">Constraints</h2>
+<ul>
+<li><strong>Default 10 parallel tasks</strong>: batches default to 10 concurrent subagents (configurable via <code>delegation.max_concurrent_children</code> in config.yaml, no hard ceiling, only a floor of 1)</li>
+<li><strong>Nested delegation is opt-in</strong>: leaf subagents (default) cannot call <code>delegate_task</code>, <code>clarify</code>, <code>memory</code>, or <code>execute_code</code>. Orchestrator subagents (<code>role="orchestrator"</code>) retain <code>delegate_task</code> for further delegation, but only when <code>delegation.max_spawn_depth</code> is raised above the default of 1 (floor 1, no ceiling); the other three remain blocked. Disable globally via <code>delegation.orchestrator_enabled: false</code>.</li>
+</ul>
+<h3 id="tuning-concurrency-and-depth">Tuning Concurrency and Depth</h3>
+<table>
+<thead>
+<tr>
+<th>Config</th>
+<th>Default</th>
+<th>Range</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_concurrent_children</code></td>
+<td>10</td>
+<td>&gt;=1</td>
+<td>Parallel batch size per <code>delegate_task</code> call</td>
+</tr>
+<tr>
+<td><code>max_spawn_depth</code></td>
+<td>1</td>
+<td>&gt;=1</td>
+<td>How many delegation levels can spawn further</td>
+</tr>
+</tbody>
+</table>
+<p>Example: running 30 parallel workers with nested subagents:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">delegation</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">max_concurrent_children</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span>
+<span class="w">  </span><span class="nt">max_spawn_depth</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+</code></pre></div>
+
+<ul>
+<li><strong>Separate terminals</strong> — each subagent gets its own terminal session with separate working directory and state</li>
+<li><strong>No conversation history</strong> — subagents see only the <code>goal</code> and <code>context</code> the parent agent passes when calling <code>delegate_task</code></li>
+<li><strong>Default 250 iterations</strong> — set <code>delegation.max_iterations</code> lower in <code>config.yaml</code> for fleets of simple tasks to save cost</li>
+<li><strong>Not durable</strong> — top-level delegation runs in the background and posts its result back later, but it remains tied to the owning session and Hermes process. Session closure, <code>/stop</code>, <code>/new</code>, or a process restart can cancel or strand in-progress work. Use <code>cronjob</code> or <code>terminal(background=True, notify_on_complete=True)</code> for work that must survive those boundaries.</li>
+</ul>
+<hr />
+<h2 id="tips">Tips</h2>
+<p><strong>Be specific in goals.</strong> "Fix the bug" is too vague. "Fix the TypeError in api/handlers.py line 47 where process_request() receives None from parse_body()" gives the subagent enough to work with.</p>
+<p><strong>Include file paths.</strong> Subagents don't know your project structure. Always include absolute paths to relevant files, the project root, and the test command.</p>
+<p><strong>Use delegation for context isolation.</strong> Sometimes you want a fresh perspective. Delegating forces you to articulate the problem clearly, and the subagent approaches it without the assumptions that built up in your conversation.</p>
+<p><strong>Check results.</strong> Subagent summaries are just that — summaries. If a subagent says "fixed the bug and tests pass," verify by running the tests yourself or reading the diff.</p>
+<p><strong>Failures are surfaced.</strong> A subagent that dies (provider error, timeout, crash) is reported with a clean one-line notice — <code>⚠️ Subagent failed — "your goal": &lt;reason&gt;</code> — in the CLI delegation tree and as a chat notice on gateway platforms, even when tool progress is turned off. The parent agent also receives the full error in the tool result.</p>
+<hr />
+<p><em>For the complete delegation reference — all parameters, ACP integration, and advanced configuration — see <a href="../user-guide/features/delegation.html">Subagent Delegation</a>.</em></p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/delegation-patterns</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#when-to-delegate">When to Delegate</a></li>
+<li class="lvl2"><a href="#pattern-parallel-research">Pattern: Parallel Research</a></li>
+<li class="lvl2"><a href="#pattern-code-review">Pattern: Code Review</a></li>
+<li class="lvl2"><a href="#pattern-compare-alternatives">Pattern: Compare Alternatives</a></li>
+<li class="lvl2"><a href="#pattern-multi-file-refactoring">Pattern: Multi-File Refactoring</a></li>
+<li class="lvl2"><a href="#pattern-gather-then-analyze">Pattern: Gather Then Analyze</a></li>
+<li class="lvl2"><a href="#inherited-tool-access">Inherited Tool Access</a></li>
+<li class="lvl2"><a href="#constraints">Constraints</a></li>
+<li class="lvl3"><a href="#tuning-concurrency-and-depth">Tuning Concurrency and Depth</a></li>
+<li class="lvl2"><a href="#tips">Tips</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

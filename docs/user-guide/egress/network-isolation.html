@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network Egress Isolation (Docker) · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/egress/network-isolation</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="network-egress-isolation-for-docker-deployments">Network Egress Isolation for Docker Deployments</h1>
+<p>When running Hermes inside Docker, the default <code>network_mode: host</code> gives the
+agent process unrestricted outbound network access. This guide shows how to
+segment traffic so the agent core can only reach the services it needs, while
+blocking arbitrary outbound connections.</p>
+<p>This is primarily a defense against prompt injection attacks that attempt to
+exfiltrate data via <code>curl</code>, <code>wget</code>, or raw HTTP from tool-generated shell
+commands.</p>
+<h2 id="threat-model">Threat Model</h2>
+<p>The Hermes <a href="https://github.com/NousResearch/hermes-agent/blob/main/SECURITY.md" class="ext" target="_blank" rel="noopener">SECURITY.md</a> §2 defines the trust model. The
+terminal backend is the primary execution boundary. However, when running with
+<code>network_mode: host</code>, any command the agent executes can reach any endpoint on
+the network, including external ones.</p>
+<p>Network egress isolation adds a second layer: even if a malicious command
+executes inside the container, it cannot reach endpoints outside the
+explicitly allowlisted set.</p>
+<h2 id="architecture">Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────┐
+│  Docker Network: internal (no internet)     │
+│                                             │
+│   ┌──────────────┐   ┌──────────────────┐   │
+│   │ hermes-agent │   │ hermes-dashboard │   │
+│   └──────┬───────┘   └────────┬─────────┘   │
+│          │                    │              │
+│          ▼                    │              │
+│   ┌──────────────┐            │              │
+│   │ hermes-gtw   │◄───────────┘              │
+│   └──────┬───────┘                           │
+│          │                                   │
+└──────────┼───────────────────────────────────┘
+           │
+┌──────────┼───────────────────────────────────┐
+│  Docker Network: egress (internet-capable)   │
+│          │                                   │
+│          ▼                                   │
+│   ┌─────────────────┐                        │
+│   │ egress-proxy     │──► allowlisted hosts  │
+│   │ (squid / envoy)  │                       │
+│   └─────────────────┘                        │
+└──────────────────────────────────────────────┘
+</code></pre></div>
+
+<p>Two Docker networks:</p>
+<ul>
+<li><strong><code>internal</code></strong> — no default route, no internet access. The agent, dashboard,
+  and gateway run here.</li>
+<li><strong><code>egress</code></strong> — has internet access. Only services that need to reach external
+  APIs are attached to this network.</li>
+</ul>
+<p>The gateway service is dual-homed (attached to both networks) so it can
+receive inbound messages from Telegram/Slack/etc. and forward them to the
+agent on the internal network.</p>
+<h2 id="compose-configuration">Compose Configuration</h2>
+<p>Override the default <code>docker-compose.yml</code> with a
+<code>docker-compose.override.yml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># docker-compose.override.yml</span>
+<span class="c1"># Network egress isolation for production deployments.</span>
+<span class="c1">#</span>
+<span class="c1"># Usage:</span>
+<span class="c1">#   HERMES_UID=$(id -u) HERMES_GID=$(id -g) docker compose up -d</span>
+<span class="c1">#</span>
+<span class="c1"># This overrides network_mode: host with isolated Docker networks.</span>
+
+<span class="nt">networks</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">internal</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">driver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">bridge</span>
+<span class="w">    </span><span class="nt">internal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">          </span><span class="c1"># no default route, no internet</span>
+<span class="w">  </span><span class="nt">egress</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">driver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">bridge</span>
+
+<span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">network_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">        </span><span class="c1"># clear the host-mode default</span>
+<span class="w">    </span><span class="nt">networks</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">internal</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">egress</span><span class="w">              </span><span class="c1"># needs outbound for Telegram, LLM APIs</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;127.0.0.1:9119:9119&quot;</span><span class="w">   </span><span class="c1"># dashboard proxy, localhost only</span>
+
+<span class="w">  </span><span class="nt">dashboard</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">network_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span>
+<span class="w">    </span><span class="nt">networks</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">internal</span><span class="w">            </span><span class="c1"># internal only, no egress needed</span>
+</code></pre></div>
+
+<h3 id="with-an-egress-proxy-recommended">With an Egress Proxy (Recommended)</h3>
+<p>For tighter control, route all outbound traffic through an HTTP proxy with
+an explicit allowlist:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># docker-compose.override.yml (with egress proxy)</span>
+
+<span class="nt">networks</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">internal</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">driver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">bridge</span>
+<span class="w">    </span><span class="nt">internal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">egress</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">driver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">bridge</span>
+
+<span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">network_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span>
+<span class="w">    </span><span class="nt">networks</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">internal</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">egress</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">HTTP_PROXY=http://egress-proxy:3128</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">HTTPS_PROXY=http://egress-proxy:3128</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">NO_PROXY=hermes,hermes-dashboard,localhost</span>
+
+<span class="w">  </span><span class="nt">dashboard</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">network_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span>
+<span class="w">    </span><span class="nt">networks</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">internal</span>
+
+<span class="w">  </span><span class="nt">egress-proxy</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ubuntu/squid:6.10-24.04_edge</span>
+<span class="w">    </span><span class="nt">networks</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">egress</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./config/squid-allowlist.conf:/etc/squid/conf.d/allowlist.conf:ro</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+</code></pre></div>
+
+<p>Example <code>config/squid-allowlist.conf</code>:</p>
+<div class="highlight"><pre><span></span><code># Only allow HTTPS CONNECT to these hosts
+acl allowed_hosts dstdomain api.openai.com
+acl allowed_hosts dstdomain api.anthropic.com
+acl allowed_hosts dstdomain openrouter.ai
+acl allowed_hosts dstdomain generativelanguage.googleapis.com
+acl allowed_hosts dstdomain api.telegram.org
+acl allowed_hosts dstdomain api.github.com
+acl allowed_hosts dstdomain discord.com
+
+http_access allow CONNECT allowed_hosts
+http_access deny all
+</code></pre></div>
+
+<p>Adjust the allowlist to match your LLM provider and messaging platform.</p>
+<h2 id="validating-the-setup">Validating the Setup</h2>
+<p>After bringing up the stack, verify isolation:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># From the agent container: this should FAIL (no egress)</span>
+docker<span class="w"> </span>compose<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>gateway<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>curl<span class="w"> </span>-sf<span class="w"> </span>--max-time<span class="w"> </span><span class="m">5</span><span class="w"> </span>https://example.com<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;FAIL: egress not blocked&quot;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;OK: egress blocked&quot;</span>
+
+<span class="c1"># From the agent container: this should SUCCEED (internal network)</span>
+docker<span class="w"> </span>compose<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>gateway<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>curl<span class="w"> </span>-sf<span class="w"> </span>--max-time<span class="w"> </span><span class="m">5</span><span class="w"> </span>http://hermes-dashboard:9119/health<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;OK: internal reachable&quot;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;FAIL&quot;</span>
+
+<span class="c1"># If using egress proxy: this should SUCCEED (allowlisted)</span>
+docker<span class="w"> </span>compose<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>gateway<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>curl<span class="w"> </span>-sf<span class="w"> </span>--max-time<span class="w"> </span><span class="m">5</span><span class="w"> </span>--proxy<span class="w"> </span>http://egress-proxy:3128<span class="w"> </span>https://api.openai.com/v1/models<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;OK&quot;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;FAIL&quot;</span>
+</code></pre></div>
+
+<h2 id="limitations">Limitations</h2>
+<ul>
+<li>
+<p><strong>DNS resolution:</strong> The <code>internal</code> network can still resolve external DNS
+  names unless you also run a local DNS resolver that blocks external queries.
+  For most threat models this is acceptable since DNS resolution alone does not
+  exfiltrate meaningful data.</p>
+</li>
+<li>
+<p><strong>Not a substitute for sandbox backends:</strong> This guide isolates the agent
+  <em>container's</em> network. If you use the default local terminal backend, tool
+  commands execute inside the same container. For stronger isolation, combine
+  network segmentation with a sandboxed terminal backend (Docker, Modal,
+  Daytona).</p>
+</li>
+<li>
+<p><strong>Platform adapters need egress:</strong> The gateway service needs outbound access
+  to reach messaging platform APIs. If you add new platform adapters, add their
+  API endpoints to the proxy allowlist.</p>
+</li>
+</ul>
+<h2 id="related">Related</h2>
+<ul>
+<li><a href="https://github.com/NousResearch/hermes-agent/blob/main/SECURITY.md" class="ext" target="_blank" rel="noopener">SECURITY.md</a> — Hermes trust model and vulnerability reporting</li>
+<li><a href="../docker.html">Docker</a> — running Hermes in a container</li>
+<li><a href="iron-proxy.html">Egress proxy</a> — credential-injection firewall for the sandbox</li>
+<li><a href="https://github.com/NousResearch/hermes-agent/blob/main/docker-compose.yml" class="ext" target="_blank" rel="noopener">docker-compose.yml</a> — default compose configuration</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/egress/network-isolation</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#threat-model">Threat Model</a></li>
+<li class="lvl2"><a href="#architecture">Architecture</a></li>
+<li class="lvl2"><a href="#compose-configuration">Compose Configuration</a></li>
+<li class="lvl3"><a href="#with-an-egress-proxy-recommended">With an Egress Proxy (Recommended)</a></li>
+<li class="lvl2"><a href="#validating-the-setup">Validating the Setup</a></li>
+<li class="lvl2"><a href="#limitations">Limitations</a></li>
+<li class="lvl2"><a href="#related">Related</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>委托与并行工作 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / guides/delegation-patterns</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="委托与并行工作">委托与并行工作</h1>
+<p>Hermes 可以生成隔离的子代理来并行处理任务。每个子代理拥有独立的对话、终端会话和工具集。只有最终摘要会返回——中间工具调用不会进入你的上下文窗口。</p>
+<p>完整功能参考，请参阅<a href="../user-guide/features/delegation.html">子代理委托</a>。</p>
+<hr />
+<h2 id="何时委托">何时委托</h2>
+<p><strong>适合委托的场景：</strong>
+- 推理密集型子任务（调试、代码审查、研究综合）
+- 会用中间数据淹没上下文的任务
+- 并行独立工作流（同时进行研究 A 和研究 B）
+- 需要代理以无偏见方式处理的全新上下文任务</p>
+<p><strong>使用其他方式的场景：</strong>
+- 单次工具调用 → 直接使用工具
+- 步骤间有逻辑的机械性多步骤工作 → <code>execute_code</code>
+- 需要用户交互的任务 → 子代理无法使用 <code>clarify</code>
+- 快速文件编辑 → 直接操作
+- 必须在会话关闭或进程重启后继续运行的持久性长任务 → <code>cronjob</code> 或 <code>terminal(background=True, notify_on_complete=True)</code>。顶层委派是异步的，但仍依赖当前进程。</p>
+<hr />
+<h2 id="模式并行研究">模式：并行研究</h2>
+<p>同时研究三个主题并获取结构化摘要：</p>
+<div class="highlight"><pre><span></span><code>并行研究以下三个主题：
+1. WebAssembly 在浏览器之外的现状
+2. 2025 年 RISC-V 服务器芯片的采用情况
+3. 量子计算的实际应用
+
+重点关注近期进展和关键参与者。
+</code></pre></div>
+
+<p>在后台，Hermes 使用：</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span><span class="n">tasks</span><span class="o">=</span><span class="p">[</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Research WebAssembly outside the browser in 2025&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Focus on: runtimes (Wasmtime, Wasmer), cloud/edge use cases, WASI progress&quot;</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Research RISC-V server chip adoption&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Focus on: server chips shipping, cloud providers adopting, software ecosystem&quot;</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Research practical quantum computing applications&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;Focus on: error correction breakthroughs, real-world use cases, key companies&quot;</span>
+    <span class="p">}</span>
+<span class="p">])</span>
+</code></pre></div>
+
+<p>三个任务并发运行。每个子代理独立搜索网络并返回摘要。父代理随后将它们综合成一份连贯的简报。</p>
+<hr />
+<h2 id="模式代码审查">模式：代码审查</h2>
+<p>将安全审查委托给一个全新上下文的子代理，让它以无先入之见的方式审查代码：</p>
+<div class="highlight"><pre><span></span><code>审查 src/auth/ 中的认证模块，检查安全问题。
+检查 SQL 注入、JWT 验证问题、密码处理
+和会话管理。修复发现的问题并运行测试。
+</code></pre></div>
+
+<p>关键在于 <code>context</code> 字段——它必须包含子代理所需的一切信息：</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Review src/auth/ for security issues and fix any found&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;Project at /home/user/webapp. Python 3.11, Flask, PyJWT, bcrypt.</span>
+<span class="s2">    Auth files: src/auth/login.py, src/auth/jwt.py, src/auth/middleware.py</span>
+<span class="s2">    Test command: pytest tests/auth/ -v</span>
+<span class="s2">    Focus on: SQL injection, JWT validation, password hashing, session management.</span>
+<span class="s2">    Fix issues found and verify tests pass.&quot;&quot;&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<div class="admonition adm-warning"><p class="adm-title">上下文问题</p>
+<p>子代理对你的对话<strong>一无所知</strong>。它们从完全空白的状态开始。如果你委托"修复我们讨论的那个 bug"，子代理根本不知道你指的是哪个 bug。务必明确传递文件路径、错误信息、项目结构和约束条件。</p>
+</div>
+<hr />
+<h2 id="模式比较备选方案">模式：比较备选方案</h2>
+<p>并行评估同一问题的多种解决方案，然后选出最佳方案：</p>
+<div class="highlight"><pre><span></span><code>我需要为 Django 应用添加全文搜索。并行评估三种方案：
+1. PostgreSQL tsvector（内置）
+2. 通过 django-elasticsearch-dsl 使用 Elasticsearch
+3. 通过 meilisearch-python 使用 Meilisearch
+
+对每种方案评估：配置复杂度、查询能力、资源需求
+和维护开销。比较后推荐一种。
+</code></pre></div>
+
+<p>每个子代理独立研究一个选项。由于它们相互隔离，不存在交叉干扰——每项评估都基于自身的优缺点。父代理获取全部三份摘要后进行比较。</p>
+<hr />
+<h2 id="模式多文件重构">模式：多文件重构</h2>
+<p>将大型重构任务拆分给并行子代理，每个子代理负责代码库的不同部分：</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span><span class="n">tasks</span><span class="o">=</span><span class="p">[</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Refactor all API endpoint handlers to use the new response format&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;&quot;Project at /home/user/api-server.</span>
+<span class="s2">        Files: src/handlers/users.py, src/handlers/auth.py, src/handlers/billing.py</span>
+<span class="s2">        Old format: return {&quot;data&quot;: result, &quot;status&quot;: &quot;ok&quot;}</span>
+<span class="s2">        New format: return APIResponse(data=result, status=200).to_dict()</span>
+<span class="s2">        Import: from src.responses import APIResponse</span>
+<span class="s2">        Run tests after: pytest tests/handlers/ -v&quot;&quot;&quot;</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Update all client SDK methods to handle the new response format&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;&quot;Project at /home/user/api-server.</span>
+<span class="s2">        Files: sdk/python/client.py, sdk/python/models.py</span>
+<span class="s2">        Old parsing: result = response.json()[&quot;data&quot;]</span>
+<span class="s2">        New parsing: result = response.json()[&quot;data&quot;] (same key, but add status code checking)</span>
+<span class="s2">        Also update sdk/python/tests/test_client.py&quot;&quot;&quot;</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+        <span class="s2">&quot;goal&quot;</span><span class="p">:</span> <span class="s2">&quot;Update API documentation to reflect the new response format&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;context&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;&quot;Project at /home/user/api-server.</span>
+<span class="s2">        Docs at: docs/api/. Format: Markdown with code examples.</span>
+<span class="s2">        Update all response examples from old format to new format.</span>
+<span class="s2">        Add a &#39;Response Format&#39; section to docs/api/overview.md explaining the schema.&quot;&quot;&quot;</span>
+    <span class="p">}</span>
+<span class="p">])</span>
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>每个子代理拥有独立的终端会话。只要它们编辑不同的文件，就可以在同一项目目录中工作而互不干扰。如果两个子代理可能修改同一文件，请在并行工作完成后自行处理该文件。</p>
+</div>
+<hr />
+<h2 id="模式先收集后分析">模式：先收集后分析</h2>
+<p>使用 <code>execute_code</code> 进行机械性数据收集，然后委托推理密集型分析：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 第一步：机械性收集（此处 execute_code 更合适——无需推理）</span>
+<span class="n">execute_code</span><span class="p">(</span><span class="s2">&quot;&quot;&quot;</span>
+<span class="s2">from hermes_tools import web_search, web_extract</span>
+
+<span class="s2">results = []</span>
+<span class="s2">for query in [&quot;AI funding Q1 2026&quot;, &quot;AI startup acquisitions 2026&quot;, &quot;AI IPOs 2026&quot;]:</span>
+<span class="s2">    r = web_search(query, limit=5)</span>
+<span class="s2">    for item in r[&quot;data&quot;][&quot;web&quot;]:</span>
+<span class="s2">        results.append({&quot;title&quot;: item[&quot;title&quot;], &quot;url&quot;: item[&quot;url&quot;], &quot;desc&quot;: item[&quot;description&quot;]})</span>
+
+<span class="s2"># Extract full content from top 5 most relevant</span>
+<span class="s2">urls = [r[&quot;url&quot;] for r in results[:5]]</span>
+<span class="s2">content = web_extract(urls)</span>
+
+<span class="s2"># Save for the analysis step</span>
+
+<span class="s2">with open(&quot;/tmp/ai-funding-data.json&quot;, &quot;w&quot;) as f:</span>
+<span class="s2">    json.dump({&quot;search_results&quot;: results, &quot;extracted&quot;: content[&quot;results&quot;]}, f)</span>
+<span class="s2">print(f&quot;Collected {len(results)} results, extracted {len(content[&#39;results&#39;])} pages&quot;)</span>
+<span class="s2">&quot;&quot;&quot;</span><span class="p">)</span>
+
+<span class="c1"># 第二步：推理密集型分析（此处委托更合适）</span>
+<span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Analyze AI funding data and write a market report&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;Raw data at /tmp/ai-funding-data.json contains search results and</span>
+<span class="s2">    extracted web pages about AI funding, acquisitions, and IPOs in Q1 2026.</span>
+<span class="s2">    Write a structured market report: key deals, trends, notable players,</span>
+<span class="s2">    and outlook. Focus on deals over $100M.&quot;&quot;&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>这通常是最高效的模式：<code>execute_code</code> 以低成本处理 10 余次顺序工具调用，然后子代理在干净的上下文中完成单次高成本推理任务。</p>
+<hr />
+<h2 id="继承的工具访问权限">继承的工具访问权限</h2>
+<p>子代理会继承父代理已启用的工具集。<code>delegate_task</code> 不接受面向模型的 <code>toolsets</code> 参数，因此委派任务无法自行授予父代理没有的能力。如果委派任务需要网络、终端、文件或其他访问权限，请在开始对话前配置父代理的工具。Hermes 仍会移除 <code>clarify</code>、<code>memory</code> 和 <code>execute_code</code> 等对子代理屏蔽的工具。</p>
+<hr />
+<h2 id="约束条件">约束条件</h2>
+<ul>
+<li><strong>默认 3 个并行任务</strong>：批次默认并发 3 个子代理（可通过 config.yaml 中的 <code>delegation.max_concurrent_children</code> 配置，无硬性上限，最低为 1）</li>
+<li><strong>嵌套委托需显式启用</strong>：叶子子代理（默认）无法调用 <code>delegate_task</code>、<code>clarify</code>、<code>memory</code>、<code>send_message</code> 或 <code>execute_code</code>。编排器子代理（<code>role="orchestrator"</code>）保留 <code>delegate_task</code> 以支持进一步委托，但仅在 <code>delegation.max_spawn_depth</code> 高于默认值 1 时生效（支持 1-3）；其余四项仍被禁用。可通过 <code>delegation.orchestrator_enabled: false</code> 全局禁用。</li>
+</ul>
+<h3 id="调整并发数与深度">调整并发数与深度</h3>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>范围</th>
+<th>效果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_concurrent_children</code></td>
+<td>3</td>
+<td>&gt;=1</td>
+<td>每次 <code>delegate_task</code> 调用的并行批次大小</td>
+</tr>
+<tr>
+<td><code>max_spawn_depth</code></td>
+<td>1</td>
+<td>1-3</td>
+<td>可进一步生成子代理的委托层级数</td>
+</tr>
+</tbody>
+</table>
+<p>示例：运行 30 个并行 worker 并启用嵌套子代理：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">delegation</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">max_concurrent_children</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span>
+<span class="w">  </span><span class="nt">max_spawn_depth</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+</code></pre></div>
+
+<ul>
+<li><strong>独立终端</strong> — 每个子代理拥有独立的终端会话，具有独立的工作目录和状态</li>
+<li><strong>无对话历史</strong> — 子代理只能看到父代理调用 <code>delegate_task</code> 时传入的 <code>goal</code> 和 <code>context</code></li>
+<li><strong>默认 50 次迭代</strong> — 对简单任务设置较低的 <code>max_iterations</code> 以节省成本</li>
+<li><strong>非持久性</strong> — 顶层委派会在后台运行并稍后发送结果，但仍依赖所属会话和 Hermes 进程。会话关闭、<code>/stop</code>、<code>/new</code> 或进程重启都可能取消或遗留正在执行的工作。对于必须跨越这些边界继续运行的任务，请使用 <code>cronjob</code> 或 <code>terminal(background=True, notify_on_complete=True)</code>。</li>
+</ul>
+<hr />
+<h2 id="技巧">技巧</h2>
+<p><strong>目标要具体。</strong> "修复 bug"过于模糊。"修复 api/handlers.py 第 47 行的 TypeError，该错误由 parse_body() 向 process_request() 返回 None 引起"才能给子代理足够的信息。</p>
+<p><strong>包含文件路径。</strong> 子代理不了解你的项目结构。务必提供相关文件的绝对路径、项目根目录和测试命令。</p>
+<p><strong>利用委托实现上下文隔离。</strong> 有时你需要全新的视角。委托迫使你清晰地阐述问题，而子代理会在没有对话中积累的假设前提下处理它。</p>
+<p><strong>核验结果。</strong> 子代理的摘要只是摘要。如果子代理说"修复了 bug 且测试通过"，请自行运行测试或查看 diff 来验证。</p>
+<hr />
+<p><em>完整的委托参考——所有参数、ACP 集成和高级配置——请参阅<a href="../user-guide/features/delegation.html">子代理委托</a>。</em></p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/guides/delegation-patterns</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#何时委托">何时委托</a></li>
+<li class="lvl2"><a href="#模式并行研究">模式：并行研究</a></li>
+<li class="lvl2"><a href="#模式代码审查">模式：代码审查</a></li>
+<li class="lvl2"><a href="#模式比较备选方案">模式：比较备选方案</a></li>
+<li class="lvl2"><a href="#模式多文件重构">模式：多文件重构</a></li>
+<li class="lvl2"><a href="#模式先收集后分析">模式：先收集后分析</a></li>
+<li class="lvl2"><a href="#继承的工具访问权限">继承的工具访问权限</a></li>
+<li class="lvl2"><a href="#约束条件">约束条件</a></li>
+<li class="lvl3"><a href="#调整并发数与深度">调整并发数与深度</a></li>
+<li class="lvl2"><a href="#技巧">技巧</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

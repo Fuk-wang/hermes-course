@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kanban tutorial · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/kanban-tutorial</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="kanban-tutorial">Kanban tutorial</h1>
+<p>A walkthrough of the four use-cases the Hermes Kanban system was designed for, with the dashboard open in a browser. If you haven't read the <a href="kanban.html">Kanban overview</a> yet, start there — this assumes you know what a task, run, assignee, and dispatcher are.</p>
+<h2 id="setup">Setup</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>init<span class="w">           </span><span class="c1"># optional; first `hermes kanban &lt;anything&gt;` auto-inits</span>
+hermes<span class="w"> </span>dashboard<span class="w">             </span><span class="c1"># opens http://127.0.0.1:9119 in your browser</span>
+<span class="c1"># click Kanban in the left nav</span>
+</code></pre></div>
+
+<p>The dashboard is the most comfortable place for <strong>you</strong> to watch the system. Agent workers the dispatcher spawns never see the dashboard or the CLI — they drive the board through a dedicated <code>kanban_*</code> <a href="kanban.html#how-workers-interact-with-the-board">toolset</a> (<code>kanban_show</code>, <code>kanban_list</code>, <code>kanban_complete</code>, <code>kanban_request_review</code>, <code>kanban_request_changes</code>, <code>kanban_block</code>, <code>kanban_heartbeat</code>, <code>kanban_comment</code>, <code>kanban_attach</code>, <code>kanban_attach_url</code>, <code>kanban_attachments</code>, <code>kanban_create</code>, <code>kanban_link</code>, <code>kanban_unblock</code>). All three surfaces — dashboard, CLI, worker tools — route through the same per-board SQLite DB (<code>~/.hermes/kanban.db</code> for the default board, <code>~/.hermes/kanban/boards/&lt;slug&gt;/kanban.db</code> for any board you create later), so each board is consistent no matter which side of the fence a change came from.</p>
+<p>This tutorial uses the <code>default</code> board throughout. If you want multiple isolated queues (one per project / repo / domain), see <a href="kanban.html#boards-multi-project">Boards (multi-project)</a> in the overview — the same CLI / dashboard / worker flows apply per board, and workers physically cannot see tasks on other boards.</p>
+<p>Throughout the tutorial, <strong>code blocks labelled <code>bash</code> are commands <em>you</em> run.</strong> Code blocks labelled <code># worker tool calls</code> are what the spawned worker's model emits as tool calls — shown here so you can see the loop end-to-end, not because you'd ever run them yourself.</p>
+<h2 id="the-board-at-a-glance">The board at a glance</h2>
+<p><img alt="Kanban board overview" src="../../../assets/img/kanban-tutorial/01-board-overview.png" /></p>
+<p>Six columns, left to right:</p>
+<ul>
+<li><strong>Triage</strong> — raw ideas. By default the dispatcher auto-runs the <strong>decomposer</strong> on tasks here: the built-in decomposer uses <code>auxiliary.kanban_decomposer</code>, reads your profile roster + descriptions, and produces a graph of child tasks routed to the best-fit specialists. The original task is held alive as the parent so its assignee (<code>kanban.orchestrator_profile</code>, or the active default profile when unset) wakes back up to judge completion when everything finishes. Flip the <strong>Orchestration: Auto/Manual</strong> pill at the top of the kanban page to switch modes. In Manual mode click <strong>⚗ Decompose</strong> on a card, or run <code>hermes kanban decompose &lt;id&gt;</code> / <code>/kanban decompose &lt;id&gt;</code>. For single tasks that don't need fan-out, <strong>✨ Specify</strong> does a one-shot spec rewrite (goal, approach, acceptance criteria) and promotes to <code>todo</code>. Configure the models under <code>auxiliary.kanban_decomposer</code> and <code>auxiliary.triage_specifier</code> in <code>config.yaml</code>. See <a href="kanban.html#auto-vs-manual-orchestration">Auto vs Manual orchestration</a> in the main Kanban guide.</li>
+<li><strong>Todo</strong> — created but waiting on dependencies, or not yet assigned.</li>
+<li><strong>Ready</strong> — assigned and waiting for the dispatcher to claim.</li>
+<li><strong>In progress</strong> — a worker is actively running the task. With "Lanes by profile" on (the default), this column sub-groups by assignee so you can see at a glance what each worker is doing.</li>
+<li><strong>Blocked</strong> — a worker asked for human input, or the circuit breaker tripped.</li>
+<li><strong>Done</strong> — completed.</li>
+</ul>
+<p>The top bar has filters for search, tenant, and assignee, plus a <code>Lanes by profile</code> toggle and a <code>Nudge dispatcher</code> button that runs one dispatch tick right now instead of waiting for the daemon's next interval. Clicking any card opens its drawer on the right.</p>
+<h3 id="flat-view">Flat view</h3>
+<p>If the profile lanes are noisy, toggle "Lanes by profile" off and the In Progress column collapses to a single flat list ordered by claim time:</p>
+<p><img alt="Board with lanes by profile off" src="../../../assets/img/kanban-tutorial/02-board-flat.png" /></p>
+<h2 id="story-1--solo-dev-shipping-a-feature">Story 1 — Solo dev shipping a feature</h2>
+<p>You're building a feature. Classic flow: design a schema, implement the API, write the tests. Three tasks with parent→child dependencies.</p>
+<div class="highlight"><pre><span></span><code><span class="nv">SCHEMA</span><span class="o">=</span><span class="k">$(</span>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Design auth schema&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>backend-dev<span class="w"> </span>--tenant<span class="w"> </span>auth-project<span class="w"> </span>--priority<span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--body<span class="w"> </span><span class="s2">&quot;Design the user/session/token schema for the auth module.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.id<span class="k">)</span>
+
+<span class="nv">API</span><span class="o">=</span><span class="k">$(</span>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Implement auth API endpoints&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>backend-dev<span class="w"> </span>--tenant<span class="w"> </span>auth-project<span class="w"> </span>--priority<span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--parent<span class="w"> </span><span class="nv">$SCHEMA</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--body<span class="w"> </span><span class="s2">&quot;POST /register, POST /login, POST /refresh, POST /logout.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.id<span class="k">)</span>
+
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Write auth integration tests&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>qa-dev<span class="w"> </span>--tenant<span class="w"> </span>auth-project<span class="w"> </span>--priority<span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--parent<span class="w"> </span><span class="nv">$API</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--body<span class="w"> </span><span class="s2">&quot;Cover happy path, wrong password, expired token, concurrent refresh.&quot;</span>
+</code></pre></div>
+
+<p>Because <code>API</code> has <code>SCHEMA</code> as its parent, and <code>tests</code> has <code>API</code> as its parent, only <code>SCHEMA</code> starts in <code>ready</code>. The other two sit in <code>todo</code> until their parents complete. This is the dependency promotion engine doing its job — no other worker will pick up the test-writing until there's an API to test.</p>
+<p>On the next dispatcher tick (60s by default, or immediately if you hit <strong>Nudge dispatcher</strong>) the <code>backend-dev</code> profile spawns as a worker with <code>HERMES_KANBAN_TASK=$SCHEMA</code> in its env. Here's what the worker's tool-call loop looks like from inside the agent:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># worker tool calls — NOT commands you run</span>
+<span class="n">kanban_show</span><span class="p">()</span>
+<span class="c1"># → returns title, body, worker_context, parents, prior attempts, comments</span>
+
+<span class="c1"># (worker reads worker_context, uses terminal/file tools to design the schema,</span>
+<span class="c1">#  write migrations, run its own checks, commit — the real work happens here)</span>
+
+<span class="n">kanban_heartbeat</span><span class="p">(</span><span class="n">note</span><span class="o">=</span><span class="s2">&quot;schema drafted, writing migrations now&quot;</span><span class="p">)</span>
+
+<span class="n">kanban_complete</span><span class="p">(</span>
+    <span class="n">summary</span><span class="o">=</span><span class="s2">&quot;users(id, email, pw_hash), sessions(id, user_id, jti, expires_at); &quot;</span>
+            <span class="s2">&quot;refresh tokens stored as sessions with type=&#39;refresh&#39;&quot;</span><span class="p">,</span>
+    <span class="n">metadata</span><span class="o">=</span><span class="p">{</span>
+        <span class="s2">&quot;changed_files&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;migrations/001_users.sql&quot;</span><span class="p">,</span> <span class="s2">&quot;migrations/002_sessions.sql&quot;</span><span class="p">],</span>
+        <span class="s2">&quot;decisions&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;bcrypt for hashing&quot;</span><span class="p">,</span> <span class="s2">&quot;JWT for session tokens&quot;</span><span class="p">,</span>
+                      <span class="s2">&quot;7-day refresh, 15-min access&quot;</span><span class="p">],</span>
+    <span class="p">},</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><code>kanban_show</code> defaults <code>task_id</code> to <code>$HERMES_KANBAN_TASK</code>, so the worker doesn't need to know its own id. <code>kanban_complete</code> writes the summary + metadata onto the current <code>task_runs</code> row, closes that run, and transitions the task to <code>done</code> — all in one atomic hop through <code>kanban_db</code>.</p>
+<p>When <code>SCHEMA</code> hits <code>done</code>, the dependency engine promotes <code>API</code> to <code>ready</code> automatically. The API worker, when it picks up, will call <code>kanban_show()</code> and see <code>SCHEMA</code>'s summary and metadata attached to the parent handoff — so it knows the schema decisions without re-reading a long design doc.</p>
+<p>Click the completed schema task on the board and the drawer shows everything:</p>
+<p><img alt="Solo dev — completed schema task drawer" src="../../../assets/img/kanban-tutorial/03-drawer-schema-task.png" /></p>
+<p>The Run History section at the bottom is the key addition. One attempt: outcome <code>completed</code>, worker <code>@backend-dev</code>, duration, timestamp, and the handoff summary in full. The metadata blob (<code>changed_files</code>, <code>decisions</code>) is stored on the run too and surfaced to any downstream worker that reads this parent.</p>
+<p>You can inspect the same data from your terminal at any time — these commands are <strong>you</strong> peeking at the board, not the worker:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>show<span class="w"> </span><span class="nv">$SCHEMA</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>runs<span class="w"> </span><span class="nv">$SCHEMA</span>
+<span class="c1"># #  OUTCOME       PROFILE       ELAPSED  STARTED</span>
+<span class="c1"># 1  completed     backend-dev        0s  2026-04-27 19:34</span>
+<span class="c1">#     → users(id, email, pw_hash), sessions(id, user_id, jti, expires_at); refresh tokens ...</span>
+</code></pre></div>
+
+<h2 id="story-2--fleet-farming">Story 2 — Fleet farming</h2>
+<p>You have three workers (a translator, a transcriber, a copywriter) and a pile of independent tasks. You want all three pulling in parallel and making visible progress. This is the simplest kanban use-case and the one the original design optimized for.</p>
+<p>Create the work:</p>
+<div class="highlight"><pre><span></span><code><span class="k">for</span><span class="w"> </span>lang<span class="w"> </span><span class="k">in</span><span class="w"> </span>Spanish<span class="w"> </span>French<span class="w"> </span>German<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">    </span>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Translate homepage to </span><span class="nv">$lang</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>--assignee<span class="w"> </span>translator<span class="w"> </span>--tenant<span class="w"> </span>content-ops
+<span class="k">done</span>
+<span class="k">for</span><span class="w"> </span>i<span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="m">3</span><span class="w"> </span><span class="m">4</span><span class="w"> </span><span class="m">5</span><span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">    </span>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Transcribe Q3 customer call #</span><span class="nv">$i</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>--assignee<span class="w"> </span>transcriber<span class="w"> </span>--tenant<span class="w"> </span>content-ops
+<span class="k">done</span>
+<span class="k">for</span><span class="w"> </span>sku<span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="m">1001</span><span class="w"> </span><span class="m">1002</span><span class="w"> </span><span class="m">1003</span><span class="w"> </span><span class="m">1004</span><span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">    </span>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Generate product description: SKU-</span><span class="nv">$sku</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>--assignee<span class="w"> </span>copywriter<span class="w"> </span>--tenant<span class="w"> </span>content-ops
+<span class="k">done</span>
+</code></pre></div>
+
+<p>Start the gateway and walk away — it hosts the embedded dispatcher
+that picks up all three specialist profiles' tasks on the same
+kanban.db:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>start
+</code></pre></div>
+
+<p>Now filter the board to <code>content-ops</code> (or just search for "Transcribe") and you get this:</p>
+<p><img alt="Fleet view filtered to transcribe tasks" src="../../../assets/img/kanban-tutorial/07-fleet-transcribes.png" /></p>
+<p>Two transcribes done, one running, two ready waiting for the next dispatcher tick. The In Progress column is grouped by profile (the "Lanes by profile" default) so you see each worker's active task without scanning a mixed list. The dispatcher will promote the next ready task to running as soon as the current one completes. With three daemons working on three assignee pools in parallel, the whole content queue drains without further human input.</p>
+<p><strong>Everything Story 1 said about structured handoff still applies here.</strong> A translator worker completing a call emits <code>kanban_complete(summary="translated 4 pages, style matched existing marketing voice", metadata={"duration_seconds": 720, "tokens_used": 2100})</code> — useful for analytics and for any downstream task that depends on this one.</p>
+<h2 id="story-3--role-pipeline-with-retry">Story 3 — Role pipeline with retry</h2>
+<p>This is where Kanban earns its keep over a flat TODO list. A PM writes a spec. An engineer implements it. A reviewer rejects the first attempt. The engineer tries again with changes. The reviewer approves.</p>
+<p>The dashboard view, filtered by <code>auth-project</code>:</p>
+<p><img alt="Pipeline view for a multi-role feature" src="../../../assets/img/kanban-tutorial/08-pipeline-auth.png" /></p>
+<p>The screenshot uses the <strong>pre-created downstream card</strong> model: the implementation card has a dedicated reviewer child. In that model the engineer must call <code>kanban_complete</code> when implementation is ready so the reviewer child can leave <code>todo</code>. Never block the implementation parent merely to ask for review.</p>
+<p>For workflows where the same card owns implementation and review, use the first-class review lifecycle instead. The full implement → review → changes → re-review choreography is:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># --- Engineer: first implementation attempt ---</span>
+<span class="n">kanban_show</span><span class="p">()</span>
+<span class="c1"># (write code, run tests, prepare the candidate)</span>
+<span class="n">kanban_request_review</span><span class="p">(</span>
+    <span class="n">summary</span><span class="o">=</span><span class="s2">&quot;implemented reset flow; candidate is ready for review&quot;</span><span class="p">,</span>
+    <span class="n">metadata</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;changed_files&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;auth/reset.py&quot;</span><span class="p">],</span> <span class="s2">&quot;tests_run&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">},</span>
+    <span class="n">reviewer</span><span class="o">=</span><span class="s2">&quot;reviewer&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="c1"># → the same card enters review; the implementation run closes as</span>
+<span class="c1">#   outcome=&#39;review_requested&#39;</span>
+
+<span class="c1"># --- Reviewer: request concrete changes ---</span>
+<span class="n">kanban_show</span><span class="p">()</span>
+<span class="c1"># (inspect the handoff and candidate)</span>
+<span class="n">kanban_request_changes</span><span class="p">(</span>
+    <span class="n">reason</span><span class="o">=</span><span class="s2">&quot;Add password-strength validation and make reset tokens single-use.&quot;</span>
+<span class="p">)</span>
+<span class="c1"># → the review run closes as outcome=&#39;changes_requested&#39;; the card returns</span>
+<span class="c1">#   to backend-dev in ready/todo without touching block-loop accounting</span>
+
+<span class="c1"># --- Engineer: second implementation attempt ---</span>
+<span class="n">kanban_show</span><span class="p">()</span>  <span class="c1"># prior review evidence is in worker_context</span>
+<span class="c1"># (apply feedback and re-run tests)</span>
+<span class="n">kanban_request_review</span><span class="p">(</span>
+    <span class="n">summary</span><span class="o">=</span><span class="s2">&quot;added zxcvbn validation and single-use reset tokens&quot;</span><span class="p">,</span>
+    <span class="n">metadata</span><span class="o">=</span><span class="p">{</span>
+        <span class="s2">&quot;changed_files&quot;</span><span class="p">:</span> <span class="p">[</span>
+            <span class="s2">&quot;auth/reset.py&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;auth/tests/test_reset.py&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;migrations/003_single_use_reset_tokens.sql&quot;</span><span class="p">,</span>
+        <span class="p">],</span>
+        <span class="s2">&quot;tests_run&quot;</span><span class="p">:</span> <span class="mi">11</span><span class="p">,</span>
+        <span class="s2">&quot;review_iteration&quot;</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="p">},</span>
+    <span class="n">reviewer</span><span class="o">=</span><span class="s2">&quot;reviewer&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># --- Reviewer: approve ---</span>
+<span class="n">kanban_complete</span><span class="p">(</span><span class="n">summary</span><span class="o">=</span><span class="s2">&quot;review passed; acceptance criteria verified&quot;</span><span class="p">)</span>
+<span class="c1"># → done</span>
+</code></pre></div>
+
+<p>The task's run history now records <code>review_requested → changes_requested → review_requested → completed</code>. Each attempt has its own actor, summary, metadata, and outcome, so the second engineer sees exactly what the reviewer rejected and the final approval remains auditable. <code>kanban_block</code> is reserved for a real external escalation (missing access, a product decision, unavailable infrastructure), not normal review feedback.</p>
+<p>If you intentionally use the downstream-card model shown in the screenshot, the reviewer opens <code>Review password reset PR</code> after its implementation parent completes:</p>
+<p><img alt="Reviewer's drawer view of the pipeline" src="../../../assets/img/kanban-tutorial/09-drawer-pipeline-review.png" /></p>
+<p>The reviewer card's <code>worker_context</code> includes the completed implementation handoff. That is a separate card workflow; do not combine it with same-card <code>kanban_request_review</code> or you will duplicate the review lane.</p>
+<h2 id="story-4--circuit-breaker-and-crash-recovery">Story 4 — Circuit breaker and crash recovery</h2>
+<p>Real workers fail. Missing credentials, OOM kills, transient network errors. The dispatcher has two lines of defense: a <strong>circuit breaker</strong> that auto-blocks after N consecutive failures so the board doesn't thrash forever, and <strong>crash detection</strong> that reclaims a task whose worker PID went away before its TTL expired.</p>
+<h3 id="circuit-breaker--permanent-looking-failure">Circuit breaker — permanent-looking failure</h3>
+<p>A deploy task that can't spawn its worker because <code>AWS_ACCESS_KEY_ID</code> isn't set in the profile's environment:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Deploy to staging (missing creds)&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>deploy-bot<span class="w"> </span>--tenant<span class="w"> </span>ops<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--max-retries<span class="w"> </span><span class="m">3</span>
+</code></pre></div>
+
+<p>The dispatcher tries to spawn the worker. Spawn fails (<code>RuntimeError: AWS_ACCESS_KEY_ID not set</code>). The dispatcher releases the claim, increments a failure counter, and tries again next tick. Because this example sets <code>--max-retries 3</code>, the circuit trips after three consecutive failures: the task goes to <code>blocked</code> with outcome <code>gave_up</code>. If you omit the flag, Hermes uses <code>kanban.failure_limit</code> (default: 2). No more retries until a human unblocks it.</p>
+<p>Click the blocked task:</p>
+<p><img alt="Circuit breaker — 2 spawn_failed + 1 gave_up" src="../../../assets/img/kanban-tutorial/11-drawer-gave-up.png" /></p>
+<p>Three runs, all with the same error on the <code>error</code> field. The first two are <code>spawn_failed</code> (retryable), the third is <code>gave_up</code> (terminal). The event log above shows the full sequence: <code>created → claimed → spawn_failed → claimed → spawn_failed → claimed → gave_up</code>.</p>
+<p>On the terminal:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>runs<span class="w"> </span>t_ef5d
+<span class="c1"># #   OUTCOME        PROFILE        ELAPSED  STARTED</span>
+<span class="c1"># 1   spawn_failed   deploy-bot          0s  2026-04-27 19:34</span>
+<span class="c1">#       ! AWS_ACCESS_KEY_ID not set in deploy-bot env</span>
+<span class="c1"># 2   spawn_failed   deploy-bot          0s  2026-04-27 19:34</span>
+<span class="c1">#       ! AWS_ACCESS_KEY_ID not set in deploy-bot env</span>
+<span class="c1"># 3   gave_up        deploy-bot          0s  2026-04-27 19:34</span>
+<span class="c1">#       ! AWS_ACCESS_KEY_ID not set in deploy-bot env</span>
+</code></pre></div>
+
+<p>If Telegram / Discord / Slack is wired in, a gateway notification fires on the <code>gave_up</code> event so you hear about the outage without having to check the board.</p>
+<h3 id="crash-recovery--worker-dies-mid-flight">Crash recovery — worker dies mid-flight</h3>
+<p>Sometimes the spawn succeeds but the worker process dies later — segfault, OOM, <code>systemctl stop</code>. The dispatcher polls <code>kill(pid, 0)</code> and detects the dead pid; the claim releases, the task goes back to <code>ready</code>, and the next tick gives it to a fresh worker.</p>
+<p>The example in the seed data is a migration that was running out of memory:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Worker claims, starts scanning 2.4M rows, OOM kills it at ~2.3M</span>
+<span class="c1"># Dispatcher detects dead pid, releases claim, increments attempt counter</span>
+<span class="c1"># Retry with a chunked strategy succeeds</span>
+</code></pre></div>
+
+<p>The drawer shows the full two-attempt history:</p>
+<p><img alt="Crash and recovery — 1 crashed + 1 completed" src="../../../assets/img/kanban-tutorial/06-drawer-crash-recovery.png" /></p>
+<p>Run 1 — <code>crashed</code>, with the error <code>OOM kill at row 2.3M (process 99999 gone)</code>. Run 2 — <code>completed</code>, with <code>"strategy": "chunked with LIMIT + WHERE id &gt; last_id"</code> in its metadata. The retrying worker saw the crash of run 1 in its context and picked a safer strategy; the metadata makes it obvious to a future observer (or postmortem writer) what changed.</p>
+<h2 id="structured-handoff--why-summary-and-metadata-matter">Structured handoff — why <code>summary</code> and <code>metadata</code> matter</h2>
+<p>In every story above, workers called <code>kanban_complete(summary=..., metadata=...)</code> at the end. That's not decoration — it's the primary handoff channel between stages of a workflow.</p>
+<p>When a worker on task B is spawned and calls <code>kanban_show()</code>, the <code>worker_context</code> it gets back includes:</p>
+<ul>
+<li>B's <strong>prior attempts</strong> (previous runs: outcome, summary, error, metadata) so a retrying worker doesn't repeat a failed path.</li>
+<li><strong>Parent task results</strong> — for each parent, the most-recent completed run's summary and metadata — so downstream workers see why and how the upstream work was done.</li>
+</ul>
+<p>This replaces the "dig through comments and the work output" dance that plagues flat kanban systems. A PM writes acceptance criteria in the spec's metadata, and the engineer's worker sees them structurally in the parent handoff. An engineer records which tests they ran and how many passed, and the reviewer's worker has that list in hand before opening a diff.</p>
+<p>The bulk-close guard exists because this data is per-run. <code>hermes kanban complete a b c --summary X</code> (you, from the CLI) is refused — copy-pasting the same summary to three tasks is almost always wrong. Bulk close without the handoff flags still works for the common "I finished a pile of admin tasks" case. The tool surface doesn't expose a bulk variant at all; <code>kanban_complete</code> is always single-task-at-a-time for the same reason.</p>
+<h2 id="follow-up-on-a-done-card--ci-remediation-via-the-parent-link">Follow-up on a done card — CI remediation via the parent link</h2>
+<p>Story 1's implementation card is <code>done</code>. Two hours later CI fails on the merged branch. Don't reopen the done card — completed cards are history, and their handoff flows forward. Create a remediation card with the done card as its <strong>parent</strong>:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Fix CI: test_backoff_jitter flakes on 3.11&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>backend-dev<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--parent<span class="w"> </span>t_impl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--workspace<span class="w"> </span>worktree<span class="w"> </span>--branch<span class="w"> </span>wt/ci-fix-backoff<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--body<span class="w"> </span><span class="s2">&quot;CI run #4812 failed after t_impl completed.</span>
+<span class="s2">FAILED tests/test_retry.py::test_backoff_jitter - TimeoutError</span>
+<span class="s2">Acceptance: tests/test_retry.py green on 3.11 and 3.12.&quot;</span>
+</code></pre></div>
+
+<p>Three things make this work:</p>
+<ul>
+<li><strong>Immediate dispatch.</strong> Because the parent is already <code>done</code>, the child is created straight into <code>ready</code> — the dispatcher can claim it on the next tick. (A child of a still-open parent would wait in <code>todo</code>.)</li>
+<li><strong>Inherited context.</strong> The remediation worker's context includes a <em>Parent task results</em> section carrying <code>t_impl</code>'s completion summary and metadata — the changed files and decisions the original worker recorded — so it knows why the code is shaped the way it is before reading a line of it.</li>
+<li><strong>Fresh evidence in the body.</strong> The CI log didn't exist when <code>t_impl</code> completed, so it can't be in the parent's handoff — it goes in the new card's body, alongside explicit acceptance criteria.</li>
+</ul>
+<p>Prefer a fresh worktree/branch for the remediation card. Checking out the original branch gives the worker repo <em>state</em> but none of the <em>rationale</em> — the parent handoff carries that. Same assignee profile is usually right: the profile that wrote the code has the skills to fix it.</p>
+<h2 id="inspecting-a-task-currently-running">Inspecting a task currently running</h2>
+<p>For completeness — here's the drawer of a task still in flight (the API implementation from Story 1, claimed by <code>backend-dev</code> but not yet complete):</p>
+<p><img alt="Claimed, in-flight task" src="../../../assets/img/kanban-tutorial/10-drawer-in-flight.png" /></p>
+<p>Status is <code>Running</code>. The active run appears in the Run History section with outcome <code>active</code> and no <code>ended_at</code>. If this worker dies or times out, the dispatcher closes this run with the appropriate outcome and opens a new one on the next claim — the attempt row never disappears.</p>
+<h2 id="next-steps">Next steps</h2>
+<ul>
+<li><a href="kanban.html">Kanban overview</a> — the full data model, event vocabulary, and CLI reference.</li>
+<li><code>hermes kanban --help</code> — every subcommand, every flag.</li>
+<li><code>hermes kanban watch --kinds completed,gave_up,timed_out</code> — live stream terminal events across the whole board.</li>
+<li><code>hermes kanban notify-subscribe &lt;task&gt; --platform telegram --chat-id &lt;id&gt;</code> — get a gateway ping when a specific task finishes.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban-tutorial</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#setup">Setup</a></li>
+<li class="lvl2"><a href="#the-board-at-a-glance">The board at a glance</a></li>
+<li class="lvl3"><a href="#flat-view">Flat view</a></li>
+<li class="lvl2"><a href="#story-1--solo-dev-shipping-a-feature">Story 1 — Solo dev shipping a feature</a></li>
+<li class="lvl2"><a href="#story-2--fleet-farming">Story 2 — Fleet farming</a></li>
+<li class="lvl2"><a href="#story-3--role-pipeline-with-retry">Story 3 — Role pipeline with retry</a></li>
+<li class="lvl2"><a href="#story-4--circuit-breaker-and-crash-recovery">Story 4 — Circuit breaker and crash recovery</a></li>
+<li class="lvl3"><a href="#circuit-breaker--permanent-looking-failure">Circuit breaker — permanent-looking failure</a></li>
+<li class="lvl3"><a href="#crash-recovery--worker-dies-mid-flight">Crash recovery — worker dies mid-flight</a></li>
+<li class="lvl2"><a href="#structured-handoff--why-summary-and-metadata-matter">Structured handoff — why summary and metadata matter</a></li>
+<li class="lvl2"><a href="#follow-up-on-a-done-card--ci-remediation-via-the-parent-link">Follow-up on a done card — CI remediation via the parent link</a></li>
+<li class="lvl2"><a href="#inspecting-a-task-currently-running">Inspecting a task currently running</a></li>
+<li class="lvl2"><a href="#next-steps">Next steps</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

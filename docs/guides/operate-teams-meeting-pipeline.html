@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Operate the Teams Meeting Pipeline · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/operate-teams-meeting-pipeline</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="operate-the-teams-meeting-pipeline">Operate the Teams Meeting Pipeline</h1>
+<p>Use this guide after you have already enabled the feature from <a href="../user-guide/messaging/teams-meetings.html">Teams Meetings</a>.</p>
+<p>This page covers:
+- operator CLI flows
+- routine subscription maintenance
+- failure triage
+- go-live checks
+- rollout worksheet</p>
+<h2 id="core-operator-commands">Core Operator Commands</h2>
+<h3 id="validate-the-config-snapshot">Validate the config snapshot</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>validate
+</code></pre></div>
+
+<p>Use this first after any config change.</p>
+<h3 id="inspect-token-health">Inspect token health</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>token-health
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>token-health<span class="w"> </span>--force-refresh
+</code></pre></div>
+
+<p>Use <code>--force-refresh</code> when you suspect stale auth state.</p>
+<h3 id="inspect-subscriptions">Inspect subscriptions</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>subscriptions
+</code></pre></div>
+
+<h3 id="renew-near-expiry-subscriptions">Renew near-expiry subscriptions</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>maintain-subscriptions
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>maintain-subscriptions<span class="w"> </span>--dry-run
+</code></pre></div>
+
+<h3 id="automating-subscription-renewal-required-for-production">Automating subscription renewal (REQUIRED for production)</h3>
+<p><strong>Microsoft Graph subscriptions expire in at most 72 hours.</strong> If nothing renews them, meeting notifications silently stop after 3 days and the pipeline looks "broken." This is the #1 operational failure mode for any Graph-backed integration.</p>
+<p>You MUST run <code>maintain-subscriptions</code> on a schedule. Pick one of these three options:</p>
+<h4 id="option-1-hermes-cron-recommended-if-you-already-run-the-hermes-gateway">Option 1: Hermes cron (recommended if you already run the Hermes gateway)</h4>
+<p>Hermes ships a built-in cron scheduler. The <code>--no-agent</code> mode runs a script as the job (rather than using an LLM), and <code>--script</code> must point at a file under <code>~/.hermes/scripts/</code>. First create the script:</p>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.hermes/scripts
+cat<span class="w"> </span>&gt;<span class="w"> </span>~/.hermes/scripts/maintain-teams-subscriptions.sh<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<span class="s">#!/usr/bin/env bash</span>
+<span class="s">exec hermes teams-pipeline maintain-subscriptions</span>
+<span class="s">EOF</span>
+chmod<span class="w"> </span>+x<span class="w"> </span>~/.hermes/scripts/maintain-teams-subscriptions.sh
+</code></pre></div>
+
+<p>Then register a script-only cron job that runs every 12 hours (gives 6x headroom against the 72h expiry window):</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;0 */12 * * *&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;teams-pipeline-maintain-subscriptions&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--no-agent<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--script<span class="w"> </span>maintain-teams-subscriptions.sh<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--deliver<span class="w"> </span><span class="nb">local</span>
+</code></pre></div>
+
+<p>Verify it was registered and inspect the next run time:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>list
+hermes<span class="w"> </span>cron<span class="w"> </span>status<span class="w">        </span><span class="c1"># scheduler status</span>
+</code></pre></div>
+
+<h4 id="option-2-systemd-timer-recommended-for-linux-production-deployments">Option 2: systemd timer (recommended for Linux production deployments)</h4>
+<p>Create <code>/etc/systemd/system/hermes-teams-pipeline-maintain.service</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">[Unit]</span>
+<span class="na">Description</span><span class="o">=</span><span class="s">Hermes Teams pipeline subscription maintenance</span>
+<span class="na">After</span><span class="o">=</span><span class="s">network-online.target</span>
+
+<span class="k">[Service]</span>
+<span class="na">Type</span><span class="o">=</span><span class="s">oneshot</span>
+<span class="na">User</span><span class="o">=</span><span class="s">hermes</span>
+<span class="na">EnvironmentFile</span><span class="o">=</span><span class="s">/etc/hermes/env</span>
+<span class="na">ExecStart</span><span class="o">=</span><span class="s">/usr/local/bin/hermes teams-pipeline maintain-subscriptions</span>
+</code></pre></div>
+
+<p>And <code>/etc/systemd/system/hermes-teams-pipeline-maintain.timer</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">[Unit]</span>
+<span class="na">Description</span><span class="o">=</span><span class="s">Run Hermes Teams pipeline subscription maintenance every 12 hours</span>
+
+<span class="k">[Timer]</span>
+<span class="na">OnBootSec</span><span class="o">=</span><span class="s">5min</span>
+<span class="na">OnUnitActiveSec</span><span class="o">=</span><span class="s">12h</span>
+<span class="na">Persistent</span><span class="o">=</span><span class="s">true</span>
+
+<span class="k">[Install]</span>
+<span class="na">WantedBy</span><span class="o">=</span><span class="s">timers.target</span>
+</code></pre></div>
+
+<p>Enable:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>systemctl<span class="w"> </span>daemon-reload
+sudo<span class="w"> </span>systemctl<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>--now<span class="w"> </span>hermes-teams-pipeline-maintain.timer
+systemctl<span class="w"> </span>list-timers<span class="w"> </span>hermes-teams-pipeline-maintain.timer
+</code></pre></div>
+
+<h4 id="option-3-plain-crontab">Option 3: Plain crontab</h4>
+<div class="highlight"><pre><span></span><code>0 */12 * * * /usr/local/bin/hermes teams-pipeline maintain-subscriptions &gt;&gt; /var/log/hermes/teams-pipeline-maintain.log 2&gt;&amp;1
+</code></pre></div>
+
+<p>Make sure the cron environment has the <code>MSGRAPH_*</code> credentials. Simplest fix: source <code>~/.hermes/.env</code> at the top of a wrapper script that crontab calls.</p>
+<h4 id="verifying-renewal-is-working">Verifying renewal is working</h4>
+<p>After you've set up the schedule, check renewal activity after the first scheduled run:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>subscriptions<span class="w">   </span><span class="c1"># should show expirationDateTime advanced</span>
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>maintain-subscriptions<span class="w"> </span>--dry-run<span class="w">   </span><span class="c1"># should show &quot;0 expiring soon&quot; most of the time</span>
+</code></pre></div>
+
+<p>If you ever see your Graph webhook mysteriously "stop working" after exactly ~72 hours, this is the first thing to check: did the renewal job actually run?</p>
+<h3 id="inspect-recent-jobs">Inspect recent jobs</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>list
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>list<span class="w"> </span>--status<span class="w"> </span>failed
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>show<span class="w"> </span>&lt;job-id&gt;
+</code></pre></div>
+
+<h3 id="replay-a-stored-job">Replay a stored job</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>run<span class="w"> </span>&lt;job-id&gt;
+</code></pre></div>
+
+<h3 id="dry-run-meeting-artifact-fetches">Dry-run meeting artifact fetches</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>fetch<span class="w"> </span>--meeting-id<span class="w"> </span>&lt;meeting-id&gt;
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>fetch<span class="w"> </span>--join-web-url<span class="w"> </span><span class="s2">&quot;&lt;join-url&gt;&quot;</span>
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>fetch<span class="w"> </span>--join-web-url<span class="w"> </span><span class="s2">&quot;&lt;join-url&gt;&quot;</span><span class="w"> </span>--organizer-user-id<span class="w"> </span>&lt;entra-user-id&gt;
+</code></pre></div>
+
+<p>Pass <code>--organizer-user-id</code> (the organizer's Microsoft Entra user ID) to resolve
+through the organizer-scoped <code>/users/{id}/onlineMeetings</code> Graph path. This is
+required for Teams <code>/meet/</code> short URLs, which Graph rejects on the
+<code>/communications/onlineMeetings</code> endpoint. Webhook-driven jobs derive the
+organizer automatically from the notification's <code>@odata.id</code>.</p>
+<h2 id="routine-runbook">Routine Runbook</h2>
+<h3 id="after-first-setup">After first setup</h3>
+<p>Run these in order:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>validate
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>token-health<span class="w"> </span>--force-refresh
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>subscriptions
+</code></pre></div>
+
+<p>Then trigger or wait for a real meeting event and confirm:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>list
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>show<span class="w"> </span>&lt;job-id&gt;
+</code></pre></div>
+
+<h3 id="daily-or-periodic-checks">Daily or periodic checks</h3>
+<ul>
+<li>run <code>hermes teams-pipeline maintain-subscriptions --dry-run</code></li>
+<li>inspect <code>hermes teams-pipeline list --status failed</code></li>
+<li>verify the Teams delivery target is still the correct chat or channel</li>
+</ul>
+<h3 id="before-changing-webhook-urls-or-delivery-targets">Before changing webhook URLs or delivery targets</h3>
+<ul>
+<li>update the public notification URL or Teams target config</li>
+<li>run <code>hermes teams-pipeline validate</code></li>
+<li>renew or recreate affected subscriptions</li>
+<li>confirm new events land in the expected sink</li>
+</ul>
+<h2 id="failure-triage">Failure Triage</h2>
+<h3 id="no-jobs-are-being-created">No jobs are being created</h3>
+<p>Check:
+- <code>msgraph_webhook</code> is enabled
+- the public notification URL points to <code>/msgraph/webhook</code>
+- the client state in the subscription matches <code>MSGRAPH_WEBHOOK_CLIENT_STATE</code>
+- subscriptions still exist remotely and are not expired</p>
+<h3 id="jobs-stay-in-retry-or-fail-before-summarization">Jobs stay in retry or fail before summarization</h3>
+<p>Check:
+- transcript permissions and availability
+- recording permissions and artifact availability
+- <code>ffmpeg</code> availability if recording fallback is enabled
+- Graph token health</p>
+<h3 id="summaries-are-produced-but-not-delivered-to-teams">Summaries are produced but not delivered to Teams</h3>
+<p>Check:
+- <code>platforms.teams.enabled: true</code>
+- <code>delivery_mode</code>
+- <code>incoming_webhook_url</code> for webhook mode
+- <code>chat_id</code> or <code>team_id</code> plus <code>channel_id</code> for Graph mode
+- Teams auth config if Graph posting is used</p>
+<h3 id="duplicate-or-unexpected-replays">Duplicate or unexpected replays</h3>
+<p>Check:
+- whether you manually replayed a job with <code>hermes teams-pipeline run</code>
+- whether the sink record already exists for that meeting
+- whether you intentionally enabled a resend path in your local config</p>
+<h2 id="go-live-checklist">Go-Live Checklist</h2>
+<ul>
+<li>[ ] Graph credentials are present and correct</li>
+<li>[ ] <code>msgraph_webhook</code> is enabled and reachable from the public internet</li>
+<li>[ ] <code>MSGRAPH_WEBHOOK_CLIENT_STATE</code> is set and matches subscriptions</li>
+<li>[ ] transcript subscription is created</li>
+<li>[ ] recording subscription is created if STT fallback is required</li>
+<li>[ ] <code>ffmpeg</code> is installed if recording fallback is enabled</li>
+<li>[ ] Teams outbound delivery target is configured and verified</li>
+<li>[ ] Notion and Linear sinks are configured only if actually needed</li>
+<li>[ ] <code>hermes teams-pipeline validate</code> returns an OK snapshot</li>
+<li>[ ] <code>hermes teams-pipeline token-health --force-refresh</code> succeeds</li>
+<li>[ ] <strong><code>maintain-subscriptions</code> is scheduled</strong> (Hermes cron, systemd timer, or crontab — see <a href="#automating-subscription-renewal-required-for-production">Automating subscription renewal</a>). Without this, Graph subscriptions silently expire within 72 hours.</li>
+<li>[ ] a real end-to-end meeting event has produced a stored job</li>
+<li>[ ] at least one summary has reached the intended delivery sink</li>
+</ul>
+<h2 id="delivery-mode-decision-guide">Delivery-Mode Decision Guide</h2>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Use when</th>
+<th>Tradeoff</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>incoming_webhook</code></td>
+<td>you only need simple posting into Teams</td>
+<td>simplest setup, less control</td>
+</tr>
+<tr>
+<td><code>graph</code></td>
+<td>you need channel or chat posting through Graph</td>
+<td>more control, more auth and target config</td>
+</tr>
+</tbody>
+</table>
+<h2 id="operator-worksheet">Operator Worksheet</h2>
+<p>Fill this out before rollout:</p>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Public notification URL</td>
+<td></td>
+</tr>
+<tr>
+<td>Graph tenant ID</td>
+<td></td>
+</tr>
+<tr>
+<td>Graph client ID</td>
+<td></td>
+</tr>
+<tr>
+<td>Webhook client state</td>
+<td></td>
+</tr>
+<tr>
+<td>Transcript resource subscription</td>
+<td></td>
+</tr>
+<tr>
+<td>Recording resource subscription</td>
+<td></td>
+</tr>
+<tr>
+<td>Teams delivery mode</td>
+<td></td>
+</tr>
+<tr>
+<td>Teams chat ID or team/channel</td>
+<td></td>
+</tr>
+<tr>
+<td>Notion database ID</td>
+<td></td>
+</tr>
+<tr>
+<td>Linear team ID</td>
+<td></td>
+</tr>
+<tr>
+<td>Store path override, if any</td>
+<td></td>
+</tr>
+<tr>
+<td>Owner for daily checks</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2 id="change-review-worksheet">Change Review Worksheet</h2>
+<p>Use this before changing the deployment:</p>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Are we changing the public webhook URL?</td>
+<td></td>
+</tr>
+<tr>
+<td>Are we rotating Graph credentials?</td>
+<td></td>
+</tr>
+<tr>
+<td>Are we changing Teams delivery mode?</td>
+<td></td>
+</tr>
+<tr>
+<td>Are we moving to a new Teams chat or channel?</td>
+<td></td>
+</tr>
+<tr>
+<td>Do subscriptions need to be recreated or renewed?</td>
+<td></td>
+</tr>
+<tr>
+<td>Do we need a fresh end-to-end verification run?</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2 id="related-docs">Related Docs</h2>
+<ul>
+<li><a href="../user-guide/messaging/teams-meetings.html">Teams Meetings setup</a></li>
+<li><a href="../user-guide/messaging/teams.html">Microsoft Teams bot setup</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/operate-teams-meeting-pipeline</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#core-operator-commands">Core Operator Commands</a></li>
+<li class="lvl3"><a href="#validate-the-config-snapshot">Validate the config snapshot</a></li>
+<li class="lvl3"><a href="#inspect-token-health">Inspect token health</a></li>
+<li class="lvl3"><a href="#inspect-subscriptions">Inspect subscriptions</a></li>
+<li class="lvl3"><a href="#renew-near-expiry-subscriptions">Renew near-expiry subscriptions</a></li>
+<li class="lvl3"><a href="#automating-subscription-renewal-required-for-production">Automating subscription renewal (REQUIRED for production)</a></li>
+<li class="lvl3"><a href="#inspect-recent-jobs">Inspect recent jobs</a></li>
+<li class="lvl3"><a href="#replay-a-stored-job">Replay a stored job</a></li>
+<li class="lvl3"><a href="#dry-run-meeting-artifact-fetches">Dry-run meeting artifact fetches</a></li>
+<li class="lvl2"><a href="#routine-runbook">Routine Runbook</a></li>
+<li class="lvl3"><a href="#after-first-setup">After first setup</a></li>
+<li class="lvl3"><a href="#daily-or-periodic-checks">Daily or periodic checks</a></li>
+<li class="lvl3"><a href="#before-changing-webhook-urls-or-delivery-targets">Before changing webhook URLs or delivery targets</a></li>
+<li class="lvl2"><a href="#failure-triage">Failure Triage</a></li>
+<li class="lvl3"><a href="#no-jobs-are-being-created">No jobs are being created</a></li>
+<li class="lvl3"><a href="#jobs-stay-in-retry-or-fail-before-summarization">Jobs stay in retry or fail before summarization</a></li>
+<li class="lvl3"><a href="#summaries-are-produced-but-not-delivered-to-teams">Summaries are produced but not delivered to Teams</a></li>
+<li class="lvl3"><a href="#duplicate-or-unexpected-replays">Duplicate or unexpected replays</a></li>
+<li class="lvl2"><a href="#go-live-checklist">Go-Live Checklist</a></li>
+<li class="lvl2"><a href="#delivery-mode-decision-guide">Delivery-Mode Decision Guide</a></li>
+<li class="lvl2"><a href="#operator-worksheet">Operator Worksheet</a></li>
+<li class="lvl2"><a href="#change-review-worksheet">Change Review Worksheet</a></li>
+<li class="lvl2"><a href="#related-docs">Related Docs</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peft Fine Tuning — 使用 LoRA、QLoRA 及 25+ 种方法对 LLM 进行参数高效微调 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/optional/mlops/mlops-peft</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="peft-fine-tuning">Peft Fine Tuning</h1>
+<p>使用 LoRA、QLoRA 及 25+ 种方法对 LLM 进行参数高效微调（Parameter-efficient fine-tuning）。适用场景：在显存有限的情况下微调大型模型（7B–70B）、需要以极低精度损失训练不足 1% 的参数，或用于多适配器（multi-adapter）服务。HuggingFace 官方库，与 transformers 生态深度集成。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>可选 — 通过 <code>hermes skills install official/mlops/peft</code> 安装</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>optional-skills/mlops/peft</code></td>
+</tr>
+<tr>
+<td>版本</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>作者</td>
+<td>Orchestra Research</td>
+</tr>
+<tr>
+<td>许可证</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>依赖</td>
+<td><code>peft&gt;=0.13.0</code>, <code>transformers&gt;=4.45.0</code>, <code>torch&gt;=2.0.0</code>, <code>bitsandbytes&gt;=0.43.0</code></td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>标签</td>
+<td><code>Fine-Tuning</code>, <code>PEFT</code>, <code>LoRA</code>, <code>QLoRA</code>, <code>Parameter-Efficient</code>, <code>Adapters</code>, <code>Low-Rank</code>, <code>Memory Optimization</code>, <code>Multi-Adapter</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发该 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。</p>
+</div>
+<h1 id="peft参数高效微调">PEFT（参数高效微调）</h1>
+<p>通过 LoRA、QLoRA 及 25+ 种适配器方法，仅训练不足 1% 的参数来微调 LLM。</p>
+<h2 id="何时使用-peft">何时使用 PEFT</h2>
+<p><strong>在以下情况使用 PEFT/LoRA：</strong>
+- 在消费级 GPU（RTX 4090、A100）上微调 7B–70B 模型
+- 需要训练不足 1% 的参数（6MB 适配器 vs 14GB 完整模型）
+- 希望通过多个任务专属适配器快速迭代
+- 从单一基础模型部署多个微调变体</p>
+<p><strong>在以下情况使用 QLoRA（PEFT + 量化）：</strong>
+- 在单张 24GB GPU 上微调 70B 模型
+- 显存是主要瓶颈
+- 可接受相比完整微调约 5% 的质量损失</p>
+<p><strong>在以下情况改用完整微调：</strong>
+- 训练小型模型（参数量 &lt; 1B）
+- 需要最高质量且有充足算力预算
+- 显著的领域偏移需要更新全部权重</p>
+<h2 id="快速开始">快速开始</h2>
+<h3 id="安装">安装</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 基础安装</span>
+pip<span class="w"> </span>install<span class="w"> </span>peft
+
+<span class="c1"># 含量化支持（推荐）</span>
+pip<span class="w"> </span>install<span class="w"> </span>peft<span class="w"> </span>bitsandbytes
+
+<span class="c1"># 完整工具栈</span>
+pip<span class="w"> </span>install<span class="w"> </span>peft<span class="w"> </span>transformers<span class="w"> </span>accelerate<span class="w"> </span>bitsandbytes<span class="w"> </span>datasets
+</code></pre></div>
+
+<h3 id="lora-微调标准方式">LoRA 微调（标准方式）</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoModelForCausalLM</span><span class="p">,</span> <span class="n">AutoTokenizer</span><span class="p">,</span> <span class="n">TrainingArguments</span><span class="p">,</span> <span class="n">Trainer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_peft_model</span><span class="p">,</span> <span class="n">LoraConfig</span><span class="p">,</span> <span class="n">TaskType</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">datasets</span><span class="w"> </span><span class="kn">import</span> <span class="n">load_dataset</span>
+
+<span class="c1"># 加载基础模型</span>
+<span class="n">model_name</span> <span class="o">=</span> <span class="s2">&quot;meta-llama/Llama-3.1-8B&quot;</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="n">model_name</span><span class="p">,</span> <span class="n">torch_dtype</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span><span class="p">,</span> <span class="n">device_map</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span><span class="p">)</span>
+<span class="n">tokenizer</span> <span class="o">=</span> <span class="n">AutoTokenizer</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="n">model_name</span><span class="p">)</span>
+<span class="n">tokenizer</span><span class="o">.</span><span class="n">pad_token</span> <span class="o">=</span> <span class="n">tokenizer</span><span class="o">.</span><span class="n">eos_token</span>
+
+<span class="c1"># LoRA 配置</span>
+<span class="n">lora_config</span> <span class="o">=</span> <span class="n">LoraConfig</span><span class="p">(</span>
+    <span class="n">task_type</span><span class="o">=</span><span class="n">TaskType</span><span class="o">.</span><span class="n">CAUSAL_LM</span><span class="p">,</span>
+    <span class="n">r</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span>                          <span class="c1"># 秩（Rank），范围 8-64，越高容量越大</span>
+    <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span>                 <span class="c1"># 缩放因子（通常为 2*r）</span>
+    <span class="n">lora_dropout</span><span class="o">=</span><span class="mf">0.05</span><span class="p">,</span>             <span class="c1"># 正则化 dropout</span>
+    <span class="n">target_modules</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;q_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;v_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;k_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;o_proj&quot;</span><span class="p">],</span>  <span class="c1"># 注意力层</span>
+    <span class="n">bias</span><span class="o">=</span><span class="s2">&quot;none&quot;</span>                    <span class="c1"># 不训练偏置项</span>
+<span class="p">)</span>
+
+<span class="c1"># 应用 LoRA</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">get_peft_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">lora_config</span><span class="p">)</span>
+<span class="n">model</span><span class="o">.</span><span class="n">print_trainable_parameters</span><span class="p">()</span>
+<span class="c1"># 输出：trainable params: 13,631,488 || all params: 8,043,307,008 || trainable%: 0.17%</span>
+
+<span class="c1"># 准备数据集</span>
+<span class="n">dataset</span> <span class="o">=</span> <span class="n">load_dataset</span><span class="p">(</span><span class="s2">&quot;databricks/databricks-dolly-15k&quot;</span><span class="p">,</span> <span class="n">split</span><span class="o">=</span><span class="s2">&quot;train&quot;</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">tokenize</span><span class="p">(</span><span class="n">example</span><span class="p">):</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;### Instruction:</span><span class="se">\n</span><span class="si">{</span><span class="n">example</span><span class="p">[</span><span class="s1">&#39;instruction&#39;</span><span class="p">]</span><span class="si">}</span><span class="se">\n\n</span><span class="s2">### Response:</span><span class="se">\n</span><span class="si">{</span><span class="n">example</span><span class="p">[</span><span class="s1">&#39;response&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="k">return</span> <span class="n">tokenizer</span><span class="p">(</span><span class="n">text</span><span class="p">,</span> <span class="n">truncation</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">max_length</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span> <span class="n">padding</span><span class="o">=</span><span class="s2">&quot;max_length&quot;</span><span class="p">)</span>
+
+<span class="n">tokenized</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">tokenize</span><span class="p">,</span> <span class="n">remove_columns</span><span class="o">=</span><span class="n">dataset</span><span class="o">.</span><span class="n">column_names</span><span class="p">)</span>
+
+<span class="c1"># 训练</span>
+<span class="n">training_args</span> <span class="o">=</span> <span class="n">TrainingArguments</span><span class="p">(</span>
+    <span class="n">output_dir</span><span class="o">=</span><span class="s2">&quot;./lora-llama&quot;</span><span class="p">,</span>
+    <span class="n">num_train_epochs</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+    <span class="n">per_device_train_batch_size</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+    <span class="n">gradient_accumulation_steps</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+    <span class="n">learning_rate</span><span class="o">=</span><span class="mf">2e-4</span><span class="p">,</span>
+    <span class="n">fp16</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">logging_steps</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span>
+    <span class="n">save_strategy</span><span class="o">=</span><span class="s2">&quot;epoch&quot;</span>
+<span class="p">)</span>
+
+<span class="n">trainer</span> <span class="o">=</span> <span class="n">Trainer</span><span class="p">(</span>
+    <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+    <span class="n">args</span><span class="o">=</span><span class="n">training_args</span><span class="p">,</span>
+    <span class="n">train_dataset</span><span class="o">=</span><span class="n">tokenized</span><span class="p">,</span>
+    <span class="n">data_collator</span><span class="o">=</span><span class="k">lambda</span> <span class="n">data</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;input_ids&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">f</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">data</span><span class="p">]),</span>
+                                 <span class="s2">&quot;attention_mask&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">f</span><span class="p">[</span><span class="s2">&quot;attention_mask&quot;</span><span class="p">]</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">data</span><span class="p">]),</span>
+                                 <span class="s2">&quot;labels&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">f</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">data</span><span class="p">])}</span>
+<span class="p">)</span>
+
+<span class="n">trainer</span><span class="o">.</span><span class="n">train</span><span class="p">()</span>
+
+<span class="c1"># 仅保存适配器（6MB vs 16GB）</span>
+<span class="n">model</span><span class="o">.</span><span class="n">save_pretrained</span><span class="p">(</span><span class="s2">&quot;./lora-llama-adapter&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="qlora-微调显存高效方式">QLoRA 微调（显存高效方式）</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoModelForCausalLM</span><span class="p">,</span> <span class="n">BitsAndBytesConfig</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_peft_model</span><span class="p">,</span> <span class="n">LoraConfig</span><span class="p">,</span> <span class="n">prepare_model_for_kbit_training</span>
+
+<span class="c1"># 4-bit 量化配置</span>
+<span class="n">bnb_config</span> <span class="o">=</span> <span class="n">BitsAndBytesConfig</span><span class="p">(</span>
+    <span class="n">load_in_4bit</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">bnb_4bit_quant_type</span><span class="o">=</span><span class="s2">&quot;nf4&quot;</span><span class="p">,</span>           <span class="c1"># NormalFloat4（最适合 LLM）</span>
+    <span class="n">bnb_4bit_compute_dtype</span><span class="o">=</span><span class="s2">&quot;bfloat16&quot;</span><span class="p">,</span>   <span class="c1"># 以 bf16 计算</span>
+    <span class="n">bnb_4bit_use_double_quant</span><span class="o">=</span><span class="kc">True</span>       <span class="c1"># 嵌套量化</span>
+<span class="p">)</span>
+
+<span class="c1"># 加载量化模型</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+    <span class="s2">&quot;meta-llama/Llama-3.1-70B&quot;</span><span class="p">,</span>
+    <span class="n">quantization_config</span><span class="o">=</span><span class="n">bnb_config</span><span class="p">,</span>
+    <span class="n">device_map</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span>
+<span class="p">)</span>
+
+<span class="c1"># 为训练做准备（启用梯度检查点）</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">prepare_model_for_kbit_training</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+
+<span class="c1"># QLoRA 的 LoRA 配置</span>
+<span class="n">lora_config</span> <span class="o">=</span> <span class="n">LoraConfig</span><span class="p">(</span>
+    <span class="n">r</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>                              <span class="c1"># 70B 模型使用更高秩</span>
+    <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span>
+    <span class="n">lora_dropout</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>
+    <span class="n">target_modules</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;q_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;v_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;k_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;o_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;gate_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;up_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;down_proj&quot;</span><span class="p">],</span>
+    <span class="n">bias</span><span class="o">=</span><span class="s2">&quot;none&quot;</span><span class="p">,</span>
+    <span class="n">task_type</span><span class="o">=</span><span class="s2">&quot;CAUSAL_LM&quot;</span>
+<span class="p">)</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">get_peft_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">lora_config</span><span class="p">)</span>
+<span class="c1"># 70B 模型现在可在单张 24GB GPU 上运行！</span>
+</code></pre></div>
+
+<h2 id="lora-参数选择">LoRA 参数选择</h2>
+<h3 id="秩r容量与效率的权衡">秩（r）——容量与效率的权衡</h3>
+<table>
+<thead>
+<tr>
+<th>秩</th>
+<th>可训练参数量</th>
+<th>显存</th>
+<th>质量</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>4</td>
+<td>~3M</td>
+<td>极低</td>
+<td>较低</td>
+<td>简单任务、原型验证</td>
+</tr>
+<tr>
+<td><strong>8</strong></td>
+<td>~7M</td>
+<td>低</td>
+<td>良好</td>
+<td><strong>推荐起始点</strong></td>
+</tr>
+<tr>
+<td><strong>16</strong></td>
+<td>~14M</td>
+<td>中等</td>
+<td>更好</td>
+<td><strong>通用微调</strong></td>
+</tr>
+<tr>
+<td>32</td>
+<td>~27M</td>
+<td>较高</td>
+<td>高</td>
+<td>复杂任务</td>
+</tr>
+<tr>
+<td>64</td>
+<td>~54M</td>
+<td>高</td>
+<td>最高</td>
+<td>领域适配、70B 模型</td>
+</tr>
+</tbody>
+</table>
+<h3 id="alphalora_alpha缩放因子">Alpha（lora_alpha）——缩放因子</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 经验法则：alpha = 2 * rank</span>
+<span class="n">LoraConfig</span><span class="p">(</span><span class="n">r</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span> <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">32</span><span class="p">)</span>  <span class="c1"># 标准</span>
+<span class="n">LoraConfig</span><span class="p">(</span><span class="n">r</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span> <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">16</span><span class="p">)</span>  <span class="c1"># 保守（学习率效果较低）</span>
+<span class="n">LoraConfig</span><span class="p">(</span><span class="n">r</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span> <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">64</span><span class="p">)</span>  <span class="c1"># 激进（学习率效果较高）</span>
+</code></pre></div>
+
+<h3 id="按架构选择目标模块">按架构选择目标模块</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Llama / Mistral / Qwen</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;q_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;v_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;k_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;o_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;gate_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;up_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;down_proj&quot;</span><span class="p">]</span>
+
+<span class="c1"># GPT-2 / GPT-Neo</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;c_attn&quot;</span><span class="p">,</span> <span class="s2">&quot;c_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;c_fc&quot;</span><span class="p">]</span>
+
+<span class="c1"># Falcon</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;query_key_value&quot;</span><span class="p">,</span> <span class="s2">&quot;dense&quot;</span><span class="p">,</span> <span class="s2">&quot;dense_h_to_4h&quot;</span><span class="p">,</span> <span class="s2">&quot;dense_4h_to_h&quot;</span><span class="p">]</span>
+
+<span class="c1"># BLOOM</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;query_key_value&quot;</span><span class="p">,</span> <span class="s2">&quot;dense&quot;</span><span class="p">,</span> <span class="s2">&quot;dense_h_to_4h&quot;</span><span class="p">,</span> <span class="s2">&quot;dense_4h_to_h&quot;</span><span class="p">]</span>
+
+<span class="c1"># 自动检测所有线性层</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="s2">&quot;all-linear&quot;</span>  <span class="c1"># PEFT 0.6.0+</span>
+</code></pre></div>
+
+<h2 id="加载与合并适配器">加载与合并适配器</h2>
+<h3 id="加载已训练的适配器">加载已训练的适配器</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">PeftModel</span><span class="p">,</span> <span class="n">AutoPeftModelForCausalLM</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoModelForCausalLM</span>
+
+<span class="c1"># 方式一：使用 PeftModel 加载</span>
+<span class="n">base_model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;meta-llama/Llama-3.1-8B&quot;</span><span class="p">)</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">PeftModel</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="n">base_model</span><span class="p">,</span> <span class="s2">&quot;./lora-llama-adapter&quot;</span><span class="p">)</span>
+
+<span class="c1"># 方式二：直接加载（推荐）</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoPeftModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+    <span class="s2">&quot;./lora-llama-adapter&quot;</span><span class="p">,</span>
+    <span class="n">device_map</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="将适配器合并到基础模型">将适配器合并到基础模型</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 合并以用于部署（无适配器开销）</span>
+<span class="n">merged_model</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">merge_and_unload</span><span class="p">()</span>
+
+<span class="c1"># 保存合并后的模型</span>
+<span class="n">merged_model</span><span class="o">.</span><span class="n">save_pretrained</span><span class="p">(</span><span class="s2">&quot;./llama-merged&quot;</span><span class="p">)</span>
+<span class="n">tokenizer</span><span class="o">.</span><span class="n">save_pretrained</span><span class="p">(</span><span class="s2">&quot;./llama-merged&quot;</span><span class="p">)</span>
+
+<span class="c1"># 推送到 Hub</span>
+<span class="n">merged_model</span><span class="o">.</span><span class="n">push_to_hub</span><span class="p">(</span><span class="s2">&quot;username/llama-finetuned&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="多适配器服务">多适配器服务</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">PeftModel</span>
+
+<span class="c1"># 加载基础模型及第一个适配器</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoPeftModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;./adapter-task1&quot;</span><span class="p">)</span>
+
+<span class="c1"># 加载额外适配器</span>
+<span class="n">model</span><span class="o">.</span><span class="n">load_adapter</span><span class="p">(</span><span class="s2">&quot;./adapter-task2&quot;</span><span class="p">,</span> <span class="n">adapter_name</span><span class="o">=</span><span class="s2">&quot;task2&quot;</span><span class="p">)</span>
+<span class="n">model</span><span class="o">.</span><span class="n">load_adapter</span><span class="p">(</span><span class="s2">&quot;./adapter-task3&quot;</span><span class="p">,</span> <span class="n">adapter_name</span><span class="o">=</span><span class="s2">&quot;task3&quot;</span><span class="p">)</span>
+
+<span class="c1"># 运行时切换适配器</span>
+<span class="n">model</span><span class="o">.</span><span class="n">set_adapter</span><span class="p">(</span><span class="s2">&quot;task1&quot;</span><span class="p">)</span>  <span class="c1"># 使用 task1 适配器</span>
+<span class="n">output1</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="o">**</span><span class="n">inputs</span><span class="p">)</span>
+
+<span class="n">model</span><span class="o">.</span><span class="n">set_adapter</span><span class="p">(</span><span class="s2">&quot;task2&quot;</span><span class="p">)</span>  <span class="c1"># 切换到 task2</span>
+<span class="n">output2</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="o">**</span><span class="n">inputs</span><span class="p">)</span>
+
+<span class="c1"># 禁用适配器（使用基础模型）</span>
+<span class="k">with</span> <span class="n">model</span><span class="o">.</span><span class="n">disable_adapter</span><span class="p">():</span>
+    <span class="n">base_output</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="o">**</span><span class="n">inputs</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="peft-方法对比">PEFT 方法对比</h2>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>可训练参数占比</th>
+<th>显存</th>
+<th>速度</th>
+<th>最适场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>LoRA</strong></td>
+<td>0.1–1%</td>
+<td>低</td>
+<td>快</td>
+<td>通用微调</td>
+</tr>
+<tr>
+<td><strong>QLoRA</strong></td>
+<td>0.1–1%</td>
+<td>极低</td>
+<td>中等</td>
+<td>显存受限场景</td>
+</tr>
+<tr>
+<td>AdaLoRA</td>
+<td>0.1–1%</td>
+<td>低</td>
+<td>中等</td>
+<td>自动秩选择</td>
+</tr>
+<tr>
+<td>IA3</td>
+<td>0.01%</td>
+<td>极小</td>
+<td>最快</td>
+<td>少样本适配</td>
+</tr>
+<tr>
+<td>Prefix Tuning</td>
+<td>0.1%</td>
+<td>低</td>
+<td>中等</td>
+<td>生成控制</td>
+</tr>
+<tr>
+<td>Prompt Tuning</td>
+<td>0.001%</td>
+<td>极小</td>
+<td>快</td>
+<td>简单任务适配</td>
+</tr>
+<tr>
+<td>P-Tuning v2</td>
+<td>0.1%</td>
+<td>低</td>
+<td>中等</td>
+<td>NLU 任务</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ia3最少参数">IA3（最少参数）</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">IA3Config</span>
+
+<span class="n">ia3_config</span> <span class="o">=</span> <span class="n">IA3Config</span><span class="p">(</span>
+    <span class="n">target_modules</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;q_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;v_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;k_proj&quot;</span><span class="p">,</span> <span class="s2">&quot;down_proj&quot;</span><span class="p">],</span>
+    <span class="n">feedforward_modules</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;down_proj&quot;</span><span class="p">]</span>
+<span class="p">)</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">get_peft_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">ia3_config</span><span class="p">)</span>
+<span class="c1"># 仅训练 0.01% 的参数！</span>
+</code></pre></div>
+
+<h3 id="prefix-tuning">Prefix Tuning</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">PrefixTuningConfig</span>
+
+<span class="n">prefix_config</span> <span class="o">=</span> <span class="n">PrefixTuningConfig</span><span class="p">(</span>
+    <span class="n">task_type</span><span class="o">=</span><span class="s2">&quot;CAUSAL_LM&quot;</span><span class="p">,</span>
+    <span class="n">num_virtual_tokens</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span>      <span class="c1"># 前置 token 数量</span>
+    <span class="n">prefix_projection</span><span class="o">=</span><span class="kc">True</span>       <span class="c1"># 使用 MLP 投影</span>
+<span class="p">)</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">get_peft_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">prefix_config</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="集成模式">集成模式</h2>
+<h3 id="与-trlsfttrainer集成">与 TRL（SFTTrainer）集成</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">trl</span><span class="w"> </span><span class="kn">import</span> <span class="n">SFTTrainer</span><span class="p">,</span> <span class="n">SFTConfig</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">LoraConfig</span>
+
+<span class="n">lora_config</span> <span class="o">=</span> <span class="n">LoraConfig</span><span class="p">(</span><span class="n">r</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span> <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span> <span class="n">target_modules</span><span class="o">=</span><span class="s2">&quot;all-linear&quot;</span><span class="p">)</span>
+
+<span class="n">trainer</span> <span class="o">=</span> <span class="n">SFTTrainer</span><span class="p">(</span>
+    <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+    <span class="n">args</span><span class="o">=</span><span class="n">SFTConfig</span><span class="p">(</span><span class="n">output_dir</span><span class="o">=</span><span class="s2">&quot;./output&quot;</span><span class="p">,</span> <span class="n">max_seq_length</span><span class="o">=</span><span class="mi">512</span><span class="p">),</span>
+    <span class="n">train_dataset</span><span class="o">=</span><span class="n">dataset</span><span class="p">,</span>
+    <span class="n">peft_config</span><span class="o">=</span><span class="n">lora_config</span><span class="p">,</span>  <span class="c1"># 直接传入 LoRA 配置</span>
+<span class="p">)</span>
+<span class="n">trainer</span><span class="o">.</span><span class="n">train</span><span class="p">()</span>
+</code></pre></div>
+
+<h3 id="与-axolotlyaml-配置集成">与 Axolotl（YAML 配置）集成</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># axolotl config.yaml</span>
+<span class="nt">adapter</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">lora</span>
+<span class="nt">lora_r</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">16</span>
+<span class="nt">lora_alpha</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">32</span>
+<span class="nt">lora_dropout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.05</span>
+<span class="nt">lora_target_modules</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">q_proj</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">v_proj</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">k_proj</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">o_proj</span>
+<span class="nt">lora_target_linear</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">  </span><span class="c1"># 针对所有线性层</span>
+</code></pre></div>
+
+<h3 id="与-vllm推理集成">与 vLLM（推理）集成</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">vllm</span><span class="w"> </span><span class="kn">import</span> <span class="n">LLM</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">vllm.lora.request</span><span class="w"> </span><span class="kn">import</span> <span class="n">LoRARequest</span>
+
+<span class="c1"># 加载支持 LoRA 的基础模型</span>
+<span class="n">llm</span> <span class="o">=</span> <span class="n">LLM</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;meta-llama/Llama-3.1-8B&quot;</span><span class="p">,</span> <span class="n">enable_lora</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="c1"># 使用适配器进行推理</span>
+<span class="n">outputs</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span>
+    <span class="n">prompts</span><span class="p">,</span>
+    <span class="n">lora_request</span><span class="o">=</span><span class="n">LoRARequest</span><span class="p">(</span><span class="s2">&quot;adapter1&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;./lora-adapter&quot;</span><span class="p">)</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h2 id="性能基准">性能基准</h2>
+<h3 id="显存占用llama-31-8b">显存占用（Llama 3.1 8B）</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>GPU 显存</th>
+<th>可训练参数量</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>完整微调</td>
+<td>60+ GB</td>
+<td>8B（100%）</td>
+</tr>
+<tr>
+<td>LoRA r=16</td>
+<td>18 GB</td>
+<td>14M（0.17%）</td>
+</tr>
+<tr>
+<td>QLoRA r=16</td>
+<td>6 GB</td>
+<td>14M（0.17%）</td>
+</tr>
+<tr>
+<td>IA3</td>
+<td>16 GB</td>
+<td>800K（0.01%）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="训练速度a100-80gb">训练速度（A100 80GB）</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>Tokens/秒</th>
+<th>相对完整微调</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>完整微调</td>
+<td>2,500</td>
+<td>1x</td>
+</tr>
+<tr>
+<td>LoRA</td>
+<td>3,200</td>
+<td>1.3x</td>
+</tr>
+<tr>
+<td>QLoRA</td>
+<td>2,100</td>
+<td>0.84x</td>
+</tr>
+</tbody>
+</table>
+<h3 id="质量mmlu-基准">质量（MMLU 基准）</h3>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>完整微调</th>
+<th>LoRA</th>
+<th>QLoRA</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Llama 2-7B</td>
+<td>45.3</td>
+<td>44.8</td>
+<td>44.1</td>
+</tr>
+<tr>
+<td>Llama 2-13B</td>
+<td>54.8</td>
+<td>54.2</td>
+<td>53.5</td>
+</tr>
+</tbody>
+</table>
+<h2 id="常见问题">常见问题</h2>
+<h3 id="训练时-cuda-显存不足oom">训练时 CUDA 显存不足（OOM）</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 方案一：启用梯度检查点</span>
+<span class="n">model</span><span class="o">.</span><span class="n">gradient_checkpointing_enable</span><span class="p">()</span>
+
+<span class="c1"># 方案二：减小批大小 + 增大梯度累积步数</span>
+<span class="n">TrainingArguments</span><span class="p">(</span>
+    <span class="n">per_device_train_batch_size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+    <span class="n">gradient_accumulation_steps</span><span class="o">=</span><span class="mi">16</span>
+<span class="p">)</span>
+
+<span class="c1"># 方案三：使用 QLoRA</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">BitsAndBytesConfig</span>
+<span class="n">bnb_config</span> <span class="o">=</span> <span class="n">BitsAndBytesConfig</span><span class="p">(</span><span class="n">load_in_4bit</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">bnb_4bit_quant_type</span><span class="o">=</span><span class="s2">&quot;nf4&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="适配器未生效">适配器未生效</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 验证适配器是否激活</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">active_adapters</span><span class="p">)</span>  <span class="c1"># 应显示适配器名称</span>
+
+<span class="c1"># 检查可训练参数</span>
+<span class="n">model</span><span class="o">.</span><span class="n">print_trainable_parameters</span><span class="p">()</span>
+
+<span class="c1"># 确保模型处于训练模式</span>
+<span class="n">model</span><span class="o">.</span><span class="n">train</span><span class="p">()</span>
+</code></pre></div>
+
+<h3 id="质量下降">质量下降</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 提高秩</span>
+<span class="n">LoraConfig</span><span class="p">(</span><span class="n">r</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span> <span class="n">lora_alpha</span><span class="o">=</span><span class="mi">64</span><span class="p">)</span>
+
+<span class="c1"># 针对更多模块</span>
+<span class="n">target_modules</span> <span class="o">=</span> <span class="s2">&quot;all-linear&quot;</span>
+
+<span class="c1"># 使用更多训练数据和更多轮次</span>
+<span class="n">TrainingArguments</span><span class="p">(</span><span class="n">num_train_epochs</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+
+<span class="c1"># 降低学习率</span>
+<span class="n">TrainingArguments</span><span class="p">(</span><span class="n">learning_rate</span><span class="o">=</span><span class="mf">1e-4</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="最佳实践">最佳实践</h2>
+<ol>
+<li><strong>从 r=8–16 开始</strong>，质量不足时再提高</li>
+<li><strong>以 alpha = 2 * rank 为起始点</strong></li>
+<li><strong>同时针对注意力层和 MLP 层</strong>以获得最佳质量/效率比</li>
+<li><strong>启用梯度检查点</strong>以节省显存</li>
+<li><strong>频繁保存适配器</strong>（文件小，便于回滚）</li>
+<li><strong>合并前在留出数据上评估</strong></li>
+<li><strong>70B+ 模型在消费级硬件上使用 QLoRA</strong></li>
+</ol>
+<h2 id="参考资料">参考资料</h2>
+<ul>
+<li><strong><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/peft/references/advanced-usage.md" class="ext" target="_blank" rel="noopener">高级用法</a></strong> — DoRA、LoftQ、秩稳定化、自定义模块</li>
+<li><strong><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/peft/references/troubleshooting.md" class="ext" target="_blank" rel="noopener">故障排查</a></strong> — 常见错误、调试、优化</li>
+</ul>
+<h2 id="资源">资源</h2>
+<ul>
+<li><strong>GitHub</strong>：https://github.com/huggingface/peft</li>
+<li><strong>文档</strong>：https://huggingface.co/docs/peft</li>
+<li><strong>LoRA 论文</strong>：arXiv:2106.09685</li>
+<li><strong>QLoRA 论文</strong>：arXiv:2305.14314</li>
+<li><strong>模型</strong>：https://huggingface.co/models?library=peft</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/optional/mlops/mlops-peft</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#何时使用-peft">何时使用 PEFT</a></li>
+<li class="lvl2"><a href="#快速开始">快速开始</a></li>
+<li class="lvl3"><a href="#安装">安装</a></li>
+<li class="lvl3"><a href="#lora-微调标准方式">LoRA 微调（标准方式）</a></li>
+<li class="lvl3"><a href="#qlora-微调显存高效方式">QLoRA 微调（显存高效方式）</a></li>
+<li class="lvl2"><a href="#lora-参数选择">LoRA 参数选择</a></li>
+<li class="lvl3"><a href="#秩r容量与效率的权衡">秩（r）——容量与效率的权衡</a></li>
+<li class="lvl3"><a href="#alphalora_alpha缩放因子">Alpha（lora_alpha）——缩放因子</a></li>
+<li class="lvl3"><a href="#按架构选择目标模块">按架构选择目标模块</a></li>
+<li class="lvl2"><a href="#加载与合并适配器">加载与合并适配器</a></li>
+<li class="lvl3"><a href="#加载已训练的适配器">加载已训练的适配器</a></li>
+<li class="lvl3"><a href="#将适配器合并到基础模型">将适配器合并到基础模型</a></li>
+<li class="lvl3"><a href="#多适配器服务">多适配器服务</a></li>
+<li class="lvl2"><a href="#peft-方法对比">PEFT 方法对比</a></li>
+<li class="lvl3"><a href="#ia3最少参数">IA3（最少参数）</a></li>
+<li class="lvl3"><a href="#prefix-tuning">Prefix Tuning</a></li>
+<li class="lvl2"><a href="#集成模式">集成模式</a></li>
+<li class="lvl3"><a href="#与-trlsfttrainer集成">与 TRL（SFTTrainer）集成</a></li>
+<li class="lvl3"><a href="#与-axolotlyaml-配置集成">与 Axolotl（YAML 配置）集成</a></li>
+<li class="lvl3"><a href="#与-vllm推理集成">与 vLLM（推理）集成</a></li>
+<li class="lvl2"><a href="#性能基准">性能基准</a></li>
+<li class="lvl3"><a href="#显存占用llama-31-8b">显存占用（Llama 3.1 8B）</a></li>
+<li class="lvl3"><a href="#训练速度a100-80gb">训练速度（A100 80GB）</a></li>
+<li class="lvl3"><a href="#质量mmlu-基准">质量（MMLU 基准）</a></li>
+<li class="lvl2"><a href="#常见问题">常见问题</a></li>
+<li class="lvl3"><a href="#训练时-cuda-显存不足oom">训练时 CUDA 显存不足（OOM）</a></li>
+<li class="lvl3"><a href="#适配器未生效">适配器未生效</a></li>
+<li class="lvl3"><a href="#质量下降">质量下降</a></li>
+<li class="lvl2"><a href="#最佳实践">最佳实践</a></li>
+<li class="lvl2"><a href="#参考资料">参考资料</a></li>
+<li class="lvl2"><a href="#资源">资源</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

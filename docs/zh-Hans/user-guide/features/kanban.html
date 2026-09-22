@@ -1,0 +1,1130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kanban（多 Agent 看板） · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/features/kanban</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="kanban--多-agent-配置文件协作">Kanban — 多 Agent 配置文件协作</h1>
+<blockquote>
+<p><strong>想要详细教程？</strong> 请阅读 <a href="kanban-tutorial.html">Kanban 教程</a> —— 包含四个用户故事（独立开发者、批量任务、带重试的角色流水线、熔断器），并附有各场景的仪表盘截图。本页是参考文档，教程是叙述性说明。</p>
+</blockquote>
+<p>Hermes Kanban 是一个持久化任务看板，在所有 Hermes 配置文件之间共享，允许多个具名 agent 协作完成工作，而无需脆弱的进程内子 agent 集群。每个任务都是 <code>~/.hermes/kanban.db</code> 中的一行记录；每次交接都是任何人都可以读写的一行记录；每个 worker 都是拥有独立身份的完整 OS 进程。</p>
+<h3 id="两个操作界面模型通过工具交互你通过-cli-交互">两个操作界面：模型通过工具交互，你通过 CLI 交互</h3>
+<p>看板有两个入口，均由同一个 <code>~/.hermes/kanban.db</code> 支撑：</p>
+<ul>
+<li><strong>Agent 通过专用 <code>kanban_*</code> 工具集驱动看板</strong> —— <code>kanban_show</code>、<code>kanban_list</code>、<code>kanban_complete</code>、<code>kanban_block</code>、<code>kanban_request_review</code>、<code>kanban_request_changes</code>、<code>kanban_heartbeat</code>、<code>kanban_comment</code>、<code>kanban_create</code>、<code>kanban_link</code>、<code>kanban_unblock</code>。调度器在 schema 中已内置这些工具来启动每个 worker；编排器（orchestrator）配置文件也可以通过 <code>kanban</code> 工具集显式启用。模型通过直接调用工具来读取和路由任务，<em>而不是</em>通过 shell 执行 <code>hermes kanban</code>。详见下方<a href="#how-workers-interact-with-the-board">Worker 如何与看板交互</a>。</li>
+<li><strong>你（以及脚本和 cron）通过 CLI 上的 <code>hermes kanban …</code>、斜杠命令 <code>/kanban …</code> 或仪表盘驱动看板。</strong> 这些界面面向人类和自动化场景——即没有工具调用模型的场合。</li>
+</ul>
+<p>两个界面都通过同一个 <code>kanban_db</code> 层路由，因此读取视图一致，写入不会产生偏差。本页其余部分展示 CLI 示例，因为它们便于复制粘贴，但每个 CLI 动词都有模型使用的等效工具调用。</p>
+<p>这种形态覆盖了 <code>delegate_task</code> 无法处理的工作负载：</p>
+<ul>
+<li><strong>研究分诊</strong> —— 并行研究员 + 分析师 + 写作者，支持人工介入。</li>
+<li><strong>定时运维</strong> —— 每日定期简报，逐周积累日志。</li>
+<li><strong>数字孪生</strong> —— 持久化具名助手（<code>inbox-triage</code>、<code>ops-review</code>），随时间积累记忆。</li>
+<li><strong>工程流水线</strong> —— 分解 → 在并行 worktree 中实现 → 审查 → 迭代 → PR。</li>
+<li><strong>批量任务</strong> —— 一个专家管理 N 个对象（50 个社交账号、12 个监控服务）。</li>
+</ul>
+<p>八种典型协作模式见下文的协作模式一节。</p>
+<h2 id="kanban-与-delegate_task-的对比">Kanban 与 <code>delegate_task</code> 的对比</h2>
+<p>两者看起来相似，但并非同一原语。</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>delegate_task</code></th>
+<th>Kanban</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>形态</td>
+<td>RPC 调用（fork → join）</td>
+<td>持久化消息队列 + 状态机</td>
+</tr>
+<tr>
+<td>父级</td>
+<td>阻塞直到子级返回</td>
+<td><code>create</code> 后即发即忘</td>
+</tr>
+<tr>
+<td>子级身份</td>
+<td>匿名子 agent</td>
+<td>具有持久记忆的具名配置文件</td>
+</tr>
+<tr>
+<td>可恢复性</td>
+<td>无 —— 失败即失败</td>
+<td>阻塞 → 解除阻塞 → 重新运行；崩溃 → 回收</td>
+</tr>
+<tr>
+<td>人工介入</td>
+<td>不支持</td>
+<td>随时可评论 / 解除阻塞</td>
+</tr>
+<tr>
+<td>每任务 agent 数</td>
+<td>一次调用 = 一个子 agent</td>
+<td>任务生命周期内 N 个 agent（重试、审查、跟进）</td>
+</tr>
+<tr>
+<td>审计追踪</td>
+<td>上下文压缩后丢失</td>
+<td>永久保存在 SQLite 行中</td>
+</tr>
+<tr>
+<td>协调方式</td>
+<td>层级式（调用方 → 被调用方）</td>
+<td>对等式 —— 任意配置文件可读写任意任务</td>
+</tr>
+</tbody>
+</table>
+<p><strong>一句话区别：</strong> <code>delegate_task</code> 是函数调用；Kanban 是工作队列，每次交接都是任意配置文件（或人类）可见和编辑的一行记录。</p>
+<p><strong>使用 <code>delegate_task</code> 的场景：</strong> 父 agent 在继续之前需要一个简短的推理答案，无需人工介入，结果返回到父 agent 的上下文中。</p>
+<p><strong>使用 Kanban 的场景：</strong> 工作跨越 agent 边界、需要在重启后存活、可能需要人工输入、可能被不同角色接手，或需要事后可发现。</p>
+<p>两者可以共存：kanban worker 在运行期间可以内部调用 <code>delegate_task</code>。</p>
+<h2 id="核心概念">核心概念</h2>
+<ul>
+<li><strong>Board（看板）</strong> —— 一个独立的任务队列，拥有自己的 SQLite DB、工作区目录和调度器循环。单次安装可以有多个看板（例如每个项目、仓库或领域一个）；详见下方<a href="#boards-multi-project">看板（多项目）</a>。单项目用户保持使用 <code>default</code> 看板，在本文档章节之外不会看到"board"这个词。</li>
+<li><strong>Task（任务）</strong> —— 包含标题、可选正文、一个受让人（配置文件名称）、状态（<code>triage | todo | ready | running | blocked | review | done | archived</code>）、可选租户命名空间、可选幂等键（用于重试自动化的去重）的一行记录。</li>
+<li><strong>Link（链接）</strong> —— <code>task_links</code> 行，记录父 → 子依赖关系。当所有父任务变为 <code>done</code> 时，调度器将 <code>todo → ready</code>。</li>
+<li><strong>Comment（评论）</strong> —— agent 间协议。Agent 和人类追加评论；当 worker 被（重新）启动时，它将完整的评论线程作为上下文的一部分读取。</li>
+<li><strong>Workspace（工作区）</strong> —— worker 操作的目录。三种类型：</li>
+<li><code>scratch</code>（默认）—— 在 <code>~/.hermes/kanban/workspaces/&lt;id&gt;/</code> 下（非默认看板为 <code>~/.hermes/kanban/boards/&lt;slug&gt;/workspaces/&lt;id&gt;/</code>）创建的临时目录。<strong>任务完成时删除</strong> —— scratch 按设计是临时性的。通过 <code>kanban_complete(artifacts=[...])</code> 明确声明的文件会在清理前复制到持久的任务附件存储；旧版完成摘要中已存在的交付文件路径也会得到同样处理。其他 scratch 文件仍会被删除。如果声明的 scratch 交付文件不存在，任务会保持进行中，worker 可修正路径后重试。需要保留整个工作区时，请使用 <code>worktree:</code> 或 <code>dir:&lt;path&gt;</code>。在某次安装中首次创建 scratch 工作区时，调度器会记录警告并在任务上发出 <code>tip_scratch_workspace</code> 事件（可通过 <code>hermes kanban show &lt;id&gt;</code> 查看）。</li>
+<li><code>dir:&lt;path&gt;</code> —— 现有的共享目录（Obsidian vault、邮件运维目录、每账号文件夹）。<strong>必须是绝对路径。</strong> 像 <code>dir:../tenants/foo/</code> 这样的相对路径在调度时会被拒绝，因为它们会相对于调度器碰巧所在的 CWD 解析，这是模糊的，也是混淆代理（confused-deputy）逃逸向量。路径本身是受信任的 —— 这是你的机器、你的文件系统，worker 以你的 uid 运行。这是受信任本地用户的威胁模型；kanban 设计为单主机。<strong>完成时保留。</strong></li>
+<li><code>worktree</code> —— 用于编码任务的 git worktree，位于 <code>.worktrees/&lt;id&gt;/</code> 下。使用 <code>worktree:&lt;path&gt;</code> 固定确切的目标路径。Worker 端的 <code>git worktree add</code> 创建它，提供 <code>--branch</code> 时使用该分支。<strong>完成时保留。</strong></li>
+<li><strong>Dispatcher（调度器）</strong> —— 一个长期运行的循环，每 N 秒（默认 60 秒）执行一次：回收过期的认领、回收崩溃的 worker（PID 消失但 TTL 尚未过期）、推进就绪任务、原子性认领、启动已分配的配置文件。默认<strong>在 gateway 内部运行</strong>（<code>kanban.dispatch_in_gateway: true</code>）。每次 tick 一个调度器扫描所有看板；worker 启动时固定了 <code>HERMES_KANBAN_BOARD</code>，因此无法看到其他看板。在同一任务上连续启动失败 <code>kanban.failure_limit</code> 次（默认：2）后，调度器会以最后一个错误为原因自动阻塞该任务 —— 防止因配置文件不存在、工作区无法挂载等原因导致的反复抖动。</li>
+<li><strong>Tenant（租户）</strong> —— 看板<em>内</em>的可选字符串命名空间。一个专家团队可以通过工作区路径和内存键前缀为多个业务提供数据隔离服务（<code>--tenant business-a</code>）。租户是软过滤器；看板是硬隔离边界。</li>
+</ul>
+<h2 id="boards-multi-project">看板（多项目）</h2>
+<p>看板让你将不相关的工作流分离到独立的队列中 —— 每个项目、仓库或领域一个。新安装只有一个名为 <code>default</code> 的看板（DB 位于 <code>~/.hermes/kanban.db</code>，保持向后兼容）。只需要一个工作流的用户无需了解看板；该功能是可选启用的。</p>
+<p>每个看板的隔离是绝对的：</p>
+<ul>
+<li>每个看板有独立的 SQLite DB（<code>~/.hermes/kanban/boards/&lt;slug&gt;/kanban.db</code>）。</li>
+<li>独立的 <code>workspaces/</code> 和 <code>logs/</code> 目录。</li>
+<li>为任务启动的 Worker 只能看到<strong>其所在看板</strong>的任务 —— 调度器在子进程环境中设置 <code>HERMES_KANBAN_BOARD</code>，worker 可访问的每个 <code>kanban_*</code> 工具都会读取它。</li>
+<li>不允许跨看板链接任务（保持 schema 简单；如果确实需要跨项目引用，请使用自由文本提及并通过 id 手动查找）。</li>
+</ul>
+<h3 id="通过-cli-管理看板">通过 CLI 管理看板</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 查看磁盘上的内容。全新安装只显示 &quot;default&quot;。</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>list
+
+<span class="c1"># 创建新看板。</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>create<span class="w"> </span>atm10-server<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--name<span class="w"> </span><span class="s2">&quot;ATM10 Server&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--description<span class="w"> </span><span class="s2">&quot;Minecraft modded server ops&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--icon<span class="w"> </span>🎮<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--switch<span class="w">                   </span><span class="c1"># 可选：将其设为活动看板</span>
+
+<span class="c1"># 在不切换的情况下操作特定看板。</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>--board<span class="w"> </span>atm10-server<span class="w"> </span>list
+hermes<span class="w"> </span>kanban<span class="w"> </span>--board<span class="w"> </span>atm10-server<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Restart ATM server&quot;</span><span class="w"> </span>--assignee<span class="w"> </span>ops
+
+<span class="c1"># 更改后续调用的&quot;当前&quot;看板。</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>switch<span class="w"> </span>atm10-server
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>show<span class="w">             </span><span class="c1"># 当前活动的是哪个？</span>
+
+<span class="c1"># 重命名显示名称（slug 是不可变的 —— 它是目录名）。</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>rename<span class="w"> </span>atm10-server<span class="w"> </span><span class="s2">&quot;ATM10 (Prod)&quot;</span>
+
+<span class="c1"># 归档（默认）—— 将看板目录移动到 boards/_archived/&lt;slug&gt;-&lt;ts&gt;/。</span>
+<span class="c1"># 可通过将目录移回来恢复。</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>rm<span class="w"> </span>atm10-server
+
+<span class="c1"># 硬删除 —— 对看板目录执行 `rm -rf`。无法恢复。</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>rm<span class="w"> </span>atm10-server<span class="w"> </span>--delete
+</code></pre></div>
+
+<p>看板解析顺序（优先级从高到低）：</p>
+<ol>
+<li>CLI 调用中的显式 <code>--board &lt;slug&gt;</code>。</li>
+<li><code>HERMES_KANBAN_BOARD</code> 环境变量（调度器在启动 worker 时设置，因此 worker 无法看到其他看板）。</li>
+<li><code>~/.hermes/kanban/current</code> —— 由 <code>hermes kanban boards switch</code> 持久化的 slug。</li>
+<li><code>default</code>。</li>
+</ol>
+<p>Slug 经过验证：小写字母数字 + 连字符 + 下划线，1-64 个字符，必须以字母数字开头。大写输入会自动转为小写。其他任何内容（斜杠、空格、点、<code>..</code>）在 CLI 层被拒绝，以防止路径遍历技巧命名看板。</p>
+<h3 id="通过仪表盘管理看板">通过仪表盘管理看板</h3>
+<p><code>hermes dashboard</code> → Kanban 标签页在存在多个看板（或任何看板有任务）时，顶部会显示看板切换器。单看板用户只看到一个小的 <code>+ New board</code> 按钮；切换器在需要时才显示。</p>
+<ul>
+<li><strong>看板下拉菜单</strong> —— 选择活动看板。你的选择保存在浏览器的 <code>localStorage</code> 中，因此在重新加载后仍然有效，不会影响你打开的终端中 CLI 的 <code>current</code> 指针。</li>
+<li><strong>+ New board</strong> —— 打开一个模态框，询问 slug、显示名称、描述和图标。可选择自动切换到新看板。</li>
+<li><strong>Archive</strong> —— 仅在非 <code>default</code> 看板上显示。确认后，将看板目录移动到 <code>boards/_archived/</code>。</li>
+</ul>
+<p>所有仪表盘 API 端点接受 <code>?board=&lt;slug&gt;</code> 进行看板范围限定。事件 WebSocket 在连接时固定到一个看板；在 UI 中切换会针对新看板打开一个新的 WS。</p>
+<h2 id="快速开始">快速开始</h2>
+<p>以下命令是<strong>你</strong>（人类）设置看板和创建任务的操作。一旦任务被分配，调度器就会将分配的配置文件作为 worker 启动，从那时起<strong>模型通过 <code>kanban_*</code> 工具调用驱动任务，而不是 CLI 命令</strong> —— 详见<a href="#how-workers-interact-with-the-board">Worker 如何与看板交互</a>。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. 创建看板（你）</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>init
+
+<span class="c1"># 2. 启动 gateway（托管内嵌调度器）</span>
+hermes<span class="w"> </span>gateway<span class="w"> </span>start
+
+<span class="c1"># 3. 创建任务（你 —— 或编排器 agent 通过 kanban_create）</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;research AI funding landscape&quot;</span><span class="w"> </span>--assignee<span class="w"> </span>researcher
+
+<span class="c1"># 4. 实时查看活动（你）</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>watch
+
+<span class="c1"># 5. 查看看板（你）</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>list
+hermes<span class="w"> </span>kanban<span class="w"> </span>stats
+</code></pre></div>
+
+<p>当调度器接管 <code>t_abcd</code> 并启动 <code>researcher</code> 配置文件时，该 worker 的模型做的第一件事是调用 <code>kanban_show()</code> 读取其任务。它不会运行 <code>hermes kanban show t_abcd</code>。</p>
+<h3 id="gateway-内嵌调度器默认">Gateway 内嵌调度器（默认）</h3>
+<p>调度器在 gateway 进程内运行。无需安装任何东西，无需管理单独的服务 —— 只要 gateway 运行，就绪任务会在下一个 tick（默认 60 秒）被接管。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">kanban</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">dispatch_in_gateway</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">        </span><span class="c1"># 默认</span>
+<span class="w">  </span><span class="nt">dispatch_interval_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60</span><span class="w">    </span><span class="c1"># 默认</span>
+<span class="w">  </span><span class="nt">review_dispatch</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">            </span><span class="c1"># 默认：使用内置 sdlc-review skill 自动启动 reviewer。</span>
+<span class="w">                                   </span><span class="c1"># 纯人工审查看板可设为 false。</span>
+</code></pre></div>
+
+<p>通过 <code>HERMES_KANBAN_DISPATCH_IN_GATEWAY=0</code> 在运行时覆盖配置标志以进行调试。标准 gateway 监督适用：直接运行 <code>hermes gateway start</code>，或将 gateway 配置为 systemd 用户单元（参见 gateway 文档）。没有运行中的 gateway，<code>ready</code> 任务会保持原状，直到 gateway 启动 —— <code>hermes kanban create</code> 在创建时会对此发出警告。</p>
+<p>将 <code>hermes kanban daemon</code> 作为单独进程运行已<strong>弃用</strong>；请使用 gateway。如果你确实无法运行 gateway（无头主机策略禁止长期运行的服务等），<code>--force</code> 逃生舱口在一个发布周期内保持旧的独立守护进程可用，但同时运行 gateway 内嵌调度器和针对同一 <code>kanban.db</code> 的独立守护进程会导致认领竞争，不受支持。</p>
+<h3 id="幂等创建用于自动化--webhook">幂等创建（用于自动化 / webhook）</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 第一次调用创建任务。使用相同键的任何后续调用</span>
+<span class="c1"># 返回现有任务 id 而不是重复创建。</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;nightly ops review&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>ops<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--idempotency-key<span class="w"> </span><span class="s2">&quot;nightly-ops-</span><span class="k">$(</span>date<span class="w"> </span>-u<span class="w"> </span>+%Y-%m-%d<span class="k">)</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--json
+</code></pre></div>
+
+<h3 id="批量-cli-动词">批量 CLI 动词</h3>
+<p>所有生命周期动词都接受多个 id，因此你可以在一个命令中清理一批任务：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span><span class="nb">complete</span><span class="w"> </span>t_abc<span class="w"> </span>t_def<span class="w"> </span>t_hij<span class="w"> </span>--result<span class="w"> </span><span class="s2">&quot;batch wrap&quot;</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>archive<span class="w">  </span>t_abc<span class="w"> </span>t_def<span class="w"> </span>t_hij
+hermes<span class="w"> </span>kanban<span class="w"> </span>unblock<span class="w">  </span>t_abc<span class="w"> </span>t_def
+hermes<span class="w"> </span>kanban<span class="w"> </span>block<span class="w">    </span>t_abc<span class="w"> </span><span class="s2">&quot;need input&quot;</span><span class="w"> </span>--ids<span class="w"> </span>t_def<span class="w"> </span>t_hij
+</code></pre></div>
+
+<h2 id="how-workers-interact-with-the-board">Worker 如何与看板交互</h2>
+<p><strong>Worker 不会 shell 执行 <code>hermes kanban</code>。</strong> 当调度器启动 worker 时，它在子进程环境中设置 <code>HERMES_KANBAN_TASK=t_abcd</code>，该环境变量在模型的 schema 中启用专用的 <strong>kanban 工具集</strong>。同一工具集也可供在工具集配置中启用 <code>kanban</code> 的编排器配置文件使用。这些工具通过 Python <code>kanban_db</code> 层直接读取和修改看板，与 CLI 的做法相同。运行中的 worker 像调用任何其他工具一样调用这些工具；它从不看到或需要 <code>hermes kanban</code> CLI。</p>
+<table>
+<thead>
+<tr>
+<th>工具</th>
+<th>用途</th>
+<th>必需参数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kanban_show</code></td>
+<td>读取当前任务（标题、正文、先前尝试、父级交接、评论、完整预格式化的 <code>worker_context</code>）。默认使用环境变量中的任务 id。</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>kanban_list</code></td>
+<td>列出带有 <code>assignee</code>、<code>status</code>、<code>tenant</code>、归档可见性和限制过滤器的任务摘要。供编排器发现看板工作使用。</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>kanban_complete</code></td>
+<td>以 <code>summary</code> + <code>metadata</code> 结构化交接完成任务。</td>
+<td><code>summary</code> / <code>result</code> 至少一个</td>
+</tr>
+<tr>
+<td><code>kanban_request_review</code></td>
+<td>启动同卡审查，携带 <code>summary</code>、可选 <code>metadata</code> 和 reviewer profile；任务移入 <code>review</code>，且不计入 block 循环。</td>
+<td><code>summary</code></td>
+</tr>
+<tr>
+<td><code>kanban_request_changes</code></td>
+<td>reviewer 在活动审查 run 中要求修改：关闭审查 run，重新检查父依赖，并把任务交还原 implementer。</td>
+<td><code>reason</code></td>
+</tr>
+<tr>
+<td><code>kanban_block</code></td>
+<td>以 <code>reason</code> 上报需要人工输入。</td>
+<td><code>reason</code></td>
+</tr>
+<tr>
+<td><code>kanban_heartbeat</code></td>
+<td>在长时间操作期间发出存活信号。纯副作用。</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>kanban_comment</code></td>
+<td>向任务线程追加持久化备注。</td>
+<td><code>task_id</code>、<code>body</code></td>
+</tr>
+<tr>
+<td><code>kanban_create</code></td>
+<td>（编排器）将任务扇出为带有 <code>assignee</code>、可选 <code>parents</code>、<code>skills</code> 等的子任务。</td>
+<td><code>title</code>、<code>assignee</code></td>
+</tr>
+<tr>
+<td><code>kanban_link</code></td>
+<td>（编排器）事后添加 <code>parent_id → child_id</code> 依赖边。</td>
+<td><code>parent_id</code>、<code>child_id</code></td>
+</tr>
+<tr>
+<td><code>kanban_unblock</code></td>
+<td>（编排器）将阻塞任务恢复到来源阶段（<code>review</code> 或 <code>ready</code>）；父任务仍开放时进入 <code>todo</code>。</td>
+<td><code>task_id</code></td>
+</tr>
+</tbody>
+</table>
+<p>典型的 worker 轮次如下所示：</p>
+<div class="highlight"><pre><span></span><code># 模型的工具调用，按顺序：
+kanban_show()                                     # 无参数 —— 使用 HERMES_KANBAN_TASK
+# （模型读取返回的 worker_context，通过终端/文件工具完成工作）
+kanban_heartbeat(note=&quot;halfway through — 4 of 8 files transformed&quot;)
+# （更多工作）
+kanban_complete(
+    summary=&quot;migrated limiter.py to token-bucket; added 14 tests, all pass&quot;,
+    metadata={&quot;changed_files&quot;: [&quot;limiter.py&quot;, &quot;tests/test_limiter.py&quot;], &quot;tests_run&quot;: 14},
+)
+</code></pre></div>
+
+<p><strong>编排器</strong> worker 则进行扇出：</p>
+<div class="highlight"><pre><span></span><code>kanban_show()
+kanban_create(
+    title=&quot;research ICP funding 2024-2026&quot;,
+    assignee=&quot;researcher-a&quot;,
+    body=&quot;focus on seed + series A, North America, AI-adjacent&quot;,
+)
+# → 返回 {&quot;task_id&quot;: &quot;t_r1&quot;, ...}
+kanban_create(title=&quot;research ICP funding — EU angle&quot;, assignee=&quot;researcher-b&quot;, body=&quot;…&quot;)
+# → 返回 {&quot;task_id&quot;: &quot;t_r2&quot;, ...}
+kanban_create(
+    title=&quot;synthesize findings into launch brief&quot;,
+    assignee=&quot;writer&quot;,
+    parents=[&quot;t_r1&quot;, &quot;t_r2&quot;],                     # 两者都完成时推进到 ready
+    body=&quot;one-pager, 300 words, neutral tone&quot;,
+)
+kanban_complete(summary=&quot;decomposed into 2 research tasks + 1 writer; linked dependencies&quot;)
+</code></pre></div>
+
+<p>"（编排器）"工具 —— <code>kanban_list</code>、<code>kanban_create</code>、<code>kanban_link</code>、<code>kanban_unblock</code>，以及对外部任务的 <code>kanban_comment</code> —— 通过同一工具集提供；约定（编码在自动注入的 kanban 指引中）是 worker 配置文件不进行扇出或路由无关工作，编排器配置文件不执行实现工作。调度器启动的 worker 仍然针对破坏性生命周期操作限定在任务范围内，无法修改无关任务。</p>
+<h3 id="为什么使用工具而不是-shell-执行-hermes-kanban">为什么使用工具而不是 shell 执行 <code>hermes kanban</code></h3>
+<p>三个原因：</p>
+<ol>
+<li><strong>后端可移植性。</strong> 终端工具指向远程后端（Docker / Modal / Singularity / SSH）的 worker 会在容器<em>内部</em>运行 <code>hermes kanban complete</code>，而容器中没有安装 <code>hermes</code>，也没有挂载 <code>~/.hermes/kanban.db</code>。kanban 工具在 agent 自己的 Python 进程中运行，无论终端后端如何，始终能访问 <code>~/.hermes/kanban.db</code>。</li>
+<li><strong>无 shell 引用脆弱性。</strong> 通过 shlex + argparse 传递 <code>--metadata '{"files": [...]}'</code> 是潜在的隐患。结构化工具参数完全绕过了这个问题。</li>
+<li><strong>更好的错误处理。</strong> 工具结果是模型可以推理的结构化 JSON，而不是需要解析的 stderr 字符串。</li>
+</ol>
+<p><strong>对普通会话零 schema 占用。</strong> 普通的 <code>hermes chat</code> 会话在其 schema 中没有任何 <code>kanban_*</code> 工具，除非活动配置文件为编排器工作显式启用了 <code>kanban</code> 工具集。调度器启动的任务 worker 因为设置了 <code>HERMES_KANBAN_TASK</code> 而获得任务范围的工具；编排器配置文件通过配置获得更广泛的路由界面。对于从不使用 kanban 的用户，没有工具膨胀。</p>
+<p>自动注入的 kanban 指引教导模型何时调用哪个工具以及调用顺序。</p>
+<h3 id="推荐的交接证据">推荐的交接证据</h3>
+<p><code>kanban_complete(summary=..., metadata={...})</code> 是有意灵活的：summary 是人类可读的收尾说明，<code>metadata</code> 是机器可读的交接信息，下游 agent、审查者或仪表盘可以直接复用，无需从文本中提取。</p>
+<p>对于工程和审查任务，推荐使用以下可选 metadata 格式：</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;changed_files&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;path/to/file.py&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;verification&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;pytest tests/hermes_cli/test_kanban_db.py -q&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;dependencies&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;parent task id or external issue, if any&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;blocked_reason&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;retry_notes&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;what failed before, if this was a retry&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;residual_risk&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;what was not tested or still needs human review&quot;</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>这些键是约定，不是 schema 要求。有用的特性是每个 worker 留下足够的证据，让下一个读者能快速回答四个问题：</p>
+<ol>
+<li>改了什么？</li>
+<li>如何验证的？</li>
+<li>如果失败，什么可以解除阻塞或重试？</li>
+<li>什么风险是有意留下的？</li>
+</ol>
+<p>不要将密钥、原始日志、token（令牌）、OAuth 材料和无关记录放入 <code>metadata</code>。改为存储指针和摘要。如果任务没有文件或测试，在 <code>summary</code> 中明确说明，并在 <code>metadata</code> 中放置确实存在的证据，例如来源 URL、issue id 或手动审查步骤。</p>
+<h3 id="worker-生命周期">Worker 生命周期</h3>
+<p>任何处理 kanban 任务的配置文件都会<strong>自动</strong>获得 worker 生命周期 —— 它在启动时被注入到 worker 的系统 prompt 中（<code>KANBAN_GUIDANCE</code> 块），因此<strong>无需安装或配置任何东西</strong>。它通过<strong>工具调用</strong>（而非 CLI 命令）教导 worker 完整的生命周期：</p>
+<ol>
+<li>启动时，调用 <code>kanban_show()</code> 读取标题 + 正文 + 父级交接 + 先前尝试 + 完整评论线程。</li>
+<li>通过终端工具执行 <code>cd $HERMES_KANBAN_WORKSPACE</code>，在那里完成工作。</li>
+<li>在长时间操作期间每隔几分钟调用一次 <code>kanban_heartbeat(note="...")</code>。<strong>如果你的工作可能运行超过 1 小时，请至少每小时调用一次 <code>kanban_heartbeat</code></strong> —— 调度器会回收运行时间超过 <code>kanban.dispatch_stale_timeout_seconds</code>（默认 4 小时）且最近一小时内没有心跳的任务，认为 worker 在没有清理的情况下崩溃了。回收是无害的（任务返回 <code>ready</code> 重新调度，不增加失败计数器），但你会失去当前运行的进度。</li>
+<li>以 <code>kanban_complete(summary="...", metadata={...})</code> 完成，或在卡住时以 <code>kanban_block(reason="...")</code> 完成。</li>
+</ol>
+<p>最终的 <code>kanban_complete</code> / <code>kanban_block</code> 调用是 worker 协议的一部分。如果 worker 进程以状态 0 退出而任务仍处于 <code>running</code> 状态，调度器将其视为协议违规，发出 <code>protocol_violation</code> 事件，并在下一个 tick 自动阻塞任务而不是重新启动它进入同一循环。这通常意味着模型写了一个纯文本答案并退出，而没有使用 Kanban 工具界面。</p>
+<h3 id="为特定任务固定额外-skill">为特定任务固定额外 skill</h3>
+<p>有时单个任务需要受让人配置文件默认不携带的专业上下文 —— 需要 <code>translation</code> skill 的翻译任务、需要 <code>github-code-review</code> 的审查任务、需要 <code>security-pr-audit</code> 的安全审计。与其每次都编辑受让人的配置文件，不如直接将 skill 附加到任务上。</p>
+<p><strong>从编排器 agent</strong>（常见情况 —— 一个 agent 将工作路由到另一个），使用 <code>kanban_create</code> 工具的 <code>skills</code> 数组：</p>
+<div class="highlight"><pre><span></span><code>kanban_create(
+    title=&quot;translate README to Japanese&quot;,
+    assignee=&quot;linguist&quot;,
+    skills=[&quot;translation&quot;],
+)
+
+kanban_create(
+    title=&quot;audit auth flow&quot;,
+    assignee=&quot;reviewer&quot;,
+    skills=[&quot;security-pr-audit&quot;, &quot;github-code-review&quot;],
+)
+</code></pre></div>
+
+<p><strong>从人类（CLI / 斜杠命令）</strong>，为每个 skill 重复 <code>--skill</code>：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;translate README to Japanese&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>linguist<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--skill<span class="w"> </span>translation
+
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;audit auth flow&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>reviewer<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--skill<span class="w"> </span>security-pr-audit<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--skill<span class="w"> </span>github-code-review
+</code></pre></div>
+
+<p><strong>从仪表盘</strong>，在内联创建表单的 <strong>skills</strong> 字段中以逗号分隔输入 skill 名称。</p>
+<p>调度器为列出的每个 skill 发出一个 <code>--skills &lt;name&gt;</code> 标志，因此 worker 在自动注入的 kanban 指引之上加载了所有这些 skill。skill 名称必须与受让人配置文件上实际安装的 skill 匹配（运行 <code>hermes skills list</code> 查看可用内容）；没有运行时安装。</p>
+<h3 id="成本策略前沿模型编排低价模型执行">成本策略：前沿模型编排，低价模型执行</h3>
+<p>Kanban 的按 profile 配置让规划者/执行者的成本分层水到渠成。将项目分解为范围清晰的卡片需要前沿模型级别的判断力；而执行一张已经带有明确目标、上下文和交接证据的卡片通常不需要——并且绝大多数 token 消耗发生在 worker 身上，因此成本真正落在 worker 模型上。让编排器/调度器 profile 运行前沿模型，让 worker profile 指向低价模型。每个 profile 在 <code>~/.hermes/profiles/&lt;name&gt;/</code> 下有自己的 <code>config.yaml</code>，调度器在生成 <code>hermes -p &lt;assignee&gt;</code> 时注入 profile 范围的 <code>HERMES_HOME</code>，因此每个 worker 读取自己 profile 的模型设置：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml（编排器 / 调度器 profile）</span>
+<span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-frontier-model&quot;</span>
+
+<span class="c1"># ~/.hermes/profiles/coder/config.yaml（worker profile）</span>
+<span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-inexpensive-model&quot;</span>
+
+<span class="c1"># ~/.hermes/profiles/researcher/config.yaml（另一个 worker profile）</span>
+<span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-inexpensive-model&quot;</span>
+</code></pre></div>
+
+<p>对于偶尔出现的质量敏感型卡片，可以只为该任务固定更强的模型（按任务模型覆盖）：创建时用 <code>--model</code>/<code>--provider</code>，之后用 <code>hermes kanban set-model &lt;task-id&gt; &lt;model&gt; --provider &lt;name&gt;</code>（<code>set-model ... none</code> 清除覆盖），或使用仪表盘的按任务模型下拉框——无需修改 profile 配置。未设置覆盖时，worker 使用其 profile 配置的模型。</p>
+<h3 id="编排器的行为方式">编排器的行为方式</h3>
+<p><strong>行为良好的编排器不会自己做工作。</strong> 它将用户的目标分解为任务，链接它们，将每个任务分配给你设置的配置文件之一，然后退后。编排器指引 —— 反诱惑规则、Step-0 配置文件发现提示（调度器在未知受让人名称上静默失败，因此编排器必须将每张卡片落地到你机器上实际存在的配置文件），以及以 <code>kanban_create</code> / <code>kanban_link</code> / <code>kanban_comment</code> 为核心的分解手册 —— 会自动注入到 worker 的系统 prompt 中；无需安装任何东西。</p>
+<p>典型的编排器轮次（两个并行研究员交接给一个写作者）：</p>
+<div class="highlight"><pre><span></span><code># 来自用户的目标：&quot;draft a launch post on the ICP funding landscape&quot;
+kanban_create(title=&quot;research ICP funding, NA angle&quot;,  assignee=&quot;researcher-a&quot;, body=&quot;…&quot;)  # → t_r1
+kanban_create(title=&quot;research ICP funding, EU angle&quot;,  assignee=&quot;researcher-b&quot;, body=&quot;…&quot;)  # → t_r2
+kanban_create(
+    title=&quot;synthesize ICP funding research into launch post draft&quot;,
+    assignee=&quot;writer&quot;,
+    parents=[&quot;t_r1&quot;, &quot;t_r2&quot;],        # 两个研究员都完成时推进到 &#39;ready&#39;
+    body=&quot;one-pager, neutral tone, cite sources inline&quot;,
+)                                     # → t_w1
+# 可选：事后发现的跨切依赖，无需重新创建任务
+kanban_link(parent_id=&quot;t_r1&quot;, child_id=&quot;t_followup&quot;)
+kanban_complete(
+    summary=&quot;decomposed into 2 parallel research tasks → 1 synthesis task; writer starts when both researchers finish&quot;,
+)
+</code></pre></div>
+
+<p>编排器指引随 worker 的系统 prompt 自动提供 —— 无需按配置文件安装或同步任何东西。</p>
+<p><strong>先决策，再扇出。</strong> 设计决策属于编排器，而不是 worker。如果两张并行卡片都需要选择同一件事 —— 命名方案、schema、文件格式、API 形态 —— 编排器应当一次性做出决定，并把该决定写入<strong>两张</strong>卡片的正文。Worker 看不到兄弟卡片，因此每张子卡片的正文必须携带它所依赖的全部决策。示例：对于并行卡片"构建导出器"和"构建导入器"，不要让每个 worker 各自发明文件格式 —— 应预先选定一种（比如带 <code>version</code> 字段的换行分隔 JSON）并写入两张卡片的正文，否则两半工作永远无法互通。</p>
+<p>为获得最佳效果，将其与工具集限制为看板操作（<code>kanban</code>、<code>gateway</code>、<code>memory</code>）的配置文件配对，这样编排器即使尝试也无法执行实现任务。</p>
+<h2 id="仪表盘gui">仪表盘（GUI）</h2>
+<p><code>/kanban</code> CLI 和斜杠命令足以无头运行看板，但可视化看板通常是人工介入的正确界面：分诊、跨配置文件监督、阅读评论线程以及在列之间拖动卡片。Hermes 将此作为<strong>内置仪表盘插件</strong>在 <code>plugins/kanban/</code> 中提供 —— 不是核心功能，不是单独的服务 —— 遵循<a href="extending-the-dashboard.html">扩展仪表盘</a>中描述的模型。</p>
+<p>使用以下命令打开：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>init<span class="w">      </span><span class="c1"># 一次性：如果尚未创建 kanban.db</span>
+hermes<span class="w"> </span>dashboard<span class="w">        </span><span class="c1"># 导航栏中出现 &quot;Kanban&quot; 标签页，位于 &quot;Skills&quot; 之后</span>
+</code></pre></div>
+
+<h3 id="插件提供的功能">插件提供的功能</h3>
+<ul>
+<li>一个 <strong>Kanban</strong> 标签页，每个状态显示一列：<code>triage</code>、<code>todo</code>、<code>ready</code>、<code>running</code>、<code>blocked</code>、<code>done</code>（开启切换时还有 <code>archived</code>）。</li>
+<li><code>triage</code> 是粗略想法的停车列。默认情况下（<code>kanban.auto_decompose: true</code>），调度器会自动对落在这里的任务运行<strong>分解器</strong> —— 编排器配置文件读取粗略想法，查看你的配置文件名册（含描述），并将任务扇出为路由到最合适专家的小型子任务图。原始任务作为每个子任务的父级保持存活，因此当所有子任务完成时，编排器会重新唤醒以判断完成情况，并在工作未完成时添加更多任务。点击页面顶部的 <strong>Orchestration: Auto/Manual</strong> 切换按钮（或设置 <code>kanban.auto_decompose: false</code>）切换到手动模式，在手动模式下分诊任务保持原位，直到你点击卡片上的 <strong>⚗ Decompose</strong> 或运行 <code>hermes kanban decompose &lt;id&gt;</code>。对于不需要扇出的任务（或没有编排器配置文件的设置），<strong>✨ Specify</strong> 按钮通过相同的 LLM 机制进行单任务规格重写（标题 + 正文，包含目标、方法、验收标准）。详见下方<a href="#auto-vs-manual-orchestration">自动与手动编排</a>。</li>
+<li>卡片显示任务 id、标题、优先级徽章、租户标签、分配的配置文件、评论/链接计数、<strong>进度标签</strong>（任务有依赖项时显示 <code>N/M</code> 子任务已完成）以及"N 前创建"。每张卡片的复选框启用多选。</li>
+<li><strong>Running 列内的按配置文件分组</strong> —— 工具栏复选框切换 Running 列按受让人的子分组。</li>
+<li><strong>通过 WebSocket 实时更新</strong> —— 插件以短轮询间隔追踪仅追加的 <code>task_events</code> 表；任何配置文件（CLI、gateway 或另一个仪表盘标签页）操作后，看板立即反映变化。重新加载经过防抖处理，因此一批事件只触发一次重新获取。</li>
+<li><strong>拖放</strong>卡片在列之间更改状态。拖放操作发送 <code>PATCH /api/plugins/kanban/tasks/:id</code>，通过与 CLI 使用的相同 <code>kanban_db</code> 代码路由 —— 三个界面永远不会产生偏差。移动到破坏性状态（<code>done</code>、<code>archived</code>、<code>blocked</code>）时会提示确认。触摸设备使用基于指针的回退，因此看板可以在平板电脑上使用。</li>
+<li><strong>内联创建</strong> —— 点击任意列标题上的 <code>+</code>，输入标题、受让人、优先级，以及（可选）从所有现有任务的下拉菜单中选择父任务。按 Enter 创建任务，Shift+Enter 在标题字段中插入换行，或按 Escape 取消。从 Triage 列创建会自动将新任务停放在分诊中。</li>
+<li><strong>多选与批量操作</strong> —— shift/ctrl 点击卡片或勾选其复选框将其添加到选择中。顶部出现批量操作栏，包含批量状态转换、归档和重新分配（通过配置文件下拉菜单，或"（取消分配）"）。破坏性批量操作先确认。每个 id 的部分失败会被报告，不会中止其余操作。</li>
+<li><strong>点击卡片</strong>（不按 shift/ctrl）打开侧边抽屉（按 Escape 或点击外部关闭），包含：</li>
+<li><strong>可编辑标题</strong> —— 点击标题进行重命名。</li>
+<li><strong>可编辑受让人 / 优先级</strong> —— 点击元数据行进行修改。</li>
+<li><strong>可编辑描述</strong> —— 默认以 markdown 渲染（标题、粗体、斜体、内联代码、围栏代码、<code>http(s)</code> / <code>mailto:</code> 链接、项目符号列表），带有"编辑"按钮可切换到文本区域。Markdown 渲染是一个微型、防 XSS 的渲染器 —— 每次替换都在 HTML 转义的输入上运行，只有 <code>http(s)</code> / <code>mailto:</code> 链接通过，并且始终设置 <code>target="_blank"</code> + <code>rel="noopener noreferrer"</code>。</li>
+<li><strong>依赖编辑器</strong> —— 父级和子级的芯片列表，每个都有 <code>×</code> 用于取消链接，加上所有其他任务的下拉菜单用于添加新的父级或子级。循环尝试在服务器端被拒绝并给出清晰的消息。</li>
+<li><strong>状态操作行</strong>（→ triage / → ready / → running / block / unblock / complete / archive），破坏性转换有确认提示。对于 <strong>Triage</strong> 列中的卡片，该行还提供两个 LLM 驱动的操作：<strong>⚗ Decompose</strong> 将任务扇出为路由到专家配置文件（按描述）的子任务图（编排器驱动路径），<strong>✨ Specify</strong> 进行单任务规格重写。当 LLM 判断任务不需要扇出时，Decompose 会回退到类似 specify 的推进，因此它是严格的超集。两者都可以从 CLI（<code>hermes kanban decompose &lt;id&gt;</code> / <code>specify &lt;id&gt;</code> / <code>--all</code>）、任何 gateway 平台（<code>/kanban decompose &lt;id&gt;</code>）以及通过 <code>POST /api/plugins/kanban/tasks/:id/decompose</code> 和 <code>…/specify</code> 以编程方式访问。在 <code>config.yaml</code> 的 <code>auxiliary.kanban_decomposer</code> 和 <code>auxiliary.triage_specifier</code> 下配置模型。</li>
+<li>结果部分（也以 markdown 渲染）、带 Enter 提交的评论线程、最近 20 个事件。</li>
+<li><strong>工具栏过滤器</strong> —— 自由文本搜索、租户下拉菜单（默认为 <code>config.yaml</code> 中的 <code>dashboard.kanban.default_tenant</code>）、受让人下拉菜单、"显示已归档"切换、"按配置文件分组"切换，以及<strong>推动调度器</strong>按钮，这样你就不必等待下一个 60 秒 tick。</li>
+</ul>
+<p>视觉上目标是熟悉的 Linear / Fusion 布局：深色主题、带计数的列标题、彩色状态点、优先级和租户的标签芯片。插件只读取主题 CSS 变量（<code>--color-*</code>、<code>--radius</code>、<code>--font-mono</code> 等），因此它会随活动的仪表盘主题自动重新换肤。</p>
+<h3 id="auto-vs-manual-orchestration">自动与手动编排</h3>
+<p>看板有两种方式处理你放入 Triage 列的任务：</p>
+<p><strong>自动（默认）</strong> —— <code>kanban.auto_decompose: true</code>。Gateway 内嵌调度器在每个 tick 运行<strong>分解器</strong>，受 <code>kanban.auto_decompose_per_tick</code>（默认每 tick 3 个任务）限制，以防批量加载分诊任务时突发消耗辅助 LLM。分解器读取粗略想法，查看你安装的配置文件及其描述，并要求 LLM 生成 JSON 任务图：要启动哪些任务、分配给谁，以及哪些依赖哪些。原始分诊任务成为图中每个叶节点的父级，因此它保持存活直到整个图完成 —— 然后推进回 <code>ready</code>，让其受让人（编排器配置文件）判断完成情况，并在工作未完成时添加更多任务。这是"丢一行描述，走开"的流程。</p>
+<p><strong>手动</strong> —— <code>kanban.auto_decompose: false</code>。分诊任务保持在分诊中，直到你操作。点击卡片上的 <strong>⚗ Decompose</strong> 按钮，运行 <code>hermes kanban decompose &lt;id&gt;</code>（或 <code>--all</code>），或从聊天中使用 <code>/kanban decompose &lt;id&gt;</code>。这与看板的预分解器行为一致，适合需要完全控制运行时机的场景。</p>
+<p><strong>重要边界：</strong> 手动模式只会关闭内置的 Triage 分解器。它不会阻止配置文件调用 <code>kanban_create</code>，也不会关闭创建者会话的唤醒。启用 <code>kanban.auto_subscribe_on_create: true</code> 时，任务的终止事件会通过合成状态消息恢复原始 agent，使其读取交接并判断是否确实需要新的后续工作。希望任务完成保持被动时，请设置 <code>auto_subscribe_on_create: false</code>。溯源时，内置分解器创建的子任务标记为 <code>created_by=auto-decomposer</code>；由恢复后的配置文件创建的任务则记录该配置文件名。</p>
+<p>从 kanban 页面顶部的 <strong>Orchestration: Auto/Manual</strong> 切换按钮（翠绿色 = 自动，静音灰色 = 手动）在两种模式之间切换，或直接编辑 <code>config.yaml</code>。两种模式都与 <code>hermes kanban specify</code> 共存 —— 当你不想扇出时，它仍然可用作单任务规格重写。</p>
+<p>分解器的路由决策依赖于配置文件描述，这是一个每配置文件的标签原语，通过 <code>hermes profile create --description "..."</code>、<code>hermes profile describe &lt;name&gt; --text "..."</code>、<code>hermes profile describe &lt;name&gt; --auto</code>（LLM 从配置文件安装的 skill + 模型自动生成），或仪表盘展开的 <strong>Orchestration settings</strong> 面板中的每配置文件编辑器来设置。没有描述的配置文件仍然出现在名册中 —— 它们可以按名称路由，只是精度较低。分解器<strong>绝不</strong>会将子任务落地为 <code>assignee=None</code>：当 LLM 选择未知配置文件时，子任务路由到 <code>kanban.default_assignee</code>（如果未设置，则路由到活动默认配置文件）。</p>
+<p>配置项（均在 <code>~/.hermes/config.yaml</code> 的 <code>kanban:</code> 下）：</p>
+<table>
+<thead>
+<tr>
+<th>键</th>
+<th>默认值</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>auto_decompose</code></td>
+<td><code>true</code></td>
+<td>调度器每 tick 为 Triage 任务运行内置分解器；它不会限制配置文件驱动的 <code>kanban_create</code> 或创建者唤醒回合。</td>
+</tr>
+<tr>
+<td><code>auto_decompose_per_tick</code></td>
+<td><code>3</code></td>
+<td>每个调度器 tick 的分解上限。超出部分推迟到下一个 tick。</td>
+</tr>
+<tr>
+<td><code>orchestrator_profile</code></td>
+<td><code>""</code></td>
+<td>拥有分解权的配置文件。空 = 回退到活动默认配置文件。</td>
+</tr>
+<tr>
+<td><code>default_assignee</code></td>
+<td><code>""</code></td>
+<td>LLM 选择未知配置文件时子任务的落地位置。空 = 回退到活动默认配置文件。</td>
+</tr>
+<tr>
+<td><code>auto_subscribe_on_create</code></td>
+<td><code>true</code></td>
+<td>当 <code>kanban_create</code> 在持久 gateway/TUI 会话中运行时，终止事件会通过合成状态回合恢复原始 agent。设为 <code>false</code> 可让完成保持被动，或要求显式调用 <code>kanban_notify-subscribe</code>。此设置独立于 <code>auto_decompose</code>。</td>
+</tr>
+</tbody>
+</table>
+<p>以及两个辅助 LLM 槽：</p>
+<table>
+<thead>
+<tr>
+<th>键</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>auxiliary.kanban_decomposer</code></td>
+<td>生成任务图的模型（由 Decompose 调用）。设置 <code>provider</code>/<code>model</code> 以覆盖主聊天模型。</td>
+</tr>
+<tr>
+<td><code>auxiliary.profile_describer</code></td>
+<td>自动生成配置文件描述的模型（由 <code>hermes profile describe --auto</code> 调用）。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="架构">架构</h3>
+<p>GUI 严格是一个<strong>通过 DB 读取 + 通过 kanban_db 写入</strong>的层，没有自己的领域逻辑：</p>
+<!-- ascii-guard-ignore -->
+
+<div class="highlight"><pre><span></span><code>┌────────────────────────┐      WebSocket (tails task_events)
+│   React SPA (plugin)   │ ◀──────────────────────────────────┐
+│   HTML5 drag-and-drop  │                                    │
+└──────────┬─────────────┘                                    │
+           │ REST over fetchJSON                              │
+           ▼                                                  │
+┌────────────────────────┐     writes call kanban_db.*        │
+│  FastAPI router        │     directly — same code path      │
+│  plugins/kanban/       │     the CLI /kanban verbs use      │
+│  dashboard/plugin_api.py                                    │
+└──────────┬─────────────┘                                    │
+           │                                                  │
+           ▼                                                  │
+┌────────────────────────┐                                    │
+│  ~/.hermes/kanban.db   │ ───── append task_events ──────────┘
+│  (WAL, shared)         │
+└────────────────────────┘
+</code></pre></div>
+
+<!-- ascii-guard-ignore-end -->
+
+<h3 id="rest-接口">REST 接口</h3>
+<p>所有路由挂载在 <code>/api/plugins/kanban/</code> 下，并受仪表盘的临时会话 token 保护：</p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>路径</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/board?tenant=&lt;name&gt;&amp;include_archived=…</code></td>
+<td>按状态列分组的完整看板，加上用于过滤下拉菜单的租户和受让人</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/tasks/:id</code></td>
+<td>任务 + 评论 + 事件 + 链接</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tasks</code></td>
+<td>创建（封装 <code>kanban_db.create_task</code>，接受 <code>triage: bool</code> 和 <code>parents: [id, …]</code>）</td>
+</tr>
+<tr>
+<td><code>PATCH</code></td>
+<td><code>/tasks/:id</code></td>
+<td>状态 / 受让人 / 优先级 / 标题 / 正文 / 结果</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tasks/bulk</code></td>
+<td>对 <code>ids</code> 中的每个 id 应用相同的补丁（状态 / 归档 / 受让人 / 优先级）。每个 id 的失败不会中止其他操作</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tasks/:id/comments</code></td>
+<td>追加评论</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tasks/:id/specify</code></td>
+<td>运行分诊规格器 —— 辅助 LLM 充实任务正文并将其从 <code>triage</code> 推进到 <code>todo</code>。返回 <code>{ok, task_id, reason, new_title}</code>；"不在分诊中" / 无辅助客户端 / LLM 错误时 <code>ok=false</code> 并附人类可读原因，返回 200 而非 4xx</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tasks/:id/decompose</code></td>
+<td>运行 kanban 分解器 —— 辅助 LLM 生成任务图，辅助函数原子性创建子任务 + 链接根任务 + 翻转 <code>triage → todo</code>。返回 <code>{ok, task_id, reason, fanout, child_ids, new_title}</code>。与 <code>/specify</code> 相同的 LLM 错误返回 200 约定。</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/profiles</code></td>
+<td>列出已安装的配置文件及其描述（供仪表盘的配置文件描述编辑器和编排器选择器使用）。</td>
+</tr>
+<tr>
+<td><code>PATCH</code></td>
+<td><code>/profiles/:name</code></td>
+<td>设置或清除配置文件的描述（用户编写 —— <code>description_auto: false</code>）。返回 <code>{ok, profile, description}</code>。</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/profiles/:name/describe-auto</code></td>
+<td>通过 <code>auxiliary.profile_describer</code> 为配置文件生成描述。以 <code>description_auto: true</code> 持久化，以便仪表盘可以显示"审查"徽章。</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/orchestration</code></td>
+<td>读取 kanban 编排设置（<code>orchestrator_profile</code>、<code>default_assignee</code>、<code>auto_decompose</code>）以及回退后的<em>解析</em>有效值。</td>
+</tr>
+<tr>
+<td><code>PUT</code></td>
+<td><code>/orchestration</code></td>
+<td>在 <code>config.yaml</code> 中更新三个编排键中的一个或多个。验证非空配置文件名实际存在。</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/links</code></td>
+<td>添加依赖关系（<code>parent_id</code> → <code>child_id</code>）</td>
+</tr>
+<tr>
+<td><code>DELETE</code></td>
+<td><code>/links?parent_id=…&amp;child_id=…</code></td>
+<td>删除依赖关系</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/dispatch?max=…&amp;dry_run=…</code></td>
+<td>推动调度器 —— 跳过 60 秒等待</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/config</code></td>
+<td>从 <code>config.yaml</code> 读取 <code>dashboard.kanban</code> 偏好设置 —— <code>default_tenant</code>、<code>lane_by_profile</code>、<code>include_archived_by_default</code>、<code>render_markdown</code></td>
+</tr>
+<tr>
+<td><code>WS</code></td>
+<td><code>/events?since=&lt;event_id&gt;</code></td>
+<td><code>task_events</code> 行的实时流</td>
+</tr>
+</tbody>
+</table>
+<p>每个处理器都是一个薄封装 —— 插件约 700 行 Python（路由器 + WebSocket 追踪 + 批量处理器 + 配置读取器），不添加任何新的业务逻辑。一个微型 <code>_conn()</code> 辅助函数在每次读写时自动初始化 <code>kanban.db</code>，因此无论用户是先打开仪表盘、直接访问 REST API，还是运行 <code>hermes kanban init</code>，全新安装都能正常工作。</p>
+<h3 id="仪表盘配置">仪表盘配置</h3>
+<p><code>~/.hermes/config.yaml</code> 中 <code>dashboard.kanban</code> 下的任何这些键都会更改标签页的默认值 —— 插件在加载时通过 <code>GET /config</code> 读取它们：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">dashboard</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">kanban</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">default_tenant</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">acme</span><span class="w">              </span><span class="c1"># 预选租户过滤器</span>
+<span class="w">    </span><span class="nt">lane_by_profile</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">             </span><span class="c1"># &quot;按配置文件分组&quot;切换的默认值</span>
+<span class="w">    </span><span class="nt">include_archived_by_default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">    </span><span class="nt">render_markdown</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">             </span><span class="c1"># 设为 false 则使用纯 &lt;pre&gt; 渲染</span>
+</code></pre></div>
+
+<p>每个键都是可选的，回退到所示的默认值。</p>
+<h3 id="安全模型">安全模型</h3>
+<p>仪表盘的 HTTP 认证中间件<a href="../../../user-guide/features/extending-the-dashboard.html#backend-api-routes" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">显式跳过 <code>/api/plugins/</code></a> —— 插件路由在设计上是未认证的，因为仪表盘默认绑定到 localhost。这意味着 kanban REST 接口可以从主机上的任何进程访问。</p>
+<p>WebSocket 额外增加了一步：它要求仪表盘的临时会话 token 作为 <code>?token=…</code> 查询参数（浏览器无法在升级请求上设置 <code>Authorization</code>），与浏览器内 PTY 桥使用的模式一致。</p>
+<p>如果你运行 <code>hermes dashboard --host 0.0.0.0</code>，每个插件路由 —— 包括 kanban —— 都可以从网络访问。<strong>不要在共享主机上这样做。</strong> 看板包含任务正文、评论和工作区路径；攻击者访问这些路由可以读取你整个协作界面，还可以创建 / 重新分配 / 归档任务。</p>
+<p><code>~/.hermes/kanban.db</code> 中的任务是有意与配置文件无关的（这是协调原语）。如果你用 <code>hermes -p &lt;profile&gt; dashboard</code> 打开仪表盘，看板仍然显示主机上任何其他配置文件创建的任务。同一用户拥有所有配置文件，但如果多个角色共存，这一点值得了解。</p>
+<h3 id="实时更新">实时更新</h3>
+<p><code>task_events</code> 是一个带有单调递增 <code>id</code> 的仅追加 SQLite 表。WebSocket 端点保存每个客户端最后看到的事件 id，并在新行到达时推送。当一批事件到达时，前端重新加载（非常廉价的）看板端点 —— 比尝试从每种事件类型修补本地状态更简单、更正确。WAL 模式意味着读取循环永远不会阻塞调度器的 <code>BEGIN IMMEDIATE</code> 认领事务。</p>
+<h3 id="扩展">扩展</h3>
+<p>插件使用标准的 Hermes 仪表盘插件契约 —— 完整的 manifest 参考、shell 槽、页面范围槽和 Plugin SDK，请参阅<a href="extending-the-dashboard.html">扩展仪表盘</a>。额外的列、自定义卡片样式、租户过滤布局或完整的 <code>tab.override</code> 替换都可以表达，无需 fork 此插件。</p>
+<p>要禁用而不删除：在 <code>config.yaml</code> 中添加 <code>dashboard.plugins.kanban.enabled: false</code>（或删除 <code>plugins/kanban/dashboard/manifest.json</code>）。</p>
+<h3 id="范围边界">范围边界</h3>
+<p>GUI 是刻意精简的。插件所做的一切都可以从 CLI 访问；插件只是让人类使用起来更舒适。自动分配、预算、治理门控和组织图视图仍然是用户空间 —— 一个路由器配置文件、另一个插件，或对 <code>tools/approval.py</code> 的复用 —— 正如设计规范的范围外章节所列。</p>
+<h2 id="cli-命令参考">CLI 命令参考</h2>
+<p>这是<strong>你</strong>（或脚本、cron、仪表盘）用来驱动看板的界面。在调度器内部运行的 Worker 使用 <code>kanban_*</code> <a href="#how-workers-interact-with-the-board">工具界面</a>进行相同的操作 —— 这里的 CLI 和那里的工具都通过 <code>kanban_db</code> 路由，因此两个界面在构造上是一致的。</p>
+<div class="highlight"><pre><span></span><code>hermes kanban init                                     # 创建 kanban.db + 打印守护进程提示
+hermes kanban create &quot;&lt;title&gt;&quot; [--body ...] [--assignee &lt;profile&gt;]
+                                [--parent &lt;id&gt;]... [--tenant &lt;name&gt;]
+                                [--workspace scratch|worktree|worktree:&lt;path&gt;|dir:&lt;path&gt;]
+                                [--branch &lt;name&gt;]
+                                [--priority N] [--triage] [--idempotency-key KEY]
+                                [--max-runtime 30m|2h|1d|&lt;seconds&gt;]
+                                [--max-retries N]
+                                [--skill &lt;name&gt;]...
+                                [--json]
+hermes kanban list [--mine] [--assignee P] [--status S] [--tenant T] [--archived] [--json]
+hermes kanban show &lt;id&gt; [--json]
+hermes kanban assign &lt;id&gt; &lt;profile&gt;                    # 或 &#39;none&#39; 取消分配
+hermes kanban link &lt;parent_id&gt; &lt;child_id&gt;
+hermes kanban unlink &lt;parent_id&gt; &lt;child_id&gt;
+hermes kanban claim &lt;id&gt; [--ttl SECONDS]
+hermes kanban comment &lt;id&gt; &quot;&lt;text&gt;&quot; [--author NAME]
+
+# 批量动词 —— 接受多个 id：
+hermes kanban complete &lt;id&gt;... [--result &quot;...&quot;]
+hermes kanban block &lt;id&gt; &quot;&lt;reason&gt;&quot; [--ids &lt;id&gt;...]
+hermes kanban unblock &lt;id&gt;...
+hermes kanban archive &lt;id&gt;...
+
+hermes kanban request-review &lt;id&gt; [--summary &quot;...&quot;] [--metadata JSON] [--reviewer PROFILE]
+hermes kanban request-changes &lt;id&gt; &quot;&lt;所需修改&gt;&quot;                       # reviewer -&gt; implementer
+hermes kanban reopen-review  &lt;id&gt;... [--reason &quot;...&quot;]                 # 请求修改：&#39;review&#39; -&gt; ready/todo
+
+hermes kanban tail &lt;id&gt;                                # 跟踪单个任务的事件流
+hermes kanban watch [--assignee P] [--tenant T]        # 将所有事件实时流式传输到终端
+        [--kinds completed,blocked,…] [--interval SECS]
+hermes kanban heartbeat &lt;id&gt; [--note &quot;...&quot;]            # 长时间操作的 worker 存活信号
+hermes kanban runs &lt;id&gt; [--json]                       # 尝试历史（每次运行一行）
+hermes kanban assignees [--json]                       # 磁盘上的配置文件 + 每受让人任务计数
+hermes kanban dispatch [--dry-run] [--max N]           # 单次扫描
+        [--failure-limit N] [--json]
+hermes kanban daemon --force                           # 已弃用 —— 独立调度器（改用 `hermes gateway start`）
+        [--failure-limit N] [--pidfile PATH] [-v]
+hermes kanban stats [--json]                           # 每状态 + 每受让人计数
+hermes kanban log &lt;id&gt; [--tail BYTES]                  # 来自 ~/.hermes/kanban/logs/ 的 worker 日志
+hermes kanban notify-subscribe &lt;id&gt;                    # gateway 桥接钩子（由 gateway 中的 /kanban 使用）
+        --platform &lt;name&gt; --chat-id &lt;id&gt; [--thread-id &lt;id&gt;] [--user-id &lt;id&gt;]
+hermes kanban notify-list [&lt;id&gt;] [--json]
+hermes kanban notify-unsubscribe &lt;id&gt;
+        --platform &lt;name&gt; --chat-id &lt;id&gt; [--thread-id &lt;id&gt;]
+hermes kanban context &lt;id&gt;                             # worker 看到的内容
+hermes kanban specify [&lt;id&gt; | --all] [--tenant T]      # 将分诊列的想法充实
+        [--author NAME] [--json]                       #   为完整规格并推进到 todo
+hermes kanban gc [--event-retention-days N]            # 工作区 + 旧事件 + 旧日志
+        [--log-retention-days N]
+</code></pre></div>
+
+<p>所有命令也可以作为交互式 CLI 中的斜杠命令和消息 gateway 中使用（见下方<a href="#kanban-slash-command"><code>/kanban</code> 斜杠命令</a>）。</p>
+<p><code>--max-retries</code> 是调度器的每任务熔断器覆盖。<code>--max-retries 1</code> 在第一次不成功的尝试后阻塞任务，而 <code>--max-retries 3</code> 允许两次重试并在第三次失败时阻塞。省略它则使用 <code>config.yaml</code> 中的 <code>kanban.failure_limit</code>，然后是内置默认值。</p>
+<h2 id="kanban-slash-command"><code>/kanban</code> 斜杠命令</h2>
+<p>每个 <code>hermes kanban &lt;action&gt;</code> 动词也可以作为 <code>/kanban &lt;action&gt;</code> 访问 —— 从交互式 <code>hermes chat</code> 会话内部<strong>以及</strong>从任何 gateway 平台（Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Mattermost、电子邮件、SMS）。两个界面都调用完全相同的 <code>hermes_cli.kanban.run_slash()</code> 入口点，该入口点复用 <code>hermes kanban</code> argparse 树，因此参数界面、标志和输出格式在 CLI、<code>/kanban</code> 和 <code>hermes kanban</code> 之间完全相同。你不必离开聊天来驱动看板。</p>
+<div class="highlight"><pre><span></span><code>/kanban list
+/kanban show t_abcd
+/kanban create &quot;write launch post&quot; --assignee writer --parent t_research
+/kanban comment t_abcd &quot;looks good, ship it&quot;
+/kanban unblock t_abcd
+/kanban dispatch --max 3
+/kanban specify t_abcd                  # 将分诊一行描述充实为真正的规格
+/kanban specify --all --tenant engineering  # 一次性扫描某个租户中的所有分诊任务
+</code></pre></div>
+
+<p>以与 shell 相同的方式引用多词参数 —— <code>run_slash</code> 用 <code>shlex.split</code> 解析行的其余部分，因此 <code>"..."</code> 和 <code>'...'</code> 都有效。</p>
+<h3 id="运行中使用kanban-绕过运行中-agent-保护">运行中使用：<code>/kanban</code> 绕过运行中 agent 保护</h3>
+<p>Gateway 通常在 agent 仍在思考时将斜杠命令和用户消息排队 —— 这就是防止你在第一轮还在进行时意外启动第二轮的机制。<strong><code>/kanban</code> 被明确豁免于此保护。</strong> 看板存在于 <code>~/.hermes/kanban.db</code> 中，而不是运行中 agent 的状态中，因此读取（<code>list</code>、<code>show</code>、<code>context</code>、<code>tail</code>、<code>watch</code>、<code>stats</code>、<code>runs</code>）和写入（<code>comment</code>、<code>unblock</code>、<code>block</code>、<code>assign</code>、<code>archive</code>、<code>create</code>、<code>link</code> 等）都会立即执行，即使在轮次进行中。</p>
+<p>这就是分离的全部意义：</p>
+<ul>
+<li>Worker 阻塞等待对等方 → 你从手机发送 <code>/kanban unblock t_abcd</code>，调度器在下一个 tick 接管对等方。被阻塞的 worker 不会被中断 —— 它只是不再被阻塞。</li>
+<li>你发现一张需要人工上下文的卡片 → <code>/kanban comment t_xyz "use the 2026 schema, not 2025"</code> 落在任务线程上，该任务的<em>下一次</em>运行将在 <code>kanban_show()</code> 中读取它。</li>
+<li>你想知道你的团队在做什么而不停止编排器 → <code>/kanban list --mine</code> 或 <code>/kanban stats</code> 在不触及主对话的情况下检查看板。</li>
+</ul>
+<h3 id="kanban-create-时自动订阅仅限-gateway"><code>/kanban create</code> 时自动订阅（仅限 gateway）</h3>
+<p>当你从 gateway 使用 <code>/kanban create "…"</code> 创建任务时，发起聊天（平台 + 聊天 id + 线程 id）会自动订阅该任务的终端事件（<code>completed</code>、<code>blocked</code>、<code>gave_up</code>、<code>crashed</code>、<code>timed_out</code>）。每个终端事件你会收到一条消息回复 —— 包括 <code>completed</code> 时 worker 结果摘要的第一行 —— 无需轮询或记住任务 id。</p>
+<div class="highlight"><pre><span></span><code>you&gt; /kanban create &quot;transcribe today&#39;s podcast&quot; --assignee transcriber
+bot&gt; Created t_9fc1a3  (ready, assignee=transcriber)
+     (subscribed — you&#39;ll be notified when t_9fc1a3 completes or blocks)
+
+… ~8 minutes later …
+
+bot&gt; ✓ t_9fc1a3 completed by transcriber
+     transcribed 42 minutes, saved to podcast/2026-05-04.md
+</code></pre></div>
+
+<p>订阅在任务达到 <code>done</code> 或 <code>archived</code> 后自动移除。如果你用 <code>--json</code>（机器输出）脚本化创建，则跳过自动订阅 —— 假设脚本化调用者希望通过 <code>/kanban notify-subscribe</code> 显式管理订阅。</p>
+<h3 id="消息中的输出截断">消息中的输出截断</h3>
+<p>Gateway 平台有实际的消息长度限制。如果 <code>/kanban list</code>、<code>/kanban show</code> 或 <code>/kanban tail</code> 产生超过约 3800 个字符的输出，响应会被截断，并附上 <code>… (truncated; use \</code>hermes kanban …` in your terminal for full output)` 页脚。CLI 界面没有此限制。</p>
+<h3 id="自动补全">自动补全</h3>
+<p>在交互式 CLI 中，输入 <code>/kanban</code> 并按 Tab 会循环显示内置子命令列表（<code>list</code>、<code>ls</code>、<code>show</code>、<code>create</code>、<code>assign</code>、<code>link</code>、<code>unlink</code>、<code>claim</code>、<code>comment</code>、<code>complete</code>、<code>block</code>、<code>unblock</code>、<code>archive</code>、<code>tail</code>、<code>dispatch</code>、<code>context</code>、<code>init</code>、<code>gc</code>）。上方 CLI 参考中列出的其余动词（<code>watch</code>、<code>stats</code>、<code>runs</code>、<code>log</code>、<code>assignees</code>、<code>heartbeat</code>、<code>notify-subscribe</code>、<code>notify-list</code>、<code>notify-unsubscribe</code>、<code>daemon</code>）也有效 —— 它们只是尚未出现在自动补全提示列表中。</p>
+<h2 id="协作模式">协作模式</h2>
+<p>看板无需任何新原语即可支持以下八种模式：</p>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>形态</th>
+<th>示例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>P1 扇出</strong></td>
+<td>N 个同级，相同角色</td>
+<td>"并行研究 5 个角度"</td>
+</tr>
+<tr>
+<td><strong>P2 流水线</strong></td>
+<td>角色链：侦察 → 编辑 → 写作</td>
+<td>每日简报组装</td>
+</tr>
+<tr>
+<td><strong>P3 投票 / 法定人数</strong></td>
+<td>N 个同级 + 1 个聚合器</td>
+<td>3 个研究员 → 1 个审查者选择</td>
+</tr>
+<tr>
+<td><strong>P4 长期运行日志</strong></td>
+<td>相同配置文件 + 共享目录 + cron</td>
+<td>Obsidian vault</td>
+</tr>
+<tr>
+<td><strong>P5 人工介入</strong></td>
+<td>worker 阻塞 → 用户评论 → 解除阻塞</td>
+<td>模糊决策</td>
+</tr>
+<tr>
+<td><strong>P6 <code>@mention</code></strong></td>
+<td>从文本内联路由</td>
+<td><code>@reviewer look at this</code></td>
+</tr>
+<tr>
+<td><strong>P7 线程范围工作区</strong></td>
+<td>线程中的 <code>/kanban here</code></td>
+<td>每项目 gateway 线程</td>
+</tr>
+<tr>
+<td><strong>P8 批量任务</strong></td>
+<td>一个配置文件，N 个对象</td>
+<td>50 个社交账号</td>
+</tr>
+<tr>
+<td><strong>P9 分诊规格器</strong></td>
+<td>粗略想法 → <code>triage</code> → <code>hermes kanban specify</code> 扩展正文 → <code>todo</code></td>
+<td>"将这个一行描述变成规格化任务"</td>
+</tr>
+</tbody>
+</table>
+<h2 id="向后续卡片传递上下文父任务链接">向后续卡片传递上下文（父任务链接）</h2>
+<p>父任务链接不只是调度门槛——它是从<strong>已完成</strong>卡片向新卡片传递上下文的通道。当你用 <code>--parent &lt;已完成卡片id&gt;</code> 创建卡片时，会发生两件事：</p>
+<ol>
+<li><strong>立即可调度。</strong> <code>create_task</code> 根据父任务状态设置新卡片的状态：所有父任务均为 <code>done</code> 的子任务直接以 <code>ready</code> 状态创建——无需等待，无需手动提升。（父任务尚未完成的子任务停在 <code>todo</code>，直到最后一个父任务完成后由 <code>recompute_ready</code> 提升。）</li>
+<li><strong>父任务的交接内容随之而来。</strong> 为子任务组装的 worker 上下文（<code>build_worker_context</code>，即 <code>kanban_show()</code> 返回的内容）包含 <code>## Parent task results</code> 部分，逐字呈现每个父任务的完成 <code>summary</code> 和 <code>metadata</code>：</li>
+</ol>
+<div class="highlight"><pre><span></span><code>## Parent task results
+### t_77c26979 (completed just now)
+Added exponential backoff with jitter to the retry helper.
+_metadata_: `{&quot;changed_files&quot;: [&quot;hermes_cli/retry.py&quot;, &quot;tests/test_retry.py&quot;], &quot;decisions&quot;: [&quot;capped backoff at 60s&quot;, &quot;jitter = full&quot;]}`
+</code></pre></div>
+
+<p>这就是为什么对已完成卡片的后续工作应当<strong>创建新的子卡片，而不是重开已完成的卡片</strong>。已完成的卡片是不可变的历史——它的上下文通过父任务链接向前流动。同卡片返工（失败卡片上的重试循环）是另一种机制：<em>同一张</em>卡片的先前尝试会作为"prior attempts"出现在该卡片自己的上下文中。</p>
+<p>单靠 worktree 或分支无法替代这一点：仓库状态告诉后续 worker 代码<em>是什么样</em>，但不告诉它<em>为什么</em>——决策、运行过的测试、改动的文件都在父任务的结构化交接中，而不在 git 里。父任务完成时尚不存在的证据（例如后来才失败的 CI 日志）应写入新卡片的<strong>正文</strong>。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 实现卡片 t_impl 已完成。两小时后 CI 失败。</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Fix CI failure from t_impl: test_retry flakes on 3.11&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>coder<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--parent<span class="w"> </span>t_impl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--body<span class="w"> </span><span class="s2">&quot;</span><span class="k">$(</span>cat<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<span class="s">CI run #4812 failed after t_impl merged.</span>
+<span class="s">Log excerpt: FAILED tests/test_retry.py::test_backoff_jitter - TimeoutError</span>
+<span class="s">Acceptance: tests/test_retry.py green on 3.11 and 3.12 in CI.</span>
+<span class="s">Use a fresh worktree/branch; do not force-push the original branch.</span>
+<span class="s">EOF</span>
+<span class="k">)</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>修复 worker 启动时，原卡片的 summary 和 metadata（改动的文件、决策）已在其上下文中，再加上你写入正文的新证据。</p>
+<h3 id="调解冲突的-worker-分支">调解冲突的 worker 分支</h3>
+<p>在工程流水线（使用 worktree 的 P1/P2）中，两个 worker 的分支合并时可能发生冲突。不要让任一 worker 自行裁决 —— 发生冲突的 agent 缺乏对方的上下文，往往会覆盖对方的改动或放弃自己的改动。正确做法是：创建一张调解卡片，指派给<strong>第三个中立配置文件</strong>，并把<strong>两张</strong>冲突卡片都链接为其父任务：父任务链接会把双方的完成摘要带入调解者的上下文，使其同时获得双方的 diff <em>和</em>双方的意图。内置的 <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/autonomous-ai-agents/agent-merge-conflict-arbiter/SKILL.md" class="ext" target="_blank" rel="noopener"><code>agent-merge-conflict-arbiter</code> 技能</a> 为该 worker 提供完整流程：对每个冲突块分类、公正地解决、验证，并在交回摘要中说明每一项决定。</p>
+<h3 id="并行战役中的碰撞热点collision-hotspots">并行战役中的碰撞热点（Collision hotspots）</h3>
+<p>在大规模并行战役中，某些文件会成为碰撞磁石：许多 worker 各自往同一个文件里添加一点内容，没有人负责保持它精简，它于是成为持续合并冲突的发生地。缓解方式是一种注释约定，而非新原语。当 worker 发现自己的 diff 在某个文件上不断与兄弟分支冲突，或它触碰的某个文件反复出现在其他卡片最近的评论中时，不应默默继续叠加改动，而应在自己的卡片上留下带有可识别前缀的评论：</p>
+<div class="highlight"><pre><span></span><code>hotspot: hermes_cli/kanban_db.py — 本轮对 dispatch 循环的第三次冲突性编辑
+</code></pre></div>
+
+<p>并在完成时的 <code>metadata</code> 中重复该标记。编排者（或查看看板的人类）如果看到<strong>两条或更多 <code>hotspot:</code> 评论指向同一路径</strong>，应在继续排入任何触碰该文件的工作<strong>之前</strong>，为该文件创建一张专门的重构/分解卡片 —— 拆分磁石文件比调解它未来引发的每一次冲突更便宜。对于<em>已经</em>发生的冲突，请使用上文的调解卡片模式配合 <code>agent-merge-conflict-arbiter</code> 技能；hotspot 标记是上游修复，能避免调解者变成一条常设车道。</p>
+<h2 id="多租户使用">多租户使用</h2>
+<p>当一个专家团队为多个业务提供服务时，为每个任务添加租户标签：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;monthly report&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>researcher<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--tenant<span class="w"> </span>business-a<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--workspace<span class="w"> </span>dir:~/tenants/business-a/data/
+</code></pre></div>
+
+<p>Worker 接收 <code>$HERMES_TENANT</code> 并按前缀命名空间化其内存写入。看板、调度器和配置文件定义都是共享的；只有数据是有范围的。</p>
+<h2 id="gateway-通知">Gateway 通知</h2>
+<p>当你从 gateway（Telegram、Discord、Slack 等）运行 <code>/kanban create …</code> 时，发起聊天会自动订阅新任务。Gateway 的后台通知器每隔几秒轮询 <code>task_events</code>，并为每个终端事件（<code>completed</code>、<code>blocked</code>、<code>gave_up</code>、<code>crashed</code>、<code>timed_out</code>）向该聊天发送一条消息。已完成的任务还会发送 worker <code>--result</code> 的第一行，这样你无需 <code>/kanban show</code> 就能看到结果。</p>
+<p>你可以从 CLI 显式管理订阅 —— 当脚本 / cron 任务想要通知一个它不是从那里发起的聊天时很有用：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>notify-subscribe<span class="w"> </span>t_abcd<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--platform<span class="w"> </span>telegram<span class="w"> </span>--chat-id<span class="w"> </span><span class="m">12345678</span><span class="w"> </span>--thread-id<span class="w"> </span><span class="m">7</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>notify-list
+hermes<span class="w"> </span>kanban<span class="w"> </span>notify-unsubscribe<span class="w"> </span>t_abcd<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--platform<span class="w"> </span>telegram<span class="w"> </span>--chat-id<span class="w"> </span><span class="m">12345678</span><span class="w"> </span>--thread-id<span class="w"> </span><span class="m">7</span>
+</code></pre></div>
+
+<p>订阅在任务达到 <code>done</code> 或 <code>archived</code> 后自动移除；无需清理。</p>
+<h3 id="多-profile-部署投递按-profile-归属">多 profile 部署：投递按 profile 归属</h3>
+<p>在每个 profile 一个 gateway 的部署中（单一调度器，<code>writer</code>、<code>admin</code> 等各自
+运行独立的 gateway 进程 —— 参见<a href="../../../user-guide/features/kanban-multi-gateway.html">多 gateway 指南</a>），
+调度与投递的归属是分开的：</p>
+<ul>
+<li><strong>调度保持单一所有者。</strong> 只有一个 gateway 保持
+  <code>kanban.dispatch_in_gateway: true</code> 并运行调度器；其余 gateway 都设为
+  <code>false</code>。</li>
+<li><strong>通知投递按 profile 归属。</strong> 每个 gateway —— 包括非调度 gateway ——
+  都运行通知器，且只轮询标记了其所托管 profile 的订阅。从 <code>writer</code>
+  profile 的 Telegram 创建的任务，其 <code>completed</code>/<code>blocked</code> 消息由
+  <code>writer</code> gateway 投递，即使调度是由 <code>default</code> gateway 完成的。</li>
+<li><strong>遗留订阅</strong>（在 profile 标记之前创建、行上没有 <code>notifier_profile</code>
+  的订阅）只由实际持有调度器单例锁的 gateway 投递，因此两个 gateway
+  永远不会争抢它们。</li>
+</ul>
+<p>board 数据库中的原子化逐事件认领可防止跨 gateway 的重复投递。不需要中继、
+凭证共享或额外的调度器 —— 每个 profile gateway 只通过它自己的适配器投递。</p>
+<h2 id="运行记录--每次尝试一行">运行记录 —— 每次尝试一行</h2>
+<p>任务是一个逻辑工作单元；<strong>运行</strong>是执行它的一次尝试。当调度器认领一个就绪任务时，它在 <code>task_runs</code> 中创建一行，并将 <code>tasks.current_run_id</code> 指向它。当该尝试结束时 —— 完成、阻塞、崩溃、超时、启动失败、回收 —— 运行行以 <code>outcome</code> 关闭，任务的指针清除。被尝试三次的任务有三行 <code>task_runs</code>。</p>
+<p>为什么用两张表而不是直接修改任务：你需要<strong>完整的尝试历史</strong>用于真实世界的事后分析（"第二次审查尝试到达批准，第三次合并"），你需要一个干净的地方挂载每次尝试的元数据 —— 哪些文件改变了、哪些测试运行了、审查者注意到了哪些发现。这些是运行事实，不是任务事实。</p>
+<p>运行也是<strong>结构化交接</strong>所在的地方。当 worker 完成任务（通过 <code>kanban_complete(...)</code>）时，它可以传递：</p>
+<ul>
+<li><code>summary</code>（工具参数）/ <code>--summary</code>（CLI）—— 人类交接；放在运行上；下游子任务在其 <code>build_worker_context</code> 中看到它。</li>
+<li><code>metadata</code>（工具参数）/ <code>--metadata</code>（CLI）—— 运行上的自由格式 JSON 字典；子任务看到它与摘要一起序列化。</li>
+<li><code>result</code>（工具参数）/ <code>--result</code>（CLI）—— 放在任务行上的简短日志行（遗留字段，保留向后兼容）。</li>
+</ul>
+<p>下游子任务读取每个父任务最近完成运行的摘要 + 元数据。重试 worker 读取其自身任务上的先前尝试（结果、摘要、错误），以避免重复已经失败的路径。</p>
+<div class="highlight"><pre><span></span><code># worker 实际做的事 —— agent 循环内的工具调用：
+kanban_complete(
+    summary=&quot;implemented token bucket, keys on user_id with IP fallback, all tests pass&quot;,
+    metadata={&quot;changed_files&quot;: [&quot;limiter.py&quot;, &quot;tests/test_limiter.py&quot;], &quot;tests_run&quot;: 14},
+    result=&quot;rate limiter shipped&quot;,
+)
+</code></pre></div>
+
+<p>当你（人类）需要关闭 worker 无法关闭的任务时，同样的交接可以从 CLI 访问 —— 例如被放弃的任务，或你从仪表盘手动标记为完成的任务：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span><span class="nb">complete</span><span class="w"> </span>t_abcd<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--result<span class="w"> </span><span class="s2">&quot;rate limiter shipped&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--summary<span class="w"> </span><span class="s2">&quot;implemented token bucket, keys on user_id with IP fallback, all tests pass&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--metadata<span class="w"> </span><span class="s1">&#39;{&quot;changed_files&quot;: [&quot;limiter.py&quot;, &quot;tests/test_limiter.py&quot;], &quot;tests_run&quot;: 14}&#39;</span>
+
+<span class="c1"># 查看重试任务的尝试历史：</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>runs<span class="w"> </span>t_abcd
+<span class="c1">#   #  OUTCOME       PROFILE           ELAPSED  STARTED</span>
+<span class="c1">#   1  blocked       worker               12s  2026-04-27 14:02</span>
+<span class="c1">#        → BLOCKED: need decision on rate-limit key</span>
+<span class="c1">#   2  completed     worker                8m   2026-04-27 15:18</span>
+<span class="c1">#        → implemented token bucket, keys on user_id with IP fallback</span>
+</code></pre></div>
+
+<p>运行在仪表盘上公开（抽屉中的运行历史部分，每次尝试一行彩色行）以及 REST API 上（<code>GET /api/plugins/kanban/tasks/:id</code> 返回 <code>runs[]</code> 数组）。带有 <code>{status: "done", summary, metadata}</code> 的 <code>PATCH /api/plugins/kanban/tasks/:id</code> 将两者都转发到内核，因此仪表盘的"标记完成"按钮等同于 CLI。<code>task_events</code> 行携带它们所属的 <code>run_id</code>，以便 UI 可以按尝试分组，<code>completed</code> 事件在其有效载荷中嵌入第一行摘要（上限 400 个字符），这样 gateway 通知器无需第二次 SQL 往返即可渲染结构化交接。</p>
+<p><strong>批量关闭注意事项。</strong> <code>hermes kanban complete a b c --summary X</code> 被拒绝 —— 结构化交接是每次运行的，因此将相同的摘要复制粘贴到 N 个任务几乎总是错误的。不带 <code>--summary</code> / <code>--metadata</code> 的批量关闭仍然适用于常见的"我完成了一堆管理任务"情况。</p>
+<p><strong>状态变更导致的运行回收。</strong> 如果你在仪表盘中将运行中的任务从 <code>running</code> 拖走（回到 <code>ready</code>，或直接到 <code>todo</code>），或归档仍在运行的任务，进行中的运行以 <code>outcome='reclaimed'</code> 关闭，而不是被孤立。当 <code>tasks.current_run_id</code> 为 <code>NULL</code> 时，<code>task_runs</code> 行始终处于终端状态，反之亦然 —— 该不变量在 CLI、仪表盘、调度器和通知器之间保持。</p>
+<p><strong>从未认领的完成的合成运行。</strong> 完成或阻塞从未被认领的任务（例如，人类从仪表盘关闭带摘要的 <code>ready</code> 任务，或 CLI 用户运行 <code>hermes kanban complete &lt;ready-task&gt; --summary X</code>）否则会丢失交接。相反，内核插入一个零持续时间运行行（<code>started_at == ended_at</code>），携带摘要 / 元数据 / 原因，以保持尝试历史完整。<code>completed</code> / <code>blocked</code> 事件的 <code>run_id</code> 指向该行。</p>
+<p><strong>实时抽屉刷新。</strong> 当仪表盘的 WebSocket 事件流报告用户当前正在查看的任务的新事件时，抽屉会重新加载自身（通过线程到其 <code>useEffect</code> 依赖列表中的每任务事件计数器）。不再需要关闭并重新打开才能看到运行的新行或更新的结果。</p>
+<h3 id="向前兼容性">向前兼容性</h3>
+<p><code>tasks</code> 上的两个可空列为 v2 工作流路由保留：<code>workflow_template_id</code>（此任务属于哪个模板）和 <code>current_step_key</code>（该模板中哪个步骤处于活动状态）。v1 内核忽略它们用于路由，但允许客户端写入它们，因此 v2 版本可以添加路由机制而无需另一次 schema 迁移。</p>
+<h2 id="事件参考">事件参考</h2>
+<p>每次转换都向 <code>task_events</code> 追加一行。每行携带一个可选的 <code>run_id</code>，以便 UI 可以按尝试分组事件。类型分为三个集群，便于过滤（<code>hermes kanban watch --kinds completed,gave_up,timed_out</code>）：</p>
+<p><strong>生命周期</strong>（关于任务作为逻辑单元发生了什么变化）：</p>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>有效载荷</th>
+<th>时机</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>created</code></td>
+<td><code>{assignee, status, parents, tenant}</code></td>
+<td>任务插入。<code>run_id</code> 为 <code>NULL</code>。</td>
+</tr>
+<tr>
+<td><code>promoted</code></td>
+<td>—</td>
+<td>因所有父任务达到 <code>done</code> 而 <code>todo → ready</code>。<code>run_id</code> 为 <code>NULL</code>。</td>
+</tr>
+<tr>
+<td><code>claimed</code></td>
+<td><code>{lock, expires, run_id}</code></td>
+<td>调度器原子性认领 <code>ready</code> 任务以启动。</td>
+</tr>
+<tr>
+<td><code>completed</code></td>
+<td><code>{result_len, summary?}</code></td>
+<td>Worker 写入 <code>--result</code> / <code>--summary</code> 且任务达到 <code>done</code>。<code>summary</code> 是第一行交接（400 字符上限）；完整版本存在于运行行上。如果在从未认领的任务上调用 <code>complete_task</code> 并带有交接字段，则合成零持续时间运行，以便 <code>run_id</code> 仍然指向某处。</td>
+</tr>
+<tr>
+<td><code>blocked</code></td>
+<td><code>{reason}</code></td>
+<td>Worker 或人类将任务翻转为 <code>blocked</code>。在带有 <code>--reason</code> 的从未认领任务上调用时合成零持续时间运行。</td>
+</tr>
+<tr>
+<td><code>unblocked</code></td>
+<td>—</td>
+<td><code>blocked → ready</code>，手动或通过 <code>/unblock</code>。<code>run_id</code> 为 <code>NULL</code>。</td>
+</tr>
+<tr>
+<td><code>archived</code></td>
+<td>—</td>
+<td>从默认看板中隐藏。如果任务仍在运行，携带作为副作用被回收的运行的 <code>run_id</code>。</td>
+</tr>
+</tbody>
+</table>
+<p><strong>编辑</strong>（不是转换的人类驱动变更）：</p>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>有效载荷</th>
+<th>时机</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>assigned</code></td>
+<td><code>{assignee}</code></td>
+<td>受让人更改（包括取消分配）。</td>
+</tr>
+<tr>
+<td><code>edited</code></td>
+<td><code>{fields}</code></td>
+<td>标题或正文更新。</td>
+</tr>
+<tr>
+<td><code>reprioritized</code></td>
+<td><code>{priority}</code></td>
+<td>优先级更改。</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td><code>{status}</code></td>
+<td>仪表盘拖放直接写入状态（例如 <code>todo → ready</code>）。从 <code>running</code> 拖走时携带被回收运行的 <code>run_id</code>；否则 <code>run_id</code> 为 NULL。</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Worker 遥测</strong>（关于执行过程，而非逻辑任务）：</p>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>有效载荷</th>
+<th>时机</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>spawned</code></td>
+<td><code>{pid}</code></td>
+<td>调度器成功启动 worker 进程。</td>
+</tr>
+<tr>
+<td><code>heartbeat</code></td>
+<td><code>{note?}</code></td>
+<td>Worker 在长时间操作期间调用 <code>hermes kanban heartbeat $TASK</code> 发出存活信号。</td>
+</tr>
+<tr>
+<td><code>reclaimed</code></td>
+<td><code>{stale_lock}</code></td>
+<td>认领 TTL 在完成前过期；任务返回 <code>ready</code>。</td>
+</tr>
+<tr>
+<td><code>crashed</code></td>
+<td><code>{pid, claimer}</code></td>
+<td>Worker PID 不再存活但 TTL 尚未过期。</td>
+</tr>
+<tr>
+<td><code>timed_out</code></td>
+<td><code>{pid, elapsed_seconds, limit_seconds, sigkill}</code></td>
+<td>超过 <code>max_runtime_seconds</code>；调度器发送 SIGTERM（5 秒宽限后发送 SIGKILL）并重新排队。</td>
+</tr>
+<tr>
+<td><code>stale</code></td>
+<td><code>{elapsed_seconds, last_heartbeat_at, heartbeat_age_seconds, timeout_seconds, pid, terminated}</code></td>
+<td>任务运行时间超过 <code>kanban.dispatch_stale_timeout_seconds</code>（默认 4 小时）<strong>且</strong>最近一小时内没有 <code>kanban_heartbeat</code>。调度器向本地 worker（如有）发送 SIGTERM，将任务重置为 <code>ready</code> 重新调度。<strong>不</strong>增加失败计数器（stale 是调度器端的缺席检测，不是 worker 故障）。运行长时间操作的 Worker 应至少每小时调用一次 <code>kanban_heartbeat</code> 以避免此情况。</td>
+</tr>
+<tr>
+<td><code>respawn_guarded</code></td>
+<td><code>{reason}</code></td>
+<td>调度器拒绝在本 tick 重新启动此就绪任务。原因：<code>blocker_auth</code>（上次失败是配额/认证/429 错误 —— 等待速率窗口重置）、<code>recent_success</code>（最近一小时内有完成的运行 —— 在重新运行前等待审查）、<code>active_pr</code>（最近的评论中出现 GitHub PR URL —— 先前的 worker 已经打开了 PR）。任务保持在 <code>ready</code>；下一个 tick 有另一次启动机会。如果底层条件持续存在，正常的 <code>consecutive_failures</code> 熔断器将在 <code>failure_limit</code> 次失败后通过 <code>gave_up</code> 自动阻塞。</td>
+</tr>
+<tr>
+<td><code>spawn_failed</code></td>
+<td><code>{error, failures}</code></td>
+<td>一次启动尝试失败（PATH 缺失、工作区无法挂载等）。计数器递增；任务返回 <code>ready</code> 重试。</td>
+</tr>
+<tr>
+<td><code>protocol_violation</code></td>
+<td><code>{pid, claimer, exit_code}</code></td>
+<td>Worker 在任务仍处于 <code>running</code> 状态时成功退出，通常是因为它回答了问题而没有调用 <code>kanban_complete</code> 或 <code>kanban_block</code>。调度器还会立即发出 <code>gave_up</code> 并自动阻塞，而不是重试。</td>
+</tr>
+<tr>
+<td><code>gave_up</code></td>
+<td><code>{failures, effective_limit, limit_source, error}</code></td>
+<td>N 次连续不成功尝试后熔断器触发。任务以最后一个错误自动阻塞。有效限制解析为任务 <code>max_retries</code>，然后是调度器 <code>failure_limit</code> / <code>kanban.failure_limit</code>，然后是内置默认值。</td>
+</tr>
+</tbody>
+</table>
+<p><code>hermes kanban tail &lt;id&gt;</code> 显示单个任务的这些事件。<code>hermes kanban watch</code> 在整个看板范围内流式传输它们。</p>
+<h2 id="范围之外">范围之外</h2>
+<p>Kanban 是刻意单主机的。<code>~/.hermes/kanban.db</code> 是本地 SQLite 文件，调度器在同一台机器上启动 worker。不支持跨两台主机运行共享看板 —— 没有"主机 A 上的 worker X，主机 B 上的 worker Y"的协调原语，崩溃检测路径假设 PID 是主机本地的。如果你需要多主机，每台主机运行独立的看板，并使用 <code>delegate_task</code> / 消息队列来桥接它们。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/features/kanban</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl3"><a href="#两个操作界面模型通过工具交互你通过-cli-交互">两个操作界面：模型通过工具交互，你通过 CLI 交互</a></li>
+<li class="lvl2"><a href="#kanban-与-delegate_task-的对比">Kanban 与 delegate_task 的对比</a></li>
+<li class="lvl2"><a href="#核心概念">核心概念</a></li>
+<li class="lvl2"><a href="#boards-multi-project">看板（多项目）</a></li>
+<li class="lvl3"><a href="#通过-cli-管理看板">通过 CLI 管理看板</a></li>
+<li class="lvl3"><a href="#通过仪表盘管理看板">通过仪表盘管理看板</a></li>
+<li class="lvl2"><a href="#快速开始">快速开始</a></li>
+<li class="lvl3"><a href="#gateway-内嵌调度器默认">Gateway 内嵌调度器（默认）</a></li>
+<li class="lvl3"><a href="#幂等创建用于自动化--webhook">幂等创建（用于自动化 / webhook）</a></li>
+<li class="lvl3"><a href="#批量-cli-动词">批量 CLI 动词</a></li>
+<li class="lvl2"><a href="#how-workers-interact-with-the-board">Worker 如何与看板交互</a></li>
+<li class="lvl3"><a href="#为什么使用工具而不是-shell-执行-hermes-kanban">为什么使用工具而不是 shell 执行 hermes kanban</a></li>
+<li class="lvl3"><a href="#推荐的交接证据">推荐的交接证据</a></li>
+<li class="lvl3"><a href="#worker-生命周期">Worker 生命周期</a></li>
+<li class="lvl3"><a href="#为特定任务固定额外-skill">为特定任务固定额外 skill</a></li>
+<li class="lvl3"><a href="#成本策略前沿模型编排低价模型执行">成本策略：前沿模型编排，低价模型执行</a></li>
+<li class="lvl3"><a href="#编排器的行为方式">编排器的行为方式</a></li>
+<li class="lvl2"><a href="#仪表盘gui">仪表盘（GUI）</a></li>
+<li class="lvl3"><a href="#插件提供的功能">插件提供的功能</a></li>
+<li class="lvl3"><a href="#auto-vs-manual-orchestration">自动与手动编排</a></li>
+<li class="lvl3"><a href="#架构">架构</a></li>
+<li class="lvl3"><a href="#rest-接口">REST 接口</a></li>
+<li class="lvl3"><a href="#仪表盘配置">仪表盘配置</a></li>
+<li class="lvl3"><a href="#安全模型">安全模型</a></li>
+<li class="lvl3"><a href="#实时更新">实时更新</a></li>
+<li class="lvl3"><a href="#扩展">扩展</a></li>
+<li class="lvl3"><a href="#范围边界">范围边界</a></li>
+<li class="lvl2"><a href="#cli-命令参考">CLI 命令参考</a></li>
+<li class="lvl2"><a href="#kanban-slash-command">/kanban 斜杠命令</a></li>
+<li class="lvl3"><a href="#运行中使用kanban-绕过运行中-agent-保护">运行中使用：/kanban 绕过运行中 agent 保护</a></li>
+<li class="lvl3"><a href="#kanban-create-时自动订阅仅限-gateway">/kanban create 时自动订阅（仅限 gateway）</a></li>
+<li class="lvl3"><a href="#消息中的输出截断">消息中的输出截断</a></li>
+<li class="lvl3"><a href="#自动补全">自动补全</a></li>
+<li class="lvl2"><a href="#协作模式">协作模式</a></li>
+<li class="lvl2"><a href="#向后续卡片传递上下文父任务链接">向后续卡片传递上下文（父任务链接）</a></li>
+<li class="lvl3"><a href="#调解冲突的-worker-分支">调解冲突的 worker 分支</a></li>
+<li class="lvl3"><a href="#并行战役中的碰撞热点collision-hotspots">并行战役中的碰撞热点（Collision hotspots）</a></li>
+<li class="lvl2"><a href="#多租户使用">多租户使用</a></li>
+<li class="lvl2"><a href="#gateway-通知">Gateway 通知</a></li>
+<li class="lvl3"><a href="#多-profile-部署投递按-profile-归属">多 profile 部署：投递按 profile 归属</a></li>
+<li class="lvl2"><a href="#运行记录--每次尝试一行">运行记录 —— 每次尝试一行</a></li>
+<li class="lvl3"><a href="#向前兼容性">向前兼容性</a></li>
+<li class="lvl2"><a href="#事件参考">事件参考</a></li>
+<li class="lvl2"><a href="#范围之外">范围之外</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

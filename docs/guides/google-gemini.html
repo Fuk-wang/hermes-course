@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Google Gemini · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/google-gemini</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="google-gemini">Google Gemini</h1>
+<p>Hermes Agent supports Google Gemini as a native provider using the <strong>Google AI Studio / Gemini API</strong> — not the OpenAI-compatible endpoint. This lets Hermes translate its internal OpenAI-shaped message and tool loop into Gemini's native <code>generateContent</code> API while preserving tool calling, streaming, multimodal inputs, and Gemini-specific response metadata.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li><strong>Google AI Studio API key</strong> — create one at <a href="https://aistudio.google.com/apikey" class="ext" target="_blank" rel="noopener">aistudio.google.com/apikey</a></li>
+<li><strong>Billing-enabled Google Cloud project</strong> — recommended for agent use. Gemini's free tier is too small for long-running agent sessions because Hermes may make several model calls per user turn.</li>
+<li><strong>Hermes installed</strong> — no extra Python package is required for the native Gemini provider.</li>
+</ul>
+<div class="admonition adm-tip"><p class="adm-title">API key path</p>
+<p>Set <code>GOOGLE_API_KEY</code> or <code>GEMINI_API_KEY</code>. Hermes checks both names for the <code>gemini</code> provider.</p>
+</div>
+<h2 id="quick-start">Quick Start</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># Add your Gemini API key</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;GOOGLE_API_KEY=...&quot;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/.env
+
+<span class="c1"># Select Gemini as your provider</span>
+hermes<span class="w"> </span>model
+<span class="c1"># → Choose &quot;More providers...&quot; → &quot;Google AI Studio&quot;</span>
+<span class="c1"># → Hermes checks your key tier and shows Gemini models</span>
+<span class="c1"># → Select a model</span>
+
+<span class="c1"># Start chatting</span>
+hermes<span class="w"> </span>chat
+</code></pre></div>
+
+<p>If you prefer direct config editing, use the native Gemini API base URL:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini-3.7-flash</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://generativelanguage.googleapis.com/v1beta</span>
+</code></pre></div>
+
+<h2 id="configuration">Configuration</h2>
+<p>After running <code>hermes model</code>, your <code>~/.hermes/config.yaml</code> will contain:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini-3.7-flash</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://generativelanguage.googleapis.com/v1beta</span>
+</code></pre></div>
+
+<p>And in <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">GOOGLE_API_KEY</span><span class="o">=</span>...
+</code></pre></div>
+
+<h3 id="native-gemini-api">Native Gemini API</h3>
+<p>The recommended endpoint is:</p>
+<div class="highlight"><pre><span></span><code>https://generativelanguage.googleapis.com/v1beta
+</code></pre></div>
+
+<p>Hermes detects this endpoint and creates its native Gemini adapter. Internally, Hermes still keeps the agent loop in OpenAI-shaped messages, then translates each request to Gemini's native schema:</p>
+<ul>
+<li><code>messages[]</code> → Gemini <code>contents[]</code></li>
+<li>system prompts → Gemini <code>systemInstruction</code></li>
+<li>tool schemas → Gemini <code>functionDeclarations</code></li>
+<li>tool results → Gemini <code>functionResponse</code> parts</li>
+<li>streaming responses → OpenAI-shaped stream chunks for the Hermes loop</li>
+</ul>
+<p>Tool parameter type arrays such as <code>"type": ["number", "null"]</code> are translated
+into Gemini's scalar type plus <code>nullable</code> form. Multi-type unions keep every
+alternative through <code>anyOf</code>, including nested properties and array items. This
+happens automatically; no MCP server or provider configuration change is needed.</p>
+<div class="admonition adm-note"><p class="adm-title">Gemini 3 thought signatures</p>
+<p>For Gemini 3 tool use, Hermes preserves the <code>thoughtSignature</code> values attached to function-call parts and replays them on the next tool turn. That covers the validation-critical path for multi-step agent workflows.</p>
+<p>Gemini 3 may also attach thought signatures to other response parts. Hermes' native adapter is optimized for agent tool loops today, so it does not yet replay every non-tool-call signature with full part-level fidelity.</p>
+</div>
+<h3 id="prefer-the-native-endpoint">Prefer the Native Endpoint</h3>
+<p>Google also exposes an OpenAI-compatible endpoint:</p>
+<div class="highlight"><pre><span></span><code>https://generativelanguage.googleapis.com/v1beta/openai/
+</code></pre></div>
+
+<p>For Hermes agent sessions, prefer the native Gemini endpoint above. Hermes includes a native Gemini adapter so it can map multi-turn tool use, tool-call results, streaming, multimodal inputs, and Gemini response metadata directly onto Gemini's <code>generateContent</code> API. The OpenAI-compatible endpoint is still useful when you specifically need OpenAI API compatibility.</p>
+<p>If you previously set <code>GEMINI_BASE_URL</code> to the <code>/openai</code> URL, remove it or change it:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">GEMINI_BASE_URL</span><span class="o">=</span>https://generativelanguage.googleapis.com/v1beta
+</code></pre></div>
+
+<p>Host-root base URLs on the Google host are normalized automatically: if the URL
+doesn't end with an API version segment (<code>v1beta</code>, <code>v1alpha</code>, <code>v1</code>, ...), Hermes
+appends <code>/v1beta</code> for you, so <code>GEMINI_BASE_URL=https://generativelanguage.googleapis.com</code>
+works the same as spelling out the <code>/v1beta</code> suffix. The same normalization
+applies to the Gemini TTS base URL (<code>tts.gemini.base_url</code>). Chat requests only
+take the native Gemini path when the base URL points at
+<code>generativelanguage.googleapis.com</code> or the Vertex AI express host below; a proxy on
+another host is treated as an OpenAI-compatible endpoint, so configure it with its
+<code>/openai</code>-style URL.</p>
+<h3 id="vertex-ai-express-mode-keys">Vertex AI Express Mode Keys</h3>
+<p>Google issues two Gemini key families. AI Studio keys start with <code>AIza…</code>; <strong>Vertex AI
+express-mode</strong> keys start with <code>AQ.…</code> and only authenticate against
+<code>aiplatform.googleapis.com</code> (they get 403 on the AI Studio host). Hermes detects the
+<code>AQ.</code> prefix and routes those keys to
+<code>https://aiplatform.googleapis.com/v1beta1/publishers/google</code> automatically — set
+<code>GEMINI_API_KEY</code> to the express key and leave <code>GEMINI_BASE_URL</code> unset. If you set
+<code>GEMINI_BASE_URL</code> to <code>https://aiplatform.googleapis.com</code> (with or without <code>/v1beta1</code>)
+Hermes completes it to the <code>publishers/google</code> form; a base URL on any other host (a
+proxy) is never rewritten. Express keys are separate from the OAuth-based
+<a href="google-vertex.html">Vertex AI provider</a>, which needs no API key.</p>
+<h2 id="available-models">Available Models</h2>
+<p>The <code>hermes model</code> picker shows Gemini models maintained in Hermes' provider registry. Common choices include:</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>ID</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gemini 3.8 Flash</td>
+<td><code>gemini-3.8-flash</code></td>
+<td>Most capable Flash model for long-horizon agentic and coding work</td>
+</tr>
+<tr>
+<td>Gemini 3.7 Flash</td>
+<td><code>gemini-3.7-flash</code></td>
+<td>Recommended default balance of speed, capability, and multimodal understanding</td>
+</tr>
+<tr>
+<td>Gemini 3.1 Pro Preview</td>
+<td><code>gemini-3.1-pro-preview</code></td>
+<td>Most capable reasoning, math, and coding model</td>
+</tr>
+<tr>
+<td>Gemini 3.5 Flash Lite</td>
+<td><code>gemini-3.5-flash-lite</code></td>
+<td>Fastest and lowest-cost option for lightweight tasks</td>
+</tr>
+<tr>
+<td>Gemini 2.5 Flash</td>
+<td><code>gemini-2.5-flash</code></td>
+<td>Previous generation fast model with thinking capabilities</td>
+</tr>
+<tr>
+<td>Gemini 2.5 Pro</td>
+<td><code>gemini-2.5-pro</code></td>
+<td>Previous generation complex reasoning model</td>
+</tr>
+</tbody>
+</table>
+<p>Model availability changes over time. If a model disappears or is not enabled for your key, run <code>hermes model</code> again and pick one from the current list.</p>
+<div class="admonition adm-info"><p class="adm-title">Model IDs</p>
+<p>Use Gemini's native model IDs such as <code>gemini-3.7-flash</code>, not OpenRouter-style IDs like <code>google/gemini-3.7-flash</code>, when <code>provider: gemini</code>.</p>
+</div>
+<h3 id="latest-aliases">Latest Aliases</h3>
+<p>Google publishes moving aliases for the Pro and Flash Gemini families. <code>gemini-pro-latest</code> and <code>gemini-flash-latest</code> are useful when you want Google to advance the model automatically without changing your Hermes config. Note that your usage charges may be affected if newer models introduce different rates.</p>
+<table>
+<thead>
+<tr>
+<th>Alias</th>
+<th>Currently tracks</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gemini-pro-latest</code></td>
+<td>Latest Gemini Pro model</td>
+<td>Best when you want Google's current Pro default</td>
+</tr>
+<tr>
+<td><code>gemini-flash-latest</code></td>
+<td>Latest Gemini Flash model</td>
+<td>Best when you want Google's current Flash default</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini-pro-latest</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://generativelanguage.googleapis.com/v1beta</span>
+</code></pre></div>
+
+<p>If you need strict reproducibility, prefer explicit model IDs such as <code>gemini-3.1-pro-preview</code> or <code>gemini-3.7-flash</code>.</p>
+<h3 id="gemma-via-the-gemini-api">Gemma via the Gemini API</h3>
+<p>Google also exposes Gemma models through the Gemini API. Hermes recognizes these as Google models, but hides very low-throughput Gemma entries from the default model picker so new users do not accidentally select an evaluation-tier model for a long-running agent session.</p>
+<p>Useful evaluation IDs include:</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>ID</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gemma 4 31B IT</td>
+<td><code>gemma-4-31b-it</code></td>
+<td>Larger Gemma model; useful for compatibility and quality evaluation</td>
+</tr>
+<tr>
+<td>Gemma 4 26B A4B IT</td>
+<td><code>gemma-4-26b-a4b-it</code></td>
+<td>Smaller active-parameter variant when available</td>
+</tr>
+</tbody>
+</table>
+<p>These models are best treated as evaluation options on Gemini API keys. Google's Gemma API pricing is free-tier-only and the usage caps are low compared with production Gemini models, so sustained Hermes agent use should normally move to a paid Gemini model, a self-hosted deployment, or another provider with appropriate quota.</p>
+<p>To use a Gemma model that is hidden from the picker, set it directly:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemma-4-31b-it</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://generativelanguage.googleapis.com/v1beta</span>
+</code></pre></div>
+
+<h2 id="switching-models-mid-session">Switching Models Mid-Session</h2>
+<p>Use the <code>/model</code> command during a conversation:</p>
+<div class="highlight"><pre><span></span><code>/model gemini-3.7-flash
+/model gemini-flash-latest
+/model gemini-3.1-pro-preview
+/model gemini-pro-latest
+/model gemma-4-31b-it
+/model gemini-3.1-flash-lite-preview
+</code></pre></div>
+
+<p>If you have not configured Gemini yet, exit the session and run <code>hermes model</code> first. <code>/model</code> switches among already-configured providers and models; it does not collect new API keys.</p>
+<h2 id="diagnostics">Diagnostics</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>doctor
+</code></pre></div>
+
+<p>The doctor checks:</p>
+<ul>
+<li>Whether <code>GOOGLE_API_KEY</code> or <code>GEMINI_API_KEY</code> is available</li>
+<li>Whether configured provider credentials can be resolved</li>
+</ul>
+<h2 id="gateway-messaging-platforms">Gateway (Messaging Platforms)</h2>
+<p>Gemini works with all Hermes gateway platforms (Telegram, Discord, Slack, WhatsApp, LINE, Feishu, etc.). Configure Gemini as your provider, then start the gateway normally:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>setup
+hermes<span class="w"> </span>gateway<span class="w"> </span>start
+</code></pre></div>
+
+<p>The gateway reads <code>config.yaml</code> and uses the same Gemini provider configuration.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="gemini-native-client-requires-an-api-key">"Gemini native client requires an API key"</h3>
+<p>Hermes could not find a usable API key. Add one of these to <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">GOOGLE_API_KEY</span><span class="o">=</span>...
+<span class="c1"># or</span>
+<span class="nv">GEMINI_API_KEY</span><span class="o">=</span>...
+</code></pre></div>
+
+<p>Then run <code>hermes model</code> again.</p>
+<h3 id="this-google-api-key-is-on-the-free-tier">"This Google API key is on the free tier"</h3>
+<p>Hermes probes Gemini API keys during setup. Free-tier quotas can be exhausted after a handful of agent turns because tool use, retries, compression, and auxiliary tasks may require multiple model calls.</p>
+<p>Enable billing on the Google Cloud project attached to your key, regenerate the key if needed, then run:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>model
+</code></pre></div>
+
+<h3 id="404-model-not-found">"404 model not found"</h3>
+<p>The selected model is not available for your account, region, or key. Run <code>hermes model</code> again and pick another Gemini model from the current list.</p>
+<h3 id="gemma-model-is-not-shown-in-hermes-model">Gemma model is not shown in <code>hermes model</code></h3>
+<p>Hermes may hide low-throughput Gemma models from the picker by default. If you intentionally want to evaluate one, set the model ID directly in <code>~/.hermes/config.yaml</code>.</p>
+<h3 id="429-quota-exceeded-on-gemma">"429 quota exceeded" on Gemma</h3>
+<p>Gemma models exposed through the Gemini API are useful for evaluation, but their Gemini API free-tier caps are low. Use them for compatibility testing, then switch to a paid Gemini model or another provider for sustained agent sessions.</p>
+<h3 id="openai-compatible-endpoint-is-configured">OpenAI-compatible endpoint is configured</h3>
+<p>Check <code>~/.hermes/.env</code> for:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">GEMINI_BASE_URL</span><span class="o">=</span>https://generativelanguage.googleapis.com/v1beta/openai/
+</code></pre></div>
+
+<p>Change it to the native endpoint or remove the override:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">GEMINI_BASE_URL</span><span class="o">=</span>https://generativelanguage.googleapis.com/v1beta
+</code></pre></div>
+
+<h3 id="tool-calling-fails-with-schema-errors">Tool calling fails with schema errors</h3>
+<p>Upgrade Hermes and rerun <code>hermes model</code>. The native Gemini adapter sanitizes tool schemas for Gemini's stricter function-declaration format; older builds or custom endpoints may not.</p>
+<h2 id="related">Related</h2>
+<ul>
+<li><a href="../integrations/providers.html">AI Providers</a></li>
+<li><a href="../user-guide/configuration.html">Configuration</a></li>
+<li><a href="../user-guide/features/fallback-providers.html">Fallback Providers</a></li>
+<li><a href="aws-bedrock.html">AWS Bedrock</a> — native cloud-provider integration using AWS credentials</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/google-gemini</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#quick-start">Quick Start</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl3"><a href="#native-gemini-api">Native Gemini API</a></li>
+<li class="lvl3"><a href="#prefer-the-native-endpoint">Prefer the Native Endpoint</a></li>
+<li class="lvl3"><a href="#vertex-ai-express-mode-keys">Vertex AI Express Mode Keys</a></li>
+<li class="lvl2"><a href="#available-models">Available Models</a></li>
+<li class="lvl3"><a href="#latest-aliases">Latest Aliases</a></li>
+<li class="lvl3"><a href="#gemma-via-the-gemini-api">Gemma via the Gemini API</a></li>
+<li class="lvl2"><a href="#switching-models-mid-session">Switching Models Mid-Session</a></li>
+<li class="lvl2"><a href="#diagnostics">Diagnostics</a></li>
+<li class="lvl2"><a href="#gateway-messaging-platforms">Gateway (Messaging Platforms)</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl3"><a href="#gemini-native-client-requires-an-api-key">&quot;Gemini native client requires an API key&quot;</a></li>
+<li class="lvl3"><a href="#this-google-api-key-is-on-the-free-tier">&quot;This Google API key is on the free tier&quot;</a></li>
+<li class="lvl3"><a href="#404-model-not-found">&quot;404 model not found&quot;</a></li>
+<li class="lvl3"><a href="#gemma-model-is-not-shown-in-hermes-model">Gemma model is not shown in hermes model</a></li>
+<li class="lvl3"><a href="#429-quota-exceeded-on-gemma">&quot;429 quota exceeded&quot; on Gemma</a></li>
+<li class="lvl3"><a href="#openai-compatible-endpoint-is-configured">OpenAI-compatible endpoint is configured</a></li>
+<li class="lvl3"><a href="#tool-calling-fails-with-schema-errors">Tool calling fails with schema errors</a></li>
+<li class="lvl2"><a href="#related">Related</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wake Word · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/wake-word</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="wake-word-hey-hermes">Wake Word ("Hey Hermes")</h1>
+<p>The wake word turns Hermes into a hands-free assistant across the CLI, TUI, and
+desktop app: with one setting on, Hermes listens in the background for a spoken
+trigger phrase. Say it, and Hermes starts a fresh session, opens the microphone,
+captures your command via the normal <a href="voice-mode.html">voice pipeline</a>,
+and answers — exactly like "Hey Siri" or "Alexa". Use <code>surface</code> to pick which
+one listens.</p>
+<p>Detection runs <strong>entirely on-device</strong>. The always-on listener only watches for
+the wake phrase; no audio leaves your machine until you actually speak a command
+to the agent.</p>
+<h2 id="how-it-works">How it works</h2>
+<ol>
+<li>With <code>wake_word.enabled: true</code> (or after <code>/wake on</code>), a lightweight hotword
+   detector listens on your configured input device, or the process default
+   microphone when <code>wake_word.input_device</code> is unset.</li>
+<li>When it hears the wake phrase it pauses itself (freeing the mic), starts a new
+   session, and records one utterance with voice mode's silence detection.</li>
+<li>Your speech is transcribed and sent to the agent. After it replies, the
+   listener resumes automatically and waits for the next wake word.</li>
+</ol>
+<p>It is <strong>off by default</strong> — nothing listens until you turn it on.</p>
+<p>On the desktop app, a hands-free voice conversation can be ended by simply
+<strong>saying "stop"</strong> (or "never mind", "goodbye", "cancel", "that's all") — the
+spoken command ends the conversation instead of being sent to the agent. Only a
+whole-utterance stop command matches, so a real request like "stop the docker
+container" still goes through normally.</p>
+<h2 id="remote-desktop-client-capture">Remote desktop (client capture)</h2>
+<p>When the desktop app connects to a <strong>remote</strong> Hermes backend (for example a
+headless Docker host or a machine in another room), the backend often has <strong>no
+microphone</strong>. Server-side PortAudio then fails with “Failed to open the
+wake-word microphone.”</p>
+<p>Hermes supports <strong>client capture</strong> for that case:</p>
+<ol>
+<li>The desktop arms wake with <code>capture: client</code> (automatic for the GUI when the
+   backend has no local input device, or set explicitly below).</li>
+<li>openWakeWord still runs <strong>on the backend</strong> (same engines, same models).</li>
+<li>The desktop opens the <strong>local Mac/PC microphone</strong>, resamples to 16 kHz mono
+   int16, and streams short frames via the <code>wake.feed</code> RPC.</li>
+<li>On detection the backend emits <code>wake.detected</code> as usual; the desktop starts
+   the normal voice pipeline on the client mic.</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="nt">wake_word</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">capture</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">auto</span><span class="w">    </span><span class="c1"># auto | local | client</span>
+<span class="w">  </span><span class="c1"># auto   — local PortAudio unless the desktop arms with client_capture</span>
+<span class="w">  </span><span class="c1"># local  — always open the backend mic (CLI/TUI default)</span>
+<span class="w">  </span><span class="c1"># client — always expect wake.feed PCM from the desktop (remote-friendly)</span>
+</code></pre></div>
+
+<p>The desktop GUI always passes <code>client_capture: true</code> on <code>wake.start</code>, so remote
+backends without a mic arm in client mode automatically. CLI and TUI keep local
+capture unless you set <code>capture: client</code> explicitly.</p>
+<p>Privacy note: with client capture, wake PCM travels over the authenticated
+desktop↔backend WebSocket (same channel as the rest of the session). Detection
+still does not send audio to third-party wake APIs; the engine is local to the
+backend process.</p>
+<h2 id="engines">Engines</h2>
+<table>
+<thead>
+<tr>
+<th>Engine</th>
+<th>Cost</th>
+<th>API key</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>openWakeWord</strong> (default)</td>
+<td>Free</td>
+<td>None</td>
+<td>Local ONNX models. Ships a bundled <strong>"hey hermes"</strong> model (default); also supports <code>hey_jarvis</code>, <code>alexa</code>, <code>hey_mycroft</code>, … and custom models</td>
+</tr>
+<tr>
+<td><strong>sherpa</strong></td>
+<td>Free</td>
+<td>None</td>
+<td><strong>Open vocabulary</strong> — detects ANY typed phrase with zero training. Small English model auto-downloads on first use (~13 MB)</td>
+</tr>
+<tr>
+<td><strong>Porcupine</strong></td>
+<td>Free tier / paid</td>
+<td><code>PORCUPINE_ACCESS_KEY</code></td>
+<td>Picovoice engine; built-in keywords + custom <code>.ppn</code> files</td>
+</tr>
+</tbody>
+</table>
+<p>By default the phrase is <strong>"hey hermes"</strong> — a model for it ships with Hermes, so
+it works out of the box with no training. (On first use, openWakeWord downloads
+its shared feature-extraction models — a small one-time fetch.)</p>
+<p>Both are lazy-installed the first time you enable the wake word (desktop
+installs made with <code>--include-desktop</code> pre-install them, so the ear works
+instantly). To install ahead of time:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>~/.hermes/hermes-agent<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[wake]&quot;</span>
+</code></pre></div>
+
+<h2 id="quick-start">Quick start</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># In an interactive `hermes` session:</span>
+/wake<span class="w"> </span>on<span class="w">        </span><span class="c1"># start listening (installs the engine on first use)</span>
+/wake<span class="w"> </span>status<span class="w">    </span><span class="c1"># show phrase, provider, and state</span>
+/wake<span class="w"> </span>off<span class="w">       </span><span class="c1"># stop listening</span>
+</code></pre></div>
+
+<p>In the desktop app, hover the microphone in the composer and click the ear
+that fans out of it. The ear is solid when the wake word is listening.</p>
+<p>The toggle IS the setting: turning the wake word on or off — via <code>/wake</code> or the
+desktop ear button — also writes <code>wake_word.enabled</code> to <code>~/.hermes/config.yaml</code>,
+so your choice persists across sessions. You can also flip it by hand:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">wake_word</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<h2 id="configuration">Configuration</h2>
+<div class="highlight"><pre><span></span><code><span class="nt">wake_word</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">  </span><span class="nt">surface</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">auto</span><span class="w">               </span><span class="c1"># eligible surface: &quot;auto&quot; | &quot;cli&quot; | &quot;tui&quot; | &quot;gui&quot;</span>
+<span class="w">  </span><span class="nt">input_device</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">null</span><span class="w">           </span><span class="c1"># PortAudio input index or device-name substring; null = process default</span>
+<span class="w">  </span><span class="nt">capture</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">auto</span><span class="w">               </span><span class="c1"># auto | local | client — where PCM is captured (see Remote desktop)</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openwakeword</span><span class="w">      </span><span class="c1"># &quot;openwakeword&quot; (free, local) | &quot;sherpa&quot; (free, any phrase) | &quot;porcupine&quot;</span>
+<span class="w">  </span><span class="nt">phrase</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;hey</span><span class="nv"> </span><span class="s">hermes&quot;</span><span class="w">        </span><span class="c1"># cosmetic label only — detection is keyed by the model/keyword below</span>
+<span class="w">  </span><span class="nt">sensitivity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.6</span><span class="w">            </span><span class="c1"># 0.0-1.0 — higher = stricter (fewer false triggers), consistent across all engines</span>
+<span class="w">  </span><span class="nt">confirmation_frames</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span><span class="w">      </span><span class="c1"># openWakeWord only — consecutive over-threshold frames required to fire</span>
+<span class="w">  </span><span class="nt">start_new_session</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">     </span><span class="c1"># start a fresh session on wake vs. continue the current one</span>
+<span class="w">  </span><span class="nt">openwakeword</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hey_hermes</span><span class="w">         </span><span class="c1"># bundled default; OR a built-in name OR a path to a custom .onnx/.tflite</span>
+<span class="w">    </span><span class="nt">inference_framework</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">   </span><span class="c1"># &quot;&quot; (auto) | &quot;onnx&quot; | &quot;tflite&quot;</span>
+<span class="w">  </span><span class="nt">porcupine</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">keyword</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">jarvis</span><span class="w">           </span><span class="c1"># built-in keyword OR path to a custom .ppn</span>
+</code></pre></div>
+
+<p><code>sensitivity</code>, <code>phrase</code>, and <code>start_new_session</code> apply to both engines. The
+<code>openwakeword</code> and <code>porcupine</code> blocks select the actual detection model.</p>
+<p><code>input_device</code> is passed directly to the wake listener's PortAudio
+(<code>sounddevice</code>) stream. Use either a numeric device index or an unambiguous
+device-name substring. This setting only changes wake-word capture; desktop
+push-to-talk still uses the desktop application's microphone path.</p>
+<h3 id="reducing-false-triggers-on-ambient-speech">Reducing false triggers on ambient speech</h3>
+<p>openWakeWord scores one short (~80ms) audio frame at a time, so a stray phoneme
+in background conversation can occasionally spike a single frame over the
+threshold and fire the wake word unintentionally. Two knobs control this:</p>
+<ul>
+<li><strong><code>confirmation_frames</code></strong> (default <code>3</code>, openWakeWord only) — how many
+  <em>consecutive</em> over-threshold frames are required before the wake fires. A real
+  "hey hermes" holds a high score across several frames; an ambient blip spikes
+  just one. Raise it (e.g. <code>4</code>–<code>5</code>) if you still get false triggers in a noisy
+  room; the cost is a few tens of milliseconds of extra latency. <code>1</code> restores
+  the old fire-on-first-frame behavior.</li>
+<li><strong><code>sensitivity</code></strong> (default <code>0.6</code>) — the detection threshold, <code>0.0</code>–<code>1.0</code>.
+  Higher is stricter (fewer false triggers). This direction is consistent across
+  <strong>all</strong> engines — for openWakeWord it's the raw per-frame score threshold, for
+  sherpa it maps onto the keyword threshold, and for Porcupine it's inverted
+  internally so "higher = stricter" holds there too. The <code>0.6</code> default sits
+  above openWakeWord's permissive <code>0.5</code> baseline, which let near-misses like
+  "hey hor" through; raise toward <code>0.8</code> if you still get false fires, lower it
+  if real "hey hermes" utterances are missed.</li>
+</ul>
+<p>The <code>sherpa</code> and <code>porcupine</code> engines decode the whole phrase internally, so they
+don't have the single-frame-spike problem and ignore <code>confirmation_frames</code>
+(but they still honor <code>sensitivity</code>).</p>
+<p><code>inference_framework</code> picks the openWakeWord backend. Leave it empty (the
+default) to let Hermes choose per platform: <strong>tflite on Apple Silicon</strong>, onnx
+everywhere else. openWakeWord's onnx backend returns near-zero scores on macOS
+ARM64 (<a href="https://github.com/dscripka/openWakeWord/issues/336" class="ext" target="_blank" rel="noopener">openWakeWord#336</a>),
+so a listener pinned to <code>onnx</code> there will arm, show as listening, and never
+fire. The tflite backend needs <code>ai-edge-litert</code> on macOS, which Hermes installs
+on demand alongside the other wake-word deps.</p>
+<h3 id="surfaces-cli-tui-gui">Surfaces (CLI, TUI, GUI)</h3>
+<p>The wake word works in all three Hermes surfaces, and <code>surface</code> picks which one
+owns the listener and opens the new session when it fires:</p>
+<table>
+<thead>
+<tr>
+<th><code>surface</code></th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>auto</code> (default)</td>
+<td>All local surfaces are eligible; the first one to arm owns the listener.</td>
+</tr>
+<tr>
+<td><code>cli</code></td>
+<td>Only the classic <code>hermes</code> CLI.</td>
+</tr>
+<tr>
+<td><code>tui</code></td>
+<td>Only <code>hermes --tui</code>.</td>
+</tr>
+<tr>
+<td><code>gui</code></td>
+<td>Only the desktop app.</td>
+</tr>
+</tbody>
+</table>
+<p>The detector is on-device and single-mic, so only one surface listens at a time,
+including when Hermes surfaces run in separate processes. Ownership is sticky:
+the first eligible claimant keeps the listener until it stops, disconnects, or
+its process exits. Hermes does not silently fail over to another open surface.
+Set <code>surface</code> when you want to pin ownership instead of using first-claim wins.
+The TUI and desktop GUI share the same Python backend (<code>tui_gateway</code>), which
+runs the detector server-side and yields the mic to voice capture while a
+command records.</p>
+<h2 id="using-a-different-phrase">Using a different phrase</h2>
+<p>"Hey Hermes" works out of the box — the bundled openWakeWord model
+(<code>model: hey_hermes</code>) is the default. To wake on something else, the easiest
+path is the open-vocabulary engine:</p>
+<h3 id="option-a--sherpa-any-phrase-zero-training">Option A — sherpa (any phrase, zero training)</h3>
+<p>Type the phrase you want; it's tokenized at runtime — "hey coder",
+"computer", "wake up neo", anything:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">wake_word</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sherpa</span>
+<span class="w">  </span><span class="nt">phrase</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;hey</span><span class="nv"> </span><span class="s">coder&quot;</span><span class="w">        </span><span class="c1"># detection key — just type your phrase</span>
+</code></pre></div>
+
+<p>The small English KWS model (~13 MB) downloads once on first use. Each
+profile can set its own phrase — "hey \&lt;profile&gt;" for every profile you run.</p>
+<h3 id="waking-a-specific-profile-desktop">Waking a specific profile (desktop)</h3>
+<p>With the sherpa engine, ONE listener can wake ANY profile. Every profile
+whose config has <code>wake_word.enabled: true</code> is enrolled automatically; its
+phrase defaults to <code>hey &lt;profile name&gt;</code> when unset. Say a profile's phrase
+and the desktop app live-switches to that profile, opens a fresh session
+there, and starts hands-free voice:</p>
+<ul>
+<li>"hey hermes" → default profile</li>
+<li>"hey coder" → the <code>coder</code> profile</li>
+<li>"hey trader" → the <code>trader</code> profile</li>
+</ul>
+<p>Set <code>wake_word.profile_routing: false</code> on the listener's profile to opt out
+and listen only for its own phrase. The CLI and TUI are single-profile
+processes: a wake phrase belonging to another profile prints the switch
+command (<code>hermes -p &lt;profile&gt;</code>) instead of routing.</p>
+<p>Names are matched acoustically by their English subword sounds: two-word
+phrases with distinct, 2+ syllable names work best. Very short names, heavy
+non-English phonology, or two profiles with similar-sounding names will
+degrade accuracy — tune per-profile <code>sensitivity</code> if needed.</p>
+<h3 id="option-b--openwakeword-free-trained-model">Option B — openWakeWord (free, trained model)</h3>
+<p>Name a built-in model (<code>hey_jarvis</code>, <code>alexa</code>, <code>hey_mycroft</code>, …), or train a
+custom model (≈75–90 min on a free/Colab GPU) for maximum robustness, drop
+the <code>.onnx</code> file somewhere, and reference it:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">wake_word</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openwakeword</span>
+<span class="w">  </span><span class="nt">phrase</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;computer&quot;</span>
+<span class="w">  </span><span class="nt">openwakeword</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.hermes/wakewords/computer.onnx</span><span class="w">   </span><span class="c1"># or a built-in name like hey_jarvis</span>
+</code></pre></div>
+
+<p>Training references:</p>
+<ul>
+<li><a href="https://github.com/dscripka/openWakeWord" class="ext" target="_blank" rel="noopener">openWakeWord</a></li>
+<li><a href="https://github.com/alfiedennen/openwakeword-colab-2026" class="ext" target="_blank" rel="noopener">2026 training Colab</a></li>
+</ul>
+<div class="admonition adm-tip"><p class="adm-title">Pick a distinctive phrase</p>
+<p>Wake phrases that don't collide with everyday speech generalize best. Two
+syllables with an uncommon word ("hermes" qualifies) beat common words like
+"hello" or "stop".</p>
+</div>
+<h3 id="option-c--porcupine-custom-keyword-in-seconds">Option C — Porcupine (custom keyword in seconds)</h3>
+<p>Create a "Hey Hermes" keyword in the <a href="https://console.picovoice.ai/" class="ext" target="_blank" rel="noopener">Picovoice Console</a>,
+download the <code>.ppn</code>, and:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">wake_word</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">porcupine</span>
+<span class="w">  </span><span class="nt">phrase</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;hey</span><span class="nv"> </span><span class="s">hermes&quot;</span>
+<span class="w">  </span><span class="nt">porcupine</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">keyword</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.hermes/wakewords/hey_hermes.ppn</span>
+</code></pre></div>
+
+<p>Set your access key in <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">PORCUPINE_ACCESS_KEY</span><span class="o">=</span>your-key-here
+</code></pre></div>
+
+<h2 id="requirements">Requirements</h2>
+<ul>
+<li>A working microphone and the <code>sounddevice</code> + <code>numpy</code> audio stack (shared with
+  voice mode).</li>
+<li>An STT provider for transcribing the spoken command — local <code>faster-whisper</code>
+  works out of the box; see <a href="voice-mode.html">Voice Mode</a> for the
+  full provider list.</li>
+<li>A TTS provider for speaking the reply (the default <code>edge-tts</code> works with no
+  key). The wake flow is fully hands-free, so the toggle refuses to arm until
+  both STT and TTS are ready — <code>hermes tools</code> (Voice section) sets them up.</li>
+<li>The wake engine deps (auto-installed, or <code>hermes-agent[wake]</code>).</li>
+</ul>
+<p><code>/wake status</code> reports exactly what's missing if the listener won't start.</p>
+<h3 id="listening-but-never-wakes-macos">"Listening" but never wakes (macOS)</h3>
+<p>macOS grants microphone access per <strong>process</strong>. STT working in the desktop app
+proves the <em>renderer</em> has mic access — the wake listener runs in the Python
+<em>backend</em>, which needs its own grant. Without it, CoreAudio hands the backend a
+"working" stream that only ever delivers silence, so the ear shows listening
+but the phrase never fires. Hermes detects this (<code>/wake status</code> shows
+"mic delivers only silence"; the desktop's folded voice menu carries the same
+hint on its trigger).
+Fix: System Settings → Privacy &amp; Security → Microphone → enable the Hermes
+backend (it may appear as your terminal, <code>python</code>, or Hermes), then toggle the
+wake word off and on.</p>
+<h3 id="listening-but-receives-silence-windows">"Listening" but receives silence (Windows)</h3>
+<p>Desktop push-to-talk and wake-word capture use different microphone paths.
+Push-to-talk uses the desktop application's browser capture, while the
+wake-word listener opens a PortAudio stream in the Python backend. One can work
+while the other selects a silent or unusable Windows input.</p>
+<p><code>/wake status</code> reports the selected input device and Windows audio host API.
+When it reports silence, set <code>wake_word.input_device</code> to the numeric index or an
+unambiguous name of the working PortAudio input, then toggle the wake word:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>wake_word.input_device<span class="w"> </span><span class="s2">&quot;Microphone Array&quot;</span>
+</code></pre></div>
+
+<p>Use <code>null</code> to return to the process default:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>wake_word.input_device<span class="w"> </span>null
+</code></pre></div>
+
+<h2 id="notes--limits">Notes &amp; limits</h2>
+<ul>
+<li><strong>Local surfaces only.</strong> The wake word runs in the CLI, TUI, and desktop GUI —
+  wherever a local microphone is available. It does not run in the messaging
+  gateway (Telegram, Discord, …), which has no mic.</li>
+<li><strong>One mic at a time.</strong> The detector releases the microphone while a command is
+  recording and reclaims it once the turn ends, so it won't fight voice capture.</li>
+<li><strong>Privacy.</strong> Hotword detection is local. Set <code>sensitivity</code> higher if you get
+  false triggers, lower if it misses you.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/wake-word</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-it-works">How it works</a></li>
+<li class="lvl2"><a href="#remote-desktop-client-capture">Remote desktop (client capture)</a></li>
+<li class="lvl2"><a href="#engines">Engines</a></li>
+<li class="lvl2"><a href="#quick-start">Quick start</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl3"><a href="#reducing-false-triggers-on-ambient-speech">Reducing false triggers on ambient speech</a></li>
+<li class="lvl3"><a href="#surfaces-cli-tui-gui">Surfaces (CLI, TUI, GUI)</a></li>
+<li class="lvl2"><a href="#using-a-different-phrase">Using a different phrase</a></li>
+<li class="lvl3"><a href="#option-a--sherpa-any-phrase-zero-training">Option A — sherpa (any phrase, zero training)</a></li>
+<li class="lvl3"><a href="#waking-a-specific-profile-desktop">Waking a specific profile (desktop)</a></li>
+<li class="lvl3"><a href="#option-b--openwakeword-free-trained-model">Option B — openWakeWord (free, trained model)</a></li>
+<li class="lvl3"><a href="#option-c--porcupine-custom-keyword-in-seconds">Option C — Porcupine (custom keyword in seconds)</a></li>
+<li class="lvl2"><a href="#requirements">Requirements</a></li>
+<li class="lvl3"><a href="#listening-but-never-wakes-macos">&quot;Listening&quot; but never wakes (macOS)</a></li>
+<li class="lvl3"><a href="#listening-but-receives-silence-windows">&quot;Listening&quot; but receives silence (Windows)</a></li>
+<li class="lvl2"><a href="#notes--limits">Notes &amp;amp; limits</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

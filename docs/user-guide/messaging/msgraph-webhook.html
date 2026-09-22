@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Microsoft Graph Webhook Listener · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/messaging/msgraph-webhook</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="microsoft-graph-webhook-listener">Microsoft Graph Webhook Listener</h1>
+<p>The <code>msgraph_webhook</code> gateway platform is an inbound event listener. It's how Hermes receives <strong>change notifications</strong> from Microsoft Graph — "a Teams meeting ended," "a new message landed in this chat," "this calendar event was updated." Different from the <code>teams</code> platform (which is a chat bot users type to) — this one is M365 telling Hermes something happened, not a person.</p>
+<p>Right now the primary consumer is the Teams meeting summary pipeline: Graph notifies when a meeting produces a transcript, the pipeline fetches it, and Hermes posts a summary back into Teams. Other Graph resources (<code>/chats/.../messages</code>, <code>/users/.../events</code>) use the same listener — the pipeline consumers land with their own PRs.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>Microsoft Graph application credentials — <a href="../../guides/microsoft-graph-app-registration.html">Register a Microsoft Graph Application</a></li>
+<li>A <strong>public HTTPS URL</strong> that Microsoft Graph can reach (Graph does not call private endpoints). A dev tunnel works for testing; production needs a real domain with a valid certificate.</li>
+<li>A strong shared secret to use as the <code>clientState</code> value. Generate with <code>openssl rand -hex 32</code> and put it in <code>~/.hermes/.env</code> as <code>MSGRAPH_WEBHOOK_CLIENT_STATE</code>.</li>
+</ul>
+<h2 id="quick-start">Quick Start</h2>
+<p>Minimum <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">msgraph_webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">127.0.0.1</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8646</span>
+<span class="w">      </span><span class="nt">client_state</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;replace-with-a-strong-secret&quot;</span>
+<span class="w">      </span><span class="nt">accepted_resources</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;communications/onlineMeetings&quot;</span>
+</code></pre></div>
+
+<p>Or via env vars in <code>~/.hermes/.env</code> (auto-merged on startup):</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MSGRAPH_WEBHOOK_ENABLED</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">MSGRAPH_WEBHOOK_PORT</span><span class="o">=</span><span class="m">8646</span>
+<span class="nv">MSGRAPH_WEBHOOK_CLIENT_STATE</span><span class="o">=</span>&lt;generate-with-openssl-rand-hex-32&gt;
+<span class="nv">MSGRAPH_WEBHOOK_ACCEPTED_RESOURCES</span><span class="o">=</span>communications/onlineMeetings
+</code></pre></div>
+
+<p>Note: the bind host is read from <code>extra.host</code> in <code>config.yaml</code> (see the example above); there is no <code>MSGRAPH_WEBHOOK_HOST</code> env-var override.</p>
+<p>Start the gateway: <code>hermes gateway run</code>. The listener exposes:</p>
+<ul>
+<li><code>POST /msgraph/webhook</code> — change notifications from Graph</li>
+<li><code>GET /msgraph/webhook?validationToken=...</code> — Graph subscription validation handshake</li>
+<li><code>GET /health</code> — readiness probe with accepted/duplicate counters</li>
+</ul>
+<p>Expose the listener publicly (reverse proxy, dev tunnel, ingress). Your notification URL for Graph subscriptions is your public HTTPS origin followed by <code>/msgraph/webhook</code>:</p>
+<div class="highlight"><pre><span></span><code>https://ops.example.com/msgraph/webhook
+</code></pre></div>
+
+<h2 id="configuration">Configuration</h2>
+<p>All settings go under <code>platforms.msgraph_webhook.extra</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>host</code></td>
+<td>unset (dual-stack: all interfaces, IPv4+IPv6)</td>
+<td>Bind address for the HTTP listener. Non-loopback binds require <code>allowed_source_cidrs</code>; loopback (<code>127.0.0.1</code> / <code>::1</code>) is the easiest dev-tunnel / reverse-proxy setup.</td>
+</tr>
+<tr>
+<td><code>port</code></td>
+<td><code>8646</code></td>
+<td>Bind port.</td>
+</tr>
+<tr>
+<td><code>webhook_path</code></td>
+<td><code>/msgraph/webhook</code></td>
+<td>URL path Graph POSTs to.</td>
+</tr>
+<tr>
+<td><code>health_path</code></td>
+<td><code>/health</code></td>
+<td>Readiness endpoint.</td>
+</tr>
+<tr>
+<td><code>client_state</code></td>
+<td>—</td>
+<td>Shared secret Graph echoes in every notification. Compared with <code>hmac.compare_digest</code> — generate with <code>openssl rand -hex 32</code>.</td>
+</tr>
+<tr>
+<td><code>accepted_resources</code></td>
+<td><code>[]</code> (accept all)</td>
+<td>Allowlist of Graph resource paths/patterns. Trailing <code>*</code> acts as prefix match. Leading <code>/</code> is tolerated. Example: <code>["communications/onlineMeetings", "chats/*/messages"]</code>.</td>
+</tr>
+<tr>
+<td><code>max_seen_receipts</code></td>
+<td><code>5000</code></td>
+<td>Dedupe cache size for notification IDs. Oldest entries evicted when the cap is hit.</td>
+</tr>
+<tr>
+<td><code>allowed_source_cidrs</code></td>
+<td><code>[]</code></td>
+<td>Required for non-loopback binds. Leave empty only when the listener is bound to loopback and fronted by a local tunnel / reverse proxy.</td>
+</tr>
+</tbody>
+</table>
+<p>Most settings also have an equivalent env var (<code>MSGRAPH_WEBHOOK_*</code>) that merges into the config at gateway startup (the exception is <code>host</code>, which is config-only — see the note above) — see the <a href="../../reference/environment-variables.html#microsoft-graph-teams-meetings">environment variables reference</a>.</p>
+<h2 id="security-hardening">Security Hardening</h2>
+<h3 id="clientstate-is-the-primary-auth-check">clientState is the primary auth check</h3>
+<p>Every Graph notification includes the <code>clientState</code> string your subscription registered with. The listener rejects any notification whose <code>clientState</code> doesn't match, using timing-safe comparison. This is Microsoft's documented mechanism — treat the value as a strong shared secret.</p>
+<p>If <code>client_state</code> is unset, the listener refuses to start.</p>
+<h3 id="source-ip-allowlisting-production-deployments">Source-IP allowlisting (production deployments)</h3>
+<p>For production, restrict the listener to Microsoft's published Graph webhook source IP ranges. Microsoft documents the egress ranges under the <a href="https://learn.microsoft.com/en-us/microsoft-365/enterprise/urls-and-ip-address-ranges" class="ext" target="_blank" rel="noopener">Office 365 IP Address and URL Web service</a>. Configure them as:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">msgraph_webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.0.0.0</span>
+<span class="w">      </span><span class="nt">client_state</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;...&quot;</span>
+<span class="w">      </span><span class="nt">allowed_source_cidrs</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;52.96.0.0/14&quot;</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;52.104.0.0/14&quot;</span>
+<span class="w">        </span><span class="c1"># ...add the current Microsoft 365 &quot;Common&quot; + &quot;Teams&quot; category egress ranges</span>
+</code></pre></div>
+
+<p>Or as an env var:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MSGRAPH_WEBHOOK_ALLOWED_SOURCE_CIDRS</span><span class="o">=</span><span class="s2">&quot;52.96.0.0/14,52.104.0.0/14&quot;</span>
+</code></pre></div>
+
+<p>Binding a non-loopback host such as <code>0.0.0.0</code>, <code>::</code>, or a LAN IP without <code>allowed_source_cidrs</code> is refused at startup. If you're using a dev tunnel or reverse proxy on the same machine, bind Hermes to <code>127.0.0.1</code> or <code>::1</code> and leave the allowlist empty there. Invalid CIDR strings log a warning and are ignored. <strong>Review the Microsoft IP list quarterly</strong> — it changes.</p>
+<h3 id="https-termination">HTTPS termination</h3>
+<p>The listener speaks plain HTTP. Terminate TLS at your reverse proxy (Caddy, Nginx, Cloudflare Tunnel, AWS ALB) and proxy to the listener over the local network. Graph refuses to deliver to non-HTTPS endpoints, so there's no path for unencrypted traffic to reach you from Graph itself.</p>
+<h3 id="response-hygiene">Response hygiene</h3>
+<p>On success the listener returns <code>202 Accepted</code> with an empty body — internal counters stay out of the wire response. Operators can observe counts via <code>/health</code>, which is guarded by the same source-IP rules as the webhook path.</p>
+<p>Status code table:</p>
+<table>
+<thead>
+<tr>
+<th>Outcome</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Notification(s) accepted or deduped</td>
+<td>202</td>
+</tr>
+<tr>
+<td>Validation handshake (GET with <code>validationToken</code>)</td>
+<td>200 (echoes the token)</td>
+</tr>
+<tr>
+<td>Every item in batch failed clientState</td>
+<td>403</td>
+</tr>
+<tr>
+<td>Malformed JSON / missing <code>value</code> array / unknown resource</td>
+<td>400</td>
+</tr>
+<tr>
+<td>Source IP not in allowlist</td>
+<td>403</td>
+</tr>
+<tr>
+<td>Bare GET without <code>validationToken</code></td>
+<td>400</td>
+</tr>
+</tbody>
+</table>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Problem</th>
+<th>What to check</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Graph subscription validation fails</td>
+<td>Public URL is reachable, <code>/msgraph/webhook</code> path matches, GET with <code>validationToken</code> echoes the token verbatim as <code>text/plain</code> within 10 seconds.</td>
+</tr>
+<tr>
+<td>Notifications POST but nothing ingests</td>
+<td><code>client_state</code> matches what you registered the subscription with. Re-run <code>openssl rand -hex 32</code> and create a new subscription if the value drifted. Check <code>accepted_resources</code> includes the resource path Graph is sending.</td>
+</tr>
+<tr>
+<td>Every notification 403s</td>
+<td><code>clientState</code> mismatch (forged, or subscription registered with a different value). Re-create the subscription with <code>hermes teams-pipeline subscribe --client-state "$MSGRAPH_WEBHOOK_CLIENT_STATE" ...</code> (ships with the pipeline runtime PR).</td>
+</tr>
+<tr>
+<td>Listener refuses to start on <code>0.0.0.0</code></td>
+<td>Set <code>allowed_source_cidrs</code> to Microsoft's current webhook egress ranges, or bind Hermes to <code>127.0.0.1</code> / <code>::1</code> behind your tunnel or reverse proxy.</td>
+</tr>
+<tr>
+<td>Listener starts but <code>curl http://localhost:8646/health</code> hangs</td>
+<td>Port binding collision. Check <code>ss -tlnp \| grep 8646</code> and change <code>port:</code> if needed.</td>
+</tr>
+<tr>
+<td>Real Graph requests from Microsoft get 403'd</td>
+<td>Source IP allowlist is too narrow. Widen the list to include the current Microsoft egress ranges. If you're still validating the tunnel path, bind Hermes to loopback and let the tunnel handle public exposure.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="related-docs">Related Docs</h2>
+<ul>
+<li><a href="../../guides/microsoft-graph-app-registration.html">Register a Microsoft Graph Application</a> — Azure app registration prereq</li>
+<li><a href="../../reference/environment-variables.html#microsoft-graph-teams-meetings">Environment Variables → Microsoft Graph</a> — full env var list</li>
+<li><a href="teams.html">Microsoft Teams bot setup</a> — the different platform that lets users chat with Hermes in Teams</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/messaging/msgraph-webhook</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#quick-start">Quick Start</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl2"><a href="#security-hardening">Security Hardening</a></li>
+<li class="lvl3"><a href="#clientstate-is-the-primary-auth-check">clientState is the primary auth check</a></li>
+<li class="lvl3"><a href="#source-ip-allowlisting-production-deployments">Source-IP allowlisting (production deployments)</a></li>
+<li class="lvl3"><a href="#https-termination">HTTPS termination</a></li>
+<li class="lvl3"><a href="#response-hygiene">Response hygiene</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl2"><a href="#related-docs">Related Docs</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

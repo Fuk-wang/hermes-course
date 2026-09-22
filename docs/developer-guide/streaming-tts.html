@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Streaming TTS Internals · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/streaming-tts</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="streaming-tts">Streaming TTS</h1>
+<p>Hermes can stream TTS audio as it arrives from the provider, instead of waiting
+for the full audio before playing. This is used by voice mode (CLI/TUI live
+conversation), the dashboard speak-stream WebSocket, and — via the gateway
+<code>StreamingTTSConsumer</code> — any platform adapter that opts into streaming audio.
+Voice replies start speaking after the first clause instead of after full
+generation + synthesis.</p>
+<h2 id="architecture">Architecture</h2>
+<p>The streaming pipeline has four parts:</p>
+<ol>
+<li><strong>Producer</strong> — the LLM emits text deltas as it generates a response</li>
+<li><strong>Sentence chunker</strong> — <code>tools.tts_streaming.SentenceChunker</code> accumulates
+   deltas, strips <code>&lt;think&gt;</code> blocks (even split across deltas), and flushes
+   complete sentences</li>
+<li><strong>TTS provider</strong> — a registered <code>StreamingTTSProvider</code> turns each sentence
+   into raw PCM chunks (int16 mono at the provider's declared <code>sample_rate</code>)</li>
+<li><strong>Audio sink</strong> — <code>sounddevice.OutputStream</code> for local playback
+   (<code>tools.tts_tool_speaker.stream_tts_to_speaker</code>), or a gateway platform adapter's
+   <code>write_streaming_tts</code> seam (<code>gateway/streaming_tts_consumer.py</code>)</li>
+</ol>
+<p>Providers with no chunked API still get per-<em>sentence</em> playback via the proven
+sync <code>text_to_speech_tool</code> path, so edge (the default) is conversational too.
+All spoken text is cleaned by <code>tools.tts_text_normalize.prepare_spoken_text</code>
+(one cleaner, all paths).</p>
+<h2 id="how-to-pick-a-provider">How to pick a provider</h2>
+<p>By default the dispatcher streams with the provider you already configured
+(<code>tts.provider</code>) when that provider has a chunked API — it never silently
+swaps your voice for a different provider just to get streaming.</p>
+<p>To override, set <code>tts.streaming.provider</code> in your <code>config.yaml</code>:</p>
+<ul>
+<li>a provider name (<code>elevenlabs</code>, <code>gemini</code>, <code>openai</code>, <code>xai</code>) pins that streamer</li>
+<li><code>auto</code> walks the priority list <code>elevenlabs → gemini → openai → xai</code> and uses
+  the first one whose credentials resolve — an explicit opt-in to "best
+  chunked voice available"</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="nt">tts</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">streaming</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span><span class="w">      </span><span class="c1"># or &quot;auto&quot;</span>
+<span class="w">    </span><span class="nt">min_len</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">20</span><span class="w">           </span><span class="c1"># shortest first sentence (chars) spoken on its own; CJK setups use ~6</span>
+<span class="w">  </span><span class="nt">gemini</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini-2.5-flash-preview-tts</span>
+<span class="w">    </span><span class="nt">voice</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Kore</span>
+</code></pre></div>
+
+<h2 id="capability-matrix">Capability matrix</h2>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Transport</th>
+<th>Chunked PCM</th>
+<th>Credentials</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>elevenlabs</td>
+<td>chunked HTTP (<code>pcm_24000</code>)</td>
+<td>yes</td>
+<td><code>ELEVENLABS_API_KEY</code> / <code>tts.elevenlabs</code></td>
+</tr>
+<tr>
+<td>openai</td>
+<td>chunked HTTP (<code>with_streaming_response</code>, <code>pcm</code>)</td>
+<td>yes</td>
+<td><code>tts.openai.api_key</code> → env → managed gateway</td>
+</tr>
+<tr>
+<td>gemini</td>
+<td>SSE (<code>streamGenerateContent?alt=sse</code>)</td>
+<td>yes</td>
+<td><code>GEMINI_API_KEY</code> / <code>GOOGLE_API_KEY</code></td>
+</tr>
+<tr>
+<td>xai</td>
+<td>WebSocket (<code>wss://api.x.ai/v1/tts</code>)</td>
+<td>yes</td>
+<td><code>XAI_API_KEY</code> preferred, else xAI OAuth (the subscription bearer 403s on metered TTS)</td>
+</tr>
+<tr>
+<td>edge, piper, kitten, neutts, mistral, minimax, deepinfra, …</td>
+<td>—</td>
+<td>no (per-sentence sync fallback)</td>
+<td>as usual</td>
+</tr>
+</tbody>
+</table>
+<p>All credential lookups go through <code>resolve_provider_secret()</code>
+(config &gt; env/.env &gt; credential pool) — never bare env reads. Streamed bodies
+are capped at 16 MiB per sentence, mirroring the sync providers' bounded
+upstream-body invariant.</p>
+<h2 id="adding-a-new-streaming-provider">Adding a new streaming provider</h2>
+<ol>
+<li>Subclass <code>StreamingTTSProvider</code> in <code>tools/tts_streaming.py</code></li>
+<li>Set <code>sample_rate</code> (and <code>channels</code> / <code>sample_width</code> if not int16 mono)</li>
+<li>Implement <code>available()</code> (a pure probe — never install anything) and
+   <code>stream(self, text) -&gt; Iterator[bytes]</code> yielding raw PCM chunks</li>
+<li>Decorate with <code>@register("yourname")</code></li>
+<li>Add tests in <code>tests/tools/test_tts_streaming.py</code></li>
+</ol>
+<p>The ABC enforces the contract; the registry makes the provider discoverable;
+the dispatcher (<code>stream_tts_to_speaker</code>) and the gateway consumer handle the
+sentence buffer, stop events, and audio sink for free.</p>
+<h2 id="gateway-streaming-platform-adapters">Gateway streaming (platform adapters)</h2>
+<p><code>gateway/streaming_tts_consumer.py</code> bridges agent deltas to an adapter's
+streaming-audio seam. Adapters opt in by overriding, on
+<code>BasePlatformAdapter</code>:</p>
+<ul>
+<li><code>supports_streaming_tts(chat_id, audio_format) -&gt; bool</code></li>
+<li><code>begin_streaming_tts / write_streaming_tts / finish_streaming_tts /
+  abort_streaming_tts</code></li>
+</ul>
+<p>All default to unsupported/no-op, so existing adapters are untouched. When a
+turn's streaming audio completes, the whole-file auto-TTS reply for that turn
+is suppressed (no double playback); when streaming fails before any audio was
+audible, the gateway falls back to the legacy whole-file voice reply.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/streaming-tts</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#architecture">Architecture</a></li>
+<li class="lvl2"><a href="#how-to-pick-a-provider">How to pick a provider</a></li>
+<li class="lvl2"><a href="#capability-matrix">Capability matrix</a></li>
+<li class="lvl2"><a href="#adding-a-new-streaming-provider">Adding a new streaming provider</a></li>
+<li class="lvl2"><a href="#gateway-streaming-platform-adapters">Gateway streaming (platform adapters)</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

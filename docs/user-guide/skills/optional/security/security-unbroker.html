@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unbroker — Autonomously remove your info from data-broker sites · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/security/security-unbroker</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="unbroker">Unbroker</h1>
+<p>Autonomously remove your info from data-broker sites.</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/security/unbroker</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/security\unbroker</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>SHL0MS (github.com/SHL0MS)</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>privacy</code>, <code>data-broker</code>, <code>opt-out</code>, <code>ccpa</code>, <code>gdpr</code>, <code>security</code>, <code>doxxing</code></td>
+</tr>
+<tr>
+<td>Related skills</td>
+<td><a href="../../bundled/productivity/productivity-google-workspace.html"><code>google-workspace</code></a>, <a href="../email/email-agentmail.html"><code>agentmail</code></a>, <a href="../../bundled/email/email-himalaya.html"><code>himalaya</code></a>, <a href="../research/research-scrapling.html"><code>scrapling</code></a>, <a href="../research/research-osint-investigation.html"><code>osint-investigation</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="unbroker_1">unbroker</h1>
+<p>Find where a person's personal information (name, addresses, phone, email, relatives) is exposed on
+data brokers and people-search sites, then remove it - automatically where possible, with guided
+human steps only where a site demands a CAPTCHA, government ID, phone call, or fax. Manages multiple
+people independently. It does <strong>not</strong> defeat anti-bot systems, does <strong>not</strong> act on anyone without
+recorded consent, and does <strong>not</strong> remove public records (voter/property/court) or accounts the
+person controls.</p>
+<p>The Python CLI (<code>scripts/pdd.py</code>) owns the deterministic state - config, dossiers + consent, the
+broker database, tier planning, the ledger, drafts, reports, <strong>email sending (SMTP), verification-link
+polling (IMAP), and the autonomous action queue (<code>next</code>)</strong>. You (the agent) do the scanning and
+form-driving with native tools: <code>web_extract</code> and <code>browser_navigate</code> for searching and web forms, and
+<code>cronjob</code> for recurring re-scans.</p>
+<h2 id="autonomy-contract">Autonomy contract</h2>
+<p>This skill is designed to run <strong>hands-off</strong>. After intake (+ recorded consent) there are exactly TWO
+legitimate human touchpoints: (1) the intake conversation itself, and (2) ONE consolidated human-task
+digest at the end of the run (<code>$PDD tasks</code>). Between those:</p>
+<ul>
+<li><strong>Never ask the operator to choose configuration.</strong> <code>$PDD setup --auto</code> detects capabilities and
+  picks the most autonomous valid config itself.</li>
+<li><strong>Never pause before individual submissions</strong> when <code>autonomy=full</code> (the default): the consent
+  recorded at intake is standing authorization for T0-T2 opt-outs. (<code>autonomy=assisted</code> restores
+  per-submission confirmation for cautious operators - honor <code>confirm_first</code> flags in <code>next</code> output.)</li>
+<li><strong>Never interrupt the run for human-only work.</strong> Record it (<code>record ... human_task_queued
+  --reason "..."</code>) and keep going; it all surfaces once in the final digest.</li>
+<li><strong>Drive the whole run as a loop over <code>$PDD next &lt;subject&gt;</code></strong> - it returns the exact ordered actions
+  to take right now (scan, poll verification, re-check, opt out parents-first, requeue blocked), plus
+  the human digest. Execute every action, record outcomes, re-run <code>next</code>, repeat until
+  <code>done_for_now</code>. Then present the digest, report, and schedule the cron.</li>
+</ul>
+<p>The hard limits that autonomy never overrides: no acting without recorded consent, no disclosure
+beyond <code>disclosure_fields</code>, no CAPTCHA/anti-bot bypass, and <code>confirmed_removed</code> only after a
+verifying re-scan.</p>
+<h2 id="when-to-use">When to Use</h2>
+<ul>
+<li>"Remove my (or my family member's) data from data brokers / people-search sites."</li>
+<li>"Opt me out", "delete me from Spokeo/Whitepages/etc.", "clean up after a doxxing."</li>
+<li>"Set up recurring privacy monitoring" (brokers re-list people).</li>
+<li>Checking which brokers still expose someone and why.</li>
+</ul>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li><code>python</code> (stdlib only; no extra packages needed for the core engine).</li>
+<li><strong>Optional upgrades</strong> (the skill works zero-config without these; <code>setup --auto</code> turns on every
+  one it detects, reading credentials from the shell env <strong>and from <code>$HERMES_HOME/.env</code></strong> so keys
+  Hermes already loads for its own tools are picked up without re-exporting - each one converts a
+  class of human tasks into agent actions):</li>
+<li><strong>Cloud browser (recommended default): <code>BROWSERBASE_API_KEY</code>.</strong> <code>setup --auto</code> selects it
+    whenever the key is present, and it is the intended baseline: a real residential-IP cloud
+    browser <strong>clears soft/managed CAPTCHAs (Cloudflare Turnstile, hCaptcha/reCAPTCHA checkbox) as
+    normal operation</strong>, so those brokers stay automated (T1) instead of becoming human tasks. This
+    is not CAPTCHA "solving" - no solver service, no fingerprint spoofing; only interactive/behavioral
+    ("hard") challenges the browser genuinely cannot pass fall back to a human task. Without the key,
+    the plain agent browser is used and soft-CAPTCHA brokers drop to T2 (human).</li>
+<li>Email automation, two credential-free-or-not options:<ul>
+<li><strong>Browser mode (no password): <code>setup --email-mode browser</code>.</strong> The agent sends opt-out/CCPA
+  emails and opens verification links through the operator's <strong>logged-in webmail</strong> using
+  <code>browser_*</code> tools. Nothing is stored. This requires Hermes to be pointed at the operator's own
+  logged-in browser, <strong>NOT</strong> a cloud browser: a headless cloud browser (Browserbase) holds no
+  webmail session and is itself Cloudflare/DataDome-gated on webmail and on session-bound broker
+  gates (e.g. PeopleConnect guided-mode). Drive the operator's real Chrome over CDP - launch
+  <code>chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.hermes/chrome-debug"</code> (a dedicated
+  debug profile signed into the webmail once, not the Default profile) and connect the browser
+  tools to <code>127.0.0.1:9222</code>. <strong><code>$PDD cdp</code> launches this for you</strong> (finds Chrome/Chromium/Brave/Edge,
+  starts it detached on the dedicated profile, prints the CDP endpoint; <code>--check</code> to test, <code>--print</code>
+  for the command). See <code>references/methods.md</code> -&gt; "Browser backends: scan vs execute".
+  Falls back to drafts for an email if the inbox isn't reachable.</li>
+<li><strong>SMTP/IMAP (stored creds): <code>EMAIL_ADDRESS</code> + <code>EMAIL_PASSWORD</code></strong> (+ <code>EMAIL_SMTP_HOST</code> /
+  <code>EMAIL_IMAP_HOST</code> for non-mainstream providers; gmail/outlook/yahoo/icloud/fastmail inferred).
+  The CLI sends via <code>send-email</code> and reads verify links via <code>poll-verification</code>. The <code>agentmail</code>
+  skill (per-broker aliases) also counts.</li>
+</ul>
+</li>
+<li>Google Sheets tracker: the <code>google-workspace</code> skill.</li>
+<li>The <code>scrapling</code> skill for stealth/Cloudflare-protected pages.</li>
+</ul>
+<h2 id="how-to-run">How to Run</h2>
+<p>Run everything through the <code>terminal</code> tool. From this skill's directory:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">PDD</span><span class="o">=</span><span class="s2">&quot;python scripts/pdd.py&quot;</span>
+</code></pre></div>
+
+<p>The engine stores data under <code>$PDD_DATA_DIR</code> (default <code>$HERMES_HOME/unbroker</code>), written
+<code>0600</code>. Run via <code>terminal</code>, <strong>not</strong> <code>execute_code</code> (that sandbox scrubs env and redacts output, which
+breaks reading the dossier).</p>
+<h2 id="quick-reference">Quick Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>$PDD setup --auto</code></td>
+<td><strong>Autonomous setup</strong>: detect capabilities, pick the most autonomous valid config (no questions)</td>
+</tr>
+<tr>
+<td><code>$PDD doctor</code></td>
+<td>Readiness check: config, broker count, and which upgrades are on/available</td>
+</tr>
+<tr>
+<td><code>$PDD cdp [--check] [--print] [--port N]</code></td>
+<td>Launch/detect the operator's Chrome over CDP for Phase-2 browser + webmail (dedicated debug profile; the reliable way to send webmail and clear session-bound gates)</td>
+</tr>
+<tr>
+<td><code>$PDD intake --full-name "..." [--alias ...] [--email ... --phone ...] [--city --state] [--prior-location "City,ST"] --consent</code></td>
+<td>Create a consenting subject; captures aliases + multiple emails/phones + prior locations; prints <code>subject_id</code></td>
+</tr>
+<tr>
+<td><code>$PDD next &lt;subject&gt;</code></td>
+<td><strong>The autonomous loop driver</strong>: ordered agent actions right now + human digest + <code>next_wake_at</code></td>
+</tr>
+<tr>
+<td><code>$PDD brokers [--priority crucial]</code></td>
+<td>List the people-search broker database (curated + live)</td>
+</tr>
+<tr>
+<td><code>$PDD refresh-brokers</code></td>
+<td>Pull the latest BADBOOL people-search list <strong>and the CA Data Broker Registry</strong> (<code>next</code> requeues this automatically when the cache is stale)</td>
+</tr>
+<tr>
+<td><code>$PDD registry [--search NAME]</code></td>
+<td>State registry coverage (CA ~545 ingested; VT/OR/TX portals surfaced); the DROP/email lane, not scanned</td>
+</tr>
+<tr>
+<td><code>$PDD drop &lt;subject&gt; [--filed]</code></td>
+<td><strong>The one-shot legal lever</strong>: one CA DROP request deletes from ALL registered brokers; <code>--filed</code> records it</td>
+</tr>
+<tr>
+<td><code>$PDD plan &lt;subject&gt; [--priority crucial]</code></td>
+<td>Per-broker tier + method + <code>search_vectors</code> + the exact fields to disclose</td>
+</tr>
+<tr>
+<td><code>$PDD plan &lt;subject&gt; --batch</code></td>
+<td><strong>Reduce view</strong>: overlays ledger state, groups brokers by next action (unscanned/found/indirect/blocked/in_progress/done), collapses ownership clusters, <strong>orders <code>found</code> cluster-parents-first + emits a tailored <code>parent_playbook</code></strong>, prints <code>next_actions</code></td>
+</tr>
+<tr>
+<td><code>$PDD fanout &lt;subject&gt; [--priority crucial] [--size 5]</code></td>
+<td>Batch brokers into parallel <code>delegate_task</code> subagents (auto for large runs; batches of 5 - 8+ time out)</td>
+</tr>
+<tr>
+<td><code>$PDD record &lt;subject&gt; &lt;broker&gt; &lt;state&gt; [--found true] [--evidence JSON] [--disclosed F --channel C] [--reason "..."]</code></td>
+<td>Update the ledger (validated state machine); <strong>auto-stamps <code>next_recheck_at</code></strong></td>
+</tr>
+<tr>
+<td><code>$PDD show &lt;subject&gt; &lt;broker&gt;</code></td>
+<td>Read back a case's recorded state + evidence + disclosure log (so the parent re-verifies a subagent's <code>found</code> without re-deriving the listing URL)</td>
+</tr>
+<tr>
+<td><code>$PDD send-email &lt;subject&gt; &lt;broker&gt; --listing &lt;url&gt; [--kind ccpa_indirect ...]</code></td>
+<td>Render + record the request (recipient locked to the broker's own address). <strong>browser</strong> mode returns a <code>compose</code> payload to send via webmail (no password); <strong>programmatic</strong> mode SMTP-sends</td>
+</tr>
+<tr>
+<td><code>$PDD verify-link &lt;subject&gt; &lt;broker&gt; --text '&lt;body&gt;'</code></td>
+<td><strong>browser mode</strong>: extract a broker's verification link from webmail text you read (anti-phishing scored)</td>
+</tr>
+<tr>
+<td><code>$PDD poll-verification &lt;subject&gt; [--broker &lt;id&gt;]</code></td>
+<td><strong>programmatic mode</strong>: poll IMAP for verification links (anti-phishing scored); auto-advances <code>submitted → verification_pending</code></td>
+</tr>
+<tr>
+<td><code>$PDD render-email &lt;subject&gt; &lt;broker&gt; --listing &lt;url&gt;</code></td>
+<td>Draft only (fallback when no email mode is configured)</td>
+</tr>
+<tr>
+<td><code>$PDD due &lt;subject&gt;</code></td>
+<td>Cases whose recheck window arrived (the cron re-scan queue)</td>
+</tr>
+<tr>
+<td><code>$PDD tasks &lt;subject&gt;</code></td>
+<td>ONE consolidated human-task digest (present at END of run)</td>
+</tr>
+<tr>
+<td><code>$PDD status &lt;subject&gt;</code></td>
+<td>Markdown status report</td>
+</tr>
+<tr>
+<td><code>$PDD report &lt;subject&gt; --sheets</code></td>
+<td>Rows for the Google Sheets tracker</td>
+</tr>
+</tbody>
+</table>
+<h2 id="batch-operation-two-phase-crawl-all-then-delete">Batch operation (two-phase: crawl-all, then delete)</h2>
+<p>For anything past a couple of brokers, run this as <strong>map → reduce → act</strong>, not broker-by-broker:</p>
+<ul>
+<li><strong>Phase 1 - DISCOVER (read-only, parallel, idempotent).</strong> Crawl <em>every</em> broker first and record a
+  verdict for each (<code>found</code> / <code>not_found</code> / <code>indirect_exposure</code> / <code>blocked</code>). Scanning has no side
+  effects, so it is safe to parallelize and retry. Getting the full exposure map <em>before</em> acting is
+  what unlocks cluster dedup and prioritization below. <strong>Default: the parent drives <code>web_extract</code>
+  probes directly</strong> - most people-search sites render name/phone/address results as static HTML that
+  <code>web_extract</code> reads in seconds. Escalate to <code>browser_*</code> only for the few JS-only sites, and to
+  <code>delegate_task</code> subagents only for genuinely <em>reasoning</em>-heavy work (large-scale namesake/relative
+  disambiguation). <strong>Do NOT hand a browser-toolset subagent a big list of brokers to crawl</strong> - in the
+  field this timed out repeatedly (600s, ~5-6 brokers each, no summary) because browser navigation is
+  heavy; the ledger writes that survived came at 10x the cost of parent <code>web_extract</code>. A <code>blocked</code>
+  (DataDome/Cloudflare/<code>antibot</code>) site is <em>not</em> a subagent job either: record <code>blocked</code> and requeue it
+  for a stealth/cloud browser (Browserbase) pass. Subagent reports are self-reports - the parent
+  re-fetches key URLs to confirm a <code>found</code> before trusting it (this cuts both ways: it caught a real
+  listing the parent had wrongly assumed was a false positive).</li>
+<li><strong>REDUCE - <code>$PDD plan &lt;subject&gt; --batch</code>.</strong> Collapses the crawl into a phase-oriented plan: groups by
+  next action, <strong>collapses ownership clusters</strong> (a parent removal that clears children is ONE action,
+  not N - e.g. one Intelius/PeopleConnect suppression covers Truthfinder/Instant Checkmate/US Search/…),
+  and prints <code>next_actions</code>. <code>phase</code> is <code>discover</code> while anything is unscanned, else <code>delete</code>.</li>
+<li><strong>Phase 2 - DELETE (sequential, irreversible).</strong> Work the reduced groups <strong>parents first</strong>:
+  <code>plan --batch</code> orders the <code>found</code> group cluster-parents-first (most children first) and emits a
+  <code>parent_playbook</code> with tailored, ordered steps per parent - follow that order and those steps
+  (full recipes in <code>references/methods.md</code> → "Ownership clusters - DO PARENTS FIRST"). Do the
+  cluster parents (skipping the covered children), <strong>re-scan each parent's children after it confirms</strong>
+  (they usually drop out), then the standalone listings; send the <code>indirect_exposure</code> cases as
+  CCPA/GDPR delete-my-PII emails (<code>send-email --kind ccpa_indirect</code>), and defer <code>blocked</code> to the
+  stealth-browser pass. Opt-outs hit CAPTCHAs, email-verification loops, and session binding - work
+  them <strong>one at a time, carefully</strong> (this is the opposite of fan-out), but do NOT stop to ask
+  permission per submission in <code>autonomy=full</code>; in <code>assisted</code>, confirm each one. <strong>Usually prefer
+  deletion over suppression</strong> where a broker offers both (Spokeo/BeenVerified) - but follow the
+  record's <code>deletion.prefer</code>: <strong>PeopleConnect is the exception</strong> (<code>prefer: false</code>), where deleting
+  your user data removes your suppressions and does not stop public-records re-listing, so you
+  suppress-and-maintain instead.</li>
+<li><strong>Blind opt-out is the DEFAULT, not a fallback.</strong> Submit an opt-out/deletion on <strong>every site with an
+  accessible removal channel, even when a listing was not first confirmed</strong> - it discloses only the
+  subject's own identifiers to the broker's own official channel, so it does not violate
+  least-disclosure. Two corollaries: (1) a guided flow that matches email+DOB+name and says "no results"
+  is a <strong>stronger <code>not_found</code></strong> than any scrape - the opt-out flow doubles as the search; (2) when a form
+  is automation-hostile (hard CAPTCHA, Cloudflare/DataDome, slide-to-verify slider), <strong>default to the
+  broker's cited rights-request email</strong> (name+state+contact-email only) rather than recording <code>blocked</code>.
+  CAPTCHA policy: never defeat behavioral/token/slider challenges; OK to read a static distorted-text or
+  plain-arithmetic CAPTCHA on the subject's own opt-out, but stop if the site rejects the whole
+  submission after a correct answer (it is fingerprinting the automation). Third-party/indirect records
+  are the exception - still confirm those before acting. Per-site game plans + the meta-search no-op
+  skip-list are in <code>references/site-playbooks.md</code>; the full policy is in <code>references/methods.md</code>.</li>
+<li><strong>PeopleConnect delete-wipes-suppression (permanent rule).</strong> A PeopleConnect <em>deletion</em> wipes the
+  suppression and the subject re-lists across the whole affiliate cluster. If a "Your deletion request
+  for PeopleConnect.us is Complete" email ever appears, the suppression is gone -&gt; <strong>re-run suppression
+  and re-verify</strong> the Control step reads "suppressed". Never leave this cluster on a completed deletion
+  (see <code>references/brokers/intelius.json</code>).</li>
+</ul>
+<p>Subagent reports are self-reports: the parent re-verifies key claims (listing URLs, match basis) before
+recording <code>found</code> and before any deletion.</p>
+<h2 id="procedure-the-autonomous-loop">Procedure (the autonomous loop)</h2>
+<ol>
+<li><strong>Setup (once, no questions).</strong> Run <code>$PDD setup --auto</code> - it detects capabilities and configures
+   the most autonomous valid combination itself (programmatic email when <code>EMAIL_*</code> creds exist,
+   Browserbase when its key exists, <code>age</code> encryption when the binary exists, <code>autonomy=full</code>). Then
+   <code>$PDD doctor</code> and show the operator the readiness output <strong>for information, not as a question</strong> -
+   proceed immediately. Mention what would unlock more automation (e.g. email creds) but do not wait.</li>
+<li><strong>Intake + consent (the ONE human conversation).</strong> <code>$PDD intake ...</code> with <code>--consent</code> (and
+   <code>--consent-method</code>). Without consent the engine refuses to plan or act. Collect everything in one
+   pass - names/aliases, current + prior cities, emails, phones - so you never have to come back with
+   questions. For California subjects, also read <code>references/legal/drop.md</code>: <code>next</code> will surface a
+   <code>drop_submit</code> one-shot that deletes from every registered broker (~545) at once, which is the
+   single highest-leverage action. File it, then <code>drop &lt;subject&gt; --filed</code>. For non-CA subjects the
+   registry is covered by targeted CCPA/GDPR emails (<code>registry --search</code>, then <code>send-email</code>); the
+   people-search sites are worked directly in either case.</li>
+<li><strong>Drain the queue.</strong> Loop:</li>
+</ol>
+<p><code>while true:
+     q = $PDD next &lt;subject&gt;
+     if q.actions is empty: break
+     execute EVERY action in order; record each outcome via $PDD record</code></p>
+<p><code>next</code> emits, in order: <code>refresh_brokers</code> (stale cache), <code>fanout_scan</code>/<code>scan_inline</code> (Phase 1
+   crawl - see step 4), <code>poll_verification</code> (in-flight email confirmations), <code>verify_removal</code> (due
+   re-checks), <code>optout_web_form</code>/<code>optout_email_send</code> (Phase 2, parents-first with playbook steps),
+   <code>indirect_email_send</code>, and <code>stealth_rescan</code>. Human-only work never appears as an action - it
+   accumulates in <code>q.human_digest</code>. In <code>autonomy=full</code>, execute actions without pausing; honor
+   <code>confirm_first</code> in <code>assisted</code> mode.
+4. <strong>Scanning (when <code>next</code> says so).</strong> For <code>fanout_scan</code>: run <code>$PDD fanout &lt;subject&gt;</code> and <strong>spawn one
+   <code>delegate_task</code> subagent per <code>batch</code>, in parallel, passing that batch's ready-made <code>brief</code></strong> - do
+   not scan all brokers yourself sequentially. For <code>scan_inline</code>: scan the few brokers yourself.
+   Either way, each broker gets <strong>every</strong> <code>search_vectors</code> entry via the <code>references/methods.md</code>
+   ladder (<code>web_extract</code> → <code>site:</code> probe → <code>browser_navigate</code> → <code>scrapling</code>), a 404 is INCONCLUSIVE
+   (not <code>not_found</code>), <code>blocked</code> is recorded when <code>antibot</code> is set and no stealth browser is available,
+   and subject vs namesake/relative is confirmed before recording:
+   <code>$PDD record &lt;subject&gt; &lt;broker&gt; &lt;found|not_found|indirect_exposure|blocked&gt; --found &lt;bool&gt; --evidence '{"listing_urls":[...]}'</code>.
+   The parent re-verifies key <code>found</code> claims from subagents before trusting them.
+5. <strong>Opt-outs (when <code>next</code> says so).</strong> Actions come pre-ordered parents-first with <code>steps</code> from each
+   broker record's own <code>optout.playbook</code> (field-verified; cluster parents like PeopleConnect,
+   Whitepages, BeenVerified, Spokeo have exact, live-checked recipes). <strong>Deletion usually beats
+   suppression</strong>: when an action carries <code>prefer_deletion</code>, complete the record's DELETION lane, not
+   just the hide-my-listing flow. When it carries <code>prefer_suppression</code> instead (<strong>PeopleConnect</strong> -
+   deleting removes your suppressions and does not stop re-listing), do the suppression flow and keep
+   it maintained; use their Delete button only for a deliberate data-purge. Per method:
+   - <strong>web_form</strong> → drive <code>optout_url</code> with <code>browser_navigate</code>/<code>browser_type</code>/<code>browser_click</code>, submit
+     only <code>disclosure_fields</code>, screenshot the confirmation, then the action's <code>after</code> record command.
+     Playbooks may end with a right-to-delete <code>send-email</code> follow-up - do it (full erasure, not just
+     listing suppression).
+    - <strong>email</strong> → <code>$PDD send-email &lt;subject&gt; &lt;broker&gt; --kind &lt;ccpa|gdpr|generic&gt; --to &lt;addr&gt;
+      --listing &lt;url&gt;</code> records + discloses in one step (recipient locked to addresses the broker
+      record declares; <code>next</code> picks the kind from residency - never claim CCPA/GDPR for someone who
+      can't). In <strong>browser</strong> mode it returns a recipient-locked <code>compose</code> payload: compose a new
+      message to <code>compose.to</code> with <code>compose.subject</code>/<code>compose.body</code> exactly in the operator's webmail
+      via <code>browser_*</code> and send (no password); in <strong>programmatic</strong> mode it SMTP-sends. <code>next</code> also
+      routes human-gated forms (phone-callback/gov-ID) through a broker's deletion email when one
+      exists - the <strong>rescue lane</strong> (verified Whitepages pattern). Draft-only falls back to
+      <code>render-email</code> + a digest entry.
+   - <strong>captcha</strong> → soft/managed challenges clear automatically on the default cloud browser (proceed
+     as normal); only a hard interactive/behavioral challenge it can't pass is recorded <code>blocked</code>
+     (requeued for the stealth/operator-browser pass). Never a solver service.
+   - <strong>phone_callback / account / gov_id / fax / mail / voice (T3)</strong> <em>without a deletion email</em> →
+     never an agent action; <code>next</code> already routed these to the digest. Record them:
+     <code>$PDD record &lt;subject&gt; &lt;broker&gt; human_task_queued --reason "..."</code>.
+ 6. <strong>Verification (when <code>next</code> says so).</strong> In <strong>programmatic</strong> mode <code>$PDD poll-verification &lt;subject&gt;</code>
+    finds arrived confirmation links via IMAP (anti-phishing scored, auto-advances state). In
+    <strong>browser</strong> mode, open the broker's confirmation email in the operator's webmail and run
+    <code>$PDD verify-link &lt;subject&gt; &lt;broker&gt; --text '&lt;body&gt;'</code> to score the link. Either way <strong>open the
+    link in the same browser</strong> (several brokers bind the verification session to the browser that
+    opens it), finish the flow, then record <code>awaiting_processing</code>. <code>confirmed_removed</code> ONLY after a
+    verifying re-scan shows the listing gone - never off the submission flow's own confirmation page.
+7. <strong>Wrap up (once per run).</strong> When <code>next</code> returns no actions: present <code>$PDD tasks &lt;subject&gt;</code> (the
+   consolidated human digest) if non-empty, then <code>$PDD status &lt;subject&gt;</code>; if the Sheets tracker is
+   on, append <code>$PDD report &lt;subject&gt; --sheets</code> rows via the <code>google-workspace</code> skill.
+8. <strong>Schedule the next wake-up.</strong> <code>next</code> returns <code>next_wake_at</code> (earliest due re-check). Create ONE
+   <code>cronjob</code> that re-runs this skill's loop for the subject (a prompt like: <em>"run the
+   unbroker loop for &lt;subject_id&gt;: <code>$PDD next</code> and execute all actions"</em>). Processing
+   windows, verification polls, and reappearance sweeps all flow through the same queue, so the case
+   keeps advancing with zero human attention.</p>
+<h2 id="pitfalls">Pitfalls</h2>
+<ul>
+<li><strong>Never disclose more than the broker already shows.</strong> Submit only <code>disclosure_fields</code>. The engine
+  never volunteers SSN/ID numbers; you must not either.</li>
+<li><strong>No consent, no action.</strong> The engine enforces this; do not work around it to "research" a third party.</li>
+<li><strong><code>send-email</code> is idempotent + rate-limited.</strong> It refuses to re-send a case already <code>submitted</code>
+  or beyond (use <code>--force</code> only if a genuine re-send is needed), and SMTP sends are paced by
+  <code>email_min_interval_seconds</code> (default 20s) with retry/backoff. Do not loop it to "make sure" -
+  a successful SMTP handoff is not proof of delivery; the due-queue re-scan is the real confirmation.</li>
+<li><strong>Ledger writes are locked.</strong> Concurrent runs (cron + manual) serialize safely; if you ever see a
+  lock timeout, another run is mid-write - let it finish, don't delete the <code>.lock</code> by hand.</li>
+<li><strong>Autonomy ≠ improvisation.</strong> Full autonomy means not <em>asking</em> between steps; it does not loosen any
+  gate. If a broker demands MORE than the planned <code>disclosure_fields</code> mid-flow, stop that case and
+  queue it (<code>human_task_queued --reason</code>) rather than deciding alone to disclose extra PII.</li>
+<li><strong>Don't interrupt the run with questions.</strong> Config choices are <code>setup --auto</code>'s job; human-only work
+  goes to the digest. The only mid-run question that's ever warranted is a missing-identity fact that
+  blocks scanning (e.g. no city at all) - and that should have been collected at intake.</li>
+<li><strong>Use <code>terminal</code>, not <code>execute_code</code></strong> for <code>pdd.py</code> (secret scrubbing + output redaction break it).</li>
+<li><strong>Dossiers are plaintext by default</strong> (JSON, <code>0600</code> under <code>HERMES_HOME</code>). For at-rest encryption run
+  <code>$PDD setup --encryption age</code> - it generates a local <code>age</code> key and encrypts dossiers + ledgers (the
+  audit log holds field names only and stays plaintext). It guards casual/backup/commit exposure, not
+  a full-<code>HERMES_HOME</code> read; set <code>PDD_AGE_IDENTITY</code> to a separate volume for real key separation.
+  <code>$PDD doctor</code> shows whether encryption is <em>actually</em> engaged (not just whether <code>age</code> is installed).</li>
+<li><strong>"Hidden from free search" ≠ deleted.</strong> Only mark <code>confirmed_removed</code> after verifying the record is
+  actually gone; note paid-tier retention in the report.</li>
+<li><strong>Soft CAPTCHAs clear by default; don't fight the hard ones.</strong> The default cloud browser passes
+  managed/soft challenges as normal operation (those brokers stay T1). For a hard interactive one it
+  genuinely can't pass, record <code>blocked</code> and let the stealth/operator-browser pass take it - never a
+  third-party solver service or fingerprint spoofing.</li>
+<li><strong>Broker pages change.</strong> If a flow breaks, <code>$PDD record ... blocked</code> and flag the broker file in
+  <code>references/brokers/</code> for re-verification instead of guessing.</li>
+<li><strong>Verify non-field-verified records before submitting.</strong> <code>confidence: auto</code> records came from
+  parsing BADBOOL (read <code>optout.notes</code>/<code>optout.links</code>, confirm the real opt-out URL). <code>confidence:
+  documented</code> records (several people-search sites) carry the correct published opt-out URL but have
+  <strong>not</strong> been field-verified (they 403 datacenter IPs), so confirm the live flow via the operator's
+  residential browser on first use, then set <code>last_verified</code>. Field-verified curated records (no
+  <code>confidence</code>, e.g. the cluster parents) have checked mechanics and take precedence.</li>
+</ul>
+<h2 id="verification">Verification</h2>
+<ul>
+<li><code>scripts/run_tests.sh tests/skills/test_unbroker_skill.py</code> (hermetic; no network), or the
+  dependency-free runner <code>python tests/skills/test_unbroker_skill.py</code>.</li>
+<li>Dry run: <code>$PDD setup --auto &amp;&amp; $PDD doctor &amp;&amp; SID=$($PDD intake --full-name "Test Person"
+  --email t@example.com --consent | python -c 'import sys,json;print(json.load(sys.stdin)["subject_id"])')
+  &amp;&amp; $PDD next "$SID"</code> and confirm a readiness summary plus an ordered action queue.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/security/security-unbroker</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#autonomy-contract">Autonomy contract</a></li>
+<li class="lvl2"><a href="#when-to-use">When to Use</a></li>
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#how-to-run">How to Run</a></li>
+<li class="lvl2"><a href="#quick-reference">Quick Reference</a></li>
+<li class="lvl2"><a href="#batch-operation-two-phase-crawl-all-then-delete">Batch operation (two-phase: crawl-all, then delete)</a></li>
+<li class="lvl2"><a href="#procedure-the-autonomous-loop">Procedure (the autonomous loop)</a></li>
+<li class="lvl2"><a href="#pitfalls">Pitfalls</a></li>
+<li class="lvl2"><a href="#verification">Verification</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

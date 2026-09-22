@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>批量处理 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/features/batch-processing</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="批量处理">批量处理</h1>
+<p>批量处理让你能够并行地在数百乃至数千个 prompt（提示词）上运行 Hermes agent，生成结构化的轨迹数据。其主要用途是<strong>训练数据生成</strong>——产出包含工具使用统计信息的 ShareGPT 格式轨迹，可用于微调或评估。</p>
+<h2 id="概述">概述</h2>
+<p>批量运行器（<code>batch_runner.py</code>）处理一个由 prompt 组成的 JSONL 数据集，将每条 prompt 通过完整的 agent 会话（含工具访问权限）运行一遍。每条 prompt 都拥有独立隔离的环境。输出为结构化轨迹数据，包含完整对话历史、工具调用统计信息以及推理覆盖率指标。</p>
+<h2 id="快速开始">快速开始</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># 基本批量运行</span>
+python<span class="w"> </span>batch_runner.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--dataset_file<span class="o">=</span>data/prompts.jsonl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--batch_size<span class="o">=</span><span class="m">10</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--run_name<span class="o">=</span>my_first_run<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--model<span class="o">=</span>anthropic/claude-sonnet-4.6<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--num_workers<span class="o">=</span><span class="m">4</span>
+
+<span class="c1"># 恢复中断的运行</span>
+python<span class="w"> </span>batch_runner.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--dataset_file<span class="o">=</span>data/prompts.jsonl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--batch_size<span class="o">=</span><span class="m">10</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--run_name<span class="o">=</span>my_first_run<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--resume
+
+<span class="c1"># 列出可用的工具集分布</span>
+python<span class="w"> </span>batch_runner.py<span class="w"> </span>--list_distributions
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">大规模运行下的可预测成本</p>
+<p>批量运行会启动大量并发 agent 会话，每个会话都会调用模型和工具。<a href="tool-gateway.html">Nous Portal</a> 订阅将模型访问、网页搜索、图像生成、TTS 以及云端浏览器统一计费——当你希望在不同供应商账户间稳定控制每条轨迹成本、避免触碰速率限制时非常实用。使用 <code>hermes setup --portal</code> 完成配置，然后将 <code>--model</code> 指向 Nous 模型。</p>
+</div>
+<h2 id="数据集格式">数据集格式</h2>
+<p>输入数据集为 JSONL 文件（每行一个 JSON 对象）。每条记录必须包含 <code>prompt</code> 字段：</p>
+<div class="highlight"><pre><span></span><code>{&quot;prompt&quot;: &quot;Write a Python function that finds the longest palindromic substring&quot;}
+{&quot;prompt&quot;: &quot;Create a REST API endpoint for user authentication using Flask&quot;}
+{&quot;prompt&quot;: &quot;Debug this error: TypeError: cannot unpack non-iterable NoneType object&quot;}
+</code></pre></div>
+
+<p>记录还可以选填以下字段：
+- <code>image</code> 或 <code>docker_image</code>：用于该 prompt 沙箱的容器镜像（适用于 Docker、Modal 和 Singularity 后端）
+- <code>cwd</code>：任务终端会话的工作目录覆盖值</p>
+<h2 id="配置选项">配置选项</h2>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--dataset_file</code></td>
+<td>（必填）</td>
+<td>JSONL 数据集路径</td>
+</tr>
+<tr>
+<td><code>--batch_size</code></td>
+<td>（必填）</td>
+<td>每批处理的 prompt 数量</td>
+</tr>
+<tr>
+<td><code>--run_name</code></td>
+<td>（必填）</td>
+<td>本次运行的名称（用于输出目录和断点续跑）</td>
+</tr>
+<tr>
+<td><code>--distribution</code></td>
+<td><code>"default"</code></td>
+<td>采样所用的工具集分布</td>
+</tr>
+<tr>
+<td><code>--model</code></td>
+<td><code>claude-sonnet-4.6</code></td>
+<td>使用的模型</td>
+</tr>
+<tr>
+<td><code>--base_url</code></td>
+<td><code>https://openrouter.ai/api/v1</code></td>
+<td>API 基础 URL</td>
+</tr>
+<tr>
+<td><code>--api_key</code></td>
+<td>（环境变量）</td>
+<td>模型的 API 密钥</td>
+</tr>
+<tr>
+<td><code>--max_turns</code></td>
+<td><code>10</code></td>
+<td>每条 prompt 的最大工具调用轮次</td>
+</tr>
+<tr>
+<td><code>--num_workers</code></td>
+<td><code>4</code></td>
+<td>并行工作进程数</td>
+</tr>
+<tr>
+<td><code>--resume</code></td>
+<td><code>false</code></td>
+<td>从断点恢复</td>
+</tr>
+<tr>
+<td><code>--verbose</code></td>
+<td><code>false</code></td>
+<td>启用详细日志</td>
+</tr>
+<tr>
+<td><code>--max_samples</code></td>
+<td>全部</td>
+<td>仅处理数据集中前 N 条样本</td>
+</tr>
+</tbody>
+</table>
+<h3 id="供应商路由openrouter">供应商路由（OpenRouter）</h3>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--providers_allowed</code></td>
+<td>允许的供应商，逗号分隔（例如 <code>"anthropic,openai"</code>）</td>
+</tr>
+<tr>
+<td><code>--providers_ignored</code></td>
+<td>忽略的供应商，逗号分隔（例如 <code>"together,deepinfra"</code>）</td>
+</tr>
+<tr>
+<td><code>--providers_order</code></td>
+<td>首选供应商顺序，逗号分隔</td>
+</tr>
+<tr>
+<td><code>--provider_sort</code></td>
+<td>按 <code>"price"</code>、<code>"throughput"</code> 或 <code>"latency"</code> 排序</td>
+</tr>
+</tbody>
+</table>
+<h3 id="推理控制">推理控制</h3>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--reasoning_effort</code></td>
+<td>推理力度：<code>none</code>、<code>minimal</code>、<code>low</code>、<code>medium</code>、<code>high</code>、<code>xhigh</code>、<code>max</code>、<code>ultra</code></td>
+</tr>
+<tr>
+<td><code>--reasoning_disabled</code></td>
+<td>完全禁用推理/思考 token</td>
+</tr>
+</tbody>
+</table>
+<h3 id="高级选项">高级选项</h3>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--ephemeral_system_prompt</code></td>
+<td>执行时使用但<strong>不</strong>保存到轨迹中的系统 prompt</td>
+</tr>
+<tr>
+<td><code>--log_prefix_chars</code></td>
+<td>日志预览中显示的字符数（默认：100）</td>
+</tr>
+<tr>
+<td><code>--prefill_messages_file</code></td>
+<td>包含 few-shot 预填充消息的 JSON 文件路径</td>
+</tr>
+</tbody>
+</table>
+<h2 id="工具集分布">工具集分布</h2>
+<p>每条 prompt 会从一个<strong>分布</strong>中随机采样一组工具集。这确保训练数据覆盖多样化的工具组合。使用 <code>--list_distributions</code> 查看所有可用分布。</p>
+<p>在当前实现中，分布为<strong>每个独立工具集</strong>分配一个概率。采样器对每个工具集独立进行伯努利抽样，并保证至少有一个工具集被启用。这与手工编写的预设组合表不同。</p>
+<h2 id="输出格式">输出格式</h2>
+<p>所有输出写入 <code>data/&lt;run_name&gt;/</code>：</p>
+<div class="highlight"><pre><span></span><code>data/my_run/
+├── trajectories.jsonl    # 合并后的最终输出（所有批次合并）
+├── batch_0.jsonl         # 各批次结果
+├── batch_1.jsonl
+├── ...
+├── checkpoint.json       # 断点续跑检查点
+└── statistics.json       # 汇总工具使用统计
+</code></pre></div>
+
+<h3 id="轨迹格式">轨迹格式</h3>
+<p><code>trajectories.jsonl</code> 中每行是一个 JSON 对象：</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;prompt_index&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;conversations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;from&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;human&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;value&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Write a function...&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;from&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gpt&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;value&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;I&#39;ll create that function...&quot;</span><span class="p">,</span>
+<span class="w">     </span><span class="nt">&quot;tool_calls&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="err">...</span><span class="p">]},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;from&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tool&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;value&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;from&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gpt&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;value&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Here&#39;s the completed function...&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;batch_num&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-01-15T10:30:00&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;anthropic/claude-sonnet-4.6&quot;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;completed&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;partial&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;api_calls&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;toolsets_used&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;terminal&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;file&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;tool_stats&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;terminal&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;failure&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;read_file&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;failure&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;tool_error_counts&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;terminal&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;read_file&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><code>conversations</code> 字段使用类 ShareGPT 格式，包含 <code>from</code> 和 <code>value</code> 字段。工具统计信息经过规范化处理，所有可能的工具均以零值默认填充，确保各条记录的 schema 一致，兼容 HuggingFace 数据集格式。</p>
+<h2 id="断点续跑">断点续跑</h2>
+<p>批量运行器具备健壮的断点续跑机制以应对故障：</p>
+<ul>
+<li><strong>检查点文件：</strong> 每批完成后保存，记录已完成的 prompt 索引</li>
+<li><strong>基于内容的恢复：</strong> 使用 <code>--resume</code> 时，运行器扫描现有批次文件，通过实际文本内容（而非索引）匹配已完成的 prompt，即使数据集顺序发生变化也能正常恢复</li>
+<li><strong>失败的 prompt：</strong> 只有成功完成的 prompt 才会被标记为已完成——失败的 prompt 在恢复时会重新尝试</li>
+<li><strong>批次合并：</strong> 完成后，所有批次文件（包括之前运行的）会合并为单个 <code>trajectories.jsonl</code></li>
+</ul>
+<h3 id="恢复流程">恢复流程</h3>
+<ol>
+<li>扫描所有 <code>batch_*.jsonl</code> 文件，通过内容匹配找出已完成的 prompt</li>
+<li>过滤数据集，排除已完成的 prompt</li>
+<li>对剩余 prompt 重新分批</li>
+<li>仅处理剩余 prompt</li>
+<li>将所有批次文件（旧的 + 新的）合并为最终输出</li>
+</ol>
+<h2 id="质量过滤">质量过滤</h2>
+<p>批量运行器会自动进行质量过滤：</p>
+<ul>
+<li><strong>无推理过滤：</strong> 所有 assistant 轮次均不包含推理内容（无 <code>&lt;REASONING_SCRATCHPAD&gt;</code> 或原生思考 token）的样本将被丢弃</li>
+<li><strong>损坏条目过滤：</strong> 包含幻觉工具名称（不在有效工具列表中）的条目在最终合并时会被过滤掉</li>
+<li><strong>推理统计：</strong> 跟踪整个运行过程中包含/不包含推理内容的轮次百分比</li>
+</ul>
+<h2 id="统计信息">统计信息</h2>
+<p>完成后，运行器会打印全面的统计信息：</p>
+<ul>
+<li><strong>工具使用情况：</strong> 每个工具的调用次数、成功/失败率</li>
+<li><strong>推理覆盖率：</strong> 包含推理内容的 assistant 轮次百分比</li>
+<li><strong>丢弃样本数：</strong> 因缺少推理内容而被过滤的样本数量</li>
+<li><strong>耗时：</strong> 总处理时间</li>
+</ul>
+<p>统计信息同时保存至 <code>statistics.json</code>，便于程序化分析。</p>
+<h2 id="使用场景">使用场景</h2>
+<h3 id="训练数据生成">训练数据生成</h3>
+<p>生成多样化的工具使用轨迹用于微调：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>batch_runner.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--dataset_file<span class="o">=</span>data/coding_prompts.jsonl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--batch_size<span class="o">=</span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--run_name<span class="o">=</span>coding_v1<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--model<span class="o">=</span>anthropic/claude-sonnet-4.6<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--num_workers<span class="o">=</span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--distribution<span class="o">=</span>default<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--max_turns<span class="o">=</span><span class="m">15</span>
+</code></pre></div>
+
+<h3 id="模型评估">模型评估</h3>
+<p>在标准化 prompt 集上评估模型的工具使用能力：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>batch_runner.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--dataset_file<span class="o">=</span>data/eval_suite.jsonl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--batch_size<span class="o">=</span><span class="m">10</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--run_name<span class="o">=</span>eval_gpt4<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--model<span class="o">=</span>openai/gpt-4o<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--num_workers<span class="o">=</span><span class="m">4</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--max_turns<span class="o">=</span><span class="m">10</span>
+</code></pre></div>
+
+<h3 id="按-prompt-指定容器镜像">按 Prompt 指定容器镜像</h3>
+<p>对于需要特定环境的基准测试，每条 prompt 可以指定自己的容器镜像：</p>
+<div class="highlight"><pre><span></span><code>{&quot;prompt&quot;: &quot;Install numpy and compute eigenvalues of a 3x3 matrix&quot;, &quot;image&quot;: &quot;python:3.11-slim&quot;}
+{&quot;prompt&quot;: &quot;Compile this Rust program and run it&quot;, &quot;image&quot;: &quot;rust:1.75&quot;}
+{&quot;prompt&quot;: &quot;Set up a Node.js Express server&quot;, &quot;image&quot;: &quot;node:20-alpine&quot;, &quot;cwd&quot;: &quot;/app&quot;}
+</code></pre></div>
+
+<p>批量运行器会在运行每条 prompt 前验证 Docker 镜像是否可访问。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/features/batch-processing</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#概述">概述</a></li>
+<li class="lvl2"><a href="#快速开始">快速开始</a></li>
+<li class="lvl2"><a href="#数据集格式">数据集格式</a></li>
+<li class="lvl2"><a href="#配置选项">配置选项</a></li>
+<li class="lvl3"><a href="#供应商路由openrouter">供应商路由（OpenRouter）</a></li>
+<li class="lvl3"><a href="#推理控制">推理控制</a></li>
+<li class="lvl3"><a href="#高级选项">高级选项</a></li>
+<li class="lvl2"><a href="#工具集分布">工具集分布</a></li>
+<li class="lvl2"><a href="#输出格式">输出格式</a></li>
+<li class="lvl3"><a href="#轨迹格式">轨迹格式</a></li>
+<li class="lvl2"><a href="#断点续跑">断点续跑</a></li>
+<li class="lvl3"><a href="#恢复流程">恢复流程</a></li>
+<li class="lvl2"><a href="#质量过滤">质量过滤</a></li>
+<li class="lvl2"><a href="#统计信息">统计信息</a></li>
+<li class="lvl2"><a href="#使用场景">使用场景</a></li>
+<li class="lvl3"><a href="#训练数据生成">训练数据生成</a></li>
+<li class="lvl3"><a href="#模型评估">模型评估</a></li>
+<li class="lvl3"><a href="#按-prompt-指定容器镜像">按 Prompt 指定容器镜像</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

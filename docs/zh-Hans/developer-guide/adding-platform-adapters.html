@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>添加平台适配器 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/adding-platform-adapters</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="添加平台适配器">添加平台适配器</h1>
+<p>本指南介绍如何向 Hermes gateway 添加新的消息平台。平台适配器将 Hermes 连接到外部消息服务（Telegram、Discord、WeCom 等），使用户可以通过该服务与 agent 交互。</p>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>添加平台有两种方式：
+- <strong>Plugin</strong>（推荐用于社区/第三方）：将 plugin 目录放入 <code>~/.hermes/plugins/</code> — 无需修改任何核心代码。参见下方 <a href="../../developer-guide/adding-platform-adapters.html#plugin-path-recommended" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">Plugin 路径</a>。
+- <strong>内置</strong>：需修改代码、配置和文档共 20+ 个文件。参见下方 <a href="#step-by-step-checklist">内置清单</a>。</p>
+</div>
+<h2 id="架构概览">架构概览</h2>
+<div class="highlight"><pre><span></span><code>用户 ↔ 消息平台 ↔ 平台适配器 ↔ Gateway Runner ↔ AIAgent
+</code></pre></div>
+
+<p>每个适配器都继承自 <code>gateway/platforms/base.py</code> 中的 <code>BasePlatformAdapter</code>，并实现以下方法：</p>
+<ul>
+<li><strong><code>connect()</code></strong> — 建立连接（WebSocket、长轮询、HTTP 服务器等）<em>(抽象方法)</em></li>
+<li><strong><code>disconnect()</code></strong> — 清理关闭 <em>(抽象方法)</em></li>
+<li><strong><code>send()</code></strong> — 向聊天发送文本消息 <em>(抽象方法)</em></li>
+<li><strong><code>send_typing()</code></strong> — 显示正在输入指示器（可选覆盖）</li>
+<li><strong><code>get_chat_info()</code></strong> — 返回聊天元数据（可选覆盖）</li>
+</ul>
+<p>适配器接收入站消息后，通过 <code>self.handle_message(event)</code> 转发，基类将其路由到 gateway runner。</p>
+<h2 id="plugin-路径推荐plugin-path-recommended">Plugin 路径（推荐）{#plugin-path-recommended}</h2>
+<p>Plugin 系统允许你在不修改任何 Hermes 核心代码的情况下添加平台适配器。你的 plugin 是一个包含两个文件的目录：</p>
+<div class="highlight"><pre><span></span><code>~/.hermes/plugins/my-platform/
+  plugin.yaml      # Plugin 元数据
+  adapter.py       # 适配器类 + register() 入口点
+</code></pre></div>
+
+<h3 id="pluginyaml">plugin.yaml</h3>
+<p>Plugin 元数据。<code>requires_env</code> 和 <code>optional_env</code> 块会自动填充 <code>hermes config</code> UI 条目（参见下方<a href="#surfacing-env-vars-in-hermes-config">在 hermes config 中暴露环境变量</a>）。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-platform</span>
+<span class="nt">label</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My Platform</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">platform</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My custom messaging platform adapter</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_TOKEN</span><span class="w">          </span><span class="c1"># 裸字符串有效</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_CHANNEL</span><span class="w">  </span><span class="c1"># 或使用富字典以获得更好的 UX</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Channel</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">join&quot;</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Channel&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="nt">optional_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_HOME_CHANNEL</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Default</span><span class="nv"> </span><span class="s">channel</span><span class="nv"> </span><span class="s">for</span><span class="nv"> </span><span class="s">cron</span><span class="nv"> </span><span class="s">delivery&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<h3 id="adapterpy">adapter.py</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BasePlatformAdapter</span><span class="p">,</span> <span class="n">SendResult</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms.event</span><span class="w"> </span><span class="kn">import</span> <span class="n">MessageEvent</span><span class="p">,</span> <span class="n">MessageType</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gateway.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">Platform</span><span class="p">,</span> <span class="n">PlatformConfig</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyPlatformAdapter</span><span class="p">(</span><span class="n">BasePlatformAdapter</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">PlatformConfig</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="n">Platform</span><span class="p">(</span><span class="s2">&quot;my_platform&quot;</span><span class="p">))</span>
+        <span class="n">extra</span> <span class="o">=</span> <span class="n">config</span><span class="o">.</span><span class="n">extra</span> <span class="ow">or</span> <span class="p">{}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">token</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">extra</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;token&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="c1"># 连接到平台 API，启动监听器</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mark_connected</span><span class="p">()</span>
+        <span class="k">return</span> <span class="kc">True</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">disconnect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mark_disconnected</span><span class="p">()</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">send</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">reply_to</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">metadata</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="c1"># 通过平台 API 发送消息</span>
+        <span class="k">return</span> <span class="n">SendResult</span><span class="p">(</span><span class="n">success</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">message_id</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">)</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_chat_info</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">chat_id</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;dm&quot;</span><span class="p">}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">check_requirements</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_config</span><span class="p">(</span><span class="n">config</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="n">extra</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="s2">&quot;extra&quot;</span><span class="p">,</span> <span class="p">{})</span> <span class="ow">or</span> <span class="p">{}</span>
+    <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">extra</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;token&quot;</span><span class="p">))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_env_enablement</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="n">token</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="n">channel</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_CHANNEL&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="p">(</span><span class="n">token</span> <span class="ow">and</span> <span class="n">channel</span><span class="p">):</span>
+        <span class="k">return</span> <span class="kc">None</span>
+    <span class="n">seed</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;token&quot;</span><span class="p">:</span> <span class="n">token</span><span class="p">,</span> <span class="s2">&quot;channel&quot;</span><span class="p">:</span> <span class="n">channel</span><span class="p">}</span>
+    <span class="n">home</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_HOME_CHANNEL&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">home</span><span class="p">:</span>
+        <span class="n">seed</span><span class="p">[</span><span class="s2">&quot;home_channel&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;chat_id&quot;</span><span class="p">:</span> <span class="n">home</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;Home&quot;</span><span class="p">}</span>
+    <span class="k">return</span> <span class="n">seed</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Plugin 入口点 — 由 Hermes plugin 系统调用。&quot;&quot;&quot;</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+        <span class="n">label</span><span class="o">=</span><span class="s2">&quot;My Platform&quot;</span><span class="p">,</span>
+        <span class="n">adapter_factory</span><span class="o">=</span><span class="k">lambda</span> <span class="n">cfg</span><span class="p">:</span> <span class="n">MyPlatformAdapter</span><span class="p">(</span><span class="n">cfg</span><span class="p">),</span>
+        <span class="n">check_fn</span><span class="o">=</span><span class="n">check_requirements</span><span class="p">,</span>
+        <span class="n">validate_config</span><span class="o">=</span><span class="n">validate_config</span><span class="p">,</span>
+        <span class="n">required_env</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">],</span>
+        <span class="n">install_hint</span><span class="o">=</span><span class="s2">&quot;pip install my-platform-sdk&quot;</span><span class="p">,</span>
+        <span class="c1"># 环境变量驱动的自动配置 — 在适配器构建前从环境变量</span>
+        <span class="c1"># 填充 PlatformConfig.extra。参见下方&quot;环境变量驱动的自动配置&quot;章节。</span>
+        <span class="n">env_enablement_fn</span><span class="o">=</span><span class="n">_env_enablement</span><span class="p">,</span>
+        <span class="c1"># Cron 主频道投递支持。允许 deliver=my_platform 的 cron 任务</span>
+        <span class="c1"># 无需编辑 cron/scheduler.py 即可路由。参见下方&quot;Cron 投递&quot;章节。</span>
+        <span class="n">cron_deliver_env_var</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_HOME_CHANNEL&quot;</span><span class="p">,</span>
+        <span class="c1"># 每平台用户授权环境变量</span>
+        <span class="n">allowed_users_env</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_ALLOWED_USERS&quot;</span><span class="p">,</span>
+        <span class="n">allow_all_env</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_ALLOW_ALL_USERS&quot;</span><span class="p">,</span>
+        <span class="c1"># 智能分块的消息长度限制（0 = 无限制）</span>
+        <span class="n">max_message_length</span><span class="o">=</span><span class="mi">4000</span><span class="p">,</span>
+        <span class="c1"># 注入系统 prompt（提示词）的 LLM 指导</span>
+        <span class="n">platform_hint</span><span class="o">=</span><span class="p">(</span>
+            <span class="s2">&quot;You are chatting via My Platform. &quot;</span>
+            <span class="s2">&quot;It supports markdown formatting.&quot;</span>
+        <span class="p">),</span>
+        <span class="c1"># 显示</span>
+        <span class="n">emoji</span><span class="o">=</span><span class="s2">&quot;💬&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="c1"># 可选：注册平台专属工具</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_tool</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform_search&quot;</span><span class="p">,</span>
+        <span class="n">toolset</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+        <span class="n">schema</span><span class="o">=</span><span class="p">{</span><span class="o">...</span><span class="p">},</span>
+        <span class="n">handler</span><span class="o">=</span><span class="n">my_search_handler</span><span class="p">,</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h3 id="配置">配置</h3>
+<p>用户在 <code>config.yaml</code> 中配置平台：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">my_platform</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">      </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">token</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;...&quot;</span>
+<span class="w">        </span><span class="nt">channel</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#general&quot;</span>
+</code></pre></div>
+
+<p>或通过环境变量（适配器在 <code>__init__</code> 中读取）。</p>
+<h3 id="plugin-系统自动处理的内容">Plugin 系统自动处理的内容</h3>
+<p>调用 <code>ctx.register_platform()</code> 时，以下集成点将自动处理 — 无需修改核心代码：</p>
+<table>
+<thead>
+<tr>
+<th>集成点</th>
+<th>工作方式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gateway 适配器创建</td>
+<td>在内置 if/elif 链之前检查注册表</td>
+</tr>
+<tr>
+<td>配置解析</td>
+<td><code>Platform._missing_()</code> 接受任意平台名称</td>
+</tr>
+<tr>
+<td>已连接平台验证</td>
+<td>调用注册表中的 <code>validate_config()</code></td>
+</tr>
+<tr>
+<td>用户授权</td>
+<td>检查 <code>allowed_users_env</code> / <code>allow_all_env</code></td>
+</tr>
+<tr>
+<td>仅环境变量自动启用</td>
+<td><code>env_enablement_fn</code> 填充 <code>PlatformConfig.extra</code> + <code>home_channel</code></td>
+</tr>
+<tr>
+<td>YAML 配置桥接</td>
+<td><code>apply_yaml_config_fn</code> 将 <code>config.yaml</code> 键转换为环境变量/extras</td>
+</tr>
+<tr>
+<td>Cron 投递</td>
+<td><code>cron_deliver_env_var</code> 使 <code>deliver=&lt;name&gt;</code> 生效</td>
+</tr>
+<tr>
+<td><code>hermes config</code> UI 条目</td>
+<td><code>plugin.yaml</code> 中的 <code>requires_env</code> / <code>optional_env</code> 自动填充</td>
+</tr>
+<tr>
+<td>send_message 工具</td>
+<td>通过实时 gateway 适配器路由</td>
+</tr>
+<tr>
+<td>Webhook 跨平台投递</td>
+<td>检查注册表中的已知平台</td>
+</tr>
+<tr>
+<td><code>/update</code> 命令访问</td>
+<td><code>allow_update_command</code> 标志</td>
+</tr>
+<tr>
+<td>频道目录</td>
+<td>Plugin 平台包含在枚举中</td>
+</tr>
+<tr>
+<td>系统 prompt 提示</td>
+<td><code>platform_hint</code> 注入 LLM 上下文</td>
+</tr>
+<tr>
+<td>消息分块</td>
+<td><code>max_message_length</code> 用于智能分割</td>
+</tr>
+<tr>
+<td>PII 脱敏</td>
+<td><code>pii_safe</code> 标志</td>
+</tr>
+<tr>
+<td><code>hermes status</code></td>
+<td>显示带 <code>(plugin)</code> 标签的 plugin 平台</td>
+</tr>
+<tr>
+<td><code>hermes gateway setup</code></td>
+<td>Plugin 平台出现在设置菜单中</td>
+</tr>
+<tr>
+<td><code>hermes tools</code> / <code>hermes skills</code></td>
+<td>Plugin 平台出现在每平台配置中</td>
+</tr>
+<tr>
+<td>Token 锁（多配置文件）</td>
+<td>在 <code>connect()</code> 中使用 <code>acquire_scoped_lock()</code></td>
+</tr>
+<tr>
+<td>孤立配置警告</td>
+<td>Plugin 缺失时输出描述性日志</td>
+</tr>
+</tbody>
+</table>
+<h2 id="环境变量驱动的自动配置">环境变量驱动的自动配置</h2>
+<p>大多数用户通过将环境变量写入 <code>~/.hermes/.env</code> 来配置平台，而不是编辑 <code>config.yaml</code>。<code>env_enablement_fn</code> hook 允许你的 plugin 在适配器构建<strong>之前</strong>读取这些环境变量，使 <code>hermes gateway status</code>、<code>get_connected_platforms()</code> 和 cron 投递无需实例化平台 SDK 即可看到正确状态。</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">_env_enablement</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;从环境变量填充 PlatformConfig.extra。</span>
+
+<span class="sd">    在 load_gateway_config() 期间由平台注册表调用。</span>
+<span class="sd">    当平台未完成最低配置时返回 None — 调用方将跳过自动启用。</span>
+<span class="sd">    返回字典以填充 extras。</span>
+
+<span class="sd">    特殊键 &#39;home_channel&#39; 会被提取并成为 PlatformConfig 上的</span>
+<span class="sd">    HomeChannel dataclass；其他所有键合并到 PlatformConfig.extra 中。</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">token</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_TOKEN&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="n">channel</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_CHANNEL&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="p">(</span><span class="n">token</span> <span class="ow">and</span> <span class="n">channel</span><span class="p">):</span>
+        <span class="k">return</span> <span class="kc">None</span>
+    <span class="n">seed</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;token&quot;</span><span class="p">:</span> <span class="n">token</span><span class="p">,</span> <span class="s2">&quot;channel&quot;</span><span class="p">:</span> <span class="n">channel</span><span class="p">}</span>
+    <span class="n">home</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_HOME_CHANNEL&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">home</span><span class="p">:</span>
+        <span class="n">seed</span><span class="p">[</span><span class="s2">&quot;home_channel&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;chat_id&quot;</span><span class="p">:</span> <span class="n">home</span><span class="p">,</span>
+            <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_HOME_CHANNEL_NAME&quot;</span><span class="p">,</span> <span class="s2">&quot;Home&quot;</span><span class="p">),</span>
+        <span class="p">}</span>
+    <span class="k">return</span> <span class="n">seed</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+        <span class="n">label</span><span class="o">=</span><span class="s2">&quot;My Platform&quot;</span><span class="p">,</span>
+        <span class="n">adapter_factory</span><span class="o">=</span><span class="k">lambda</span> <span class="n">cfg</span><span class="p">:</span> <span class="n">MyPlatformAdapter</span><span class="p">(</span><span class="n">cfg</span><span class="p">),</span>
+        <span class="n">check_fn</span><span class="o">=</span><span class="n">check_requirements</span><span class="p">,</span>
+        <span class="n">validate_config</span><span class="o">=</span><span class="n">validate_config</span><span class="p">,</span>
+        <span class="n">env_enablement_fn</span><span class="o">=</span><span class="n">_env_enablement</span><span class="p">,</span>
+        <span class="c1"># ... 其他字段</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h2 id="yamlenv-配置桥接">YAML→env 配置桥接</h2>
+<p>部分用户更倾向于设置 <code>config.yaml</code> 键（<code>my_platform.require_mention</code>、<code>my_platform.allowed_channels</code> 等）而非环境变量。<code>apply_yaml_config_fn</code> hook 允许你的 plugin 自行处理这一转换，而无需强制核心 <code>gateway/config.py</code> 了解你平台的 YAML schema。</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">_apply_yaml_config</span><span class="p">(</span><span class="n">yaml_cfg</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="n">platform_cfg</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;将 config.yaml 中的 `my_platform:` 键转换为环境变量/extras。</span>
+
+<span class="sd">    yaml_cfg     — 完整的顶层解析后 config.yaml 字典</span>
+<span class="sd">    platform_cfg — 平台自身的子字典（yaml_cfg.get(&quot;my_platform&quot;, {})）</span>
+
+<span class="sd">    可直接修改 os.environ（使用 `not os.getenv(...)` 守卫以保持</span>
+<span class="sd">    环境变量 &gt; YAML 的优先级），也可返回字典合并到 PlatformConfig.extra 中。</span>
+<span class="sd">    返回 None 或 {} 表示无额外内容。</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="s2">&quot;require_mention&quot;</span> <span class="ow">in</span> <span class="n">platform_cfg</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_REQUIRE_MENTION&quot;</span><span class="p">):</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;MY_PLATFORM_REQUIRE_MENTION&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">platform_cfg</span><span class="p">[</span><span class="s2">&quot;require_mention&quot;</span><span class="p">])</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="n">allowed</span> <span class="o">=</span> <span class="n">platform_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;allowed_channels&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">allowed</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;MY_PLATFORM_ALLOWED_CHANNELS&quot;</span><span class="p">):</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">allowed</span><span class="p">,</span> <span class="nb">list</span><span class="p">):</span>
+            <span class="n">allowed</span> <span class="o">=</span> <span class="s2">&quot;,&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">allowed</span><span class="p">)</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;MY_PLATFORM_ALLOWED_CHANNELS&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">allowed</span><span class="p">)</span>
+    <span class="k">return</span> <span class="kc">None</span>  <span class="c1"># 无需合并到 PlatformConfig.extra 的额外内容</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+        <span class="o">...</span><span class="p">,</span>
+        <span class="n">apply_yaml_config_fn</span><span class="o">=</span><span class="n">_apply_yaml_config</span><span class="p">,</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p>该 hook 在 <code>load_gateway_config()</code> 期间，于通用共享键循环（处理 <code>unauthorized_dm_behavior</code>、<code>notice_delivery</code>、<code>reply_prefix</code>、<code>require_mention</code> 等公共键）之后、<code>_apply_env_overrides()</code> 之前调用，因此你的 plugin 只需桥接<strong>平台专属</strong>键。</p>
+<p>hook 内抛出的异常会被捕获并以 debug 级别记录 — 行为异常的 plugin 不会中止 gateway 配置加载。</p>
+<h2 id="cron-投递">Cron 投递</h2>
+<p>要让 <code>deliver=my_platform</code> 的 cron 任务路由到已配置的主频道，将 <code>cron_deliver_env_var</code> 设置为持有默认聊天/房间/频道 ID 的环境变量名：</p>
+<div class="highlight"><pre><span></span><code><span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+    <span class="o">...</span>
+    <span class="n">cron_deliver_env_var</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_HOME_CHANNEL&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>调度器在解析 <code>deliver=my_platform</code> 任务的主目标时会读取此环境变量，并将该平台视为 <code>_KNOWN_DELIVERY_PLATFORMS</code> 风格检查中的有效 cron 目标。如果你的 <code>env_enablement_fn</code> 填充了 <code>home_channel</code> 字典（见上文），则优先使用该值 — <code>cron_deliver_env_var</code> 是在环境变量填充之前运行的 cron 任务的回退方案。</p>
+<h3 id="进程外-cron-投递">进程外 cron 投递</h3>
+<p><code>cron_deliver_env_var</code> 使你的平台成为可识别的 <code>deliver=</code> 目标。要在 cron 任务运行于独立进程（即 <code>hermes cron run</code> 与 <code>hermes gateway</code> 分离）时使实际发送成功，需注册 <code>standalone_sender_fn</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_standalone_send</span><span class="p">(</span>
+    <span class="n">pconfig</span><span class="p">,</span>
+    <span class="n">chat_id</span><span class="p">,</span>
+    <span class="n">message</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">thread_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="n">media_files</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="n">force_document</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;建立临时连接/获取新 token，发送消息，然后关闭。&quot;&quot;&quot;</span>
+    <span class="c1"># ... 建立连接，发送消息，返回结果 ...</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;success&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;message_id&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">}</span>
+    <span class="c1"># 或 {&quot;error&quot;: &quot;...&quot;}</span>
+
+<span class="n">ctx</span><span class="o">.</span><span class="n">register_platform</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;my_platform&quot;</span><span class="p">,</span>
+    <span class="o">...</span>
+    <span class="n">cron_deliver_env_var</span><span class="o">=</span><span class="s2">&quot;MY_PLATFORM_HOME_CHANNEL&quot;</span><span class="p">,</span>
+    <span class="n">standalone_sender_fn</span><span class="o">=</span><span class="n">_standalone_send</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>为何需要此 hook：内置平台（Telegram、Discord、Slack 等）在 <code>tools/send_message_tool.py</code> 中内置了直接 REST 辅助函数，使 cron 无需在同一进程中持有 gateway 即可投递。Plugin 平台历史上依赖 <code>_gateway_runner_ref()</code>，该函数在 gateway 进程外返回 <code>None</code>，因此若没有 <code>standalone_sender_fn</code>，cron 端发送会失败并报 <code>No live adapter for platform '&lt;name&gt;'</code>。</p>
+<p>该函数接收与实时适配器相同的 <code>pconfig</code> 和 <code>chat_id</code>，以及可选的 <code>thread_id</code>、<code>media_files</code> 和 <code>force_document</code> 关键字参数。返回 <code>{"success": True, "message_id": ...}</code> 视为成功投递；返回 <code>{"error": "..."}</code> 会将消息记录到 cron 的 <code>delivery_errors</code> 中。函数内抛出的异常由调度器捕获并报告为 <code>Plugin standalone send failed: &lt;reason&gt;</code>。参考实现位于 <code>plugins/platforms/{irc,teams,google_chat}/adapter.py</code>。</p>
+<h2 id="surfacing-env-vars-in-hermes-config">在 <code>hermes config</code> 中暴露环境变量</h2>
+<p><code>hermes_cli/config.py</code> 在导入时扫描 <code>plugins/platforms/*/plugin.yaml</code>，并从 <code>requires_env</code> 和（可选的）<code>optional_env</code> 块自动填充 <code>OPTIONAL_ENV_VARS</code>。使用富字典形式可提供完整的描述、prompt、password 标志和 URL — CLI 设置 UI 会自动识别。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/platforms/my_platform/plugin.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my_platform-platform</span>
+<span class="nt">label</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My Platform</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">platform</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">&gt;</span>
+<span class="w">  </span><span class="no">My Platform gateway adapter for Hermes Agent.</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_TOKEN</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Bot</span><span class="nv"> </span><span class="s">API</span><span class="nv"> </span><span class="s">token</span><span class="nv"> </span><span class="s">from</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">My</span><span class="nv"> </span><span class="s">Platform</span><span class="nv"> </span><span class="s">console&quot;</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;My</span><span class="nv"> </span><span class="s">Platform</span><span class="nv"> </span><span class="s">bot</span><span class="nv"> </span><span class="s">token&quot;</span>
+<span class="w">    </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://my-platform.example.com/bots&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_CHANNEL</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Channel</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">join</span><span class="nv"> </span><span class="s">(e.g.</span><span class="nv"> </span><span class="s">#hermes)&quot;</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Channel&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="nt">optional_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_HOME_CHANNEL</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Default</span><span class="nv"> </span><span class="s">channel</span><span class="nv"> </span><span class="s">for</span><span class="nv"> </span><span class="s">cron</span><span class="nv"> </span><span class="s">delivery</span><span class="nv"> </span><span class="s">(defaults</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">MY_PLATFORM_CHANNEL)&quot;</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Home</span><span class="nv"> </span><span class="s">channel</span><span class="nv"> </span><span class="s">(or</span><span class="nv"> </span><span class="s">empty)&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_PLATFORM_ALLOWED_USERS</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Comma-separated</span><span class="nv"> </span><span class="s">user</span><span class="nv"> </span><span class="s">IDs</span><span class="nv"> </span><span class="s">allowed</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">talk</span><span class="nv"> </span><span class="s">to</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">bot&quot;</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Allowed</span><span class="nv"> </span><span class="s">users</span><span class="nv"> </span><span class="s">(comma-separated)&quot;</span>
+<span class="w">    </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p><strong>支持的字典键：</strong> <code>name</code>（必填）、<code>description</code>、<code>prompt</code>、<code>url</code>、<code>password</code>（布尔值；当省略时根据 <code>*_TOKEN</code> / <code>*_SECRET</code> / <code>*_KEY</code> / <code>*_PASSWORD</code> / <code>*_JSON</code> 后缀自动检测）、<code>category</code>（默认为 <code>"messaging"</code>）。</p>
+<p>裸字符串条目（<code>- MY_PLATFORM_TOKEN</code>）仍然有效 — 会根据 plugin 的 <code>label</code> 自动生成通用描述。如果 <code>OPTIONAL_ENV_VARS</code> 中已存在同名变量的硬编码条目，则以硬编码为准（向后兼容）；plugin.yaml 形式作为回退。</p>
+<h2 id="平台专属慢速-llm-用户体验">平台专属慢速 LLM 用户体验</h2>
+<p>某些平台存在约束，影响慢速 LLM 响应的呈现方式：</p>
+<ul>
+<li><strong>LINE</strong> 发出单次使用的<em>回复 token</em>，在入站事件后约 60 秒过期。使用该 token 回复是免费的；回退到计费的 Push API 则不然。如果 LLM 在截止时间前未完成，选择是"消耗付费 Push 配额"或"在回复 token 过期前用它做些更聪明的事"。</li>
+<li><strong>WhatsApp</strong> 在 24 小时不活跃后将会话标记为非活跃，此后只接受模板消息。</li>
+<li><strong>SMS</strong> 没有正在输入指示器或渐进式更新的概念 — 长响应看起来就像 bot 离线了。</li>
+</ul>
+<p>这些是 <code>BasePlatformAdapter</code> 无法预判的真实约束。Plugin 接口有意为适配器在基础输入循环之上叠加平台专属 UX 留出空间，而无需扩展 kwarg 列表。</p>
+<h3 id="模式子类化-_keep_typing-以叠加飞行中-ux">模式：子类化 <code>_keep_typing</code> 以叠加飞行中 UX</h3>
+<p><code>BasePlatformAdapter._keep_typing</code> 是正在输入指示器的心跳 — 它在 LLM 生成时作为后台任务运行，响应投递后被取消。要在某个阈值时叠加平台专属行为（例如在 45 秒时发送"仍在思考"气泡），在你的适配器中覆盖 <code>_keep_typing</code>，在 <code>super()._keep_typing()</code> 旁边调度你自己的任务，并在 <code>finally</code> 中清理：</p>
+<div class="highlight"><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">LineAdapter</span><span class="p">(</span><span class="n">BasePlatformAdapter</span><span class="p">):</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_keep_typing</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">slow_response_threshold</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">await</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">_keep_typing</span><span class="p">(</span><span class="n">chat_id</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="k">return</span>
+
+        <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_fire_at_threshold</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">await</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">slow_response_threshold</span><span class="p">)</span>
+            <span class="k">except</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">CancelledError</span><span class="p">:</span>
+                <span class="k">raise</span>
+            <span class="c1"># 平台专属操作 — 对于 LINE，使用缓存的回复 token 发送</span>
+            <span class="c1"># Template Buttons &quot;获取答案&quot;气泡，用户可通过 postback</span>
+            <span class="c1"># 回调中的新（免费）回复 token 稍后获取缓存的响应。</span>
+            <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_send_slow_response_button</span><span class="p">(</span><span class="n">chat_id</span><span class="p">)</span>
+
+        <span class="n">side_task</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">create_task</span><span class="p">(</span><span class="n">_fire_at_threshold</span><span class="p">())</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">await</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">_keep_typing</span><span class="p">(</span><span class="n">chat_id</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="k">finally</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">side_task</span><span class="o">.</span><span class="n">done</span><span class="p">():</span>
+                <span class="n">side_task</span><span class="o">.</span><span class="n">cancel</span><span class="p">()</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="k">await</span> <span class="n">side_task</span>
+                <span class="k">except</span> <span class="p">(</span><span class="n">asyncio</span><span class="o">.</span><span class="n">CancelledError</span><span class="p">,</span> <span class="ne">Exception</span><span class="p">):</span>
+                    <span class="k">pass</span>
+</code></pre></div>
+
+<p>关键点：</p>
+<ul>
+<li><strong>始终 <code>await super()._keep_typing(...)</code>。</strong> 输入心跳本身有独立价值 — 不要替换它，而是在其上叠加。</li>
+<li><strong>在 <code>finally</code> 中清理副任务。</strong> 当 LLM 完成（或 <code>/stop</code> 取消运行）时，gateway 会取消输入任务。你的副任务也必须响应该取消，否则它会残留并可能在响应已投递后触发。</li>
+<li><strong>配合 <code>interrupt_session_activity</code></strong> 在用户发出 <code>/stop</code> 时解决任何孤立 UX 状态。对于 LINE，这意味着将 postback 缓存条目从 <code>PENDING</code> 转换为 <code>ERROR</code>，使持久的"获取答案"按钮投递"运行已中断"消息而非循环。</li>
+</ul>
+<h3 id="模式子类化-send-以通过缓存路由而非立即发送">模式：子类化 <code>send</code> 以通过缓存路由而非立即发送</h3>
+<p>如果你的慢速响应 UX 缓存响应以供稍后检索（LINE 的 postback 流程），你的 <code>send</code> 覆盖需要识别三种模式：</p>
+<ol>
+<li><strong>此聊天存在待处理的 postback</strong> → 将响应缓存在 request_id 下，不发送任何可见内容。</li>
+<li><strong>系统忙碌确认</strong>（<code>⚡ Interrupting</code>、<code>⏳ Queued</code>、<code>⏩ Steered</code>）→ 绕过缓存直接发送，使用户看到 gateway 对其输入的响应。</li>
+<li><strong>正常响应</strong> → 按常规通过回复 token 或 Push 发送。</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">send</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">kw</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SendResult</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">_is_system_bypass</span><span class="p">(</span><span class="n">content</span><span class="p">):</span>
+        <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_send_text_chunks</span><span class="p">(</span><span class="n">chat_id</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">force_push</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="n">pending_rid</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_buttons</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">chat_id</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">pending_rid</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_cache</span><span class="o">.</span><span class="n">set_ready</span><span class="p">(</span><span class="n">pending_rid</span><span class="p">,</span> <span class="n">content</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">SendResult</span><span class="p">(</span><span class="n">success</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">message_id</span><span class="o">=</span><span class="n">pending_rid</span><span class="p">)</span>
+    <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_send_text_chunks</span><span class="p">(</span><span class="n">chat_id</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">force_push</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</code></pre></div>
+
+<p><code>_SYSTEM_BYPASS_PREFIXES</code> 是 gateway 自身的忙碌确认前缀（<code>⚡</code>、<code>⏳</code>、<code>⏩</code>、<code>💾</code>）。无论缓存 UX 状态如何，始终让这些前缀可见地通过。</p>
+<h3 id="何时适用此模式">何时适用此模式</h3>
+<p>在以下情况使用输入循环覆盖方式：</p>
+<ul>
+<li>平台的出站 API 存在硬性时间窗口约束（单次使用回复 token、过期的粘性会话等），<strong>且</strong></li>
+<li>在该平台上<em>可见的飞行中气泡</em>是可接受的 UX。</li>
+</ul>
+<p>在以下情况使用更简单的 <code>slow_response_threshold = 0</code> 始终 Push 路径：</p>
+<ul>
+<li>平台没有有意义的免费与付费区别，<strong>或</strong></li>
+<li>用户社区更倾向于"加载中……加载中……完成"的静默后响应，而非交互式中间气泡。</li>
+</ul>
+<p>LINE 两者都支持：阈值默认为 45 秒用于免费 postback 获取，<code>LINE_SLOW_RESPONSE_THRESHOLD=0</code> 恢复为"始终 Push 回退"。</p>
+<h3 id="参考实现">参考实现</h3>
+<p>完整的 LINE postback 实现参见 <code>plugins/platforms/line/adapter.py</code> — 包含 <code>RequestCache</code> 状态机（<code>PENDING → READY → DELIVERED</code>，以及 <code>/stop</code> 的 <code>ERROR</code>）、在阈值时触发 Template Buttons 气泡的 <code>_keep_typing</code> 覆盖、通过缓存路由的 <code>send</code> 覆盖，以及解决孤立 PENDING 条目的 <code>interrupt_session_activity</code> 覆盖。</p>
+<h3 id="参考实现plugin-路径">参考实现（Plugin 路径）</h3>
+<p>完整的工作示例参见仓库中的 <code>plugins/platforms/irc/</code> — 一个无外部依赖的完整异步 IRC 适配器。<code>plugins/platforms/teams/</code> 涵盖 Bot Framework / Adaptive Cards，<code>plugins/platforms/google_chat/</code> 涵盖基于 OAuth 的 REST API，<code>plugins/platforms/line/</code> 涵盖带平台专属慢速 LLM UX 的 webhook 驱动消息 API。</p>
+<hr />
+<h2 id="分步清单内置路径step-by-step-checklist">分步清单（内置路径）{#step-by-step-checklist}</h2>
+<div class="admonition adm-note"><p class="adm-title">注意</p>
+<p>此清单用于将平台直接添加到 Hermes 核心代码库 — 通常由核心贡献者为官方支持的平台执行。社区/第三方平台应使用上方的 <a href="../../developer-guide/adding-platform-adapters.html#plugin-path-recommended" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">Plugin 路径</a>。</p>
+</div>
+<h3 id="1-platform-枚举">1. Platform 枚举</h3>
+<p>在 <code>gateway/config.py</code> 的 <code>Platform</code> 枚举中添加你的平台：</p>
+<div class="highlight"><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">Platform</span><span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="n">Enum</span><span class="p">):</span>
+    <span class="c1"># ... 现有平台 ...</span>
+    <span class="n">NEWPLAT</span> <span class="o">=</span> <span class="s2">&quot;newplat&quot;</span>
+</code></pre></div>
+
+<h3 id="2-适配器文件">2. 适配器文件</h3>
+<p>创建 <code>plugins/platforms/newplat/adapter.py</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">gateway.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">Platform</span><span class="p">,</span> <span class="n">PlatformConfig</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BasePlatformAdapter</span><span class="p">,</span> <span class="n">SendResult</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gateway.platforms.event</span><span class="w"> </span><span class="kn">import</span> <span class="n">MessageEvent</span><span class="p">,</span> <span class="n">MessageType</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">check_newplat_requirements</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;如果依赖可用则返回 True。&quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="n">SOME_SDK_AVAILABLE</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">NewPlatAdapter</span><span class="p">(</span><span class="n">BasePlatformAdapter</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">PlatformConfig</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="n">Platform</span><span class="o">.</span><span class="n">NEWPLAT</span><span class="p">)</span>
+        <span class="c1"># 从 config.extra 字典读取配置</span>
+        <span class="n">extra</span> <span class="o">=</span> <span class="n">config</span><span class="o">.</span><span class="n">extra</span> <span class="ow">or</span> <span class="p">{}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_api_key</span> <span class="o">=</span> <span class="n">extra</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;api_key&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">&quot;NEWPLAT_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="c1"># 建立连接，启动轮询/webhook</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mark_connected</span><span class="p">()</span>
+        <span class="k">return</span> <span class="kc">True</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">disconnect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_running</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mark_disconnected</span><span class="p">()</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">send</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">reply_to</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">metadata</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="c1"># 通过平台 API 发送消息</span>
+        <span class="k">return</span> <span class="n">SendResult</span><span class="p">(</span><span class="n">success</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">message_id</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">)</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_chat_info</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chat_id</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">chat_id</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;dm&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>对于入站消息，构建 <code>MessageEvent</code> 并调用 <code>self.handle_message(event)</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="n">source</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">build_source</span><span class="p">(</span>
+    <span class="n">chat_id</span><span class="o">=</span><span class="n">chat_id</span><span class="p">,</span>
+    <span class="n">chat_name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span>
+    <span class="n">chat_type</span><span class="o">=</span><span class="s2">&quot;dm&quot;</span><span class="p">,</span>  <span class="c1"># 或 &quot;group&quot;</span>
+    <span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span>
+    <span class="n">user_name</span><span class="o">=</span><span class="n">user_name</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">event</span> <span class="o">=</span> <span class="n">MessageEvent</span><span class="p">(</span>
+    <span class="n">text</span><span class="o">=</span><span class="n">content</span><span class="p">,</span>
+    <span class="n">message_type</span><span class="o">=</span><span class="n">MessageType</span><span class="o">.</span><span class="n">TEXT</span><span class="p">,</span>
+    <span class="n">source</span><span class="o">=</span><span class="n">source</span><span class="p">,</span>
+    <span class="n">message_id</span><span class="o">=</span><span class="n">msg_id</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">handle_message</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="3-gateway-配置gatewayconfigpy">3. Gateway 配置（<code>gateway/config.py</code>）</h3>
+<p>三个接触点：</p>
+<ol>
+<li><strong><code>get_connected_platforms()</code></strong> — 添加对你平台所需凭据的检查</li>
+<li><strong><code>load_gateway_config()</code></strong> — 添加 token 环境变量映射条目：<code>Platform.NEWPLAT: "NEWPLAT_TOKEN"</code></li>
+<li><strong><code>_apply_env_overrides()</code></strong> — 将所有 <code>NEWPLAT_*</code> 环境变量映射到配置</li>
+</ol>
+<h3 id="4-gateway-runnergatewayrunpy">4. Gateway Runner（<code>gateway/run.py</code>）</h3>
+<p>六个接触点：</p>
+<ol>
+<li><strong><code>_instantiate_adapter()</code></strong> — 添加 <code>elif platform == Platform.NEWPLAT:</code> 分支。<code>_create_adapter()</code> 包装器会将每个成功创建的适配器绑定到其网关运行器。</li>
+<li><strong><code>_is_user_authorized()</code> allowed_users 映射</strong> — <code>Platform.NEWPLAT: "NEWPLAT_ALLOWED_USERS"</code></li>
+<li><strong><code>_is_user_authorized()</code> allow_all 映射</strong> — <code>Platform.NEWPLAT: "NEWPLAT_ALLOW_ALL_USERS"</code></li>
+<li><strong>早期环境检查 <code>_any_allowlist</code> 元组</strong> — 添加 <code>"NEWPLAT_ALLOWED_USERS"</code></li>
+<li><strong>早期环境检查 <code>_allow_all</code> 元组</strong> — 添加 <code>"NEWPLAT_ALLOW_ALL_USERS"</code></li>
+<li><strong><code>_UPDATE_ALLOWED_PLATFORMS</code> frozenset</strong> — 添加 <code>Platform.NEWPLAT</code></li>
+</ol>
+<h3 id="5-跨平台投递">5. 跨平台投递</h3>
+<ol>
+<li><strong><code>gateway/platforms/webhook.py</code></strong> — 将 <code>"newplat"</code> 添加到投递类型元组</li>
+<li><strong><code>cron/scheduler.py</code></strong> — 添加到 <code>_KNOWN_DELIVERY_PLATFORMS</code> frozenset 和 <code>_deliver_result()</code> 平台映射</li>
+</ol>
+<h3 id="6-cli-集成">6. CLI 集成</h3>
+<ol>
+<li><strong><code>hermes_cli/config.py</code></strong> — 将所有 <code>NEWPLAT_*</code> 变量添加到 <code>_EXTRA_ENV_KEYS</code></li>
+<li><strong><code>hermes_cli/gateway.py</code></strong> — 在 <code>_PLATFORMS</code> 列表中添加条目，包含 key、label、emoji、token_var、setup_instructions 和 vars</li>
+<li><strong><code>hermes_cli/platforms.py</code></strong> — 添加带 label 和 default_toolset 的 <code>PlatformInfo</code> 条目（供 <code>skills_config</code> 和 <code>tools_config</code> TUI 使用）</li>
+<li><strong><code>hermes_cli/setup.py</code></strong> — 添加 <code>_setup_newplat()</code> 函数（可委托给 <code>gateway.py</code>）并将元组添加到消息平台列表</li>
+<li><strong><code>hermes_cli/status.py</code></strong> — 添加平台检测条目：<code>"NewPlat": ("NEWPLAT_TOKEN", "NEWPLAT_HOME_CHANNEL")</code></li>
+<li><strong><code>hermes_cli/dump.py</code></strong> — 将 <code>"newplat": "NEWPLAT_TOKEN"</code> 添加到平台检测字典</li>
+</ol>
+<h3 id="7-工具">7. 工具</h3>
+<ol>
+<li><strong><code>tools/send_message_tool.py</code></strong> — 将 <code>"newplat": Platform.NEWPLAT</code> 添加到平台映射</li>
+<li><strong><code>tools/cronjob_tools.py</code></strong> — 将 <code>newplat</code> 添加到投递目标描述字符串</li>
+</ol>
+<h3 id="8-toolset">8. Toolset</h3>
+<ol>
+<li><strong><code>toolsets.py</code></strong> — 添加带 <code>_HERMES_CORE_TOOLS</code> 的 <code>"hermes-newplat"</code> toolset 定义</li>
+<li><strong><code>toolsets.py</code></strong> — 将 <code>"hermes-newplat"</code> 添加到 <code>"hermes-gateway"</code> 的 includes 列表</li>
+</ol>
+<h3 id="9-可选平台提示">9. 可选：平台提示</h3>
+<p><strong><code>agent/prompt_builder.py</code></strong> — 如果你的平台有特定渲染限制（不支持 markdown、消息长度限制等），在 <code>_PLATFORM_HINTS</code> 字典中添加条目。这会将平台专属指导注入系统 prompt：</p>
+<div class="highlight"><pre><span></span><code><span class="n">_PLATFORM_HINTS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="c1"># ...</span>
+    <span class="s2">&quot;newplat&quot;</span><span class="p">:</span> <span class="p">(</span>
+        <span class="s2">&quot;You are chatting via NewPlat. It supports markdown formatting &quot;</span>
+        <span class="s2">&quot;but has a 4000-character message limit.&quot;</span>
+    <span class="p">),</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>并非所有平台都需要提示 — 仅在 agent 行为应有所不同时添加。</p>
+<h3 id="10-测试">10. 测试</h3>
+<p>创建 <code>tests/gateway/test_newplat.py</code>，覆盖：</p>
+<ul>
+<li>从配置构建适配器</li>
+<li>消息事件构建</li>
+<li>发送方法（mock 外部 API）</li>
+<li>平台专属功能（加密、路由等）</li>
+</ul>
+<h3 id="11-文档">11. 文档</h3>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>需添加内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>website/docs/user-guide/messaging/newplat.md</code></td>
+<td>完整的平台设置页面</td>
+</tr>
+<tr>
+<td><code>website/docs/user-guide/messaging/index.md</code></td>
+<td>平台对比表、架构图、toolset 表、安全章节、下一步链接</td>
+</tr>
+<tr>
+<td><code>website/docs/reference/environment-variables.md</code></td>
+<td>所有 NEWPLAT_* 环境变量</td>
+</tr>
+<tr>
+<td><code>website/docs/reference/toolsets-reference.md</code></td>
+<td>hermes-newplat toolset</td>
+</tr>
+<tr>
+<td><code>website/docs/integrations/index.md</code></td>
+<td>平台链接</td>
+</tr>
+<tr>
+<td><code>website/sidebars.ts</code></td>
+<td>文档页面的侧边栏条目</td>
+</tr>
+<tr>
+<td><code>website/docs/developer-guide/architecture.md</code></td>
+<td>适配器数量 + 列表</td>
+</tr>
+<tr>
+<td><code>website/docs/developer-guide/gateway-internals.md</code></td>
+<td>适配器文件列表</td>
+</tr>
+</tbody>
+</table>
+<h2 id="一致性审计">一致性审计</h2>
+<p>在将新平台 PR 标记为完成之前，对照已有平台进行一致性审计：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 查找所有提及参考平台的 .py 文件</span>
+search_files<span class="w"> </span><span class="s2">&quot;bluebubbles&quot;</span><span class="w"> </span><span class="nv">output_mode</span><span class="o">=</span><span class="s2">&quot;files_only&quot;</span><span class="w"> </span><span class="nv">file_glob</span><span class="o">=</span><span class="s2">&quot;*.py&quot;</span>
+
+<span class="c1"># 查找所有提及新平台的 .py 文件</span>
+search_files<span class="w"> </span><span class="s2">&quot;newplat&quot;</span><span class="w"> </span><span class="nv">output_mode</span><span class="o">=</span><span class="s2">&quot;files_only&quot;</span><span class="w"> </span><span class="nv">file_glob</span><span class="o">=</span><span class="s2">&quot;*.py&quot;</span>
+
+<span class="c1"># 在第一个集合中但不在第二个集合中的文件是潜在的遗漏点</span>
+</code></pre></div>
+
+<p>对 <code>.md</code> 和 <code>.ts</code> 文件重复上述操作。逐一排查每个遗漏点 — 是平台枚举（需要更新）还是平台专属引用（可跳过）？</p>
+<h2 id="常见模式">常见模式</h2>
+<h3 id="长轮询适配器">长轮询适配器</h3>
+<p>如果你的适配器使用长轮询（如 Telegram 或 Weixin），使用轮询循环任务：</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_poll_task</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">create_task</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_poll_loop</span><span class="p">())</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_mark_connected</span><span class="p">()</span>
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_poll_loop</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">_running</span><span class="p">:</span>
+        <span class="n">messages</span> <span class="o">=</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fetch_updates</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">msg</span> <span class="ow">in</span> <span class="n">messages</span><span class="p">:</span>
+            <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">handle_message</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_build_event</span><span class="p">(</span><span class="n">msg</span><span class="p">))</span>
+</code></pre></div>
+
+<h3 id="回调webhook-适配器">回调/Webhook 适配器</h3>
+<p>如果平台将消息推送到你的端点（如 WeCom 回调），运行 HTTP 服务器：</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_app</span> <span class="o">=</span> <span class="n">web</span><span class="o">.</span><span class="n">Application</span><span class="p">()</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_app</span><span class="o">.</span><span class="n">router</span><span class="o">.</span><span class="n">add_post</span><span class="p">(</span><span class="s2">&quot;/callback&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_handle_callback</span><span class="p">)</span>
+    <span class="c1"># ... 启动 aiohttp 服务器</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_mark_connected</span><span class="p">()</span>
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_handle_callback</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">):</span>
+    <span class="n">event</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_build_event</span><span class="p">(</span><span class="k">await</span> <span class="n">request</span><span class="o">.</span><span class="n">text</span><span class="p">())</span>
+    <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_message_queue</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">web</span><span class="o">.</span><span class="n">Response</span><span class="p">(</span><span class="n">text</span><span class="o">=</span><span class="s2">&quot;success&quot;</span><span class="p">)</span>  <span class="c1"># 立即确认</span>
+</code></pre></div>
+
+<p>对于有严格响应截止时间的平台（例如 WeCom 的 5 秒限制），始终立即确认，稍后通过 API 主动投递 agent 的回复。Agent 会话运行 3–30 分钟 — 在回调响应窗口内内联回复是不可行的。</p>
+<h3 id="token-锁">Token 锁</h3>
+<p>如果适配器持有带唯一凭据的持久连接，添加作用域锁以防止两个配置文件使用相同凭据：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">gateway.status</span><span class="w"> </span><span class="kn">import</span> <span class="n">acquire_scoped_lock</span><span class="p">,</span> <span class="n">release_scoped_lock</span>
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">acquire_scoped_lock</span><span class="p">(</span><span class="s2">&quot;newplat&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_token</span><span class="p">):</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s2">&quot;Token already in use by another profile&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="c1"># ... 连接</span>
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">disconnect</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="n">release_scoped_lock</span><span class="p">(</span><span class="s2">&quot;newplat&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_token</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="参考实现_1">参考实现</h2>
+<table>
+<thead>
+<tr>
+<th>适配器</th>
+<th>模式</th>
+<th>复杂度</th>
+<th>适合参考的场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bluebubbles.py</code></td>
+<td>REST + webhook</td>
+<td>中</td>
+<td>简单 REST API 集成</td>
+</tr>
+<tr>
+<td><code>weixin.py</code></td>
+<td>长轮询 + CDN</td>
+<td>高</td>
+<td>媒体处理、加密</td>
+</tr>
+<tr>
+<td><code>wecom_callback.py</code></td>
+<td>回调/webhook</td>
+<td>中</td>
+<td>HTTP 服务器、AES 加密、多应用</td>
+</tr>
+<tr>
+<td><code>plugins/platforms/irc/adapter.py</code></td>
+<td>长轮询 + IRC 协议</td>
+<td>高</td>
+<td>带作用域令牌锁的全功能插件适配器</td>
+</tr>
+</tbody>
+</table>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/adding-platform-adapters</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#架构概览">架构概览</a></li>
+<li class="lvl2"><a href="#plugin-路径推荐plugin-path-recommended">Plugin 路径（推荐）{#plugin-path-recommended}</a></li>
+<li class="lvl3"><a href="#pluginyaml">plugin.yaml</a></li>
+<li class="lvl3"><a href="#adapterpy">adapter.py</a></li>
+<li class="lvl3"><a href="#配置">配置</a></li>
+<li class="lvl3"><a href="#plugin-系统自动处理的内容">Plugin 系统自动处理的内容</a></li>
+<li class="lvl2"><a href="#环境变量驱动的自动配置">环境变量驱动的自动配置</a></li>
+<li class="lvl2"><a href="#yamlenv-配置桥接">YAML→env 配置桥接</a></li>
+<li class="lvl2"><a href="#cron-投递">Cron 投递</a></li>
+<li class="lvl3"><a href="#进程外-cron-投递">进程外 cron 投递</a></li>
+<li class="lvl2"><a href="#surfacing-env-vars-in-hermes-config">在 hermes config 中暴露环境变量</a></li>
+<li class="lvl2"><a href="#平台专属慢速-llm-用户体验">平台专属慢速 LLM 用户体验</a></li>
+<li class="lvl3"><a href="#模式子类化-_keep_typing-以叠加飞行中-ux">模式：子类化 _keep_typing 以叠加飞行中 UX</a></li>
+<li class="lvl3"><a href="#模式子类化-send-以通过缓存路由而非立即发送">模式：子类化 send 以通过缓存路由而非立即发送</a></li>
+<li class="lvl3"><a href="#何时适用此模式">何时适用此模式</a></li>
+<li class="lvl3"><a href="#参考实现">参考实现</a></li>
+<li class="lvl3"><a href="#参考实现plugin-路径">参考实现（Plugin 路径）</a></li>
+<li class="lvl2"><a href="#分步清单内置路径step-by-step-checklist">分步清单（内置路径）{#step-by-step-checklist}</a></li>
+<li class="lvl3"><a href="#1-platform-枚举">1. Platform 枚举</a></li>
+<li class="lvl3"><a href="#2-适配器文件">2. 适配器文件</a></li>
+<li class="lvl3"><a href="#3-gateway-配置gatewayconfigpy">3. Gateway 配置（gateway/config.py）</a></li>
+<li class="lvl3"><a href="#4-gateway-runnergatewayrunpy">4. Gateway Runner（gateway/run.py）</a></li>
+<li class="lvl3"><a href="#5-跨平台投递">5. 跨平台投递</a></li>
+<li class="lvl3"><a href="#6-cli-集成">6. CLI 集成</a></li>
+<li class="lvl3"><a href="#7-工具">7. 工具</a></li>
+<li class="lvl3"><a href="#8-toolset">8. Toolset</a></li>
+<li class="lvl3"><a href="#9-可选平台提示">9. 可选：平台提示</a></li>
+<li class="lvl3"><a href="#10-测试">10. 测试</a></li>
+<li class="lvl3"><a href="#11-文档">11. 文档</a></li>
+<li class="lvl2"><a href="#一致性审计">一致性审计</a></li>
+<li class="lvl2"><a href="#常见模式">常见模式</a></li>
+<li class="lvl3"><a href="#长轮询适配器">长轮询适配器</a></li>
+<li class="lvl3"><a href="#回调webhook-适配器">回调/Webhook 适配器</a></li>
+<li class="lvl3"><a href="#token-锁">Token 锁</a></li>
+<li class="lvl2"><a href="#参考实现_1">参考实现</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

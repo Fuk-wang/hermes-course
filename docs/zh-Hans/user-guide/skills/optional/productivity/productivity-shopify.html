@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shopify — 通过 curl 使用 Shopify Admin 与 Storefront GraphQL API · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/optional/productivity/productivity-shopify</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="shopify">Shopify</h1>
+<p>通过 curl 使用 Shopify Admin 与 Storefront GraphQL API。涵盖商品、订单、客户、库存、metafield。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>可选 — 通过 <code>hermes skills install official/productivity/shopify</code> 安装</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>optional-skills/productivity/shopify</code></td>
+</tr>
+<tr>
+<td>版本</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>作者</td>
+<td>community</td>
+</tr>
+<tr>
+<td>许可证</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>标签</td>
+<td><code>Shopify</code>, <code>E-commerce</code>, <code>Commerce</code>, <code>API</code>, <code>GraphQL</code></td>
+</tr>
+<tr>
+<td>相关 skill</td>
+<td><a href="../../../../../user-guide/skills/bundled/productivity/productivity-airtable.html"><code>airtable</code></a>, <a href="../../../../../user-guide/skills/bundled/social-media/social-media-xurl.html"><code>xurl</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 skill 激活时 agent 所看到的指令内容。</p>
+</div>
+<h1 id="shopify--admin-与-storefront-graphql-api">Shopify — Admin 与 Storefront GraphQL API</h1>
+<p>通过 <code>curl</code> 直接操作 Shopify 店铺：列出商品、管理库存、拉取订单、更新客户、读取 metafield。无需 SDK，无需应用框架——只需 GraphQL 端点和自定义应用访问令牌。</p>
+<p>REST Admin API 自 2024-04 起已进入遗留状态，仅接受安全修复。<strong>所有管理操作请使用 GraphQL Admin</strong>。面向客户的只读查询（商品、集合、购物车）请使用 <strong>Storefront GraphQL</strong>。</p>
+<h2 id="前置条件">前置条件</h2>
+<ol>
+<li>在 Shopify 管理后台：<strong>Settings → Apps and sales channels → Develop apps → Create an app</strong>。</li>
+<li>点击 <strong>Configure Admin API scopes</strong>，选择所需权限（见下方示例），保存。</li>
+<li><strong>Install app</strong> → Admin API 访问令牌仅显示一次。立即复制——Shopify 不会再次展示。令牌以 <code>shpat_</code> 开头。</li>
+<li>保存至 <code>~/.hermes/.env</code>：
+   <code>SHOPIFY_ACCESS_TOKEN=shpat_xxxxxxxxxxxxxxxxxxxx
+   SHOPIFY_STORE_DOMAIN=my-store.myshopify.com
+   SHOPIFY_API_VERSION=2026-01</code></li>
+</ol>
+<blockquote>
+<p><strong>注意：</strong> 自 2026 年 1 月 1 日起，在 Shopify 管理后台新建"旧版自定义应用"的功能已停用。新配置应使用 <strong>Dev Dashboard</strong>（<code>shopify.dev/docs/apps/build/dev-dashboard</code>）。已有的管理后台创建的应用继续有效。如果用户的店铺没有现有自定义应用且时间在 2026-01-01 之后，请引导其使用 Dev Dashboard 而非管理后台流程。</p>
+</blockquote>
+<p>常用权限范围（scope）按任务分类：
+- 商品 / 集合：<code>read_products</code>、<code>write_products</code>
+- 库存：<code>read_inventory</code>、<code>write_inventory</code>、<code>read_locations</code>
+- 订单：<code>read_orders</code>、<code>write_orders</code>（不含 <code>read_all_orders</code> 时仅返回最近 30 条）
+- 客户：<code>read_customers</code>、<code>write_customers</code>
+- 草稿订单：<code>read_draft_orders</code>、<code>write_draft_orders</code>
+- 履约：<code>read_fulfillments</code>、<code>write_fulfillments</code>
+- Metafield / metaobject：由对应资源的 scope 覆盖</p>
+<h2 id="api-基础">API 基础</h2>
+<ul>
+<li><strong>端点：</strong> <code>https://$SHOPIFY_STORE_DOMAIN/admin/api/$SHOPIFY_API_VERSION/graphql.json</code></li>
+<li><strong>认证头：</strong> <code>X-Shopify-Access-Token: $SHOPIFY_ACCESS_TOKEN</code>（<strong>不是</strong> <code>Authorization: Bearer</code>）</li>
+<li><strong>方法：</strong> 始终为 <code>POST</code>，始终使用 <code>Content-Type: application/json</code>，请求体为 <code>{"query": "...", "variables": {...}}</code></li>
+<li><strong>HTTP 200 不代表成功。</strong> GraphQL 在顶层 <code>errors</code> 数组和各字段的 <code>userErrors</code> 中返回错误。两者都需检查。</li>
+<li><strong>ID 为 GID 字符串：</strong> <code>gid://shopify/Product/10079467700516</code>、<code>gid://shopify/Variant/...</code>、<code>gid://shopify/Order/...</code>。原样传入——不要去掉前缀。</li>
+<li><strong>速率限制：</strong> 基于查询消耗（leaky bucket）计算。每个响应的 <code>extensions.cost</code> 包含 <code>requestedQueryCost</code>、<code>actualQueryCost</code>、<code>throttleStatus.{currentlyAvailable, maximumAvailable, restoreRate}</code>。当 <code>currentlyAvailable</code> 低于下一次查询消耗时退避。标准店铺 = 100 点桶，50/s 恢复；Plus = 1000/100。</li>
+</ul>
+<p>基础 curl 模式（可复用）：</p>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">  </span><span class="nb">local</span><span class="w"> </span><span class="nv">query</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$1</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nb">local</span><span class="w"> </span><span class="nv">variables</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">2</span><span class="k">:-</span><span class="p">{</span><span class="si">}</span><span class="s2">}&quot;</span>
+<span class="w">  </span>curl<span class="w"> </span>-sS<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="s2">&quot;https://</span><span class="si">${</span><span class="nv">SHOPIFY_STORE_DOMAIN</span><span class="si">}</span><span class="s2">/admin/api/</span><span class="si">${</span><span class="nv">SHOPIFY_API_VERSION</span><span class="k">:-</span><span class="nv">2026</span><span class="p">-01</span><span class="si">}</span><span class="s2">/graphql.json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-H<span class="w"> </span><span class="s2">&quot;X-Shopify-Access-Token: </span><span class="si">${</span><span class="nv">SHOPIFY_ACCESS_TOKEN</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--data<span class="w"> </span><span class="s2">&quot;</span><span class="k">$(</span>jq<span class="w"> </span>-nc<span class="w"> </span>--arg<span class="w"> </span>q<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$query</span><span class="s2">&quot;</span><span class="w"> </span>--argjson<span class="w"> </span>v<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$variables</span><span class="s2">&quot;</span><span class="w"> </span><span class="s1">&#39;{query: $q, variables: $v}&#39;</span><span class="k">)</span><span class="s2">&quot;</span>
+<span class="o">}</span>
+</code></pre></div>
+
+<p>通过管道传给 <code>jq</code> 以获得可读输出。<code>-sS</code> 保留错误可见性同时隐藏进度条。</p>
+<h2 id="发现">发现</h2>
+<h3 id="店铺信息--当前-api-版本">店铺信息 + 当前 API 版本</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;{ shop { name myshopifyDomain primaryDomain { url } currencyCode plan { displayName } } }&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h3 id="列出所有支持的-api-版本">列出所有支持的 API 版本</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;{ publicApiVersions { handle supported } }&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.data.publicApiVersions[] | select(.supported)&#39;</span>
+</code></pre></div>
+
+<h2 id="商品">商品</h2>
+<h3 id="搜索商品前-20-条匹配结果">搜索商品（前 20 条匹配结果）</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($q: String!) {</span>
+<span class="s1">  products(first: 20, query: $q) {</span>
+<span class="s1">    edges { node { id title handle status totalInventory variants(first: 5) { edges { node { id sku price inventoryQuantity } } } } }</span>
+<span class="s1">    pageInfo { hasNextPage endCursor }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;q&quot;:&quot;hoodie status:active&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>查询语法支持 <code>title:</code>、<code>sku:</code>、<code>vendor:</code>、<code>product_type:</code>、<code>status:active</code>、<code>tag:</code>、<code>created_at:&gt;2025-01-01</code>。完整语法：https://shopify.dev/docs/api/usage/search-syntax</p>
+<h3 id="分页获取商品游标">分页获取商品（游标）</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($cursor: String) {</span>
+<span class="s1">  products(first: 100, after: $cursor) {</span>
+<span class="s1">    edges { cursor node { id handle } }</span>
+<span class="s1">    pageInfo { hasNextPage endCursor }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;cursor&quot;:null}&#39;</span>
+<span class="c1"># 后续调用：传入上一次的 endCursor</span>
+</code></pre></div>
+
+<h3 id="获取商品含变体--metafield">获取商品（含变体 + metafield）</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($id: ID!) {</span>
+<span class="s1">  product(id: $id) {</span>
+<span class="s1">    id title handle descriptionHtml tags status</span>
+<span class="s1">    variants(first: 20) { edges { node { id sku price compareAtPrice inventoryQuantity selectedOptions { name value } } } }</span>
+<span class="s1">    metafields(first: 20) { edges { node { namespace key type value } } }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;id&quot;:&quot;gid://shopify/Product/10079467700516&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h3 id="创建含一个变体的商品">创建含一个变体的商品</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($input: ProductCreateInput!) {</span>
+<span class="s1">  productCreate(product: $input) {</span>
+<span class="s1">    product { id handle }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;input&quot;:{&quot;title&quot;:&quot;Test Hoodie&quot;,&quot;status&quot;:&quot;DRAFT&quot;,&quot;vendor&quot;:&quot;Hermes&quot;,&quot;productType&quot;:&quot;Apparel&quot;,&quot;tags&quot;:[&quot;test&quot;]}}&#39;</span>
+</code></pre></div>
+
+<p>新版本中变体有独立的 mutation：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 创建商品后添加变体</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {</span>
+<span class="s1">  productVariantsBulkCreate(productId: $productId, variants: $variants) {</span>
+<span class="s1">    productVariants { id sku price }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;productId&quot;:&quot;gid://shopify/Product/...&quot;,&quot;variants&quot;:[{&quot;optionValues&quot;:[{&quot;optionName&quot;:&quot;Size&quot;,&quot;name&quot;:&quot;M&quot;}],&quot;price&quot;:&quot;49.00&quot;,&quot;inventoryItem&quot;:{&quot;sku&quot;:&quot;HD-M&quot;,&quot;tracked&quot;:true}}]}&#39;</span>
+</code></pre></div>
+
+<h3 id="更新价格--sku">更新价格 / SKU</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {</span>
+<span class="s1">  productVariantsBulkUpdate(productId: $productId, variants: $variants) {</span>
+<span class="s1">    productVariants { id sku price }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;productId&quot;:&quot;gid://shopify/Product/...&quot;,&quot;variants&quot;:[{&quot;id&quot;:&quot;gid://shopify/ProductVariant/...&quot;,&quot;price&quot;:&quot;55.00&quot;}]}&#39;</span>
+</code></pre></div>
+
+<h2 id="订单">订单</h2>
+<h3 id="列出最近订单不含-read_all_orders-时默认最多-30-条">列出最近订单（不含 <code>read_all_orders</code> 时默认最多 30 条）</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">{</span>
+<span class="s1">  orders(first: 20, reverse: true, query: &quot;financial_status:paid&quot;) {</span>
+<span class="s1">    edges { node {</span>
+<span class="s1">      id name createdAt displayFinancialStatus displayFulfillmentStatus</span>
+<span class="s1">      totalPriceSet { shopMoney { amount currencyCode } }</span>
+<span class="s1">      customer { id displayName email }</span>
+<span class="s1">      lineItems(first: 10) { edges { node { title quantity sku } } }</span>
+<span class="s1">    } }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>常用订单查询过滤器：<code>financial_status:paid|pending|refunded</code>、<code>fulfillment_status:unfulfilled|fulfilled</code>、<code>created_at:&gt;2025-01-01</code>、<code>tag:gift</code>、<code>email:foo@example.com</code>。</p>
+<h3 id="获取单个订单含收货地址">获取单个订单（含收货地址）</h3>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($id: ID!) {</span>
+<span class="s1">  order(id: $id) {</span>
+<span class="s1">    id name email</span>
+<span class="s1">    shippingAddress { name address1 address2 city province country zip phone }</span>
+<span class="s1">    lineItems(first: 50) { edges { node { title quantity variant { sku } originalUnitPriceSet { shopMoney { amount currencyCode } } } } }</span>
+<span class="s1">    transactions { id kind status amountSet { shopMoney { amount currencyCode } } }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;id&quot;:&quot;gid://shopify/Order/....&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h2 id="客户">客户</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># 搜索</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">{</span>
+<span class="s1">  customers(first: 10, query: &quot;email:*@example.com&quot;) {</span>
+<span class="s1">    edges { node { id email displayName numberOfOrders amountSpent { amount currencyCode } } }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span>
+
+<span class="c1"># 创建</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($input: CustomerInput!) {</span>
+<span class="s1">  customerCreate(input: $input) {</span>
+<span class="s1">    customer { id email }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;input&quot;:{&quot;email&quot;:&quot;test@example.com&quot;,&quot;firstName&quot;:&quot;Test&quot;,&quot;lastName&quot;:&quot;User&quot;,&quot;tags&quot;:[&quot;api-created&quot;]}}&#39;</span>
+</code></pre></div>
+
+<h2 id="库存">库存</h2>
+<p>库存挂载在与变体关联的<strong>库存项目</strong>上，数量按<strong>仓库位置</strong>跟踪。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 获取某变体在所有仓库的库存</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($id: ID!) {</span>
+<span class="s1">  productVariant(id: $id) {</span>
+<span class="s1">    id sku</span>
+<span class="s1">    inventoryItem {</span>
+<span class="s1">      id tracked</span>
+<span class="s1">      inventoryLevels(first: 10) {</span>
+<span class="s1">        edges { node { location { id name } quantities(names: [&quot;available&quot;,&quot;on_hand&quot;,&quot;committed&quot;]) { name quantity } } }</span>
+<span class="s1">      }</span>
+<span class="s1">    }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;id&quot;:&quot;gid://shopify/ProductVariant/...&quot;}&#39;</span>
+</code></pre></div>
+
+<p>调整库存（增量）— 使用 <code>inventoryAdjustQuantities</code>：</p>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($input: InventoryAdjustQuantitiesInput!) {</span>
+<span class="s1">  inventoryAdjustQuantities(input: $input) {</span>
+<span class="s1">    inventoryAdjustmentGroup { reason changes { name delta } }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">  &quot;input&quot;: {</span>
+<span class="s1">    &quot;reason&quot;: &quot;correction&quot;,</span>
+<span class="s1">    &quot;name&quot;: &quot;available&quot;,</span>
+<span class="s1">    &quot;changes&quot;: [{&quot;delta&quot;: 5, &quot;inventoryItemId&quot;: &quot;gid://shopify/InventoryItem/...&quot;, &quot;locationId&quot;: &quot;gid://shopify/Location/...&quot;}]</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span>
+</code></pre></div>
+
+<p>设置绝对库存（非增量）— <code>inventorySetQuantities</code>：</p>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($input: InventorySetQuantitiesInput!) {</span>
+<span class="s1">  inventorySetQuantities(input: $input) {</span>
+<span class="s1">    inventoryAdjustmentGroup { id }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;input&quot;:{&quot;reason&quot;:&quot;correction&quot;,&quot;name&quot;:&quot;available&quot;,&quot;ignoreCompareQuantity&quot;:true,&quot;quantities&quot;:[{&quot;inventoryItemId&quot;:&quot;gid://shopify/InventoryItem/...&quot;,&quot;locationId&quot;:&quot;gid://shopify/Location/...&quot;,&quot;quantity&quot;:100}]}}&#39;</span>
+</code></pre></div>
+
+<h2 id="metafield-与-metaobject">Metafield 与 Metaobject</h2>
+<p>Metafield 用于为资源（商品、客户、订单、店铺）附加自定义数据。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 读取</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">query($id: ID!) {</span>
+<span class="s1">  product(id: $id) {</span>
+<span class="s1">    metafields(first: 10, namespace: &quot;custom&quot;) {</span>
+<span class="s1">      edges { node { key type value } }</span>
+<span class="s1">    }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;id&quot;:&quot;gid://shopify/Product/...&quot;}&#39;</span>
+
+<span class="c1"># 写入（适用于任意 owner 类型）</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($metafields: [MetafieldsSetInput!]!) {</span>
+<span class="s1">  metafieldsSet(metafields: $metafields) {</span>
+<span class="s1">    metafields { id key namespace }</span>
+<span class="s1">    userErrors { field message code }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;metafields&quot;:[{&quot;ownerId&quot;:&quot;gid://shopify/Product/...&quot;,&quot;namespace&quot;:&quot;custom&quot;,&quot;key&quot;:&quot;care_instructions&quot;,&quot;type&quot;:&quot;multi_line_text_field&quot;,&quot;value&quot;:&quot;Wash cold. Tumble dry low.&quot;}]}&#39;</span>
+</code></pre></div>
+
+<h2 id="storefront-api公开只读">Storefront API（公开只读）</h2>
+<p>使用不同的端点和令牌，适用于面向客户的应用或 Hydrogen 风格的 headless 配置。请求头有所不同：</p>
+<ul>
+<li><strong>端点：</strong> <code>https://$SHOPIFY_STORE_DOMAIN/api/$SHOPIFY_API_VERSION/graphql.json</code></li>
+<li><strong>认证头（公开）：</strong> <code>X-Shopify-Storefront-Access-Token: &lt;public token&gt;</code> — 可嵌入浏览器</li>
+<li><strong>认证头（私有）：</strong> <code>Shopify-Storefront-Private-Token: &lt;private token&gt;</code> — 仅限服务端</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sS<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;https://</span><span class="si">${</span><span class="nv">SHOPIFY_STORE_DOMAIN</span><span class="si">}</span><span class="s2">/api/</span><span class="si">${</span><span class="nv">SHOPIFY_API_VERSION</span><span class="k">:-</span><span class="nv">2026</span><span class="p">-01</span><span class="si">}</span><span class="s2">/graphql.json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-Shopify-Storefront-Access-Token: </span><span class="si">${</span><span class="nv">SHOPIFY_STOREFRONT_TOKEN</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;query&quot;:&quot;{ shop { name } products(first: 5) { edges { node { id title handle } } } }&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h2 id="批量操作">批量操作</h2>
+<p>适用于超出速率限制的大批量数据导出（完整商品目录、全年订单）：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. 启动批量查询</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation {</span>
+<span class="s1">  bulkOperationRunQuery(query: &quot;&quot;&quot;</span>
+<span class="s1">    { products { edges { node { id title handle variants { edges { node { sku price } } } } } } }</span>
+<span class="s1">  &quot;&quot;&quot;) {</span>
+<span class="s1">    bulkOperation { id status }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span>
+
+<span class="c1"># 2. 轮询状态</span>
+shop_gql<span class="w"> </span><span class="s1">&#39;{ currentBulkOperation { id status errorCode objectCount fileSize url partialDataUrl } }&#39;</span>
+
+<span class="c1"># 3. 状态为 COMPLETED 时下载 JSONL 文件</span>
+curl<span class="w"> </span>-sS<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$URL</span><span class="s2">&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>products.jsonl
+</code></pre></div>
+
+<p>每行 JSONL 为一个节点，嵌套连接以独立行输出并附带 <code>__parentId</code>。如有需要，在客户端重新组装。</p>
+<h2 id="webhook">Webhook</h2>
+<p>订阅事件以避免轮询：</p>
+<div class="highlight"><pre><span></span><code>shop_gql<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">mutation($topic: WebhookSubscriptionTopic!, $sub: WebhookSubscriptionInput!) {</span>
+<span class="s1">  webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) {</span>
+<span class="s1">    webhookSubscription { id topic endpoint { __typename ... on WebhookHttpEndpoint { callbackUrl } } }</span>
+<span class="s1">    userErrors { field message }</span>
+<span class="s1">  }</span>
+<span class="s1">}&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;topic&quot;:&quot;ORDERS_CREATE&quot;,&quot;sub&quot;:{&quot;callbackUrl&quot;:&quot;https://example.com/webhook&quot;,&quot;format&quot;:&quot;JSON&quot;}}&#39;</span>
+</code></pre></div>
+
+<p>使用应用的 client secret（非访问令牌）验证传入 webhook 的 HMAC：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">echo</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$REQUEST_BODY</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>openssl<span class="w"> </span>dgst<span class="w"> </span>-sha256<span class="w"> </span>-hmac<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$APP_SECRET</span><span class="s2">&quot;</span><span class="w"> </span>-binary<span class="w"> </span><span class="p">|</span><span class="w"> </span>base64
+<span class="c1"># 与 X-Shopify-Hmac-Sha256 请求头比对</span>
+</code></pre></div>
+
+<h2 id="常见陷阱">常见陷阱</h2>
+<ul>
+<li><strong>REST 端点仍然存在但已冻结。</strong> 不要针对 <code>/admin/api/.../products.json</code> 编写新集成，请使用 GraphQL。</li>
+<li><strong>令牌格式检查。</strong> Admin 令牌以 <code>shpat_</code> 开头，Storefront 公开令牌以 <code>shpua_</code> 开头。若令牌正确但请求头错误，每次请求都会返回 401 且无有效错误信息。</li>
+<li><strong>令牌有效但返回 403 = 缺少 scope。</strong> Shopify 返回 <code>{"errors":[{"message":"Access denied for ..."}]}</code>。在应用上重新配置 Admin API scope，然后重新安装以重新生成令牌。</li>
+<li><strong><code>userErrors</code> 为空 ≠ 成功。</strong> 还需检查 <code>data.&lt;mutation&gt;.&lt;resource&gt;</code> 是否非空。某些失败两者均不填充——请检查完整响应。</li>
+<li><strong>GID 与数字 ID。</strong> 旧版 REST 返回数字 ID；GraphQL 需要完整 GID 字符串。转换方式：<code>gid://shopify/Product/&lt;numeric&gt;</code>。</li>
+<li><strong>速率限制意外。</strong> 单次深度嵌套的 <code>products(first: 250)</code> 可能消耗 1000+ 点，在标准套餐店铺上立即触发限流。从小范围开始，读取 <code>extensions.cost</code>，再做调整。</li>
+<li><strong>分页排序。</strong> <code>products(first: N, reverse: true)</code> 按 <code>id DESC</code> 排序，而非 <code>created_at</code>。若需"最新优先"，请使用 <code>sortKey: CREATED_AT, reverse: true</code>。</li>
+<li><strong>历史数据需要 <code>read_all_orders</code>。</strong> 不含此 scope 时，<code>orders(...)</code> 会静默限制在 60 天窗口内。不会报错，只是结果比预期少。对于订单量大的 Shopify Plus 商户，请通过应用的受保护数据设置申请此 scope。</li>
+<li><strong>货币金额为字符串。</strong> 金额以 <code>"49.00"</code> 而非 <code>49.0</code> 返回。若关心零填充，不要盲目使用 <code>jq tonumber</code>。</li>
+<li><strong>多货币 Money 字段</strong> 同时包含 <code>shopMoney</code>（店铺货币）和 <code>presentmentMoney</code>（客户货币）。请保持一致地选择其中一个。</li>
+</ul>
+<h2 id="安全须知">安全须知</h2>
+<p>Shopify 中的 mutation 操作是真实生效的——它们会创建商品、执行退款、取消订单、发货。在执行 <code>productDelete</code>、<code>orderCancel</code>、<code>refundCreate</code> 或任何批量 mutation 之前：请明确说明变更内容、所在店铺，并与用户确认。除非用户有独立的开发店铺，否则不存在生产数据的暂存副本。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/optional/productivity/productivity-shopify</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#前置条件">前置条件</a></li>
+<li class="lvl2"><a href="#api-基础">API 基础</a></li>
+<li class="lvl2"><a href="#发现">发现</a></li>
+<li class="lvl3"><a href="#店铺信息--当前-api-版本">店铺信息 + 当前 API 版本</a></li>
+<li class="lvl3"><a href="#列出所有支持的-api-版本">列出所有支持的 API 版本</a></li>
+<li class="lvl2"><a href="#商品">商品</a></li>
+<li class="lvl3"><a href="#搜索商品前-20-条匹配结果">搜索商品（前 20 条匹配结果）</a></li>
+<li class="lvl3"><a href="#分页获取商品游标">分页获取商品（游标）</a></li>
+<li class="lvl3"><a href="#获取商品含变体--metafield">获取商品（含变体 + metafield）</a></li>
+<li class="lvl3"><a href="#创建含一个变体的商品">创建含一个变体的商品</a></li>
+<li class="lvl3"><a href="#更新价格--sku">更新价格 / SKU</a></li>
+<li class="lvl2"><a href="#订单">订单</a></li>
+<li class="lvl3"><a href="#列出最近订单不含-read_all_orders-时默认最多-30-条">列出最近订单（不含 read_all_orders 时默认最多 30 条）</a></li>
+<li class="lvl3"><a href="#获取单个订单含收货地址">获取单个订单（含收货地址）</a></li>
+<li class="lvl2"><a href="#客户">客户</a></li>
+<li class="lvl2"><a href="#库存">库存</a></li>
+<li class="lvl2"><a href="#metafield-与-metaobject">Metafield 与 Metaobject</a></li>
+<li class="lvl2"><a href="#storefront-api公开只读">Storefront API（公开只读）</a></li>
+<li class="lvl2"><a href="#批量操作">批量操作</a></li>
+<li class="lvl2"><a href="#webhook">Webhook</a></li>
+<li class="lvl2"><a href="#常见陷阱">常见陷阱</a></li>
+<li class="lvl2"><a href="#安全须知">安全须知</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

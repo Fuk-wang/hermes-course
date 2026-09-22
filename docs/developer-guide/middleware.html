@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Middleware · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/middleware</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="hermes-middleware">Hermes Middleware</h1>
+<p>Hermes middleware is the behavior-changing companion to observer hooks.
+Observer hooks report what happened. Middleware can change what happens by
+rewriting a request before execution or by wrapping the execution callback
+itself.</p>
+<p>This contract is intentionally backend-neutral. A plugin can use it for local
+policy, request shaping, tracing, adaptive routing, cache control, sandbox
+selection, or handoff to runtimes such as NeMo Relay without changing Hermes'
+planner, model provider adapters, tool registry, memory, or CLI UX.</p>
+<p>With middleware enabled, plugins can:</p>
+<ul>
+<li>Rewrite LLM provider request kwargs before Hermes calls the provider.</li>
+<li>Rewrite tool arguments before guardrails, approval checks, hooks, and tool
+  execution see them.</li>
+<li>Wrap the actual LLM execution callback while preserving Hermes retry,
+  streaming, interrupt, and hook behavior.</li>
+<li>Wrap the actual tool execution callback while preserving Hermes guardrails,
+  approval, post-tool hooks, and tool-result transformation.</li>
+</ul>
+<h2 id="contract">Contract</h2>
+<p>Plugins register middleware from <code>register(ctx)</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_middleware</span><span class="p">(</span><span class="s2">&quot;llm_request&quot;</span><span class="p">,</span> <span class="n">on_llm_request</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_middleware</span><span class="p">(</span><span class="s2">&quot;llm_execution&quot;</span><span class="p">,</span> <span class="n">on_llm_execution</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_middleware</span><span class="p">(</span><span class="s2">&quot;tool_request&quot;</span><span class="p">,</span> <span class="n">on_tool_request</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_middleware</span><span class="p">(</span><span class="s2">&quot;tool_execution&quot;</span><span class="p">,</span> <span class="n">on_tool_execution</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Every middleware callback receives:</p>
+<ul>
+<li><code>telemetry_schema_version</code>: currently <code>hermes.observer.v1</code></li>
+<li><code>middleware_schema_version</code>: currently <code>hermes.middleware.v1</code></li>
+<li>Runtime context such as <code>session_id</code>, <code>task_id</code>, <code>turn_id</code>,
+  <code>api_request_id</code>, <code>provider</code>, <code>model</code>, <code>api_mode</code>, <code>tool_name</code>, and
+  <code>tool_call_id</code> when applicable.</li>
+</ul>
+<p>Supported middleware kinds:</p>
+<table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>Payload</th>
+<th>Return shape</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>llm_request</code></td>
+<td><code>request</code>, <code>original_request</code></td>
+<td><code>{"request": {...}}</code></td>
+<td>Replace effective provider kwargs before provider execution.</td>
+</tr>
+<tr>
+<td><code>tool_request</code></td>
+<td><code>tool_name</code>, <code>args</code>, <code>original_args</code></td>
+<td><code>{"args": {...}}</code></td>
+<td>Replace effective tool args before hooks, guardrails, approvals, and execution.</td>
+</tr>
+<tr>
+<td><code>llm_execution</code></td>
+<td><code>request</code>, <code>original_request</code>, <code>next_call</code></td>
+<td>Any provider response</td>
+<td>Wrap or replace the actual provider call.</td>
+</tr>
+<tr>
+<td><code>tool_execution</code></td>
+<td><code>tool_name</code>, <code>args</code>, <code>original_args</code>, <code>next_call</code></td>
+<td>Any tool result</td>
+<td>Wrap or replace the actual tool call.</td>
+</tr>
+</tbody>
+</table>
+<p>Request middleware can return optional trace fields:</p>
+<div class="highlight"><pre><span></span><code><span class="k">return</span> <span class="p">{</span>
+    <span class="s2">&quot;request&quot;</span><span class="p">:</span> <span class="n">updated_request</span><span class="p">,</span>
+    <span class="s2">&quot;source&quot;</span><span class="p">:</span> <span class="s2">&quot;my-plugin&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;reason&quot;</span><span class="p">:</span> <span class="s2">&quot;selected fallback model&quot;</span><span class="p">,</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Hermes stores those trace entries in later observer hook payloads as
+<code>middleware_trace</code>.</p>
+<p>Execution middleware receives a <code>next_call</code> callback. Call it to continue the
+chain:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">on_tool_execution</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;next_call&quot;</span><span class="p">](</span><span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;args&quot;</span><span class="p">])</span>
+    <span class="k">return</span> <span class="n">result</span>
+</code></pre></div>
+
+<p>If multiple plugins register the same execution middleware kind, Hermes runs
+them as a nested chain in registration order. Middleware failures are fail-open:
+Hermes logs a warning and continues with the next middleware or the base
+runtime path. A callback that fails the same way on every call (typically a
+signature naming a field the middleware does not send) is reported <strong>once</strong> at
+WARNING — the message lists the fields it does provide — and identical repeats go
+to DEBUG, so a mis-declared middleware cannot flood the log; a plugin reload
+resets the report.</p>
+<h2 id="execution-order">Execution Order</h2>
+<h3 id="llm-calls">LLM Calls</h3>
+<p>For each provider request, Hermes applies middleware in this order:</p>
+<ol>
+<li>Build provider kwargs from the current conversation.</li>
+<li>Apply <code>llm_request</code> middleware.</li>
+<li>Emit <code>pre_api_request</code> observer hooks with the effective request.</li>
+<li>Run provider execution through <code>llm_execution</code> middleware.</li>
+<li>Emit <code>post_api_request</code> or <code>api_request_error</code> observer hooks.</li>
+</ol>
+<p>Request middleware sees the full provider kwargs, including <code>messages</code> or
+Responses API <code>input</code>, model settings, tool definitions, stream options, and
+provider-specific options. Execution middleware receives the same effective
+request plus <code>next_call</code>.</p>
+<h3 id="tool-calls">Tool Calls</h3>
+<p>For each tool call, Hermes applies middleware in this order:</p>
+<ol>
+<li>Parse and coerce model-provided tool arguments.</li>
+<li>Apply <code>tool_request</code> middleware.</li>
+<li>Run the normal Hermes pre-execution path against the effective arguments:
+   tool availability checks, observer block directives, guardrails, and
+   approval checks.</li>
+<li>Run tool execution through <code>tool_execution</code> middleware.</li>
+<li>Emit <code>post_tool_call</code> observer hooks.</li>
+<li>Apply <code>transform_tool_result</code> hooks before the result is appended back into
+   conversation context.</li>
+</ol>
+<p>Tool request middleware runs before approval checks. Use it carefully: a
+rewritten path, command, or URL is the value downstream policy will evaluate.</p>
+<h2 id="enablement">Enablement</h2>
+<p>Middleware only runs for enabled plugins. For a bundled plugin:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>plugins<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>&lt;plugin-name&gt;
+</code></pre></div>
+
+<p>For isolated local testing, use one <code>HERMES_HOME</code> for plugin enablement and the
+agent run:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_HOME</span><span class="o">=</span><span class="nv">$HOME</span>/.hermes/cache/scratch/hermes-middleware-test
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HERMES_HOME</span><span class="s2">&quot;</span>
+hermes<span class="w"> </span>plugins<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>&lt;plugin-name&gt;
+hermes<span class="w"> </span>chat<span class="w"> </span>--query<span class="w"> </span><span class="s1">&#39;Reply exactly ok&#39;</span>
+</code></pre></div>
+
+<p>For source checkouts, prefer the source command so the runtime sees plugins and
+middleware from the working tree:</p>
+<div class="highlight"><pre><span></span><code>uv<span class="w"> </span>sync
+uv<span class="w"> </span>run<span class="w"> </span>hermes<span class="w"> </span>plugins<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>&lt;plugin-name&gt;
+uv<span class="w"> </span>run<span class="w"> </span>hermes<span class="w"> </span>chat<span class="w"> </span>--query<span class="w"> </span><span class="s1">&#39;Reply exactly ok&#39;</span>
+</code></pre></div>
+
+<h2 id="generic-plugin-examples">Generic Plugin Examples</h2>
+<p>The examples below are intentionally small. They show the middleware contract
+shape without depending on NeMo Relay.</p>
+<h3 id="llm-request-middleware">LLM Request Middleware</h3>
+<p>This plugin tags provider requests and records a middleware trace entry:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_middleware</span><span class="p">(</span><span class="s2">&quot;llm_request&quot;</span><span class="p">,</span> <span class="n">tag_llm_request</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">tag_llm_request</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">request</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;request&quot;</span><span class="p">])</span>
+    <span class="n">extra_body</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;extra_body&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{})</span>
+    <span class="n">extra_body</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">&quot;metadata&quot;</span><span class="p">,</span> <span class="p">{})[</span><span class="s2">&quot;hermes_middleware_demo&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">True</span>
+    <span class="n">request</span><span class="p">[</span><span class="s2">&quot;extra_body&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">extra_body</span>
+    <span class="k">return</span> <span class="p">{</span>
+        <span class="s2">&quot;request&quot;</span><span class="p">:</span> <span class="n">request</span><span class="p">,</span>
+        <span class="s2">&quot;source&quot;</span><span class="p">:</span> <span class="s2">&quot;middleware-demo&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;reason&quot;</span><span class="p">:</span> <span class="s2">&quot;tagged provider request&quot;</span><span class="p">,</span>
+    <span class="p">}</span>
+</code></pre></div>
+
+<p>The effective request is passed to <code>pre_api_request</code>, provider execution, and
+<code>post_api_request</code>.</p>
+<h3 id="tool-request-middleware">Tool Request Middleware</h3>
+<p>This plugin constrains <code>terminal</code> calls to a known working directory:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_middleware</span><span class="p">(</span><span class="s2">&quot;tool_request&quot;</span><span class="p">,</span> <span class="n">normalize_terminal_workdir</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">normalize_terminal_workdir</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;tool_name&quot;</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">&quot;terminal&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">None</span>
+    <span class="n">args</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;args&quot;</span><span class="p">])</span>
+    <span class="n">args</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">&quot;workdir&quot;</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">Path</span><span class="o">.</span><span class="n">home</span><span class="p">()</span> <span class="o">/</span> <span class="s2">&quot;.hermes&quot;</span> <span class="o">/</span> <span class="s2">&quot;cache&quot;</span> <span class="o">/</span> <span class="s2">&quot;scratch&quot;</span> <span class="o">/</span> <span class="s2">&quot;hermes-middleware-demo&quot;</span><span class="p">))</span>
+    <span class="k">return</span> <span class="p">{</span>
+        <span class="s2">&quot;args&quot;</span><span class="p">:</span> <span class="n">args</span><span class="p">,</span>
+        <span class="s2">&quot;source&quot;</span><span class="p">:</span> <span class="s2">&quot;middleware-demo&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;reason&quot;</span><span class="p">:</span> <span class="s2">&quot;defaulted terminal workdir&quot;</span><span class="p">,</span>
+    <span class="p">}</span>
+</code></pre></div>
+
+<p>Because this runs before hooks and approvals, downstream telemetry and policy
+observe the rewritten <code>workdir</code>.</p>
+<h3 id="llm-execution-middleware">LLM Execution Middleware</h3>
+<p>This plugin wraps the provider call and preserves the raw provider response:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_middleware</span><span class="p">(</span><span class="s2">&quot;llm_execution&quot;</span><span class="p">,</span> <span class="n">time_llm_execution</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">time_llm_execution</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">started</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">monotonic</span><span class="p">()</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;next_call&quot;</span><span class="p">](</span><span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;request&quot;</span><span class="p">])</span>
+    <span class="n">elapsed_ms</span> <span class="o">=</span> <span class="nb">int</span><span class="p">((</span><span class="n">time</span><span class="o">.</span><span class="n">monotonic</span><span class="p">()</span> <span class="o">-</span> <span class="n">started</span><span class="p">)</span> <span class="o">*</span> <span class="mi">1000</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;llm_execution elapsed_ms=</span><span class="si">{</span><span class="n">elapsed_ms</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">response</span>
+</code></pre></div>
+
+<p>Return the same response shape Hermes expects from the provider adapter. Do not
+wrap the response in a plugin-specific envelope unless the rest of the runtime
+expects that envelope.</p>
+<h3 id="tool-execution-middleware">Tool Execution Middleware</h3>
+<p>This plugin wraps tool execution while preserving the tool result:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_middleware</span><span class="p">(</span><span class="s2">&quot;tool_execution&quot;</span><span class="p">,</span> <span class="n">annotate_tool_execution</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">annotate_tool_execution</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;next_call&quot;</span><span class="p">](</span><span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;args&quot;</span><span class="p">])</span>
+    <span class="c1"># Metrics, logging, or external routing can happen here.</span>
+    <span class="k">return</span> <span class="n">result</span>
+</code></pre></div>
+
+<p>Execution middleware may call <code>next_call(modified_args)</code> to pass a changed
+payload to later middleware and the base tool dispatcher.</p>
+<p>Plugin-specific examples should live with the plugin that owns the behavior.
+NeMo Relay execution middleware is installed through an explicitly selected
+Relay <code>plugins.toml</code>; see
+<a href="relay-shared-metrics.html">Relay shared metrics</a>.</p>
+<h2 id="safety-notes">Safety Notes</h2>
+<ul>
+<li>Middleware should be deterministic for the same input unless it is explicitly
+  routing to a dynamic external system.</li>
+<li>Request middleware should return complete replacement payloads, not partial
+  patches.</li>
+<li>Execution middleware should call <code>next_call(...)</code> exactly once unless it is
+  intentionally short-circuiting execution.</li>
+<li>If execution middleware raises before calling <code>next_call(...)</code>, Hermes treats
+  that as middleware failure and continues with the remaining middleware chain
+  and base execution.</li>
+<li>If execution middleware calls <code>next_call(...)</code> successfully and then raises
+  during post-processing, Hermes preserves the downstream result and does not
+  run the provider or tool a second time.</li>
+<li>If downstream provider or tool execution fails, middleware may let that error
+  propagate or translate it deliberately. Hermes does not convert downstream
+  failure into a successful <code>None</code> result.</li>
+<li>Tool request middleware runs before approvals. If it mutates file paths,
+  commands, URLs, or arguments, the mutated values are what guardrails and
+  approvals evaluate.</li>
+<li>Observer hooks remain the right place for read-only telemetry. Use middleware
+  only when a plugin needs to alter or wrap behavior.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/middleware</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#contract">Contract</a></li>
+<li class="lvl2"><a href="#execution-order">Execution Order</a></li>
+<li class="lvl3"><a href="#llm-calls">LLM Calls</a></li>
+<li class="lvl3"><a href="#tool-calls">Tool Calls</a></li>
+<li class="lvl2"><a href="#enablement">Enablement</a></li>
+<li class="lvl2"><a href="#generic-plugin-examples">Generic Plugin Examples</a></li>
+<li class="lvl3"><a href="#llm-request-middleware">LLM Request Middleware</a></li>
+<li class="lvl3"><a href="#tool-request-middleware">Tool Request Middleware</a></li>
+<li class="lvl3"><a href="#llm-execution-middleware">LLM Execution Middleware</a></li>
+<li class="lvl3"><a href="#tool-execution-middleware">Tool Execution Middleware</a></li>
+<li class="lvl2"><a href="#safety-notes">Safety Notes</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

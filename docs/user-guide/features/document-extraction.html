@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Document Extraction · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/document-extraction</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="document-extraction">Document Extraction</h1>
+<p>The <code>read_file</code> tool automatically converts common document formats to readable text, so the agent can inspect a PDF or spreadsheet the same way it reads source code.</p>
+<h2 id="supported-formats">Supported formats</h2>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Extensions</th>
+<th>Converter</th>
+<th>Availability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Jupyter notebooks</td>
+<td><code>.ipynb</code></td>
+<td>Built-in (stdlib)</td>
+<td>Always</td>
+</tr>
+<tr>
+<td>Word documents</td>
+<td><code>.docx</code></td>
+<td>Built-in (stdlib)</td>
+<td>Always</td>
+</tr>
+<tr>
+<td>Excel workbooks</td>
+<td><code>.xlsx</code></td>
+<td>Built-in (stdlib)</td>
+<td>Always</td>
+</tr>
+<tr>
+<td>SQLite databases</td>
+<td><code>.db</code>, <code>.sqlite</code>, <code>.sqlite3</code></td>
+<td>Built-in (stdlib)</td>
+<td>Always</td>
+</tr>
+<tr>
+<td>PDF</td>
+<td><code>.pdf</code></td>
+<td>Optional <code>anydoc</code> converter</td>
+<td>Auto-installed on first use*</td>
+</tr>
+<tr>
+<td>Legacy Office</td>
+<td><code>.doc</code>, <code>.ppt</code>, <code>.xls</code>, <code>.pptx</code>, and variants</td>
+<td>Optional <code>anydoc</code> converter</td>
+<td>Auto-installed on first use*</td>
+</tr>
+<tr>
+<td>OpenDocument</td>
+<td><code>.odt</code>, <code>.ods</code>, <code>.odp</code></td>
+<td>Optional <code>anydoc</code> converter</td>
+<td>Auto-installed on first use*</td>
+</tr>
+<tr>
+<td>Rich text / eBooks</td>
+<td><code>.rtf</code>, <code>.epub</code></td>
+<td>Optional <code>anydoc</code> converter</td>
+<td>Auto-installed on first use*</td>
+</tr>
+</tbody>
+</table>
+<p>* The optional converter is the <code>firecrawl-anydoc</code> package, installed lazily where installs are permitted (<code>security.allow_lazy_installs</code> in <code>config.yaml</code>). Without it, the three stdlib formats still work; other formats fall back to the binary-file guard.</p>
+<p>SQLite files render as a schema overview rather than a dump: each table's <code>CREATE</code> statement, row count and first five rows, plus the list of indexes, views and triggers. The database is opened read-only (<code>mode=ro&amp;immutable=1</code>, so a live database another process holds open is still readable without locks); for anything beyond the preview, query it from the terminal with <code>sqlite3</code>. A <code>.db</code> that is not SQLite (the magic bytes do not match) is refused with the real reason. Hermes's own read denylist applies before extraction, so protected stores under <code>HERMES_HOME</code> stay unreadable.</p>
+<p><code>read_file</code> also flags unresolved git merge conflicts: when the returned range contains balanced <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code> / <code>&gt;&gt;&gt;&gt;&gt;&gt;&gt;</code> marker lines, the result carries <code>conflict_blocks: N</code> and a hint to resolve them before editing around them. A lone marker inside a string or a test fixture is not counted.</p>
+<p>Conversion output is Markdown, paginated through <code>read_file</code>'s normal <code>offset</code>/<code>limit</code> window. East Asian phonetic guides (XLSX <code>rPh</code>, DOCX ruby text) annotate cell or run text and are not part of the extracted value: a cell holding 東京 with the guide トウキョウ reads as <code>東京</code>. Documents over 50 MB are refused to keep tool turns bounded.</p>
+<p>Notebook cell outputs longer than 20,000 characters are truncated; the truncation marker carries a <code>jq</code> command that names the notebook's full, shell-quoted path so the omitted output can be pulled from the original file.</p>
+<p>Extraction works with remote terminal backends (Docker, Modal, SSH): the file's bytes are transferred across the backend boundary and converted host-side, so a document inside a sandbox reads the same as a local one.</p>
+<h2 id="scanned-pdfs-the-coverage-warning">Scanned PDFs: the coverage warning</h2>
+<p>PDF conversion reads the <strong>text layer only</strong>. Pages that are scanned images — common in legal documents, resale packages, signed contracts, faxes — contain no text layer and silently convert to nothing. The telltale signature is section headers with empty bodies.</p>
+<p>When a meaningful share of pages yields no text (over 20% of the document, or 10+ pages absolute), <code>read_file</code> prepends a warning to the extraction. Each unreadable gap is labeled with the last text extracted before it — usually a section divider — so the agent can target only the gaps it actually needs instead of OCRing the whole document:</p>
+<div class="highlight"><pre><span></span><code>[EXTRACTION COVERAGE WARNING: 198 of 311 pages in this PDF yielded no
+text. ... Unreadable gaps, each labeled with the last text extracted
+before it:
+  pages 42-77 (36 pages) — after &quot;Antigua Maintenance Corp Bylaws&quot; (p41)
+  pages 92-213 (122 pages) — after &quot;... Covenants, Codes and Regulations&quot; (p91)
+  page 224 (1 page) — after &quot;... Insurance Declaration Pages&quot; (p223)
+Decide which gaps you actually need — do NOT OCR or render everything. ...]
+</code></pre></div>
+
+<p>The warning lists the exact page ranges and the recovery paths:</p>
+<ol>
+<li><strong>A few pages — render + vision.</strong> Convert the pages to images and read them with the vision tool:
+   <code>bash
+   pdftoppm -jpeg -r 150 -f 92 -l 94 document.pdf $TMPDIR/page</code>
+   Then inspect each image with <code>vision_analyze</code>. Zero extra dependencies (poppler is required for the detection itself).</li>
+<li><strong>Many pages — OCR.</strong> The <code>ocr-and-documents</code> skill covers bulk OCR with marker-pdf (90+ languages, handles equations and tables; ~3-5 GB install).</li>
+</ol>
+<p>Detection uses poppler's <code>pdftotext</code> for per-page text counts. If poppler is not installed, extraction still works — the coverage check is silently skipped.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>The agent handles the warning on its own — it will offer to render or OCR the missing pages. If you're reading extractions yourself, treat "header with an empty body" as a scanned section, not a missing one.</p>
+</div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/document-extraction</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#supported-formats">Supported formats</a></li>
+<li class="lvl2"><a href="#scanned-pdfs-the-coverage-warning">Scanned PDFs: the coverage warning</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

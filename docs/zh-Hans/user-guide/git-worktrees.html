@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Git Worktrees · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/git-worktrees</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="git-worktrees">Git Worktrees</h1>
+<p>Hermes Agent 常用于大型、长期维护的仓库。当你需要：</p>
+<ul>
+<li>在同一项目中<strong>并行运行多个 agent</strong>，或</li>
+<li>将实验性重构与主分支隔离，</li>
+</ul>
+<p>Git <strong>worktrees</strong> 是为每个 agent 提供独立检出（checkout）而无需复制整个仓库的最安全方式。</p>
+<p>本页介绍如何将 worktrees 与 Hermes 结合使用，使每个会话拥有干净、隔离的工作目录。</p>
+<h2 id="为什么在-hermes-中使用-worktrees">为什么在 Hermes 中使用 Worktrees？</h2>
+<p>Hermes 将<strong>当前工作目录</strong>视为项目根目录：</p>
+<ul>
+<li>CLI：运行 <code>hermes</code> 或 <code>hermes chat</code> 时所在的目录</li>
+<li>Messaging gateway：由 <code>MESSAGING_CWD</code> 设置的目录</li>
+</ul>
+<p>如果在<strong>同一检出</strong>中运行多个 agent，它们的变更可能相互干扰：</p>
+<ul>
+<li>一个 agent 可能删除或覆盖另一个正在使用的文件。</li>
+<li>难以区分哪些变更属于哪个实验。</li>
+</ul>
+<p>使用 worktrees 后，每个 agent 拥有：</p>
+<ul>
+<li><strong>独立的分支和工作目录</strong></li>
+<li><strong>独立的 Checkpoint Manager 历史</strong>，用于 <code>/rollback</code></li>
+</ul>
+<p>另请参阅：<a href="checkpoints-and-rollback.html">Checkpoints 与 /rollback</a>。</p>
+<h2 id="快速开始创建-worktree">快速开始：创建 Worktree</h2>
+<p>在主仓库（包含 <code>.git/</code> 的目录）中，为功能分支创建新的 worktree：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 从主仓库根目录</span>
+<span class="nb">cd</span><span class="w"> </span>/path/to/your/repo
+
+<span class="c1"># 在 ../repo-feature 中创建新分支和 worktree</span>
+git<span class="w"> </span>worktree<span class="w"> </span>add<span class="w"> </span>../repo-feature<span class="w"> </span>feature/hermes-experiment
+</code></pre></div>
+
+<p>这将创建：</p>
+<ul>
+<li>新目录：<code>../repo-feature</code></li>
+<li>新分支：<code>feature/hermes-experiment</code>，已在该目录中检出</li>
+</ul>
+<p>现在可以 <code>cd</code> 进入新 worktree 并在其中运行 Hermes：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>../repo-feature
+
+<span class="c1"># 在 worktree 中启动 Hermes</span>
+hermes
+</code></pre></div>
+
+<p>Hermes 将：</p>
+<ul>
+<li>将 <code>../repo-feature</code> 视为项目根目录。</li>
+<li>使用该目录进行上下文文件读取、代码编辑和工具调用。</li>
+<li>使用<strong>独立的 checkpoint 历史</strong>，<code>/rollback</code> 的作用范围限定在此 worktree。</li>
+</ul>
+<h2 id="并行运行多个-agent">并行运行多个 Agent</h2>
+<p>可以创建多个 worktree，每个对应独立的分支：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>/path/to/your/repo
+
+git<span class="w"> </span>worktree<span class="w"> </span>add<span class="w"> </span>../repo-experiment-a<span class="w"> </span>feature/hermes-a
+git<span class="w"> </span>worktree<span class="w"> </span>add<span class="w"> </span>../repo-experiment-b<span class="w"> </span>feature/hermes-b
+</code></pre></div>
+
+<p>在不同终端中分别运行：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 终端 1</span>
+<span class="nb">cd</span><span class="w"> </span>../repo-experiment-a
+hermes
+
+<span class="c1"># 终端 2</span>
+<span class="nb">cd</span><span class="w"> </span>../repo-experiment-b
+hermes
+</code></pre></div>
+
+<p>每个 Hermes 进程：</p>
+<ul>
+<li>在各自的分支上工作（<code>feature/hermes-a</code> 与 <code>feature/hermes-b</code>）。</li>
+<li>在不同的 shadow repo 哈希下写入 checkpoint（由 worktree 路径派生）。</li>
+<li>可独立使用 <code>/rollback</code>，互不影响。</li>
+</ul>
+<p>以下场景尤为适用：</p>
+<ul>
+<li>批量重构。</li>
+<li>对同一任务尝试不同方案。</li>
+<li>将 CLI 与 gateway 会话配对，针对同一上游仓库运行。</li>
+</ul>
+<h2 id="安全清理-worktrees">安全清理 Worktrees</h2>
+<p>实验完成后：</p>
+<ol>
+<li>决定是否保留该工作成果。</li>
+<li>如需保留：</li>
+<li>按常规方式将分支合并到主分支。</li>
+<li>移除 worktree：</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>/path/to/your/repo
+
+<span class="c1"># 移除 worktree 目录及其引用</span>
+git<span class="w"> </span>worktree<span class="w"> </span>remove<span class="w"> </span>../repo-feature
+</code></pre></div>
+
+<p>注意事项：</p>
+<ul>
+<li><code>git worktree remove</code> 在 worktree 存在未提交变更时会拒绝移除，除非强制执行。</li>
+<li>移除 worktree <strong>不会</strong>自动删除分支；可使用常规 <code>git branch</code> 命令决定是否删除分支。</li>
+<li><code>~/.hermes/checkpoints/</code> 下的 Hermes checkpoint 数据在移除 worktree 时不会自动清理，但通常体积很小。</li>
+</ul>
+<h2 id="最佳实践">最佳实践</h2>
+<ul>
+<li><strong>每个 Hermes 实验对应一个 worktree</strong></li>
+<li>为每项重要变更创建专用的分支/worktree。</li>
+<li>这样可保持 diff 聚焦，PR 小而易于审查。</li>
+<li><strong>以实验内容命名分支</strong></li>
+<li>例如：<code>feature/hermes-checkpoints-docs</code>、<code>feature/hermes-refactor-tests</code>。</li>
+<li><strong>频繁提交</strong></li>
+<li>使用 git commit 记录高层级里程碑。</li>
+<li>使用 <a href="checkpoints-and-rollback.html">checkpoints 与 /rollback</a> 作为工具驱动编辑之间的安全网。</li>
+<li><strong>使用 worktrees 时避免从裸仓库根目录运行 Hermes</strong></li>
+<li>优先使用 worktree 目录，使每个 agent 拥有明确的作用范围。</li>
+</ul>
+<h2 id="使用-hermes--w自动-worktree-模式">使用 <code>hermes -w</code>（自动 Worktree 模式）</h2>
+<p>Hermes 内置 <code>-w</code> 标志，可<strong>自动创建一个一次性 git worktree</strong> 及其独立分支。无需手动配置 worktree——只需 <code>cd</code> 进入仓库并运行：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>/path/to/your/repo
+hermes<span class="w"> </span>-w
+</code></pre></div>
+
+<p>Hermes 将：</p>
+<ul>
+<li>在仓库内的 <code>.worktrees/</code> 下创建临时 worktree。</li>
+<li>检出一个隔离分支（例如 <code>hermes/hermes-&lt;hash&gt;</code>）。</li>
+<li>在该 worktree 内运行完整的 CLI 会话。</li>
+</ul>
+<p>这是获得 worktree 隔离的最简便方式。也可与单次查询结合使用：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>-w<span class="w"> </span>-z<span class="w"> </span><span class="s2">&quot;Fix issue #123&quot;</span>
+</code></pre></div>
+
+<p>如需并行运行多个 agent，在多个终端中分别运行 <code>hermes -w</code>——每次调用都会自动获得独立的 worktree 和分支。</p>
+<h2 id="综合运用">综合运用</h2>
+<ul>
+<li>使用 <strong>git worktrees</strong> 为每个 Hermes 会话提供独立的干净检出。</li>
+<li>使用<strong>分支</strong>记录实验的高层级历史。</li>
+<li>使用 <strong>checkpoints + <code>/rollback</code></strong> 在每个 worktree 内从错误中恢复。</li>
+</ul>
+<p>这种组合带来：</p>
+<ul>
+<li>强有力的保证，确保不同 agent 和实验互不干扰。</li>
+<li>快速迭代周期，轻松从错误编辑中恢复。</li>
+<li>干净、易于审查的 pull request。</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/git-worktrees</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#为什么在-hermes-中使用-worktrees">为什么在 Hermes 中使用 Worktrees？</a></li>
+<li class="lvl2"><a href="#快速开始创建-worktree">快速开始：创建 Worktree</a></li>
+<li class="lvl2"><a href="#并行运行多个-agent">并行运行多个 Agent</a></li>
+<li class="lvl2"><a href="#安全清理-worktrees">安全清理 Worktrees</a></li>
+<li class="lvl2"><a href="#最佳实践">最佳实践</a></li>
+<li class="lvl2"><a href="#使用-hermes--w自动-worktree-模式">使用 hermes -w（自动 Worktree 模式）</a></li>
+<li class="lvl2"><a href="#综合运用">综合运用</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

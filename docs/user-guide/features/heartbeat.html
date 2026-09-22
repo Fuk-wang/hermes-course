@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session Heartbeats · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/heartbeat</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="session-heartbeats-heartbeat">Session Heartbeats (<code>/heartbeat</code>)</h1>
+<p><code>/heartbeat</code> gives the <strong>current session</strong> one recurring instruction. Whenever the session is idle and the interval has elapsed, the prompt fires as a normal user turn — same conversation, same context, same prompt cache.</p>
+<div class="highlight"><pre><span></span><code>/heartbeat every 10m Check the deployment and report meaningful changes
+</code></pre></div>
+
+<p>Inspired by Prime-Agent's <code>/heartbeat</code>. The Hermes adaptation keeps the strict message-flow invariants: the heartbeat is injected only between turns (never mid-run), as a plain user-role message.</p>
+<h2 id="heartbeat-vs-cron-which-one-do-i-want">Heartbeat vs cron: which one do I want?</h2>
+<p>They look similar but serve different jobs:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>/heartbeat</code></th>
+<th><a href="cron.html"><code>hermes cron</code></a></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Runs in</td>
+<td><strong>This conversation</strong> — full context, memory of the discussion</td>
+<td>A fresh isolated session per tick</td>
+</tr>
+<tr>
+<td>Survives process restart</td>
+<td>State survives (SessionDB); gateway watches resume automatically after restart</td>
+<td>Yes — fully durable scheduler</td>
+</tr>
+<tr>
+<td>How many</td>
+<td>One per session</td>
+<td>Unlimited jobs</td>
+</tr>
+<tr>
+<td>Best for</td>
+<td>"Keep an eye on X <em>in this thread</em> while we work"</td>
+<td>Standing jobs, reports, watchdogs, deliveries</td>
+</tr>
+</tbody>
+</table>
+<p>Rule of thumb: if the recurring prompt needs the conversation's context, use <code>/heartbeat</code>. If it's a self-contained job, use cron.</p>
+<h2 id="commands">Commands</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/heartbeat every &lt;interval&gt; &lt;prompt&gt;</code></td>
+<td>Set (or replace) the session's heartbeat. Intervals: <code>90s</code>, <code>10m</code>, <code>2h</code>, <code>1d</code> (minimum 60s).</td>
+</tr>
+<tr>
+<td><code>/heartbeat</code> or <code>/heartbeat status</code></td>
+<td>Show the heartbeat, its interval, and time to next fire.</td>
+</tr>
+<tr>
+<td><code>/heartbeat pause</code></td>
+<td>Stop firing without clearing.</td>
+</tr>
+<tr>
+<td><code>/heartbeat resume</code></td>
+<td>Resume (re-anchors the timer — no instant stale fire).</td>
+</tr>
+<tr>
+<td><code>/heartbeat clear</code></td>
+<td>Remove the heartbeat.</td>
+</tr>
+</tbody>
+</table>
+<p><code>/hb</code> is an alias. Works on the CLI, the TUI / Desktop app, and gateway platforms (on Slack, use <code>/hermes heartbeat …</code>).</p>
+<h2 id="behavior-details">Behavior details</h2>
+<ul>
+<li><strong>Idle-only.</strong> A heartbeat never interrupts a running turn. If the agent is busy when the tick comes due, it fires at the next idle poll. In the gateway, an idle watched session wakes proactively; no new inbound message is needed.</li>
+<li><strong>Missed ticks coalesce.</strong> If the session was busy (or the process wasn't running) through several intervals, you get <strong>one</strong> heartbeat turn, not a backlog. The timer re-anchors on every fire.</li>
+<li><strong>User messages win.</strong> A queued user message always takes priority; the heartbeat waits for the input queue to drain.</li>
+<li><strong>Owned by the surface that set it.</strong> A heartbeat set from a messaging chat fires from the gateway and replies into that chat even while the same session is open in the TUI / Desktop app; the viewer never claims the tick.</li>
+<li><strong>Cache-safe.</strong> The injected prompt is an ordinary user message. No system-prompt mutation, no toolset change.</li>
+<li><strong>Gateway recovery.</strong> Startup restores active heartbeats using the current persisted conversation and thread routing, in the owning profile. Each poll retries recovery after temporary storage failures or adapter downtime; paused and cleared heartbeats and suspended conversations do not restart. No new chat message is required.</li>
+<li><strong>Persistence and conversation boundaries.</strong> State lives in <code>SessionDB.state_meta</code> keyed by <code>heartbeat:&lt;session_id&gt;</code> and follows context-compression session rotations. In the messaging gateway, leaving a conversation through reset, switch, or suspension clears its heartbeat; resuming that archived conversation does not resurrect it. Firing requires the owning process (CLI session or gateway) to be running. An already-admitted gateway tick is checked again after session resolution and before agent execution: it may follow a compression child, but cannot carry its old instruction into a reset or switched conversation.</li>
+<li><strong>Execution accounting.</strong> The gateway reserves a due tick at adapter admission. If that exact attempt ends before entering the agent runner (including cancellation or a routing, authorization, emergency-stop, or preparation rejection), it refunds the tick unless the schedule has since changed. Once the agent runner is entered, the fire remains counted even if execution fails or is interrupted. This count is <strong>not</strong> proof of a successful model response or outbound delivery; abrupt process death can prevent the refund callback.</li>
+<li><strong>Quiet when there is nothing to say (gateway).</strong> A scheduled heartbeat turn may end with a bare silence marker (<code>NO_REPLY</code> / <code>[SILENT]</code>): the gateway sends nothing, unlike a human message that returns only a marker (that still gets the visible "try again" notice). While the heartbeat works, no typing indicator, tool-progress, streamed draft or "still working" bubble is posted, and a result it does deliver is routed to the chat/topic without quoting the message that set the heartbeat. Approval prompts and failures stay visible.</li>
+<li><strong>Don't-invent-work guard.</strong> The injected prompt tells the agent to reply briefly and stop when nothing meaningful changed, so an idle heartbeat doesn't generate busywork.</li>
+</ul>
+<h2 id="example">Example</h2>
+<div class="highlight"><pre><span></span><code>You: /heartbeat every 15m Check whether the CI run for PR #1234 finished; summarize the result when it does
+
+  ♥ Heartbeat set (every 15m): Check whether the CI run for PR #1234 finished; ...
+
+[15 minutes of you working on other things in the same session]
+
+Hermes: [Heartbeat — recurring instruction, fires every 15m]
+  💻 gh pr checks 1234   (1.2s)
+  CI is still running (14/37 checks complete). Nothing to report yet.
+</code></pre></div>
+
+<p>When the answer stops changing, <code>/heartbeat clear</code> it — or let it keep watch.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/heartbeat</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#heartbeat-vs-cron-which-one-do-i-want">Heartbeat vs cron: which one do I want?</a></li>
+<li class="lvl2"><a href="#commands">Commands</a></li>
+<li class="lvl2"><a href="#behavior-details">Behavior details</a></li>
+<li class="lvl2"><a href="#example">Example</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

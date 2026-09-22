@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Micro-compaction · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/micro-compaction</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="micro-compaction">Micro-compaction</h1>
+<p><strong>A way to amortize the cost of compression.</strong></p>
+<p>Long conversations eventually outgrow the model's context window, and something
+has to be thrown away or summarized. Hermes has always done this in one batch:
+when the transcript crosses a threshold, the session stops, a large chunk of the
+middle is summarized in a single call, and the conversation resumes. That works,
+but the whole bill comes due at once — one visible pause, one big summarization
+request, at whatever moment you happened to cross the line.</p>
+<p>Micro-compaction pays the same bill in instalments. After each completed turn,
+Hermes folds the single oldest un-absorbed exchange into a running summary. The
+work is the same work; it just happens continuously, a piece at a time, instead
+of all at once in the middle of your session.</p>
+<p>It is not free and it is not a magic bullet, and it is <strong>off by default</strong> —
+<code>compression.micro_compact: true</code> turns it on. Each pass is a real call to the
+compression model, and it runs at the end of a turn — your answer has already
+streamed, but the turn does not close until the pass finishes. Each pass also
+rewrites already-sent history, which breaks the provider prompt-cache prefix
+every turn; read <a href="#prompt-caching--the-cost-you-are-opting-into">Prompt caching</a>
+before enabling it, because for some setups that cost exceeds the benefit.</p>
+<p>What the feature gives you is a <strong>tuning option</strong>: you choose how the
+compression cost is distributed, and which model pays it. See
+<a href="#choosing-a-compression-model">Choosing a compression model</a>, because that
+choice matters more than anything else here.</p>
+<p><strong>The tradeoff is that knowledge gets a little earlier than you may be used to.</strong>
+Because compaction is always running, older parts of the conversation become
+summaries sooner than they would under batch compaction — which leaves
+everything verbatim until the window actually fills. Detail from earlier in the
+session turns second-hand faster. You trade some of that fidelity for never
+eating one long stall, and for a context window that stays consistently smaller
+rather than sawtoothing up to the threshold and back.</p>
+<hr />
+<h2 id="what-it-does">What it does</h2>
+<p>After every turn that finishes normally, <code>finalize_turn</code> asks the context
+compressor to absorb <strong>one</strong> exchange:</p>
+<ol>
+<li>Find the oldest exchange that hasn't been summarized yet.</li>
+<li>Send just that exchange, plus the current running summary, to the auxiliary
+   summarization model.</li>
+<li>Replace those messages in the transcript with a single summary marker
+   carrying the updated running summary.</li>
+</ol>
+<p>One exchange per turn. The per-turn cost stays bounded no matter how long the
+conversation gets.</p>
+<p>An <strong>exchange</strong> is one full agent turn: an assistant message together with its
+tool results and any follow-up assistant iterations, up to the next user
+message. In tool-heavy work that's where the bulk of the tokens live — a
+file read or a command's output dwarfs the surrounding prose — which is why
+absorbing one exchange at a time is worth doing at all. Taking the whole turn
+(rather than a single assistant+tools group) also keeps the transcript's role
+alternation strictly valid: the summary marker is an assistant-role message,
+and a full turn is always bounded by user messages on both sides.</p>
+<h2 id="your-messages-are-never-compacted">Your messages are never compacted</h2>
+<p>An exchange deliberately starts at the <em>assistant</em> message. Micro-compaction
+walks straight past user messages to get there, so <strong>what you typed is never
+summarized</strong> — your prompts stay verbatim for the entire session, no matter how
+long it runs or how many times compaction fires.</p>
+<p>This is the most useful property of the whole design, and it's worth being
+explicit about why. What the assistant produces is largely an account of what it
+did: it read this file, it ran that command, it got this result. That kind of
+narration survives summarising with very little loss — "it did it this way" is
+about as informative compressed as it was in full. Your instructions are a
+different kind of thing. They're the intent everything else is derived from, and
+they cannot be reconstructed from the work that followed. Paraphrasing "use the
+existing retry helper, don't add a new one" into a summary is exactly how an
+agent ends up confidently doing the thing you told it not to, six turns later.</p>
+<p>So the asymmetry is on purpose: compact the derived material, keep the source of
+truth. The cost is a floor on how small the middle can get, since user turns
+accumulate and are never absorbed. In practice that floor is low — a prompt is
+normally a tiny fraction of what a single tool result costs — but it is a real
+floor. If you routinely paste 10–20K-token prompts, that weight stays in context
+by design.</p>
+<h2 id="what-it-never-touches">What it never touches</h2>
+<p>Two more regions are protected and stay verbatim:</p>
+<ul>
+<li><strong>The head</strong> — the system prompt and the opening messages, so the session's
+  founding instructions are never paraphrased.</li>
+<li><strong>The tail</strong> — a token-budgeted window of the most recent messages, so
+  everything that's immediately relevant is still there in full.</li>
+</ul>
+<p>Micro-compaction only ever works in the middle, between those two.</p>
+<h2 id="how-it-works">How it works</h2>
+<h3 id="the-cursor">The cursor</h3>
+<p>The compressor keeps a cursor: the index of the first message not yet absorbed.
+Each successful pass advances it past the exchange it just summarized.</p>
+<p>If that in-memory cursor is missing or out of range — a fresh process, a resumed
+session — it's recovered by scanning the transcript for the last summary marker
+and resuming just after it. The transcript itself is the source of truth, so
+resuming a session doesn't re-summarize work already done.</p>
+<h3 id="the-rolling-summary">The rolling summary</h3>
+<p>Rather than keeping a pile of per-exchange summaries, there is exactly one
+running summary that each new exchange is merged into. The summarizer is asked
+to fold in the new material's decisions, requirements, file paths and open
+questions, drop details that are no longer relevant, and preserve the existing
+structure. It's also explicitly instructed to replace any credentials it
+encounters with <code>[REDACTED]</code>.</p>
+<p>Because that summary is cumulative, only the newest marker is kept in the
+transcript. Earlier markers are strictly redundant — the current summary already
+contains everything they held — so they're dropped as they're superseded. This
+matters more than it sounds: leaving them in place stacks near-duplicate copies
+of the same text, each with its own heading and end-marker scaffolding, and the
+transcript grows on every turn instead of shrinking.</p>
+<h3 id="defrag">Defrag</h3>
+<p>Merge into a summary often enough and it gets baggy — repetitive, and larger
+than the material justifies. When the running summary crosses a token threshold
+(2000 by default), the next pass <strong>defrags</strong>: one auxiliary call re-summarizes
+the running summary <em>itself</em> into a fresh compact version, and the summary
+marker in the transcript is rewritten in place.</p>
+<p>Defrag never touches the transcript's structure — no messages are absorbed or
+spliced, the cursor doesn't move, and user turns are untouched. It processes
+only the accumulated summary text, never conversation messages, so the
+"your messages are never compacted" guarantee holds through it.</p>
+<h3 id="staying-in-step-with-the-session-database">Staying in step with the session database</h3>
+<p>The in-memory splice alone isn't enough. Hermes's normal session flush is
+append-only, so the original rows would stay marked active and a resume would
+load <em>both</em> the summary and the messages it replaced — putting the session
+straight over the context limit.</p>
+<p>So each pass also calls <code>archive_and_compact</code>, which atomically soft-archives the
+active rows and inserts the compacted set. The messages are then stamped as
+already-persisted so the append-only flush that follows skips them. If that
+database step fails, it's logged and the session continues; the resume would
+double-load until the next batch compression cleans up.</p>
+<h3 id="when-the-summarizer-fails">When the summarizer fails</h3>
+<p>A summarization call can fail — the auxiliary model is unreachable, out of quota,
+or the exchange itself is somehow unsummarizable. The transcript is left
+untouched and the failure is counted.</p>
+<p>If the <em>same</em> exchange fails three times in a row, the cursor is advanced past it
+anyway. Without that, one bad exchange would be retried on every single turn
+forever. Those skipped messages stay in the transcript and get picked up by the
+next batch compaction.</p>
+<h2 id="interaction-with-batch-compaction">Interaction with batch compaction</h2>
+<p>Micro-compaction doesn't replace batch compaction — it defers it. Threshold-based
+compaction is still there and still fires if the window fills anyway, and its
+summary markers are the same format, so the two interoperate. In practice
+micro-compaction keeps the transcript far enough below the threshold that the
+batch path fires much less often.</p>
+<h2 id="configuration">Configuration</h2>
+<p>Micro-compaction is <strong>off by default</strong>. Turn it on explicitly:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">compression</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">micro_compact</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">             </span><span class="c1"># default: false</span>
+<span class="w">  </span><span class="nt">micro_compact_every_n_turns</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span><span class="w">  </span><span class="c1"># cadence — how often a pass runs</span>
+<span class="w">  </span><span class="nt">micro_compact_defrag_threshold_tokens</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2000</span>
+</code></pre></div>
+
+<p>With <code>micro_compact</code> unset or <code>false</code> Hermes behaves exactly as it always has:
+batch-only compaction. Everything else about compression is unchanged.</p>
+<p><code>micro_compact_every_n_turns</code> is the knob that matters most after the on/off
+switch, because it sets how often you pay the cache break described below. At
+<code>1</code> a pass runs after every completed turn: the most aggressive reclaim, and
+one broken prefix per turn. At <code>5</code> you get a fifth of the breaks and a fifth of
+the reclaim rate, which is the right direction if your sessions are long-lived
+and your provider's cache discount is deep. Values below <code>1</code> are clamped to <code>1</code>
+rather than silently disabling the feature. The counter advances per turn, not
+per committed pass, so a turn with nothing to absorb still moves the cadence
+along and cannot wedge it.</p>
+<p><code>micro_compact_defrag_threshold_tokens</code> is when the rolling summary gets
+re-summarized instead of growing forever — see <a href="#defrag">Defrag</a>.</p>
+<p>It ships opt-in rather than on because of the prompt-cache cost described in
+the next section — that cost is real, it is not universally worth paying, and
+it should be a decision you make rather than one you inherit.</p>
+<h2 id="prompt-caching--the-cost-you-are-opting-into">Prompt caching — the cost you are opting into</h2>
+<p>Read this before enabling the feature. It is the strongest argument against it.</p>
+<p>A long-lived conversation reuses a cached prompt prefix every turn, and cached
+input tokens are billed at a fraction of uncached ones. That discount survives
+only as long as the prefix does not change. <strong>A micro-compaction pass rewrites
+already-sent history</strong>, which invalidates the prefix from the rewrite point
+onward — so with micro-compaction on, you break the cache <em>every turn</em> instead
+of once per batch compaction.</p>
+<p>This is the same cost the proactive prune deliberately avoids. That path gates
+itself behind <code>compression.proactive_prune_min_reclaim_tokens</code> (4096 by
+default) precisely so its rewrites stay, in the words of the config comment,
+"one big episodic break instead of a tiny break every tool iteration."</p>
+<p>Micro-compaction has no equivalent <em>reclaim-size</em> gate — a pass commits
+whatever the one absorbed exchange happened to save, large or small. What it
+has instead is a <em>frequency</em> dial, <code>micro_compact_every_n_turns</code>. Raising it
+makes the breaks rarer and more episodic, which is the same end the prune's
+gate serves by a different route, though it gets there by absorbing less rather
+than by waiting for a bigger win. If you want the prune's exact semantics here,
+a reclaim threshold on micro-compaction is the obvious follow-up and does not
+exist yet.</p>
+<p>So the honest framing is a trade of one cost for another, not a saving:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Batch-only (default)</th>
+<th>Micro-compaction on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Compression stalls</td>
+<td>One long stall at the threshold</td>
+<td>Spread across turns</td>
+</tr>
+<tr>
+<td>Context occupancy</td>
+<td>Sawtooths up to the threshold</td>
+<td>Stays low and flat</td>
+</tr>
+<tr>
+<td>Cache prefix</td>
+<td>Intact between compactions</td>
+<td>Broken every turn</td>
+</tr>
+</tbody>
+</table>
+<p>Which side wins depends on numbers specific to you: how much your provider
+discounts cached input, how large your prefix is, how long your sessions run,
+and how much a mid-session stall actually costs you. On a provider with a deep
+cache discount and a big prefix, the per-turn invalidation can plausibly cost
+more than the stall it removes. Measure your own sessions — see
+<a href="#measuring-it">Measuring it</a> — rather than assuming.</p>
+<h2 id="choosing-a-compression-model">Choosing a compression model</h2>
+<p>Micro-compaction uses the <code>auxiliary.compression</code> model:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">compression</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openai-api</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">&lt;your choice&gt;</span>
+<span class="w">    </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">&lt;endpoint&gt;</span>
+</code></pre></div>
+
+<p>This is the single most important knob, and there is no universally right
+answer — it depends on your hardware and what you are willing to trade.</p>
+<p>Each pass sends the running summary plus one exchange, so the prompt is small
+(a few thousand tokens) but the call happens <strong>every turn</strong>, at the end of the
+turn. Two properties matter:</p>
+<ul>
+<li><strong>Latency dominates.</strong> Because a pass runs per turn, its wall-clock cost is
+  felt repeatedly. A model that takes 30 seconds turns every turn into a turn
+  plus 30 seconds.</li>
+<li><strong>Reasoning models are a poor fit.</strong> Merging one exchange into a summary is
+  mechanical work. A thinking model will spend reasoning tokens on it and be
+  substantially slower than a plain instruct model of similar size, for no
+  benefit to the output.</li>
+</ul>
+<p>Some measured points, on one particular setup — treat them as illustrations of
+the shape, not as recommendations:</p>
+<table>
+<thead>
+<tr>
+<th>model</th>
+<th>observed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>7B 4-bit instruct, local (MLX, Apple Silicon)</td>
+<td>~31s per pass; box also serving other work</td>
+</tr>
+<tr>
+<td>large MoE reasoning model, remote GPU</td>
+<td>noticeably slower still — thinking tokens on a summarisation task</td>
+</tr>
+</tbody>
+</table>
+<p>The pattern is that a small, fast, non-reasoning instruct model is usually the
+right shape, and that a bigger or "smarter" model is often worse here rather
+than better. Where that lands for you depends on what you have to run it on.</p>
+<p>If passes feel too slow, your options in rough order of effect are: pick a
+faster or smaller compression model; give it a less contended host; or turn
+micro-compaction off and go back to batch compaction.</p>
+<h2 id="measuring-it">Measuring it</h2>
+<p>Micro-compaction is not primarily a token-saving or time-saving optimisation,
+and judging it on tokens saved will undersell it. The two things it actually
+buys you are:</p>
+<ol>
+<li><strong>The long pause is amortized.</strong> The same summarization work happens, but as
+   small increments after turns instead of one stall in the middle of a session.</li>
+<li><strong>Your context lasts longer.</strong> Because the middle is continuously reclaimed,
+   occupancy stays low instead of sawtoothing up to the threshold. A session
+   runs much further — often indefinitely — before it needs a hard compaction
+   at all.</li>
+</ol>
+<p>So the number that matters is <strong>occupancy</strong>: how full the window is being kept,
+as a percentage of the compaction threshold. A session that holds steady around
+40% has headroom to keep going; one climbing through 90% is about to stall. The
+second number is <strong>how many batch compactions actually fired</strong> — ideally none.</p>
+<p>A session can save nothing on paper and still be a clear win on both counts.</p>
+<p>Every pass emits one content-free JSON line, in the same style as the batch
+compaction telemetry:</p>
+<div class="highlight"><pre><span></span><code>micro compaction telemetry: {&quot;event&quot;:&quot;micro_compaction&quot;,&quot;outcome&quot;:&quot;absorbed&quot;,
+&quot;tokens_before&quot;:12739,&quot;tokens_after&quot;:12060,&quot;tokens_delta&quot;:-679,
+&quot;occupancy_pct&quot;:38.4,&quot;threshold_tokens&quot;:34816,&quot;context_limit&quot;:40960,
+&quot;exchange_tokens&quot;:868,&quot;rolling_summary_tokens&quot;:31,&quot;passes_total&quot;:1,
+&quot;tokens_saved_total&quot;:679,&quot;duration_ms&quot;:14,...}
+</code></pre></div>
+
+<p><code>occupancy_pct</code> is <code>tokens_after</code> as a share of the compaction threshold -- the
+headroom figure. It is null when the model's window has not been resolved yet:
+the telemetry reads only the cached value, because resolving it can issue a
+synchronous <code>/models</code> probe and telemetry must never be what blocks a turn.</p>
+<p><code>tokens_delta</code> is negative when the pass shrank the transcript.
+<code>tokens_saved_total</code> and <code>passes_total</code> accumulate across the session, so a whole
+run can be summarised from its last line. No transcript content appears in the
+payload — only counts.</p>
+<p>To turn a log into an answer:</p>
+<div class="highlight"><pre><span></span><code>python scripts/micro_compaction_report.py [--per-session] [LOGFILE ...]
+</code></pre></div>
+
+<p>Defaults to <code>$HERMES_HOME/logs/agent.log</code>. It reports passes, outcome mix, net
+tokens saved, mean absorbed-exchange size and pass durations.</p>
+<h3 id="what-it-looks-like-when-it-is-working">What it looks like when it is working</h3>
+<p>One real session — a 3.5 hour whole-project code review, ~75K tokens of
+transcript, 400K window, compaction threshold at 320K:</p>
+<table>
+<thead>
+<tr>
+<th>pass</th>
+<th>messages</th>
+<th>tokens</th>
+<th>delta</th>
+<th>occupancy</th>
+<th>duration</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>40 -&gt; 39</td>
+<td>27,479 -&gt; 27,778</td>
+<td>+299</td>
+<td>8.7%</td>
+<td>2.2s</td>
+</tr>
+<tr>
+<td>2</td>
+<td>61 -&gt; 59</td>
+<td>48,676 -&gt; 48,128</td>
+<td>-548</td>
+<td>15.0%</td>
+<td>4.5s</td>
+</tr>
+<tr>
+<td>3</td>
+<td>70 -&gt; 67</td>
+<td>58,309 -&gt; 55,915</td>
+<td>-2,394</td>
+<td>17.5%</td>
+<td>9.1s</td>
+</tr>
+<tr>
+<td>4</td>
+<td>84 -&gt; 80</td>
+<td>75,251 -&gt; 69,818</td>
+<td>-5,433</td>
+<td>21.8%</td>
+<td>36.2s</td>
+</tr>
+<tr>
+<td>5</td>
+<td>84 -&gt; 80</td>
+<td>74,659 -&gt; 70,264</td>
+<td>-4,395</td>
+<td>22.0%</td>
+<td>31.2s</td>
+</tr>
+</tbody>
+</table>
+<p>Three things to read off it.</p>
+<p><strong>Occupancy flattened.</strong> It climbed to about 22% and stopped. The last two
+passes are identical (84 -&gt; 80 messages); between them the conversation added
+4,841 tokens and micro-compaction reclaimed 4,395. That is equilibrium: the
+window holds steady instead of marching toward the threshold.</p>
+<p><strong>No batch compaction fired.</strong> Across the whole session the long pause never
+happened.</p>
+<p><strong>Reclamation only ramps after the tail budget.</strong> The first passes recovered
+almost nothing, because below the tail budget (here 64,000 tokens, 16% of the
+window) nearly the whole transcript is protected tail and there is very little
+that may be touched. Early sessions legitimately show no passes at all.</p>
+<p>And the cost, stated plainly: passes ran 2 to 37 seconds, median around 31, on
+a small local model that was also serving other work. Roughly two minutes of
+summarisation spread across three and a half hours. Against one batch
+compaction of a 75K-token middle that is still the better trade, but a
+37-second increment is not a rounding error. See
+<a href="#choosing-a-compression-model">Choosing a compression model</a>.</p>
+<h3 id="reading-the-numbers-honestly">Reading the numbers honestly</h3>
+<p><strong>The first pass in a session usually costs tokens rather than saving them.</strong>
+Inserting the summary marker carries a fixed ~400 tokens of scaffolding — the
+compaction preamble, the historical heading, the end marker — and on pass one
+that is paid against a single absorbed exchange. A first pass showing
+<code>tokens_delta: +330</code> is not a malfunction.</p>
+<p>From the second pass on, the marker is <em>replaced</em> rather than added, so the
+scaffolding is already paid for and each absorbed exchange is close to pure
+saving. The break-even is normally the second or third pass. This is why the
+per-session view matters more than any single line: judge the feature on a
+session's trajectory, not on one turn.</p>
+<p>The plainer human-readable lines are still there too:</p>
+<div class="highlight"><pre><span></span><code>Micro-compaction: 37 -&gt; 36 messages
+Micro-compaction defrag: rolling summary re-summarized (1843 chars)
+Micro-compaction: skipping exchange at cursor 12 after 3 consecutive failures
+</code></pre></div>
+
+<p>Message counts move by small amounts — that's expected. The token count is where
+the effect shows: absorbing one tool-heavy exchange can drop hundreds of tokens
+while changing the message count by one or two.</p>
+<h2 id="failure-behaviour">Failure behaviour</h2>
+<p>Micro-compaction is best-effort throughout. The call in <code>finalize_turn</code> is wrapped
+so that any exception is logged and swallowed — a failure returns the conversation
+unchanged and the turn completes normally. It can degrade, but it shouldn't be
+able to break a session.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/micro-compaction</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#what-it-does">What it does</a></li>
+<li class="lvl2"><a href="#your-messages-are-never-compacted">Your messages are never compacted</a></li>
+<li class="lvl2"><a href="#what-it-never-touches">What it never touches</a></li>
+<li class="lvl2"><a href="#how-it-works">How it works</a></li>
+<li class="lvl3"><a href="#the-cursor">The cursor</a></li>
+<li class="lvl3"><a href="#the-rolling-summary">The rolling summary</a></li>
+<li class="lvl3"><a href="#defrag">Defrag</a></li>
+<li class="lvl3"><a href="#staying-in-step-with-the-session-database">Staying in step with the session database</a></li>
+<li class="lvl3"><a href="#when-the-summarizer-fails">When the summarizer fails</a></li>
+<li class="lvl2"><a href="#interaction-with-batch-compaction">Interaction with batch compaction</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl2"><a href="#prompt-caching--the-cost-you-are-opting-into">Prompt caching — the cost you are opting into</a></li>
+<li class="lvl2"><a href="#choosing-a-compression-model">Choosing a compression model</a></li>
+<li class="lvl2"><a href="#measuring-it">Measuring it</a></li>
+<li class="lvl3"><a href="#what-it-looks-like-when-it-is-working">What it looks like when it is working</a></li>
+<li class="lvl3"><a href="#reading-the-numbers-honestly">Reading the numbers honestly</a></li>
+<li class="lvl2"><a href="#failure-behaviour">Failure behaviour</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

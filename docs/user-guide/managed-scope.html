@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Managed Scope · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/managed-scope</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="managed-scope">Managed Scope</h1>
+<p><strong>Managed scope</strong> lets an administrator push a baseline of configuration and
+secrets that a standard (non-root) user <strong>cannot override</strong>. It is intended for
+fleet/org deployments where IT needs to pin, for example, the model provider, a
+shared API base URL, or <code>security.redact_secrets: true</code> across every user on a
+machine.</p>
+<p>When a managed scope is present, the values it specifies win over the user's
+<code>~/.hermes/config.yaml</code>, <code>~/.hermes/.env</code>, and even the shell environment — for
+exactly the keys it pins. Everything else stays fully user-controlled.</p>
+<div class="admonition adm-note"><p class="adm-title">Different from a package-manager–locked install</p>
+<p>A package-manager–managed install (declarative-distro / formula) blocks <em>all</em>
+config mutation and tells you to use your package manager. Managed scope is a
+separate mechanism: it injects <em>specific immutable values</em> on a per-key basis
+rather than locking the whole config. The two are independent and can coexist.</p>
+</div>
+<h2 id="where-it-lives">Where it lives</h2>
+<p>Managed scope is read from a system-level directory, default <code>/etc/hermes</code>:</p>
+<div class="highlight"><pre><span></span><code>/etc/hermes/
+├── config.yaml     # managed config layer (wins over ~/.hermes/config.yaml)
+└── .env            # managed env layer (wins over ~/.hermes/.env + shell)
+</code></pre></div>
+
+<p>The directory and files are owned by <code>root</code> (directory mode <code>0755</code>, files
+<code>0644</code>): readable by everyone, writable only by an administrator. <strong>That
+filesystem permission is the enforcement mechanism</strong> — a standard user can read
+the managed files but cannot edit them.</p>
+<p>Either file is optional. A missing managed directory or missing file simply
+means "no managed scope," and configuration resolves exactly as it does without
+the feature.</p>
+<h3 id="relocating-the-directory">Relocating the directory</h3>
+<p>The location can be relocated with the <code>HERMES_MANAGED_DIR</code> environment variable
+(for containers or non-<code>/etc</code> deployments). This is a deployment/bootstrap path
+knob — like <code>HERMES_HOME</code> — set by the same administrator who owns the managed
+files. It is <strong>never persisted</strong> to any <code>.env</code> by Hermes.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Point managed scope at a custom directory (set by IT / the deployment, not the user)</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_MANAGED_DIR</span><span class="o">=</span>/opt/org/hermes-policy
+</code></pre></div>
+
+<div class="admonition adm-warning"><p class="adm-title">Warning</p>
+<p>A user who can set <code>HERMES_MANAGED_DIR</code> can repoint managed scope at a directory
+they control, defeating it. In a real deployment this variable should be fixed
+by the administrator (e.g. baked into the service unit / container image), not
+left user-settable. <code>hermes doctor</code> reports the <em>resolved</em> managed directory so
+a redirect is visible.</p>
+</div>
+<h2 id="precedence">Precedence</h2>
+<p>For the keys a managed layer specifies, the order is (highest wins):</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>config.yaml</th>
+<th>.env</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>/etc/hermes/config.yaml</code> (managed)</td>
+<td><code>/etc/hermes/.env</code> (managed)</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>~/.hermes/config.yaml</code> (user)</td>
+<td><code>~/.hermes/.env</code> (user)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>built-in defaults</td>
+<td>pre-existing shell environment</td>
+</tr>
+</tbody>
+</table>
+<p>Merging is <strong>leaf-level</strong>: pinning <code>model.default</code> does not freeze the rest of
+<code>model.*</code>. A managed <code>config.yaml</code> of:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">org/standard-model</span>
+</code></pre></div>
+
+<p>forces <code>model.default</code> for every user while leaving <code>model.fallback</code> (and every
+other key) under user control.</p>
+<div class="admonition adm-note"><p class="adm-title">Precedence note</p>
+<p>For the keys it pins, managed scope deliberately wins over the shell environment
+too — otherwise it would not be "managed." This is the one place that inverts the
+usual "an environment variable overrides config.yaml" rule, and it applies only
+to the specific keys the managed layer specifies.</p>
+</div>
+<h2 id="seeing-whats-managed">Seeing what's managed</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>config<span class="w">        </span><span class="c1"># shows a header naming the managed source + the pinned keys</span>
+hermes<span class="w"> </span>doctor<span class="w">        </span><span class="c1"># reports the resolved managed dir + pinned key counts</span>
+</code></pre></div>
+
+<p>If you try to change a managed value, Hermes refuses and names the source:</p>
+<div class="highlight"><pre><span></span><code>$<span class="w"> </span>hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>model.default<span class="w"> </span>my/model
+Cannot<span class="w"> </span><span class="nb">set</span><span class="w"> </span><span class="s1">&#39;model.default&#39;</span>:<span class="w"> </span>it<span class="w"> </span>is<span class="w"> </span>managed<span class="w"> </span>by<span class="w"> </span>your<span class="w"> </span>administrator
+<span class="o">(</span>/etc/hermes/config.yaml<span class="o">)</span><span class="w"> </span>and<span class="w"> </span>cannot<span class="w"> </span>be<span class="w"> </span>changed.
+</code></pre></div>
+
+<p>The same applies to managed secrets — <code>hermes config set</code> / setup will not write
+a user value for an env key pinned by the managed <code>.env</code>.</p>
+<h2 id="setting-up-a-managed-scope-administrators">Setting up a managed scope (administrators)</h2>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>mkdir<span class="w"> </span>-p<span class="w"> </span>/etc/hermes
+
+<span class="c1"># Pin some config values for every user on this machine</span>
+sudo<span class="w"> </span>tee<span class="w"> </span>/etc/hermes/config.yaml<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="s">&lt;&lt;&#39;YAML&#39;</span>
+<span class="s">model:</span>
+<span class="s">  provider: nous</span>
+<span class="s">security:</span>
+<span class="s">  redact_secrets: true</span>
+<span class="s">YAML</span>
+
+<span class="c1"># Optionally pin a shared, non-sensitive env value</span>
+sudo<span class="w"> </span>tee<span class="w"> </span>/etc/hermes/.env<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="s">&lt;&lt;&#39;ENV&#39;</span>
+<span class="s">OPENAI_API_BASE=https://inference.example.com/v1</span>
+<span class="s">ENV</span>
+
+sudo<span class="w"> </span>chmod<span class="w"> </span><span class="m">0755</span><span class="w"> </span>/etc/hermes
+sudo<span class="w"> </span>chmod<span class="w"> </span><span class="m">0644</span><span class="w"> </span>/etc/hermes/config.yaml<span class="w"> </span>/etc/hermes/.env
+</code></pre></div>
+
+<p>Changes take effect on the next Hermes start (a malformed managed file is logged
+loudly and ignored — it never blocks startup, but the admin should check
+<code>hermes doctor</code> to confirm the policy is being applied).</p>
+<h2 id="security-model-and-limitations-v1">Security model and limitations (v1)</h2>
+<ul>
+<li><strong>Enforcement is filesystem permissions only.</strong> If a user has write access to
+  the managed directory (or runs Hermes as <code>root</code>), managed scope is advisory.</li>
+<li><strong>The managed <code>.env</code> is world-readable</strong> (<code>0644</code>), so any local user can read
+  secrets pushed through it. Use it for shared, non-sensitive values (an org API
+  base URL, feature defaults) rather than high-sensitivity secrets.</li>
+<li><strong>The agent's own tools are not hard-blocked from a managed <em>env</em> value.</strong> A
+  managed environment variable is applied at startup, but nothing stops the
+  agent from setting a different value inside its own subprocess shell. v1 is a
+  management-convenience boundary against a normal user, not an un-escapable
+  sandbox.</li>
+</ul>
+<p>The following are intentionally <strong>out of scope for v1</strong> and may come later:</p>
+<ul>
+<li>A hard boundary that the agent itself cannot escape.</li>
+<li>Native managed locations on macOS and Windows (v1 is Linux/POSIX-first).</li>
+<li>Drop-in fragment directories (<code>managed.d/</code>) for layered policy.</li>
+<li>Signed / integrity-checked managed files.</li>
+<li>Remote / device-management (MDM) delivery.</li>
+<li>Tighter (group-scoped) permissions for managed secrets.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/managed-scope</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#where-it-lives">Where it lives</a></li>
+<li class="lvl3"><a href="#relocating-the-directory">Relocating the directory</a></li>
+<li class="lvl2"><a href="#precedence">Precedence</a></li>
+<li class="lvl2"><a href="#seeing-whats-managed">Seeing what&#x27;s managed</a></li>
+<li class="lvl2"><a href="#setting-up-a-managed-scope-administrators">Setting up a managed scope (administrators)</a></li>
+<li class="lvl2"><a href="#security-model-and-limitations-v1">Security model and limitations (v1)</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

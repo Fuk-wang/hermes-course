@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Browser Provider Plugins · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/browser-provider-plugin</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="building-a-browser-provider-plugin">Building a Browser Provider Plugin</h1>
+<p>Browser provider plugins register a <strong>cloud browser backend</strong> that services cloud-mode <code>browser_*</code> tool calls (navigate, click, screenshot, …). Built-in providers — Browserbase, Browser Use, and Firecrawl — all ship as plugins under <code>plugins/browser/&lt;name&gt;/</code>. You can add a new one, or override a bundled one, by dropping a directory next to them.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Browser backends are one of several <strong>backend plugins</strong> Hermes supports. The others (with their own ABCs) are <a href="web-search-provider-plugin.html">Web Search Provider Plugins</a> (which this ABC deliberately mirrors), <a href="image-gen-provider-plugin.html">Image Generation</a>, <a href="video-gen-provider-plugin.html">Video Generation</a>, <a href="memory-provider-plugin.html">Memory Providers</a>, <a href="context-engine-plugin.html">Context Engines</a>, <a href="secret-source-plugin.html">Secret Sources</a>, and <a href="model-provider-plugin.html">Model Providers</a>. General tool/hook/CLI plugins live in <a href="plugins.html">Build a Hermes Plugin</a>.</p>
+</div>
+<h2 id="how-it-fits-together">How it fits together</h2>
+<p>A browser provider does <strong>not</strong> implement browsing. It implements <strong>session lifecycle</strong>: create a remote browser session, hand back a CDP websocket URL, and tear the session down. Hermes' own browser stack (<code>agent-browser</code> + <code>tools/browser_tool.py</code>) connects to whatever CDP URL you return and drives the page from there — every provider gets the full <code>browser_*</code> toolset for free.</p>
+<p>The active provider is selected by <code>browser.cloud_provider</code> in <code>config.yaml</code>; the dispatcher in <code>tools/browser_tool.py</code> is a pure registry lookup with no per-provider conditionals.</p>
+<h2 id="discovery">Discovery</h2>
+<p>Hermes scans for browser backends in three places:</p>
+<ol>
+<li><strong>Bundled</strong> — <code>&lt;repo&gt;/plugins/browser/&lt;name&gt;/</code> (auto-loaded with <code>kind: backend</code>)</li>
+<li><strong>User</strong> — <code>~/.hermes/plugins/browser/&lt;name&gt;/</code> (opt-in via <code>plugins.enabled</code> or <code>hermes plugins enable &lt;name&gt;</code>)</li>
+<li><strong>Pip</strong> — packages declaring a <code>hermes_agent.plugins</code> entry point</li>
+</ol>
+<p>Each plugin's <code>register(ctx)</code> calls <code>ctx.register_browser_provider(...)</code>, which puts the instance into the registry in <code>agent/browser_registry.py</code>.</p>
+<h2 id="directory-structure">Directory structure</h2>
+<div class="highlight"><pre><span></span><code>plugins/browser/my-backend/
+├── __init__.py     # register() entry point
+├── provider.py     # BrowserProvider subclass
+└── plugin.yaml     # Manifest with kind: backend and provides_browser_providers
+</code></pre></div>
+
+<p><code>plugin.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">browser-my-backend</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;My</span><span class="nv"> </span><span class="s">cloud</span><span class="nv"> </span><span class="s">browser</span><span class="nv"> </span><span class="s">backend.</span><span class="nv"> </span><span class="s">Requires</span><span class="nv"> </span><span class="s">MY_BACKEND_API_KEY.&quot;</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">you</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backend</span>
+<span class="nt">provides_browser_providers</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-backend</span>
+</code></pre></div>
+
+<p><code>__init__.py</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">plugins.browser.my_backend.provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">MyBackendProvider</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_browser_provider</span><span class="p">(</span><span class="n">MyBackendProvider</span><span class="p">())</span>
+</code></pre></div>
+
+<h2 id="the-browserprovider-abc">The BrowserProvider ABC</h2>
+<p>Implement <code>agent.browser_provider.BrowserProvider</code>. Three lifecycle methods plus identity:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.browser_provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">BrowserProvider</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyBackendProvider</span><span class="p">(</span><span class="n">BrowserProvider</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;my-backend&quot;</span>          <span class="c1"># the browser.cloud_provider config value</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">display_name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;My Backend&quot;</span>          <span class="c1"># shown in `hermes tools`</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_available</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Cheap check only — env var present, dep importable.</span>
+<span class="sd">        NO network calls: runs at tool-registration time and on every</span>
+<span class="sd">        `hermes tools` paint.&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MY_BACKEND_API_KEY&quot;</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">create_session</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">task_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Create a remote browser session; return the session-metadata contract.&quot;&quot;&quot;</span>
+        <span class="n">session</span> <span class="o">=</span> <span class="n">my_api</span><span class="o">.</span><span class="n">create_browser</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">&quot;session_name&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;my-backend-</span><span class="si">{</span><span class="n">task_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>  <span class="c1"># unique agent-browser session name</span>
+            <span class="s2">&quot;bb_session_id&quot;</span><span class="p">:</span> <span class="n">session</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>              <span class="c1"># provider session ID (for cleanup)</span>
+            <span class="s2">&quot;cdp_url&quot;</span><span class="p">:</span> <span class="n">session</span><span class="o">.</span><span class="n">cdp_ws_url</span><span class="p">,</span>            <span class="c1"># CDP websocket URL</span>
+            <span class="s2">&quot;features&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;stealth&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">},</span>            <span class="c1"># feature flags you enabled</span>
+        <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">close_session</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">session_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Terminate by provider session ID. Log-and-return-False on error —</span>
+<span class="sd">        never raise, so the dispatcher&#39;s cleanup loop keeps moving.&quot;&quot;&quot;</span>
+        <span class="o">...</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">emergency_cleanup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">session_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Best-effort teardown from atexit/signal handlers. Must not raise.&quot;&quot;&quot;</span>
+        <span class="o">...</span>
+</code></pre></div>
+
+<h3 id="the-session-metadata-contract">The session-metadata contract</h3>
+<p><code>create_session()</code> must return at least <code>session_name</code>, <code>bb_session_id</code>, <code>cdp_url</code>, and <code>features</code>. Two quirks worth knowing:</p>
+<ul>
+<li><strong><code>bb_session_id</code> is a legacy key name</strong> kept verbatim for backward compatibility with <code>tools/browser_tool.py</code> — it holds <em>your</em> provider's session ID regardless of vendor. Don't rename it.</li>
+<li><code>create_session()</code> <strong>may raise</strong> — <code>ValueError</code> for missing credentials, <code>RuntimeError</code> for network/API failures. The dispatcher surfaces these to the user. This differs from <code>close_session</code>/<code>emergency_cleanup</code>, which must never raise.</li>
+</ul>
+<p>An optional <code>external_call_id</code> key supports managed-gateway billing.</p>
+<h3 id="get_setup_schema--the-hermes-tools-picker-row"><code>get_setup_schema()</code> — the <code>hermes tools</code> picker row</h3>
+<p>Override this to appear as a first-class option in the Browser Automation picker with API-key prompts and an install hook:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">get_setup_schema</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+    <span class="k">return</span> <span class="p">{</span>
+        <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;My Backend&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;badge&quot;</span><span class="p">:</span> <span class="s2">&quot;paid&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;tag&quot;</span><span class="p">:</span> <span class="s2">&quot;Cloud browser with stealth and proxies&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;env_vars&quot;</span><span class="p">:</span> <span class="p">[</span>
+            <span class="p">{</span><span class="s2">&quot;key&quot;</span><span class="p">:</span> <span class="s2">&quot;MY_BACKEND_API_KEY&quot;</span><span class="p">,</span>
+             <span class="s2">&quot;prompt&quot;</span><span class="p">:</span> <span class="s2">&quot;My Backend API key&quot;</span><span class="p">,</span>
+             <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="s2">&quot;https://mybackend.example&quot;</span><span class="p">},</span>
+        <span class="p">],</span>
+        <span class="s2">&quot;post_setup&quot;</span><span class="p">:</span> <span class="s2">&quot;agent_browser&quot;</span><span class="p">,</span>   <span class="c1"># ensures local Chromium is installed (agent-browser itself resolves via npx)</span>
+    <span class="p">}</span>
+</code></pre></div>
+
+<p>Per the project standard for tool backends: if a backend can't be selected and configured through <code>hermes tools</code>, it isn't done — "set this env var manually" is not an integration.</p>
+<h2 id="users-configure-it">Users configure it</h2>
+<div class="highlight"><pre><span></span><code><span class="nt">browser</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">cloud_provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-backend</span>
+</code></pre></div>
+
+<h2 id="reference-implementations">Reference implementations</h2>
+<p>The three bundled providers under <code>plugins/browser/</code> are the canonical examples, in ascending complexity: <code>firecrawl</code> (simplest), <code>browser_use</code>, and <code>browserbase</code> (stealth/proxy/keep-alive feature flags with graceful fallback when paid features are unavailable). Copy the closest one.</p>
+<h2 id="checklist">Checklist</h2>
+<ul>
+<li>[ ] <code>name</code> is lowercase and stable (it's a config value users write)</li>
+<li>[ ] <code>is_available()</code> makes zero network calls</li>
+<li>[ ] <code>create_session()</code> returns the full metadata contract (<code>bb_session_id</code> key name intact)</li>
+<li>[ ] <code>close_session()</code> / <code>emergency_cleanup()</code> never raise</li>
+<li>[ ] <code>get_setup_schema()</code> exposes your env vars so <code>hermes tools</code> can configure the backend</li>
+<li>[ ] <code>plugin.yaml</code> declares <code>kind: backend</code> + <code>provides_browser_providers</code></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/browser-provider-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-it-fits-together">How it fits together</a></li>
+<li class="lvl2"><a href="#discovery">Discovery</a></li>
+<li class="lvl2"><a href="#directory-structure">Directory structure</a></li>
+<li class="lvl2"><a href="#the-browserprovider-abc">The BrowserProvider ABC</a></li>
+<li class="lvl3"><a href="#the-session-metadata-contract">The session-metadata contract</a></li>
+<li class="lvl3"><a href="#get_setup_schema--the-hermes-tools-picker-row">get_setup_schema() — the hermes tools picker row</a></li>
+<li class="lvl2"><a href="#users-configure-it">Users configure it</a></li>
+<li class="lvl2"><a href="#reference-implementations">Reference implementations</a></li>
+<li class="lvl2"><a href="#checklist">Checklist</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

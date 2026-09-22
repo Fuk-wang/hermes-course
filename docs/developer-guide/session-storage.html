@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session Storage · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/session-storage</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="session-storage">Session Storage</h1>
+<p>Hermes Agent uses a SQLite database (<code>~/.hermes/state.db</code>) to persist session
+metadata, full message history, and model configuration across CLI and gateway
+sessions. This replaces the earlier per-session JSONL file approach.</p>
+<p>Source files: <code>hermes_state.py</code> (facade) plus the <code>hermes_state_*.py</code> siblings (schema, fts, search, compression, portability, gateway, ...)</p>
+<h2 id="hermes-home-and-profile-isolation">Hermes home and profile isolation</h2>
+<p><code>get_hermes_home()</code> is the authoritative filesystem resolver for state and
+configuration. It uses a context-local override first, then the <code>HERMES_HOME</code>
+environment variable, and finally the platform default (<code>~/.hermes</code> on macOS
+and Linux; <code>%LOCALAPPDATA%/hermes</code> on Windows). Consequently, the default
+database is always <code>get_hermes_home() / "state.db"</code>, not a path that callers
+should hard-code as <code>~/.hermes/state.db</code>.</p>
+<p>Named profiles are isolated directories: a profile named <code>coder</code>, for example,
+uses <code>&lt;default Hermes root&gt;/profiles/coder/</code> and therefore has its own
+<code>state.db</code>, configuration, logs, and other profile-scoped state. A process that
+creates a database, reads configuration, or starts a child process for a
+profile must retain or pass that profile's <code>HERMES_HOME</code>; falling back to the
+default root mixes the wrong profile's state into the operation.</p>
+<p>The CLI bootstrap calls <code>_apply_profile_override()</code> before importing the rest
+of Hermes. An explicit <code>--profile</code>/<code>-p</code> resolves that profile and writes the
+resolved directory to <code>HERMES_HOME</code>. Without an explicit selector, a
+profile-specific <code>HERMES_HOME</code> is preserved; otherwise the bootstrap can use
+the default root's active-profile selection. <code>HOME</code> only determines the
+platform default used when no context override or <code>HERMES_HOME</code> is available.
+Changing <code>HOME</code> is not a safe way to select a named profile. In particular, a
+subprocess that drops <code>HERMES_HOME</code> can fall back to the default profile even
+when another profile is active, so subprocess spawners should pass
+<code>HERMES_HOME</code> explicitly.</p>
+<p>Use <code>display_hermes_home()</code> only for user-facing text. It formats the resolved
+home relative to the user's home directory when possible (for example,
+<code>~/.hermes/profiles/coder</code>); it does not provide a separate resolution rule.</p>
+<h3 id="test-isolation-guard">Test isolation guard</h3>
+<p>Tests must use a temporary <code>HERMES_HOME</code> or an explicit temporary database
+path. The live-system guard raises before a test-context process opens a
+production <code>state.db</code> under the real default Hermes root or a real named
+profile, preventing fixture data or SQLite side effects from reaching a live
+installation.</p>
+<p><code>HERMES_STATE_DB_GUARD_BYPASS=1</code> is a test-only escape hatch for a spawned
+child process that genuinely must access the live database. The equivalent
+in-process escape hatch is <code>@pytest.mark.live_system_guard_bypass</code>. Do not set
+either bypass in normal Hermes commands, development shells, or application
+configuration: it disables the guard (a hard <code>RuntimeError</code>) that protects live
+session history, and a shell that exports it hands the bypass to every later
+pytest run.</p>
+<h3 id="desktop-profile-isolation-and-compaction-generations">Desktop profile isolation and compaction generations</h3>
+<p>Each named profile stores its transcript in its own <code>$HERMES_HOME/state.db</code>,
+including when one <code>hermes serve</code> process serves several profiles. In-session
+agent rebuilds (Bot Chat capability refresh and <code>tools.configure</code>) must retain
+that session's database handle and bind its profile home during construction.
+Releasing the outgoing agent must not close the handle inherited by its replacement.
+<code>tools.configure</code> resolves configuration from the live session's <code>profile_home</code>,
+even when the client supplies only <code>session_id</code>. Rebuilds prepare model configuration
+before allocating a replacement, then install the agent and transfer ownership
+together; preparation failure leaves the existing agent responsible for teardown.
+Explicit profiles that cannot be resolved or whose directory has disappeared fail
+before accessing launch configuration or history. A stale <code>tools.configure</code>
+session ID likewise returns <code>session not found</code> without changing configuration;
+omitting the session ID still supports the global settings operation.</p>
+<p>In-place compaction archives old rows with <code>active=0</code> and inserts the retained
+context as <code>active=1</code> rows. A protected message can therefore legitimately appear
+in both generations with identical content and timestamp. Do not delete these
+archive rows as duplicates. Diagnose duplicate <em>live</em> writes using <code>active=1</code>,
+and check the database's profile as well as the session ID when investigating
+history that appears to revert.</p>
+<h2 id="codex-app-server-input-ownership">Codex app-server input ownership</h2>
+<p>The agent persists an accepted user input before starting its Codex turn. Codex
+then projects that input as a leading <code>userMessage</code> notification. At the runtime
+splice boundary, Hermes excludes only that leading item when it exactly matches
+the text serialized into <code>turn/start</code>, including rich-input coercion. Later or
+nonmatching user events remain intact, as do separately accepted identical turns.
+This also applies to synthetic/keyless input; it does not depend on a platform
+message ID. Existing historical duplicates are not rewritten. The gateway skips
+its transcript write when the agent reports that it owns persistence.</p>
+<h2 id="gateway-exception-path-input-ownership">Gateway exception-path input ownership</h2>
+<p>A gateway exception can occur before agent construction or after its input reaches
+SQLite. The gateway gives the accepted input an owner marker in the existing
+<code>display_metadata</code> sidecar and passes it through the agent's normal persistence
+path. Provider messages never contain this metadata. Platform markers namespace
+the inbound message ID by platform, profile, scope, chat, and thread; the original
+<code>platform_message_id</code> remains unchanged for quote/reply resolution. Keyless turns
+receive a fresh marker, even for identical text and timestamps.</p>
+<p>The exception writer probes only for that marker, following the published reroute
+and canonical live compression successor, then compression ancestors. Active rows
+and compaction archives count; undone rows, observed input, and unrelated writers
+do not. An unrelated process writing the same session cannot suppress this turn.
+No whole-history baseline or archived message-body allocation is needed. Failed
+ownership reads do not authorize a speculative append; ordinary history-read
+failures retain the existing history-unavailable response.</p>
+<p>Normal agent-owned persistence is unchanged. This is failure-writer arbitration,
+not universal exactly-once delivery, content deduplication, or a schema migration.
+Historical rows are not rewritten; unmarked historical inputs cannot establish
+ownership for a redelivered event.</p>
+<h2 id="architecture-overview">Architecture Overview</h2>
+<div class="highlight"><pre><span></span><code>~/.hermes/state.db (SQLite, WAL mode)
+├── sessions              — Session metadata, token counts, billing
+├── messages              — Full message history per session
+├── session_model_usage   — Per-model/per-task usage attribution rows
+├── messages_fts          — FTS5 virtual table (content + tool_name + tool_calls)
+├── messages_fts_trigram  — FTS5 virtual table with trigram tokenizer (CJK / substring search)
+├── messages_fts_cjk      — FTS5 virtual table with cjk_unicode61 tokenizer
+├── state_meta            — Key/value metadata table
+├── gateway_routing       — Gateway routing metadata
+├── compression_locks     — Cross-process compression locking
+├── async_delegations     — Async delegation bookkeeping
+├── delivery_obligations  — Gateway outbox (owed replies); created lazily by gateway/delivery_ledger.py
+└── schema_version        — Single-row table tracking migration state
+</code></pre></div>
+
+<p><code>hermes sessions recover</code> copies the row-bearing tables above into the
+recovered database (FTS indexes and <code>schema_version</code> are regenerated), including
+the lazily-created <code>delivery_obligations</code> ledger when the source has one — its
+row count is verified like <code>sessions</code>/<code>messages</code>.</p>
+<p>Key design decisions:
+- <strong>WAL mode</strong> for concurrent readers + one writer (gateway multi-platform)
+- <strong>FTS5 virtual table</strong> for fast text search across all session messages
+- <strong>Session lineage</strong> via <code>parent_session_id</code> chains (compression-triggered splits)
+- <strong>Source tagging</strong> (<code>cli</code>, <code>telegram</code>, <code>discord</code>, etc.) for platform filtering
+- Batch runner and RL trajectories are NOT stored here (separate systems)</p>
+<h2 id="sqlite-schema">SQLite Schema</h2>
+<h3 id="sessions-table">Sessions Table</h3>
+<p>Abridged — see <code>SCHEMA_SQL</code> in <code>hermes_state_common.py</code> (applied by <code>hermes_state_schema.py</code>) for the full current column list
+(which also includes gateway routing metadata such as <code>session_key</code>, <code>chat_id</code>,
+<code>chat_type</code>, <code>thread_id</code>, <code>display_name</code>, <code>origin_json</code>, <code>expiry_finalized</code>,
+workspace fields <code>cwd</code> / <code>git_branch</code> / <code>git_repo_root</code>, handoff and
+compression-failure fields, <code>profile_name</code>, <code>transport_profile</code> (the multiplex
+bot that received the lane, nullable), <code>rewind_count</code>, <code>archived</code>, and
+<code>pinned</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="k">source</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">user_id</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">model</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">model_config</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">system_prompt</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">parent_session_id</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">started_at</span><span class="w"> </span><span class="nb">REAL</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">ended_at</span><span class="w"> </span><span class="nb">REAL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">end_reason</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">message_count</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tool_call_count</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">input_tokens</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">output_tokens</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cache_read_tokens</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cache_write_tokens</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">reasoning_tokens</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">billing_provider</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">billing_base_url</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">billing_mode</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">estimated_cost_usd</span><span class="w"> </span><span class="nb">REAL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">actual_cost_usd</span><span class="w"> </span><span class="nb">REAL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cost_status</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cost_source</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">pricing_version</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">title</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">api_call_count</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- ... additional gateway/workspace/handoff/compression columns ...</span>
+<span class="w">    </span><span class="k">FOREIGN</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">parent_session_id</span><span class="p">)</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="n">id</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_sessions_source</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="k">source</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_sessions_parent</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="n">parent_session_id</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_sessions_started</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="n">started_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_sessions_title_unique</span>
+<span class="w">    </span><span class="k">ON</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="n">title</span><span class="p">)</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">title</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">;</span>
+</code></pre></div>
+
+<p><code>user_id</code> is the principal on the other end of the session: messaging adapters
+store the platform sender id, and <code>desktop</code> / dashboard sessions opened through
+an authenticated <code>hermes serve</code> (OAuth or the basic username/password provider)
+store the login as <code>&lt;provider&gt;:&lt;user id&gt;</code> (for example <code>basic:alice</code>). Sessions
+with nobody behind them — anonymous loopback use, <code>subagent</code>, <code>cron</code>, <code>kanban</code>
+— keep it empty. The value is set when the row is created and never inferred
+later.</p>
+<h3 id="messages-table">Messages Table</h3>
+<p>Abridged — the full schema also includes <code>effect_disposition</code>,
+<code>platform_message_id</code>, <code>observed</code>, <code>active</code>, <code>compacted</code>, <code>api_content</code>,
+<code>display_kind</code>, and <code>display_metadata</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">messages</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="n">AUTOINCREMENT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">session_id</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">sessions</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="k">role</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">content</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tool_call_id</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tool_calls</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tool_name</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="k">timestamp</span><span class="w"> </span><span class="nb">REAL</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">token_count</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">,</span>
+<span class="w">    </span><span class="n">finish_reason</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">reasoning</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">reasoning_content</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">reasoning_details</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">codex_reasoning_items</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">codex_message_items</span><span class="w"> </span><span class="nb">TEXT</span>
+<span class="w">    </span><span class="c1">-- ... additional display/compaction columns ...</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_messages_session</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">messages</span><span class="p">(</span><span class="n">session_id</span><span class="p">,</span><span class="w"> </span><span class="k">timestamp</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_messages_session_id</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">messages</span><span class="p">(</span><span class="n">session_id</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">);</span>
+</code></pre></div>
+
+<p>Notes:
+- <code>tool_calls</code> is stored as a JSON string (serialized list of tool call objects)
+- <code>reasoning_details</code>, <code>codex_reasoning_items</code>, and <code>codex_message_items</code> are stored as JSON strings
+- <code>reasoning_details</code> is always kept in history; on the chat-completions wire it is replayed only to OpenRouter and the Nous Portal (every other chat-completions route gets a copy without it, since strict schemas reject the field)
+- Desktop history hydration retains assistant sidecars in both REST and JSON-RPC (<code>session.resume</code>, <code>session.activate</code>, <code>session.history</code>) projections, including rows with reasoning and tool calls. REST may return the SQLite JSON string while RPC returns decoded items; Desktop accepts both. A final Responses reply may live only in <code>codex_message_items</code> while <code>content</code> is empty. Canonical content still takes precedence, and analysis/commentary items are not promoted to reply text.
+- <code>reasoning</code> stores the raw reasoning text for providers that expose it
+- A reasoning-only clean stop (empty <code>content</code>, <code>finish_reason=stop</code>, reasoning present) is answered with the reasoning text, but the assistant row is never written with that text as <code>content</code>: <code>content</code> stays empty, the text lives in <code>reasoning</code>/<code>reasoning_content</code>, and <code>api_content</code> carries it so the next request replays the answer byte-identically. History surfaces therefore show it as reasoning, not as a reply.
+- <code>api_content</code> is a byte-fidelity sidecar: the exact content string sent to the API for this message when it differs from <code>content</code> (ephemeral memory/plugin injections, persist overrides). It preserves the wire bytes for prompt-cache-stable replay — stored as sent, except lone surrogates, which sqlite3 cannot bind and which the conversation loop scrubs from every outgoing payload anyway. <code>NULL</code> means <code>content</code> was sent verbatim.
+- Timestamps are Unix epoch floats (<code>time.time()</code>)</p>
+<h3 id="fts5-full-text-search">FTS5 Full-Text Search</h3>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="n">VIRTUAL</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">messages_fts</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">fts5</span><span class="p">(</span>
+<span class="w">    </span><span class="n">content</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tool_name</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tool_calls</span><span class="p">,</span>
+<span class="w">    </span><span class="n">content</span><span class="o">=</span><span class="s1">&#39;messages&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">content_rowid</span><span class="o">=</span><span class="s1">&#39;id&#39;</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<p>The FTS5 table is kept in sync via three triggers that fire on INSERT, UPDATE,
+and DELETE of the <code>messages</code> table. The current triggers are gated on the
+<code>fts_rebuild_high_water</code> / <code>fts_rebuild_progress</code> markers in <code>state_meta</code> (so a
+background FTS rebuild can proceed without double-indexing) and cover all three
+indexed columns — see <code>SCHEMA_SQL</code> in <code>hermes_state_common.py</code> for the exact SQL.</p>
+<h2 id="schema-version-and-migrations">Schema Version and Migrations</h2>
+<p>Current schema version: <strong>23</strong></p>
+<p>The <code>schema_version</code> table stores a single integer. Simple column additions are handled declaratively by <code>_reconcile_columns()</code> (which diffs live columns against <code>SCHEMA_SQL</code> and ADDs any missing ones). The version-gated chain is reserved for data migrations and index/FTS changes that can't be expressed declaratively:</p>
+<table>
+<thead>
+<tr>
+<th>Version</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Initial schema (sessions, messages, FTS5)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Add <code>finish_reason</code> column to messages</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Add <code>title</code> column to sessions</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Add unique index on <code>title</code> (NULLs allowed, non-NULL must be unique)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Add billing columns: <code>cache_read_tokens</code>, <code>cache_write_tokens</code>, <code>reasoning_tokens</code>, <code>billing_provider</code>, <code>billing_base_url</code>, <code>billing_mode</code>, <code>estimated_cost_usd</code>, <code>actual_cost_usd</code>, <code>cost_status</code>, <code>cost_source</code>, <code>pricing_version</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td>Add reasoning columns to messages: <code>reasoning</code>, <code>reasoning_details</code>, <code>codex_reasoning_items</code></td>
+</tr>
+<tr>
+<td>7</td>
+<td>Add <code>reasoning_content</code> column to messages</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Add <code>api_call_count</code> column to sessions</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Add <code>codex_message_items</code> column to messages for Codex Responses message id/phase replay</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Add <code>messages_fts_trigram</code> virtual table (trigram tokenizer for CJK / substring search) and backfill existing rows</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Re-index <code>messages_fts</code> and <code>messages_fts_trigram</code> to cover <code>tool_name</code> + <code>tool_calls</code> and switch from external-content to inline mode; drop old triggers and backfill every message row</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Tag delegate subagent rows in <code>model_config</code> (<code>$._delegate_from</code>) so session pickers stay clean after parent deletes orphan them</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Gateway metadata consolidation — backfill <code>display_name</code> / <code>origin_json</code> / <code>expiry_finalized</code> from <code>sessions.json</code></td>
+</tr>
+<tr>
+<td>20</td>
+<td>Per-model usage attribution — seed <code>session_model_usage</code> rows from historical per-session aggregate totals</td>
+</tr>
+<tr>
+<td>22</td>
+<td>Task-dimension usage attribution — rebuild <code>session_model_usage</code> so the <code>task</code> column participates in the PRIMARY KEY</td>
+</tr>
+<tr>
+<td>23</td>
+<td>FTS storage redesign — external-content FTS tables replacing the v11 inline-mode copies (opt-in transition for existing DBs)</td>
+</tr>
+<tr>
+<td>29</td>
+<td>Cron sessions leave the trigram (substring/CJK) index; <code>messages_fts_trigram_src</code> view + triggers filter on <code>sessions.source</code>, one-time rebuild purges historical rows</td>
+</tr>
+<tr>
+<td>30</td>
+<td>Delegate-child (subagent) sessions leave the trigram index too — <code>source='subagent'</code> or the <code>$._delegate_from</code> marker (<code>FTS_TRIGRAM_SESSION_SQL</code>). Rows stay in <code>messages</code> and the standard <code>messages_fts</code> word index, so <code>session_search</code> still finds them; only the ~2.6× trigram shadow tables shrink. Same one-time rebuild as v29</td>
+</tr>
+</tbody>
+</table>
+<p>Versions not listed above were declarative column additions handled by <code>_reconcile_columns()</code> (version bump only, no data migration).</p>
+<p>Declarative column adds use <code>ALTER TABLE ADD COLUMN</code> wrapped in try/except to handle the column-already-exists case (idempotent). The version number is bumped after each successful migration block.</p>
+<h2 id="write-contention-handling">Write Contention Handling</h2>
+<p>Multiple hermes processes (gateway + CLI sessions + worktree agents) share one
+<code>state.db</code>. The <code>SessionDB</code> class handles write contention with:</p>
+<ul>
+<li><strong>Short SQLite timeout</strong> (1 second) instead of the default 30s</li>
+<li><strong>Application-level retry</strong> with random jitter (20-150ms, up to 15 retries)</li>
+<li><strong>BEGIN IMMEDIATE</strong> transactions to surface lock contention at transaction start</li>
+<li><strong>Periodic WAL checkpoints</strong> every 50 successful writes (PASSIVE mode)</li>
+</ul>
+<p>This avoids the "convoy effect" where SQLite's deterministic internal backoff
+causes all competing writers to retry at the same intervals.</p>
+<div class="highlight"><pre><span></span><code>_WRITE_MAX_RETRIES = 15
+_WRITE_RETRY_MIN_S = 0.020   # 20ms
+_WRITE_RETRY_MAX_S = 0.150   # 150ms
+_CHECKPOINT_EVERY_N_WRITES = 50
+</code></pre></div>
+
+<h2 id="common-operations">Common Operations</h2>
+<h3 id="initialize">Initialize</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">hermes_state</span><span class="w"> </span><span class="kn">import</span> <span class="n">SessionDB</span>
+
+<span class="n">db</span> <span class="o">=</span> <span class="n">SessionDB</span><span class="p">()</span>                           <span class="c1"># Default: ~/.hermes/state.db</span>
+<span class="n">db</span> <span class="o">=</span> <span class="n">SessionDB</span><span class="p">(</span><span class="n">db_path</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;~/.hermes/cache/scratch/test.db&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">())</span>  <span class="c1"># Custom path</span>
+</code></pre></div>
+
+<h3 id="create-and-manage-sessions">Create and Manage Sessions</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Create a new session</span>
+<span class="n">db</span><span class="o">.</span><span class="n">create_session</span><span class="p">(</span>
+    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">,</span>
+    <span class="n">source</span><span class="o">=</span><span class="s2">&quot;cli&quot;</span><span class="p">,</span>
+    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;anthropic/claude-sonnet-4.6&quot;</span><span class="p">,</span>
+    <span class="n">user_id</span><span class="o">=</span><span class="s2">&quot;user_1&quot;</span><span class="p">,</span>
+    <span class="n">parent_session_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>  <span class="c1"># or previous session ID for lineage</span>
+<span class="p">)</span>
+
+<span class="c1"># End a session</span>
+<span class="n">db</span><span class="o">.</span><span class="n">end_session</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">,</span> <span class="n">end_reason</span><span class="o">=</span><span class="s2">&quot;user_exit&quot;</span><span class="p">)</span>
+
+<span class="c1"># Reopen a session (clear ended_at/end_reason)</span>
+<span class="n">db</span><span class="o">.</span><span class="n">reopen_session</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="store-messages">Store Messages</h3>
+<div class="highlight"><pre><span></span><code><span class="n">msg_id</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">append_message</span><span class="p">(</span>
+    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">,</span>
+    <span class="n">role</span><span class="o">=</span><span class="s2">&quot;assistant&quot;</span><span class="p">,</span>
+    <span class="n">content</span><span class="o">=</span><span class="s2">&quot;Here&#39;s the answer...&quot;</span><span class="p">,</span>
+    <span class="n">tool_calls</span><span class="o">=</span><span class="p">[{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;call_1&quot;</span><span class="p">,</span> <span class="s2">&quot;function&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;terminal&quot;</span><span class="p">,</span> <span class="s2">&quot;arguments&quot;</span><span class="p">:</span> <span class="s2">&quot;</span><span class="si">{}</span><span class="s2">&quot;</span><span class="p">}}],</span>
+    <span class="n">token_count</span><span class="o">=</span><span class="mi">150</span><span class="p">,</span>
+    <span class="n">finish_reason</span><span class="o">=</span><span class="s2">&quot;stop&quot;</span><span class="p">,</span>
+    <span class="n">reasoning</span><span class="o">=</span><span class="s2">&quot;Let me think about this...&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="retrieve-messages">Retrieve Messages</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Raw messages with all metadata</span>
+<span class="n">messages</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">get_messages</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+
+<span class="c1"># OpenAI conversation format (for API replay)</span>
+<span class="n">conversation</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">get_messages_as_conversation</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+<span class="c1"># Returns: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;...&quot;}, {&quot;role&quot;: &quot;assistant&quot;, ...}]</span>
+</code></pre></div>
+
+<h3 id="session-titles">Session Titles</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Set a title (must be unique among non-NULL titles)</span>
+<span class="n">db</span><span class="o">.</span><span class="n">set_session_title</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">,</span> <span class="s2">&quot;Fix Docker Build&quot;</span><span class="p">)</span>
+
+<span class="c1"># Resolve by title (returns most recent in lineage)</span>
+<span class="n">session_id</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">resolve_session_by_title</span><span class="p">(</span><span class="s2">&quot;Fix Docker Build&quot;</span><span class="p">)</span>
+
+<span class="c1"># Auto-generate next title in lineage</span>
+<span class="n">next_title</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">get_next_title_in_lineage</span><span class="p">(</span><span class="s2">&quot;Fix Docker Build&quot;</span><span class="p">)</span>
+<span class="c1"># Returns: &quot;Fix Docker Build #2&quot;</span>
+</code></pre></div>
+
+<h2 id="full-text-search">Full-Text Search</h2>
+<p>The <code>search_messages()</code> method supports FTS5 query syntax with automatic
+sanitization of user input.</p>
+<h3 id="basic-search">Basic Search</h3>
+<div class="highlight"><pre><span></span><code><span class="n">results</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">search_messages</span><span class="p">(</span><span class="s2">&quot;docker deployment&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="fts5-query-syntax">FTS5 Query Syntax</h3>
+<table>
+<thead>
+<tr>
+<th>Syntax</th>
+<th>Example</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Keywords</td>
+<td><code>docker deployment</code></td>
+<td>Both terms (implicit AND)</td>
+</tr>
+<tr>
+<td>Quoted phrase</td>
+<td><code>"exact phrase"</code></td>
+<td>Exact phrase match</td>
+</tr>
+<tr>
+<td>Boolean OR</td>
+<td><code>docker OR kubernetes</code></td>
+<td>Either term</td>
+</tr>
+<tr>
+<td>Boolean NOT</td>
+<td><code>python NOT java</code></td>
+<td>Exclude term</td>
+</tr>
+<tr>
+<td>Prefix</td>
+<td><code>deploy*</code></td>
+<td>Prefix match</td>
+</tr>
+</tbody>
+</table>
+<h3 id="filtered-search">Filtered Search</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Search only CLI sessions</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">search_messages</span><span class="p">(</span><span class="s2">&quot;error&quot;</span><span class="p">,</span> <span class="n">source_filter</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;cli&quot;</span><span class="p">])</span>
+
+<span class="c1"># Exclude gateway sessions</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">search_messages</span><span class="p">(</span><span class="s2">&quot;bug&quot;</span><span class="p">,</span> <span class="n">exclude_sources</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;telegram&quot;</span><span class="p">,</span> <span class="s2">&quot;discord&quot;</span><span class="p">])</span>
+
+<span class="c1"># Search only user messages</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">search_messages</span><span class="p">(</span><span class="s2">&quot;help&quot;</span><span class="p">,</span> <span class="n">role_filter</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;user&quot;</span><span class="p">])</span>
+</code></pre></div>
+
+<h3 id="search-results-format">Search Results Format</h3>
+<p>Each result includes:
+- <code>id</code>, <code>session_id</code>, <code>role</code>, <code>timestamp</code>
+- <code>snippet</code> — FTS5-generated snippet with <code>&gt;&gt;&gt;match&lt;&lt;&lt;</code> markers
+- <code>context</code> — 1 message before and after the match (content truncated to 200 chars)
+- <code>source</code>, <code>model</code>, <code>session_started</code> — from the parent session</p>
+<p>The <code>_sanitize_fts5_query()</code> method handles edge cases:
+- Strips unmatched quotes and special characters
+- Wraps hyphenated terms in quotes (<code>chat-send</code> → <code>"chat-send"</code>)
+- Removes dangling boolean operators (<code>hello AND</code> → <code>hello</code>)</p>
+<h2 id="session-lineage">Session Lineage</h2>
+<p>Sessions can form chains via <code>parent_session_id</code>. This happens when context
+compression triggers a session split in the gateway.</p>
+<h3 id="query-find-session-lineage">Query: Find Session Lineage</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Find all ancestors of a session</span>
+<span class="k">WITH</span><span class="w"> </span><span class="k">RECURSIVE</span><span class="w"> </span><span class="n">lineage</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">?</span>
+<span class="w">    </span><span class="k">UNION</span><span class="w"> </span><span class="k">ALL</span>
+<span class="w">    </span><span class="k">SELECT</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="n">s</span>
+<span class="w">    </span><span class="k">JOIN</span><span class="w"> </span><span class="n">lineage</span><span class="w"> </span><span class="n">l</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">l</span><span class="p">.</span><span class="n">parent_session_id</span>
+<span class="p">)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">title</span><span class="p">,</span><span class="w"> </span><span class="n">started_at</span><span class="p">,</span><span class="w"> </span><span class="n">parent_session_id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">lineage</span><span class="p">;</span>
+
+<span class="c1">-- Find all descendants of a session</span>
+<span class="k">WITH</span><span class="w"> </span><span class="k">RECURSIVE</span><span class="w"> </span><span class="n">descendants</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">?</span>
+<span class="w">    </span><span class="k">UNION</span><span class="w"> </span><span class="k">ALL</span>
+<span class="w">    </span><span class="k">SELECT</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="n">s</span>
+<span class="w">    </span><span class="k">JOIN</span><span class="w"> </span><span class="n">descendants</span><span class="w"> </span><span class="n">d</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">parent_session_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">d</span><span class="p">.</span><span class="n">id</span>
+<span class="p">)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">title</span><span class="p">,</span><span class="w"> </span><span class="n">started_at</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">descendants</span><span class="p">;</span>
+</code></pre></div>
+
+<h3 id="query-recent-sessions-with-preview">Query: Recent Sessions with Preview</h3>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="o">*</span><span class="p">,</span>
+<span class="w">    </span><span class="k">COALESCE</span><span class="p">(</span>
+<span class="w">        </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="n">SUBSTR</span><span class="p">(</span><span class="n">m</span><span class="p">.</span><span class="n">content</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">63</span><span class="p">)</span>
+<span class="w">         </span><span class="k">FROM</span><span class="w"> </span><span class="n">messages</span><span class="w"> </span><span class="n">m</span>
+<span class="w">         </span><span class="k">WHERE</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">session_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="k">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;user&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">content</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
+<span class="w">         </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="k">timestamp</span><span class="p">,</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="mi">1</span><span class="p">),</span>
+<span class="w">        </span><span class="s1">&#39;&#39;</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">preview</span><span class="p">,</span>
+<span class="w">    </span><span class="k">COALESCE</span><span class="p">(</span>
+<span class="w">        </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="k">MAX</span><span class="p">(</span><span class="n">m2</span><span class="p">.</span><span class="k">timestamp</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">messages</span><span class="w"> </span><span class="n">m2</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">m2</span><span class="p">.</span><span class="n">session_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">id</span><span class="p">),</span>
+<span class="w">        </span><span class="n">s</span><span class="p">.</span><span class="n">started_at</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">last_active</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span><span class="w"> </span><span class="n">s</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">started_at</span><span class="w"> </span><span class="k">DESC</span>
+<span class="k">LIMIT</span><span class="w"> </span><span class="mi">20</span><span class="p">;</span>
+</code></pre></div>
+
+<h3 id="query-token-usage-statistics">Query: Token Usage Statistics</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Total tokens by model</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">model</span><span class="p">,</span>
+<span class="w">       </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">session_count</span><span class="p">,</span>
+<span class="w">       </span><span class="k">SUM</span><span class="p">(</span><span class="n">input_tokens</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">total_input</span><span class="p">,</span>
+<span class="w">       </span><span class="k">SUM</span><span class="p">(</span><span class="n">output_tokens</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">total_output</span><span class="p">,</span>
+<span class="w">       </span><span class="k">SUM</span><span class="p">(</span><span class="n">estimated_cost_usd</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">total_cost</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">model</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
+<span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">model</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">total_cost</span><span class="w"> </span><span class="k">DESC</span><span class="p">;</span>
+
+<span class="c1">-- Sessions with highest token usage</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">title</span><span class="p">,</span><span class="w"> </span><span class="n">model</span><span class="p">,</span><span class="w"> </span><span class="n">input_tokens</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">output_tokens</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">total_tokens</span><span class="p">,</span>
+<span class="w">       </span><span class="n">estimated_cost_usd</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">sessions</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">total_tokens</span><span class="w"> </span><span class="k">DESC</span>
+<span class="k">LIMIT</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span>
+</code></pre></div>
+
+<h2 id="export-and-cleanup">Export and Cleanup</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># Export a single session with messages</span>
+<span class="n">data</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">export_session</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+
+<span class="c1"># Export all sessions (with messages) as list of dicts</span>
+<span class="n">all_data</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">export_all</span><span class="p">(</span><span class="n">source</span><span class="o">=</span><span class="s2">&quot;cli&quot;</span><span class="p">)</span>
+
+<span class="c1"># Delete old sessions (only ended sessions)</span>
+<span class="n">deleted_count</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">prune_sessions</span><span class="p">(</span><span class="n">older_than_days</span><span class="o">=</span><span class="mi">90</span><span class="p">)</span>
+<span class="n">deleted_count</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">prune_sessions</span><span class="p">(</span><span class="n">older_than_days</span><span class="o">=</span><span class="mi">30</span><span class="p">,</span> <span class="n">source</span><span class="o">=</span><span class="s2">&quot;telegram&quot;</span><span class="p">)</span>
+
+<span class="c1"># Clear messages but keep the session record</span>
+<span class="n">db</span><span class="o">.</span><span class="n">clear_messages</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+
+<span class="c1"># Delete session and all messages</span>
+<span class="n">db</span><span class="o">.</span><span class="n">delete_session</span><span class="p">(</span><span class="s2">&quot;sess_abc123&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="database-location">Database Location</h2>
+<p>Default path: <code>get_hermes_home() / "state.db"</code> — <code>~/.hermes/state.db</code> for the
+default profile, <code>~/.hermes/profiles/&lt;name&gt;/state.db</code> for a named profile, or
+wherever <code>HERMES_HOME</code> points (see <a href="#hermes-home-and-profile-isolation">Hermes home and profile isolation</a>).</p>
+<p>The database file, WAL file (<code>state.db-wal</code>), and shared-memory file
+(<code>state.db-shm</code>) are all created in the same directory.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/session-storage</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#hermes-home-and-profile-isolation">Hermes home and profile isolation</a></li>
+<li class="lvl3"><a href="#test-isolation-guard">Test isolation guard</a></li>
+<li class="lvl3"><a href="#desktop-profile-isolation-and-compaction-generations">Desktop profile isolation and compaction generations</a></li>
+<li class="lvl2"><a href="#codex-app-server-input-ownership">Codex app-server input ownership</a></li>
+<li class="lvl2"><a href="#gateway-exception-path-input-ownership">Gateway exception-path input ownership</a></li>
+<li class="lvl2"><a href="#architecture-overview">Architecture Overview</a></li>
+<li class="lvl2"><a href="#sqlite-schema">SQLite Schema</a></li>
+<li class="lvl3"><a href="#sessions-table">Sessions Table</a></li>
+<li class="lvl3"><a href="#messages-table">Messages Table</a></li>
+<li class="lvl3"><a href="#fts5-full-text-search">FTS5 Full-Text Search</a></li>
+<li class="lvl2"><a href="#schema-version-and-migrations">Schema Version and Migrations</a></li>
+<li class="lvl2"><a href="#write-contention-handling">Write Contention Handling</a></li>
+<li class="lvl2"><a href="#common-operations">Common Operations</a></li>
+<li class="lvl3"><a href="#initialize">Initialize</a></li>
+<li class="lvl3"><a href="#create-and-manage-sessions">Create and Manage Sessions</a></li>
+<li class="lvl3"><a href="#store-messages">Store Messages</a></li>
+<li class="lvl3"><a href="#retrieve-messages">Retrieve Messages</a></li>
+<li class="lvl3"><a href="#session-titles">Session Titles</a></li>
+<li class="lvl2"><a href="#full-text-search">Full-Text Search</a></li>
+<li class="lvl3"><a href="#basic-search">Basic Search</a></li>
+<li class="lvl3"><a href="#fts5-query-syntax">FTS5 Query Syntax</a></li>
+<li class="lvl3"><a href="#filtered-search">Filtered Search</a></li>
+<li class="lvl3"><a href="#search-results-format">Search Results Format</a></li>
+<li class="lvl2"><a href="#session-lineage">Session Lineage</a></li>
+<li class="lvl3"><a href="#query-find-session-lineage">Query: Find Session Lineage</a></li>
+<li class="lvl3"><a href="#query-recent-sessions-with-preview">Query: Recent Sessions with Preview</a></li>
+<li class="lvl3"><a href="#query-token-usage-statistics">Query: Token Usage Statistics</a></li>
+<li class="lvl2"><a href="#export-and-cleanup">Export and Cleanup</a></li>
+<li class="lvl2"><a href="#database-location">Database Location</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

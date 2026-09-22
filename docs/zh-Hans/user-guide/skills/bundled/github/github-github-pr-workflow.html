@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Github Pr Workflow — GitHub PR 生命周期：分支、提交、开启、CI、合并 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/bundled/github/github-github-pr-workflow</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="github-pr-workflow">Github Pr Workflow</h1>
+<p>GitHub PR 生命周期：分支、提交、开启、CI、合并。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>内置（默认安装）</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>skills/github/github-pr-workflow</code></td>
+</tr>
+<tr>
+<td>版本</td>
+<td><code>1.1.0</code></td>
+</tr>
+<tr>
+<td>作者</td>
+<td>Hermes Agent</td>
+</tr>
+<tr>
+<td>许可证</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>标签</td>
+<td><code>GitHub</code>, <code>Pull-Requests</code>, <code>CI/CD</code>, <code>Git</code>, <code>Automation</code>, <code>Merge</code></td>
+</tr>
+<tr>
+<td>相关 skill</td>
+<td><a href="../../../../../user-guide/skills/bundled/github/github-github-auth.html"><code>github-auth</code></a>, <a href="../../../../../user-guide/skills/bundled/github/github-github-code-review.html"><code>github-code-review</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。</p>
+</div>
+<h1 id="github-pull-request-工作流">GitHub Pull Request 工作流</h1>
+<p>管理 PR 生命周期的完整指南。每个章节优先展示 <code>gh</code> 方式，再给出适用于无 <code>gh</code> 环境的 <code>git</code> + <code>curl</code> 备用方案。</p>
+<h2 id="前提条件">前提条件</h2>
+<ul>
+<li>已通过 GitHub 认证（参见 <code>github-auth</code> skill）</li>
+<li>位于含有 GitHub 远程仓库的 git 仓库中</li>
+</ul>
+<h3 id="快速认证检测">快速认证检测</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Determine which method to use throughout this workflow</span>
+<span class="k">if</span><span class="w"> </span><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>gh<span class="w"> </span><span class="p">&amp;</span>&gt;/dev/null<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>gh<span class="w"> </span>auth<span class="w"> </span>status<span class="w"> </span><span class="p">&amp;</span>&gt;/dev/null<span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">  </span><span class="nv">AUTH</span><span class="o">=</span><span class="s2">&quot;gh&quot;</span>
+<span class="k">else</span>
+<span class="w">  </span><span class="nv">AUTH</span><span class="o">=</span><span class="s2">&quot;git&quot;</span>
+<span class="w">  </span><span class="c1"># Ensure we have a token for API calls</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-z<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$GITHUB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-f<span class="w"> </span>~/.hermes/.env<span class="w"> </span><span class="o">]</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>grep<span class="w"> </span>-q<span class="w"> </span><span class="s2">&quot;^GITHUB_TOKEN=&quot;</span><span class="w"> </span>~/.hermes/.env<span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">      </span><span class="nv">GITHUB_TOKEN</span><span class="o">=</span><span class="k">$(</span>grep<span class="w"> </span><span class="s2">&quot;^GITHUB_TOKEN=&quot;</span><span class="w"> </span>~/.hermes/.env<span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-1<span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-d<span class="o">=</span><span class="w"> </span>-f2<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span>-d<span class="w"> </span><span class="s1">&#39;\n\r&#39;</span><span class="k">)</span>
+<span class="w">    </span><span class="k">elif</span><span class="w"> </span>grep<span class="w"> </span>-q<span class="w"> </span><span class="s2">&quot;github.com&quot;</span><span class="w"> </span>~/.git-credentials<span class="w"> </span><span class="m">2</span>&gt;/dev/null<span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">      </span><span class="nv">GITHUB_TOKEN</span><span class="o">=</span><span class="k">$(</span>uv<span class="w"> </span>run<span class="w"> </span>python3<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">HERMES_HOME</span><span class="k">:-</span><span class="nv">$HOME</span><span class="p">/.hermes</span><span class="si">}</span><span class="s2">/skills/github/github-auth/scripts/git-credential-token.py&quot;</span><span class="k">)</span>
+<span class="w">    </span><span class="k">fi</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="k">fi</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Using: </span><span class="nv">$AUTH</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<h3 id="从-git-远程地址提取-ownerrepo">从 Git 远程地址提取 Owner/Repo</h3>
+<p>许多 <code>curl</code> 命令需要 <code>owner/repo</code>。从 git 远程地址中提取：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Works for both HTTPS and SSH remote URLs</span>
+<span class="nv">REMOTE_URL</span><span class="o">=</span><span class="k">$(</span>git<span class="w"> </span>remote<span class="w"> </span>get-url<span class="w"> </span>origin<span class="k">)</span>
+<span class="nv">OWNER_REPO</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$REMOTE_URL</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sed<span class="w"> </span>-E<span class="w"> </span><span class="s1">&#39;s|.*github\.com[:/]||; s|\.git$||&#39;</span><span class="k">)</span>
+<span class="nv">OWNER</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$OWNER_REPO</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-d/<span class="w"> </span>-f1<span class="k">)</span>
+<span class="nv">REPO</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$OWNER_REPO</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-d/<span class="w"> </span>-f2<span class="k">)</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Owner: </span><span class="nv">$OWNER</span><span class="s2">, Repo: </span><span class="nv">$REPO</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="1-创建分支">1. 创建分支</h2>
+<p>此部分为纯 <code>git</code> 操作——两种方式完全相同：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Make sure you&#39;re up to date</span>
+git<span class="w"> </span>fetch<span class="w"> </span>origin
+git<span class="w"> </span>checkout<span class="w"> </span>main<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>git<span class="w"> </span>pull<span class="w"> </span>origin<span class="w"> </span>main
+
+<span class="c1"># Create and switch to a new branch</span>
+git<span class="w"> </span>checkout<span class="w"> </span>-b<span class="w"> </span>feat/add-user-authentication
+</code></pre></div>
+
+<p>分支命名规范：
+- <code>feat/description</code> — 新功能
+- <code>fix/description</code> — 缺陷修复
+- <code>refactor/description</code> — 代码重构
+- <code>docs/description</code> — 文档
+- <code>ci/description</code> — CI/CD 变更</p>
+<h2 id="2-提交变更">2. 提交变更</h2>
+<p>使用 agent 的文件工具（<code>write_file</code>、<code>patch</code>）进行修改，然后提交：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Stage specific files</span>
+git<span class="w"> </span>add<span class="w"> </span>src/auth.py<span class="w"> </span>src/models/user.py<span class="w"> </span>tests/test_auth.py
+
+<span class="c1"># Commit with a conventional commit message</span>
+git<span class="w"> </span>commit<span class="w"> </span>-m<span class="w"> </span><span class="s2">&quot;feat: add JWT-based user authentication</span>
+
+<span class="s2">- Add login/register endpoints</span>
+<span class="s2">- Add User model with password hashing</span>
+<span class="s2">- Add auth middleware for protected routes</span>
+<span class="s2">- Add unit tests for auth flow&quot;</span>
+</code></pre></div>
+
+<p>提交信息格式（Conventional Commits）：</p>
+<div class="highlight"><pre><span></span><code>type(scope): short description
+
+Longer explanation if needed. Wrap at 72 characters.
+</code></pre></div>
+
+<p>类型：<code>feat</code>、<code>fix</code>、<code>refactor</code>、<code>docs</code>、<code>test</code>、<code>ci</code>、<code>chore</code>、<code>perf</code></p>
+<h2 id="3-推送分支并创建-pr">3. 推送分支并创建 PR</h2>
+<h3 id="推送分支两种方式相同">推送分支（两种方式相同）</h3>
+<div class="highlight"><pre><span></span><code>git<span class="w"> </span>push<span class="w"> </span>-u<span class="w"> </span>origin<span class="w"> </span>HEAD
+</code></pre></div>
+
+<h3 id="创建-pr">创建 PR</h3>
+<p><strong>使用 gh：</strong></p>
+<div class="highlight"><pre><span></span><code>gh<span class="w"> </span>pr<span class="w"> </span>create<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--title<span class="w"> </span><span class="s2">&quot;feat: add JWT-based user authentication&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--body<span class="w"> </span><span class="s2">&quot;## Summary</span>
+<span class="s2">- Adds login and register API endpoints</span>
+<span class="s2">- JWT token generation and validation</span>
+
+<span class="s2">## Test Plan</span>
+<span class="s2">- [ ] Unit tests pass</span>
+
+<span class="s2">Closes #42&quot;</span>
+</code></pre></div>
+
+<p>选项：<code>--draft</code>、<code>--reviewer user1,user2</code>、<code>--label "enhancement"</code>、<code>--base develop</code></p>
+<p><strong>使用 git + curl：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nv">BRANCH</span><span class="o">=</span><span class="k">$(</span>git<span class="w"> </span>branch<span class="w"> </span>--show-current<span class="k">)</span>
+
+curl<span class="w"> </span>-s<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: token </span><span class="nv">$GITHUB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Accept: application/vnd.github.v3+json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://api.github.com/repos/<span class="nv">$OWNER</span>/<span class="nv">$REPO</span>/pulls<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;{</span>
+<span class="s2">    \&quot;title\&quot;: \&quot;feat: add JWT-based user authentication\&quot;,</span>
+<span class="s2">    \&quot;body\&quot;: \&quot;## Summary\nAdds login and register API endpoints.\n\nCloses #42\&quot;,</span>
+<span class="s2">    \&quot;head\&quot;: \&quot;</span><span class="nv">$BRANCH</span><span class="s2">\&quot;,</span>
+<span class="s2">    \&quot;base\&quot;: \&quot;main\&quot;</span>
+<span class="s2">  }&quot;</span>
+</code></pre></div>
+
+<p>响应 JSON 中包含 PR 的 <code>number</code>——请保存以供后续命令使用。</p>
+<p>若要创建草稿 PR，在 JSON body 中添加 <code>"draft": true</code>。</p>
+<h2 id="4-监控-ci-状态">4. 监控 CI 状态</h2>
+<h3 id="检查-ci-状态">检查 CI 状态</h3>
+<p><strong>使用 gh：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># One-shot check</span>
+gh<span class="w"> </span>pr<span class="w"> </span>checks
+
+<span class="c1"># Watch until all checks finish (polls every 10s)</span>
+gh<span class="w"> </span>pr<span class="w"> </span>checks<span class="w"> </span>--watch
+</code></pre></div>
+
+<p><strong>使用 git + curl：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Get the latest commit SHA on the current branch</span>
+<span class="nv">SHA</span><span class="o">=</span><span class="k">$(</span>git<span class="w"> </span>rev-parse<span class="w"> </span>HEAD<span class="k">)</span>
+
+<span class="c1"># Query the combined status</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: token </span><span class="nv">$GITHUB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://api.github.com/repos/<span class="nv">$OWNER</span>/<span class="nv">$REPO</span>/commits/<span class="nv">$SHA</span>/status<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;</span>
+
+<span class="s2">data = json.load(sys.stdin)</span>
+<span class="s2">print(f\&quot;Overall: {data[&#39;state&#39;]}\&quot;)</span>
+<span class="s2">for s in data.get(&#39;statuses&#39;, []):</span>
+<span class="s2">    print(f\&quot;  {s[&#39;context&#39;]}: {s[&#39;state&#39;]} - {s.get(&#39;description&#39;, &#39;&#39;)}\&quot;)&quot;</span>
+
+<span class="c1"># Also check GitHub Actions check runs (separate endpoint)</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: token </span><span class="nv">$GITHUB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://api.github.com/repos/<span class="nv">$OWNER</span>/<span class="nv">$REPO</span>/commits/<span class="nv">$SHA</span>/check-runs<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;</span>
+
+<span class="s2">data = json.load(sys.stdin)</span>
+<span class="s2">for cr in data.get(&#39;check_runs&#39;, []):</span>
+<span class="s2">    print(f\&quot;  {cr[&#39;name&#39;]}: {cr[&#39;status&#39;]} / {cr[&#39;conclusion&#39;] or &#39;pending&#39;}\&quot;)&quot;</span>
+</code></pre></div>
+
+<h3 id="轮询直至完成git--curl">轮询直至完成（git + curl）</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Simple polling loop — check every 30 seconds, up to 10 minutes</span>
+<span class="nv">SHA</span><span class="o">=</span><span class="k">$(</span>git<span class="w"> </span>rev-parse<span class="w"> </span>HEAD<span class="k">)</span>
+<span class="k">for</span><span class="w"> </span>i<span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="k">$(</span>seq<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="m">20</span><span class="k">)</span><span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">  </span><span class="nv">STATUS</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: token </span><span class="nv">$GITHUB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>https://api.github.com/repos/<span class="nv">$OWNER</span>/<span class="nv">$REPO</span>/commits/<span class="nv">$SHA</span>/status<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;import sys,json; print(json.load(sys.stdin)[&#39;state&#39;])&quot;</span><span class="k">)</span>
+<span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Check </span><span class="nv">$i</span><span class="s2">: </span><span class="nv">$STATUS</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$STATUS</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;success&quot;</span><span class="w"> </span><span class="o">]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$STATUS</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;failure&quot;</span><span class="w"> </span><span class="o">]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$STATUS</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;error&quot;</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="k">break</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="w">  </span>sleep<span class="w"> </span><span class="m">30</span>
+<span class="k">done</span>
+</code></pre></div>
+
+<h2 id="5-自动修复-ci-失败">5. 自动修复 CI 失败</h2>
+<p>当 CI 失败时，进行诊断并修复。此循环适用于两种认证方式。</p>
+<h3 id="第一步获取失败详情">第一步：获取失败详情</h3>
+<p><strong>使用 gh：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># List recent workflow runs on this branch</span>
+gh<span class="w"> </span>run<span class="w"> </span>list<span class="w"> </span>--branch<span class="w"> </span><span class="k">$(</span>git<span class="w"> </span>branch<span class="w"> </span>--show-current<span class="k">)</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">5</span>
+
+<span class="c1"># View failed logs</span>
+gh<span class="w"> </span>run<span class="w"> </span>view<span class="w"> </span>&lt;RUN_ID&gt;<span class="w"> </span>--log-failed
+</code></pre></div>
+
+<p><strong>使用 git + curl：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nv">BRANCH</span><span class="o">=</span><span class="k">$(</span>git<span class="w"> </span>branch<span class="w"> </span>--show-current<span class="k">)</span>
+
+<span class="c1"># List workflow runs on this branch</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: token </span><span class="nv">$GITHUB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;https://api.github.com/repos/</span><span class="nv">$OWNER</span><span class="s2">/</span><span class="nv">$REPO</span><span class="s2">/actions/runs?branch=</span><span class="nv">$BRANCH</span><span class="s2">&amp;per_page=5&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;</span>
+
+<span class="s2">runs = json.load(sys.stdin)[&#39;workflow_runs&#39;]</span>
+<span class="s2">for r in runs:</span>
+<span class="s2">    print(f\&quot;Run {r[&#39;id&#39;]}: {r[&#39;name&#39;]} - {r[&#39;conclusion&#39;] or r[&#39;status&#39;]}\&quot;)&quot;</span>
+
+<span class="c1"># Get failed job logs (download as zip, extract, read)</span>
+<span class="nv">RUN_ID</span><span class="o">=</span>&lt;run_id&gt;
+curl<span class="w"> </span>-s<span class="w"> </span>-L<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: token </span><span class="nv">$GITHUB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://api.github.com/repos/<span class="nv">$OWNER</span>/<span class="nv">$REPO</span>/actions/runs/<span class="nv">$RUN_ID</span>/logs<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-o<span class="w"> </span>/tmp/ci-logs.zip
+<span class="nb">cd</span><span class="w"> </span>/tmp<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>unzip<span class="w"> </span>-o<span class="w"> </span>ci-logs.zip<span class="w"> </span>-d<span class="w"> </span>ci-logs<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>cat<span class="w"> </span>ci-logs/*.txt
+</code></pre></div>
+
+<h3 id="第二步修复并推送">第二步：修复并推送</h3>
+<p>定位问题后，使用文件工具（<code>patch</code>、<code>write_file</code>）进行修复：</p>
+<div class="highlight"><pre><span></span><code>git<span class="w"> </span>add<span class="w"> </span>&lt;fixed_files&gt;
+git<span class="w"> </span>commit<span class="w"> </span>-m<span class="w"> </span><span class="s2">&quot;fix: resolve CI failure in &lt;check_name&gt;&quot;</span>
+git<span class="w"> </span>push
+</code></pre></div>
+
+<h3 id="第三步验证">第三步：验证</h3>
+<p>使用第 4 节中的命令重新检查 CI 状态。</p>
+<h3 id="自动修复循环模式">自动修复循环模式</h3>
+<p>当被要求自动修复 CI 时，遵循以下循环：</p>
+<ol>
+<li>检查 CI 状态 → 识别失败项</li>
+<li>读取失败日志 → 理解错误原因</li>
+<li>使用 <code>read_file</code> + <code>patch</code>/<code>write_file</code> → 修复代码</li>
+<li><code>git add . &amp;&amp; git commit -m "fix: ..." &amp;&amp; git push</code></li>
+<li>等待 CI → 重新检查状态</li>
+<li>若仍失败则重复（最多 3 次，之后询问用户）</li>
+</ol>
+<h2 id="6-合并">6. 合并</h2>
+<p><strong>使用 gh：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Squash merge + delete branch (cleanest for feature branches)</span>
+gh<span class="w"> </span>pr<span class="w"> </span>merge<span class="w"> </span>--squash<span class="w"> </span>--delete-branch
+
+<span class="c1"># Enable auto-merge (merges when all checks pass)</span>
+gh<span class="w"> </span>pr<span class="w"> </span>merge<span class="w"> </span>--auto<span class="w"> </span>--squash<span class="w"> </span>--delete-branch
+</code></pre></div>
+
+<p><strong>使用 git + curl：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nv">PR_NUMBER</span><span class="o">=</span>&lt;number&gt;
+
+<span class="c1"># Merge the PR via API (squash)</span>
+curl<span class="w"> </span>-s<span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: token </span><span class="nv">$GITHUB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://api.github.com/repos/<span class="nv">$OWNER</span>/<span class="nv">$REPO</span>/pulls/<span class="nv">$PR_NUMBER</span>/merge<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;{</span>
+<span class="s2">    \&quot;merge_method\&quot;: \&quot;squash\&quot;,</span>
+<span class="s2">    \&quot;commit_title\&quot;: \&quot;feat: add user authentication (#</span><span class="nv">$PR_NUMBER</span><span class="s2">)\&quot;</span>
+<span class="s2">  }&quot;</span>
+
+<span class="c1"># Delete the remote branch after merge</span>
+<span class="nv">BRANCH</span><span class="o">=</span><span class="k">$(</span>git<span class="w"> </span>branch<span class="w"> </span>--show-current<span class="k">)</span>
+git<span class="w"> </span>push<span class="w"> </span>origin<span class="w"> </span>--delete<span class="w"> </span><span class="nv">$BRANCH</span>
+
+<span class="c1"># Switch back to main locally</span>
+git<span class="w"> </span>checkout<span class="w"> </span>main<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>git<span class="w"> </span>pull<span class="w"> </span>origin<span class="w"> </span>main
+git<span class="w"> </span>branch<span class="w"> </span>-d<span class="w"> </span><span class="nv">$BRANCH</span>
+</code></pre></div>
+
+<p>合并方式：<code>"merge"</code>（合并提交）、<code>"squash"</code>、<code>"rebase"</code></p>
+<h3 id="启用自动合并curl">启用自动合并（curl）</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Auto-merge requires the repo to have it enabled in settings.</span>
+<span class="c1"># This uses the GraphQL API since REST doesn&#39;t support auto-merge.</span>
+<span class="nv">PR_NODE_ID</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: token </span><span class="nv">$GITHUB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://api.github.com/repos/<span class="nv">$OWNER</span>/<span class="nv">$REPO</span>/pulls/<span class="nv">$PR_NUMBER</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;import sys,json; print(json.load(sys.stdin)[&#39;node_id&#39;])&quot;</span><span class="k">)</span>
+
+curl<span class="w"> </span>-s<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: token </span><span class="nv">$GITHUB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://api.github.com/graphql<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;{\&quot;query\&quot;: \&quot;mutation { enablePullRequestAutoMerge(input: {pullRequestId: \\\&quot;</span><span class="nv">$PR_NODE_ID</span><span class="s2">\\\&quot;, mergeMethod: SQUASH}) { clientMutationId } }\&quot;}&quot;</span>
+</code></pre></div>
+
+<h2 id="7-完整工作流示例">7. 完整工作流示例</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. Start from clean main</span>
+git<span class="w"> </span>checkout<span class="w"> </span>main<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>git<span class="w"> </span>pull<span class="w"> </span>origin<span class="w"> </span>main
+
+<span class="c1"># 2. Branch</span>
+git<span class="w"> </span>checkout<span class="w"> </span>-b<span class="w"> </span>fix/login-redirect-bug
+
+<span class="c1"># 3. (Agent makes code changes with file tools)</span>
+
+<span class="c1"># 4. Commit</span>
+git<span class="w"> </span>add<span class="w"> </span>src/auth/login.py<span class="w"> </span>tests/test_login.py
+git<span class="w"> </span>commit<span class="w"> </span>-m<span class="w"> </span><span class="s2">&quot;fix: correct redirect URL after login</span>
+
+<span class="s2">Preserves the ?next= parameter instead of always redirecting to /dashboard.&quot;</span>
+
+<span class="c1"># 5. Push</span>
+git<span class="w"> </span>push<span class="w"> </span>-u<span class="w"> </span>origin<span class="w"> </span>HEAD
+
+<span class="c1"># 6. Create PR (picks gh or curl based on what&#39;s available)</span>
+<span class="c1"># ... (see Section 3)</span>
+
+<span class="c1"># 7. Monitor CI (see Section 4)</span>
+
+<span class="c1"># 8. Merge when green (see Section 6)</span>
+</code></pre></div>
+
+<h2 id="常用-pr-命令参考">常用 PR 命令参考</h2>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>gh</th>
+<th>git + curl</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>列出我的 PR</td>
+<td><code>gh pr list --author @me</code></td>
+<td><code>curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$OWNER/$REPO/pulls?state=open"</code></td>
+</tr>
+<tr>
+<td>查看 PR diff</td>
+<td><code>gh pr diff</code></td>
+<td><code>git diff main...HEAD</code>（本地）或 <code>curl -H "Accept: application/vnd.github.diff" ...</code></td>
+</tr>
+<tr>
+<td>添加评论</td>
+<td><code>gh pr comment N --body "..."</code></td>
+<td><code>curl -X POST .../issues/N/comments -d '{"body":"..."}'</code></td>
+</tr>
+<tr>
+<td>请求审查</td>
+<td><code>gh pr edit N --add-reviewer user</code></td>
+<td><code>curl -X POST .../pulls/N/requested_reviewers -d '{"reviewers":["user"]}'</code></td>
+</tr>
+<tr>
+<td>关闭 PR</td>
+<td><code>gh pr close N</code></td>
+<td><code>curl -X PATCH .../pulls/N -d '{"state":"closed"}'</code></td>
+</tr>
+<tr>
+<td>检出他人的 PR</td>
+<td><code>gh pr checkout N</code></td>
+<td><code>git fetch origin pull/N/head:pr-N &amp;&amp; git checkout pr-N</code></td>
+</tr>
+</tbody>
+</table>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/bundled/github/github-github-pr-workflow</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#前提条件">前提条件</a></li>
+<li class="lvl3"><a href="#快速认证检测">快速认证检测</a></li>
+<li class="lvl3"><a href="#从-git-远程地址提取-ownerrepo">从 Git 远程地址提取 Owner/Repo</a></li>
+<li class="lvl2"><a href="#1-创建分支">1. 创建分支</a></li>
+<li class="lvl2"><a href="#2-提交变更">2. 提交变更</a></li>
+<li class="lvl2"><a href="#3-推送分支并创建-pr">3. 推送分支并创建 PR</a></li>
+<li class="lvl3"><a href="#推送分支两种方式相同">推送分支（两种方式相同）</a></li>
+<li class="lvl3"><a href="#创建-pr">创建 PR</a></li>
+<li class="lvl2"><a href="#4-监控-ci-状态">4. 监控 CI 状态</a></li>
+<li class="lvl3"><a href="#检查-ci-状态">检查 CI 状态</a></li>
+<li class="lvl3"><a href="#轮询直至完成git--curl">轮询直至完成（git + curl）</a></li>
+<li class="lvl2"><a href="#5-自动修复-ci-失败">5. 自动修复 CI 失败</a></li>
+<li class="lvl3"><a href="#第一步获取失败详情">第一步：获取失败详情</a></li>
+<li class="lvl3"><a href="#第二步修复并推送">第二步：修复并推送</a></li>
+<li class="lvl3"><a href="#第三步验证">第三步：验证</a></li>
+<li class="lvl3"><a href="#自动修复循环模式">自动修复循环模式</a></li>
+<li class="lvl2"><a href="#6-合并">6. 合并</a></li>
+<li class="lvl3"><a href="#启用自动合并curl">启用自动合并（curl）</a></li>
+<li class="lvl2"><a href="#7-完整工作流示例">7. 完整工作流示例</a></li>
+<li class="lvl2"><a href="#常用-pr-命令参考">常用 PR 命令参考</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

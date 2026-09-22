@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oss Forensics — GitHub 仓库的供应链调查、证据恢复与取证分析 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/optional/security/security-oss-forensics</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="oss-forensics">Oss Forensics</h1>
+<p>GitHub 仓库的供应链调查、证据恢复与取证分析。
+涵盖已删除提交的恢复、强制推送检测、IOC 提取、多源证据收集、
+假设形成与验证，以及结构化取证报告生成。
+灵感来源于 RAPTOR 的 1800+ 行 OSS Forensics 系统。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>可选 — 通过 <code>hermes skills install official/security/oss-forensics</code> 安装</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>optional-skills/security/oss-forensics</code></td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos, windows</td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。</p>
+</div>
+<h1 id="oss-安全取证-skill">OSS 安全取证 Skill</h1>
+<p>一个用于研究开源供应链攻击的 7 阶段多 agent 调查框架。
+改编自 RAPTOR 的取证系统。涵盖 GitHub Archive、Wayback Machine、GitHub API、
+本地 git 分析、IOC 提取、基于证据的假设形成与验证，以及最终取证报告生成。</p>
+<hr />
+<h2 id="-反幻觉anti-hallucination防护规则">⚠️ 反幻觉（Anti-Hallucination）防护规则</h2>
+<p>在每个调查步骤前必须阅读这些规则。违反这些规则将使报告失效。</p>
+<ol>
+<li><strong>证据优先原则</strong>：任何报告、假设或摘要中的每一项声明都必须引用至少一个证据 ID（<code>EV-XXXX</code>）。禁止无引用的断言。</li>
+<li><strong>职责边界</strong>：每个子 agent（调查员）只有一个数据源，不得混用。GH Archive 调查员不查询 GitHub API，反之亦然。职责边界是硬性规定。</li>
+<li><strong>事实与假设分离</strong>：所有未经验证的推断必须标注 <code>[HYPOTHESIS]</code>。只有经原始来源验证的陈述才可作为事实表述。</li>
+<li><strong>禁止捏造证据</strong>：假设验证器必须机械地检查每个被引用的证据 ID 在证据库中确实存在，然后才能接受假设。</li>
+<li><strong>反驳需有证据</strong>：驳斥一个假设必须提供具体的、有证据支撑的反驳论点。"未找到证据"不足以推翻假设——这只能使假设变为不确定状态。</li>
+<li><strong>SHA/URL 双重验证</strong>：任何作为证据引用的提交 SHA、URL 或外部标识符，必须在被标记为已验证之前从至少两个来源独立确认。</li>
+<li><strong>可疑代码规则</strong>：绝不在本地运行被调查仓库中发现的代码。仅进行静态分析，或在沙箱环境中使用 <code>execute_code</code>。</li>
+<li><strong>密钥脱敏</strong>：调查过程中发现的任何 API 密钥、token 或凭据必须在最终报告中脱敏处理，仅在内部日志中记录。</li>
+</ol>
+<hr />
+<h2 id="示例场景">示例场景</h2>
+<ul>
+<li><strong>场景 A：依赖混淆</strong>：恶意包 <code>internal-lib-v2</code> 以更高版本号上传至 NPM，高于内部版本。调查员需追踪该包首次出现的时间，以及目标仓库中是否有 PushEvent 将 <code>package.json</code> 更新为该版本。</li>
+<li><strong>场景 B：维护者账户接管</strong>：一名长期贡献者的账户被用于推送带有后门的 <code>.github/workflows/build.yml</code>。调查员在该用户长期不活跃或来自新 IP/位置（如可通过 BigQuery 检测）之后，查找其 PushEvent。</li>
+<li><strong>场景 C：强制推送隐藏</strong>：开发者意外提交了生产环境密钥，随后强制推送以"修复"。调查员使用 <code>git fsck</code> 和 GH Archive 恢复原始提交 SHA，并验证泄露内容。</li>
+</ul>
+<hr />
+<blockquote>
+<p><strong>路径约定</strong>：在本 skill 中，<code>SKILL_DIR</code> 指本 skill 安装目录的根目录（包含此 <code>SKILL.md</code> 的文件夹）。加载 skill 时，请将 <code>SKILL_DIR</code> 解析为实际路径——例如 <code>~/.hermes/skills/security/oss-forensics/</code> 或对应的 <code>optional-skills/</code> 路径。所有脚本和模板引用均相对于该目录。</p>
+</blockquote>
+<h2 id="阶段-0初始化">阶段 0：初始化</h2>
+<ol>
+<li>创建调查工作目录：
+   <code>bash
+   mkdir investigation_$(echo "REPO_NAME" | tr '/' '_')
+   cd investigation_$(echo "REPO_NAME" | tr '/' '_')</code></li>
+<li>初始化证据库：
+   <code>bash
+   python3 SKILL_DIR/scripts/evidence-store.py --store evidence.json list</code></li>
+<li>复制取证报告模板：
+   <code>bash
+   cp SKILL_DIR/templates/forensic-report.md ./investigation-report.md</code></li>
+<li>创建 <code>iocs.md</code> 文件，用于追踪发现的入侵指标（Indicators of Compromise，IOC）。</li>
+<li>记录调查开始时间、目标仓库及调查目标说明。</li>
+</ol>
+<hr />
+<h2 id="阶段-1prompt-解析与-ioc-提取">阶段 1：Prompt 解析与 IOC 提取</h2>
+<p><strong>目标</strong>：从用户请求中提取所有结构化调查目标。</p>
+<p><strong>操作</strong>：
+- 解析用户 prompt（提示词），提取：
+  - 目标仓库（<code>owner/repo</code>）
+  - 目标参与者（GitHub 用户名、电子邮件地址）
+  - 关注的时间窗口（提交日期范围、PR 时间戳）
+  - 提供的入侵指标：提交 SHA、文件路径、包名、IP 地址、域名、API 密钥/token、恶意 URL
+  - 任何关联的供应商安全报告或博客文章</p>
+<p><strong>工具</strong>：仅推理，或对大段文本使用 <code>execute_code</code> 进行正则提取。</p>
+<p><strong>输出</strong>：将提取的 IOC 填入 <code>iocs.md</code>。每个 IOC 必须包含：
+- 类型（从以下选择：COMMIT_SHA、FILE_PATH、API_KEY、SECRET、IP_ADDRESS、DOMAIN、PACKAGE_NAME、ACTOR_USERNAME、MALICIOUS_URL、OTHER）
+- 值
+- 来源（用户提供、推断得出）</p>
+<p><strong>参考</strong>：IOC 分类法见 <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/references/evidence-types.md" class="ext" target="_blank" rel="noopener">evidence-types.md</a>。</p>
+<hr />
+<h2 id="阶段-2并行证据收集">阶段 2：并行证据收集</h2>
+<p>使用 <code>delegate_task</code>（批量模式，最多 3 个并发）派生最多 5 个专业调查员子 agent。每个调查员只有<strong>一个数据源</strong>，不得混用。</p>
+<blockquote>
+<p><strong>编排器注意</strong>：在每个委托任务的 <code>context</code> 字段中传入阶段 1 的 IOC 列表和调查时间窗口。</p>
+</blockquote>
+<hr />
+<h3 id="调查员-1本地-git-调查员">调查员 1：本地 Git 调查员</h3>
+<p><strong>职责边界</strong>：仅查询<strong>本地 Git 仓库</strong>，不调用任何外部 API。</p>
+<p><strong>操作</strong>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 克隆仓库</span>
+git<span class="w"> </span>clone<span class="w"> </span>https://github.com/OWNER/REPO.git<span class="w"> </span>target_repo<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>target_repo
+
+<span class="c1"># 完整提交日志（含统计信息）</span>
+git<span class="w"> </span>log<span class="w"> </span>--all<span class="w"> </span>--full-history<span class="w"> </span>--stat<span class="w"> </span>--format<span class="o">=</span><span class="s2">&quot;%H|%ae|%an|%ai|%s&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>../git_log.txt
+
+<span class="c1"># 检测强制推送证据（孤立/悬空提交）</span>
+git<span class="w"> </span>fsck<span class="w"> </span>--lost-found<span class="w"> </span>--unreachable<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>commit<span class="w"> </span>&gt;<span class="w"> </span>../dangling_commits.txt
+
+<span class="c1"># 检查 reflog 中的历史重写</span>
+git<span class="w"> </span>reflog<span class="w"> </span>--all<span class="w"> </span>&gt;<span class="w"> </span>../reflog.txt
+
+<span class="c1"># 列出所有分支，包括已删除的远程引用</span>
+git<span class="w"> </span>branch<span class="w"> </span>-a<span class="w"> </span>-v<span class="w"> </span>&gt;<span class="w"> </span>../branches.txt
+
+<span class="c1"># 查找可疑的大型二进制文件添加</span>
+git<span class="w"> </span>log<span class="w"> </span>--all<span class="w"> </span>--diff-filter<span class="o">=</span>A<span class="w"> </span>--name-only<span class="w"> </span>--format<span class="o">=</span><span class="s2">&quot;%H %ai&quot;</span><span class="w"> </span>--<span class="w"> </span><span class="s2">&quot;*.so&quot;</span><span class="w"> </span><span class="s2">&quot;*.dll&quot;</span><span class="w"> </span><span class="s2">&quot;*.exe&quot;</span><span class="w"> </span><span class="s2">&quot;*.bin&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>../binary_additions.txt
+
+<span class="c1"># 检查 GPG 签名异常</span>
+git<span class="w"> </span>log<span class="w"> </span>--show-signature<span class="w"> </span>--format<span class="o">=</span><span class="s2">&quot;%H %ai %aN&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>../signature_check.txt<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+</code></pre></div>
+
+<p><strong>需收集的证据</strong>（通过 <code>python3 SKILL_DIR/scripts/evidence-store.py add</code> 添加）：
+- 每个悬空提交 SHA → 类型：<code>git</code>
+- 强制推送证据（reflog 显示历史重写）→ 类型：<code>git</code>
+- 已验证贡献者的未签名提交 → 类型：<code>git</code>
+- 可疑二进制文件添加 → 类型：<code>git</code></p>
+<p><strong>参考</strong>：访问强制推送提交的方法见 <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/references/recovery-techniques.md" class="ext" target="_blank" rel="noopener">recovery-techniques.md</a>。</p>
+<hr />
+<h3 id="调查员-2github-api-调查员">调查员 2：GitHub API 调查员</h3>
+<p><strong>职责边界</strong>：仅查询 <strong>GitHub REST API</strong>，不在本地运行 git 命令。</p>
+<p><strong>操作</strong>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 提交（分页）</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://api.github.com/repos/OWNER/REPO/commits?per_page=100&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>api_commits.json
+
+<span class="c1"># Pull Request（含已关闭/已删除）</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://api.github.com/repos/OWNER/REPO/pulls?state=all&amp;per_page=100&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>api_prs.json
+
+<span class="c1"># Issues</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://api.github.com/repos/OWNER/REPO/issues?state=all&amp;per_page=100&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>api_issues.json
+
+<span class="c1"># 贡献者及协作者变更</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://api.github.com/repos/OWNER/REPO/contributors&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>api_contributors.json
+
+<span class="c1"># 仓库事件（最近 300 条）</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://api.github.com/repos/OWNER/REPO/events?per_page=100&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>api_events.json
+
+<span class="c1"># 查看特定可疑提交 SHA 的详情</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://api.github.com/repos/OWNER/REPO/git/commits/SHA&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>commit_detail.json
+
+<span class="c1"># Releases</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://api.github.com/repos/OWNER/REPO/releases?per_page=100&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>api_releases.json
+
+<span class="c1"># 检查特定提交是否存在（强制推送的提交在 commits/ 可能返回 404，但在 git/commits/ 可能成功）</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://api.github.com/repos/OWNER/REPO/commits/SHA&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.sha
+</code></pre></div>
+
+<p><strong>交叉比对目标</strong>（将差异标记为证据）：
+- PR 存在于归档中但 API 中缺失 → 删除证据
+- 贡献者出现在归档事件中但不在贡献者列表中 → 权限撤销证据
+- 提交出现在归档 PushEvent 中但不在 API 提交列表中 → 强制推送/删除证据</p>
+<p><strong>参考</strong>：GH 事件类型见 <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/references/evidence-types.md" class="ext" target="_blank" rel="noopener">evidence-types.md</a>。</p>
+<hr />
+<h3 id="调查员-3wayback-machine-调查员">调查员 3：Wayback Machine 调查员</h3>
+<p><strong>职责边界</strong>：仅查询 <strong>Wayback Machine CDX API</strong>，不使用 GitHub API。</p>
+<p><strong>目标</strong>：恢复已删除的 GitHub 页面（README、issues、PR、releases、wiki 页面）。</p>
+<p><strong>操作</strong>：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 搜索仓库主页的归档快照</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://web.archive.org/cdx/search/cdx?url=github.com/OWNER/REPO&amp;output=json&amp;limit=100&amp;from=YYYYMMDD&amp;to=YYYYMMDD&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>wayback_main.json
+
+<span class="c1"># 搜索特定已删除 issue</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://web.archive.org/cdx/search/cdx?url=github.com/OWNER/REPO/issues/NUM&amp;output=json&amp;limit=50&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>wayback_issue_NUM.json
+
+<span class="c1"># 搜索特定已删除 PR</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://web.archive.org/cdx/search/cdx?url=github.com/OWNER/REPO/pull/NUM&amp;output=json&amp;limit=50&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>wayback_pr_NUM.json
+
+<span class="c1"># 获取页面的最佳快照</span>
+<span class="c1"># 使用 Wayback Machine URL：https://web.archive.org/web/TIMESTAMP/ORIGINAL_URL</span>
+<span class="c1"># 示例：https://web.archive.org/web/20240101000000*/github.com/OWNER/REPO</span>
+
+<span class="c1"># 高级：搜索已删除的 releases/tags</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://web.archive.org/cdx/search/cdx?url=github.com/OWNER/REPO/releases/tag/*&amp;output=json&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>wayback_tags.json
+
+<span class="c1"># 高级：搜索历史 wiki 变更</span>
+curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;https://web.archive.org/cdx/search/cdx?url=github.com/OWNER/REPO/wiki/*&amp;output=json&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>wayback_wiki.json
+</code></pre></div>
+
+<p><strong>需收集的证据</strong>：
+- 已删除 issue/PR 的归档快照及其内容
+- 显示变更的历史 README 版本
+- 存在于归档中但在当前 GitHub 状态中缺失的内容证据</p>
+<p><strong>参考</strong>：CDX API 参数见 <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/references/github-archive-guide.md" class="ext" target="_blank" rel="noopener">github-archive-guide.md</a>。</p>
+<hr />
+<h3 id="调查员-4gh-archive--bigquery-调查员">调查员 4：GH Archive / BigQuery 调查员</h3>
+<p><strong>职责边界</strong>：仅通过 <strong>BigQuery</strong> 查询 <strong>GitHub Archive</strong>。这是所有公开 GitHub 事件的防篡改记录。</p>
+<blockquote>
+<p><strong>前提条件</strong>：需要具有 BigQuery 访问权限的 Google Cloud 凭据（<code>gcloud auth application-default login</code>）。如不可用，跳过此调查员并在报告中注明。</p>
+</blockquote>
+<p><strong>成本优化规则</strong>（强制执行）：
+1. 每次查询前必须先运行 <code>--dry_run</code> 以估算成本。
+2. 使用 <code>_TABLE_SUFFIX</code> 按日期范围过滤，最小化扫描数据量。
+3. 只 SELECT 所需列。
+4. 除非进行聚合，否则添加 LIMIT。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 模板：安全的 BigQuery 查询，用于查询 OWNER/REPO 的 PushEvent</span>
+bq<span class="w"> </span>query<span class="w"> </span>--use_legacy_sql<span class="o">=</span><span class="nb">false</span><span class="w"> </span>--dry_run<span class="w"> </span><span class="s2">&quot;</span>
+<span class="s2">SELECT created_at, actor.login, payload.commits, payload.before, payload.head,</span>
+<span class="s2">       payload.size, payload.distinct_size</span>
+<span class="s2">FROM \`githubarchive.month.*\`</span>
+<span class="s2">WHERE _TABLE_SUFFIX BETWEEN &#39;YYYYMM&#39; AND &#39;YYYYMM&#39;</span>
+<span class="s2">  AND type = &#39;PushEvent&#39;</span>
+<span class="s2">  AND repo.name = &#39;OWNER/REPO&#39;</span>
+<span class="s2">LIMIT 1000</span>
+<span class="s2">&quot;</span>
+<span class="c1"># 如果成本可接受，去掉 --dry_run 重新运行</span>
+
+<span class="c1"># 检测强制推送：distinct_size 为零的 PushEvent 表示提交被强制擦除</span>
+<span class="c1"># payload.distinct_size = 0 AND payload.size &gt; 0 → 强制推送指标</span>
+
+<span class="c1"># 检查已删除分支事件</span>
+bq<span class="w"> </span>query<span class="w"> </span>--use_legacy_sql<span class="o">=</span><span class="nb">false</span><span class="w"> </span><span class="s2">&quot;</span>
+<span class="s2">SELECT created_at, actor.login, payload.ref, payload.ref_type</span>
+<span class="s2">FROM \`githubarchive.month.*\`</span>
+<span class="s2">WHERE _TABLE_SUFFIX BETWEEN &#39;YYYYMM&#39; AND &#39;YYYYMM&#39;</span>
+<span class="s2">  AND type = &#39;DeleteEvent&#39;</span>
+<span class="s2">  AND repo.name = &#39;OWNER/REPO&#39;</span>
+<span class="s2">LIMIT 200</span>
+<span class="s2">&quot;</span>
+</code></pre></div>
+
+<p><strong>需收集的证据</strong>：
+- 强制推送事件（payload.size &gt; 0，payload.distinct_size = 0）
+- 分支/标签的 DeleteEvent
+- 可疑 CI/CD 自动化的 WorkflowRunEvent
+- 在 git 日志出现"空白"之前的 PushEvent（历史重写证据）</p>
+<p><strong>参考</strong>：所有 12 种事件类型及查询模式见 <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/references/github-archive-guide.md" class="ext" target="_blank" rel="noopener">github-archive-guide.md</a>。</p>
+<hr />
+<h3 id="调查员-5ioc-富化调查员">调查员 5：IOC 富化调查员</h3>
+<p><strong>职责边界</strong>：仅使用<strong>被动公开来源</strong>对阶段 1 中的<strong>现有 IOC</strong> 进行富化。不执行目标仓库中的任何代码。</p>
+<p><strong>操作</strong>：
+- 对每个提交 SHA：尝试通过直接 GitHub URL（<code>github.com/OWNER/REPO/commit/SHA.patch</code>）恢复
+- 对每个域名/IP：检查被动 DNS、WHOIS 记录（通过 <code>web_extract</code> 访问公开 WHOIS 服务）
+- 对每个包名：检查 npm/PyPI 中是否有匹配的恶意包报告
+- 对每个 actor 用户名：检查 GitHub 个人资料、贡献历史、账户注册时间
+- 使用 3 种方法恢复强制推送的提交（见 <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/references/recovery-techniques.md" class="ext" target="_blank" rel="noopener">recovery-techniques.md</a>）</p>
+<hr />
+<h2 id="阶段-3证据整合">阶段 3：证据整合</h2>
+<p>所有调查员完成后：</p>
+<ol>
+<li>运行 <code>python3 SKILL_DIR/scripts/evidence-store.py --store evidence.json list</code> 查看所有已收集证据。</li>
+<li>对每条证据，验证 <code>content_sha256</code> 哈希值与原始来源一致。</li>
+<li>按以下维度对证据分组：</li>
+<li><strong>时间线</strong>：将所有带时间戳的证据按时间顺序排列</li>
+<li><strong>参与者</strong>：按 GitHub 用户名或电子邮件分组</li>
+<li><strong>IOC</strong>：将证据与其关联的 IOC 链接</li>
+<li>识别<strong>差异</strong>：存在于一个来源但在另一个来源中缺失的条目（关键删除指标）。</li>
+<li>将证据标记为 <code>[VERIFIED]</code>（已从 2 个以上独立来源确认）或 <code>[UNVERIFIED]</code>（仅单一来源）。</li>
+</ol>
+<hr />
+<h2 id="阶段-4假设形成">阶段 4：假设形成</h2>
+<p>一个假设必须：
+- 陈述具体声明（例如："参与者 X 于某日期对 BRANCH 进行强制推送以擦除提交 SHA"）
+- 引用至少 2 个支持它的证据 ID（<code>EV-XXXX</code>、<code>EV-YYYY</code>）
+- 指明哪些证据可以推翻它
+- 在验证之前标注 <code>[HYPOTHESIS]</code></p>
+<p><strong>常见假设模板</strong>（见 <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/references/investigation-templates.md" class="ext" target="_blank" rel="noopener">investigation-templates.md</a>）：
+- 维护者账户被攻陷：合法账户在被接管后用于注入恶意代码
+- 依赖混淆：包名抢注以拦截安装
+- CI/CD 注入：恶意 workflow 变更以在构建期间运行代码
+- 仿冒命名（Typosquatting）：针对拼写错误者的高度相似包名
+- 凭据泄露：token/密钥意外提交后强制推送以擦除</p>
+<p>对每个假设，派生一个 <code>delegate_task</code> 子 agent，在确认之前尝试寻找反驳证据。</p>
+<hr />
+<h2 id="阶段-5假设验证">阶段 5：假设验证</h2>
+<p>验证器子 agent 必须机械地检查：</p>
+<ol>
+<li>对每个假设，提取所有被引用的证据 ID。</li>
+<li>验证每个 ID 在 <code>evidence.json</code> 中存在（如有任何 ID 缺失则硬性失败 → 假设因可能捏造而被拒绝）。</li>
+<li>验证每条 <code>[VERIFIED]</code> 证据已从 2 个以上来源确认。</li>
+<li>检查逻辑一致性：证据所描绘的时间线是否支持该假设？</li>
+<li>检查替代解释：相同的证据模式是否可能源于良性原因？</li>
+</ol>
+<p><strong>输出</strong>：
+- <code>VALIDATED</code>：所有证据已引用、已验证、逻辑一致，且不存在合理的替代解释。
+- <code>INCONCLUSIVE</code>：证据支持假设，但存在替代解释或证据不足。
+- <code>REJECTED</code>：证据 ID 缺失、将未验证证据作为事实引用、检测到逻辑不一致。</p>
+<p>被拒绝的假设反馈至阶段 4 进行修正（最多 3 次迭代）。</p>
+<hr />
+<h2 id="阶段-6最终报告生成">阶段 6：最终报告生成</h2>
+<p>使用 <a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/templates/forensic-report.md" class="ext" target="_blank" rel="noopener">forensic-report.md</a> 中的模板填写 <code>investigation-report.md</code>。</p>
+<p><strong>必填章节</strong>：
+- 执行摘要：一段式结论（已被攻陷 / 干净 / 不确定），含置信度等级
+- 时间线：所有重要事件的时间顺序重建，含证据引用
+- 已验证假设：每条假设含状态及支持证据 ID
+- 证据注册表：所有 <code>EV-XXXX</code> 条目的表格，含来源、类型和验证状态
+- IOC 列表：所有提取和富化的入侵指标
+- 证据保管链：证据的收集方式、来源及收集时间戳
+- 建议：如检测到攻陷，提供即时缓解措施；以及监控建议</p>
+<p><strong>报告规则</strong>：
+- 每项事实声明必须至少有一个 <code>[EV-XXXX]</code> 引用
+- 执行摘要必须说明置信度等级（高 / 中 / 低）
+- 所有密钥/凭据必须脱敏为 <code>[REDACTED]</code></p>
+<hr />
+<h2 id="阶段-7完成">阶段 7：完成</h2>
+<ol>
+<li>运行最终证据统计：<code>python3 SKILL_DIR/scripts/evidence-store.py --store evidence.json list</code></li>
+<li>归档完整调查目录。</li>
+<li>如确认存在攻陷：</li>
+<li>列出即时缓解措施（轮换凭据、固定依赖哈希、通知受影响用户）</li>
+<li>识别受影响的版本/包</li>
+<li>注明披露义务（如为公开包：与包注册表协调）</li>
+<li>向用户呈现最终 <code>investigation-report.md</code>。</li>
+</ol>
+<hr />
+<h2 id="道德使用准则">道德使用准则</h2>
+<p>本 skill 专为<strong>防御性安全调查</strong>而设计——保护开源软件免受供应链攻击。不得用于：</p>
+<ul>
+<li><strong>骚扰或跟踪</strong>贡献者或维护者</li>
+<li><strong>人肉搜索（Doxing）</strong>——将 GitHub 活动与真实身份关联用于恶意目的</li>
+<li><strong>竞争情报</strong>——未经授权调查专有或内部仓库</li>
+<li><strong>虚假指控</strong>——在没有经过验证的证据的情况下发布调查结果（参见反幻觉防护规则）</li>
+</ul>
+<p>调查应遵循<strong>最小侵入原则</strong>：仅收集验证或反驳假设所必需的证据。发布结果时，遵循负责任披露实践，在公开披露前与受影响的维护者协调。</p>
+<p>如果调查揭示了真实的攻陷，请遵循协调漏洞披露流程：
+1. 首先私下通知仓库维护者
+2. 给予合理的修复时间（通常为 90 天）
+3. 如涉及已发布包，与包注册表（npm、PyPI 等）协调
+4. 如适用，提交 CVE</p>
+<hr />
+<h2 id="api-速率限制">API 速率限制</h2>
+<p>GitHub REST API 强制执行速率限制，如不加以管理，将中断大型调查。</p>
+<p><strong>已认证请求</strong>：5,000 次/小时（需要 <code>GITHUB_TOKEN</code> 环境变量或 <code>gh</code> CLI 认证）
+<strong>未认证请求</strong>：60 次/小时（不适用于调查）</p>
+<p><strong>最佳实践</strong>：
+- 始终进行认证：<code>export GITHUB_TOKEN=ghp_...</code> 或使用 <code>gh</code> CLI（自动认证）
+- 使用条件请求（<code>If-None-Match</code> / <code>If-Modified-Since</code> 请求头），避免对未变更数据消耗配额
+- 对分页端点，按顺序获取所有页面——不要对同一端点并行请求
+- 检查 <code>X-RateLimit-Remaining</code> 响应头；如低于 100，暂停至 <code>X-RateLimit-Reset</code> 时间戳
+- BigQuery 有其自身配额（免费层每日 10 TiB）——始终先进行 dry-run
+- Wayback Machine CDX API：无正式速率限制，但请保持礼貌（最多 1-2 次请求/秒）</p>
+<p>如在调查中途遭遇速率限制，将部分结果记录到证据库中，并在报告中注明该限制。</p>
+<hr />
+<h2 id="参考资料">参考资料</h2>
+<ul>
+<li><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/references/github-archive-guide.md" class="ext" target="_blank" rel="noopener">github-archive-guide.md</a> — BigQuery 查询、CDX API、12 种事件类型</li>
+<li><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/references/evidence-types.md" class="ext" target="_blank" rel="noopener">evidence-types.md</a> — IOC 分类法、证据来源类型、观察类型</li>
+<li><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/references/recovery-techniques.md" class="ext" target="_blank" rel="noopener">recovery-techniques.md</a> — 恢复已删除的提交、PR、issues</li>
+<li><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/references/investigation-templates.md" class="ext" target="_blank" rel="noopener">investigation-templates.md</a> — 按攻击类型预置的假设模板</li>
+<li><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/scripts/evidence-store.py" class="ext" target="_blank" rel="noopener">evidence-store.py</a> — 用于管理证据 JSON 库的 CLI 工具</li>
+<li><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/security/oss-forensics/templates/forensic-report.md" class="ext" target="_blank" rel="noopener">forensic-report.md</a> — 结构化报告模板</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/optional/security/security-oss-forensics</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#-反幻觉anti-hallucination防护规则">⚠️ 反幻觉（Anti-Hallucination）防护规则</a></li>
+<li class="lvl2"><a href="#示例场景">示例场景</a></li>
+<li class="lvl2"><a href="#阶段-0初始化">阶段 0：初始化</a></li>
+<li class="lvl2"><a href="#阶段-1prompt-解析与-ioc-提取">阶段 1：Prompt 解析与 IOC 提取</a></li>
+<li class="lvl2"><a href="#阶段-2并行证据收集">阶段 2：并行证据收集</a></li>
+<li class="lvl3"><a href="#调查员-1本地-git-调查员">调查员 1：本地 Git 调查员</a></li>
+<li class="lvl3"><a href="#调查员-2github-api-调查员">调查员 2：GitHub API 调查员</a></li>
+<li class="lvl3"><a href="#调查员-3wayback-machine-调查员">调查员 3：Wayback Machine 调查员</a></li>
+<li class="lvl3"><a href="#调查员-4gh-archive--bigquery-调查员">调查员 4：GH Archive / BigQuery 调查员</a></li>
+<li class="lvl3"><a href="#调查员-5ioc-富化调查员">调查员 5：IOC 富化调查员</a></li>
+<li class="lvl2"><a href="#阶段-3证据整合">阶段 3：证据整合</a></li>
+<li class="lvl2"><a href="#阶段-4假设形成">阶段 4：假设形成</a></li>
+<li class="lvl2"><a href="#阶段-5假设验证">阶段 5：假设验证</a></li>
+<li class="lvl2"><a href="#阶段-6最终报告生成">阶段 6：最终报告生成</a></li>
+<li class="lvl2"><a href="#阶段-7完成">阶段 7：完成</a></li>
+<li class="lvl2"><a href="#道德使用准则">道德使用准则</a></li>
+<li class="lvl2"><a href="#api-速率限制">API 速率限制</a></li>
+<li class="lvl2"><a href="#参考资料">参考资料</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt 组装 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/prompt-assembly</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="prompt-组装">Prompt 组装</h1>
+<p>Hermes 刻意将以下内容分离：</p>
+<ul>
+<li><strong>已缓存的系统 prompt 状态</strong></li>
+<li><strong>API 调用时临时添加的内容</strong></li>
+</ul>
+<p>这是项目中最重要的设计决策之一，因为它影响：</p>
+<ul>
+<li>token 用量</li>
+<li>prompt 缓存效果</li>
+<li>会话连续性</li>
+<li>记忆正确性</li>
+</ul>
+<p>主要文件：</p>
+<ul>
+<li><code>run_agent.py</code></li>
+<li><code>agent/prompt_builder.py</code></li>
+<li><code>tools/memory_tool.py</code></li>
+</ul>
+<h2 id="已缓存的系统-prompt-层">已缓存的系统 prompt 层</h2>
+<p>已缓存的系统 prompt 大致按以下顺序组装：</p>
+<ol>
+<li>agent 身份 — 优先使用 <code>HERMES_HOME</code> 中的 <code>SOUL.md</code>，否则回退到 <code>prompt_builder.py</code> 中的 <code>DEFAULT_AGENT_IDENTITY</code></li>
+<li>工具感知行为指导</li>
+<li>Honcho 静态块（激活时）</li>
+<li>可选系统消息</li>
+<li>冻结的 MEMORY 快照</li>
+<li>冻结的 USER 配置文件快照</li>
+<li>skills 索引</li>
+<li>上下文文件（<code>AGENTS.md</code>、<code>.cursorrules</code>、<code>.cursor/rules/*.mdc</code>）— 若 SOUL.md 已在第 1 步作为身份加载，则此处<strong>不</strong>再包含它</li>
+<li>时间戳 / 可选会话 ID</li>
+<li>平台提示</li>
+</ol>
+<p>当设置了 <code>skip_context_files</code>（例如子 agent 委托）时，不会加载 SOUL.md，而是使用硬编码的 <code>DEFAULT_AGENT_IDENTITY</code>。</p>
+<h3 id="具体示例组装后的系统-prompt">具体示例：组装后的系统 prompt</h3>
+<p>以下是所有层都存在时最终系统 prompt 的简化视图（注释说明每个部分的来源）：</p>
+<div class="highlight"><pre><span></span><code># Layer 1: Agent Identity (from ~/.hermes/SOUL.md)
+You are Hermes, an AI assistant created by Nous Research.
+You are an expert software engineer and researcher.
+You value correctness, clarity, and efficiency.
+...
+
+# Layer 2: Tool-aware behavior guidance
+You have persistent memory across sessions. Save durable facts using
+the memory tool: user preferences, environment details, tool quirks,
+and stable conventions. Memory is injected into every turn, so keep
+it compact and focused on facts that will still matter later.
+...
+When the user references something from a past conversation or you
+suspect relevant cross-session context exists, use session_search
+to recall it before asking them to repeat themselves.
+
+# Tool-use enforcement (for GPT/Codex models only)
+You MUST use your tools to take action — do not describe what you
+would do or plan to do without actually doing it.
+...
+
+# Layer 3: Honcho static block (when active)
+[Honcho personality/context data]
+
+# Layer 4: Optional system message (from config or API)
+[User-configured system message override]
+
+# Layer 5: Frozen MEMORY snapshot
+## Persistent Memory
+- User prefers Python 3.12, uses pyproject.toml
+- Default editor is nvim
+- Working on project &quot;atlas&quot; in ~/code/atlas
+- Timezone: US/Pacific
+
+# Layer 6: Frozen USER profile snapshot
+## User Profile
+- Name: Alice
+- GitHub: alice-dev
+
+# Layer 7: Skills index
+## Skills (mandatory)
+Before replying, scan the skills below. If one clearly matches
+your task, load it with skill_view(name) and follow its instructions.
+...
+&lt;available_skills&gt;
+  software-development:
+    - code-review: Structured code review workflow
+    - test-driven-development: TDD methodology
+  research:
+    - arxiv: Search and summarize arXiv papers
+&lt;/available_skills&gt;
+
+# Layer 8: Context files (from project directory)
+# Project Context
+The following project context files have been loaded and should be followed:
+
+## AGENTS.md
+This is the atlas project. Use pytest for testing. The main
+entry point is src/atlas/main.py. Always run `make lint` before
+committing.
+
+# Layer 9: Timestamp + session
+Current time: 2026-03-30T14:30:00-07:00
+Session: abc123
+
+# Layer 10: Platform hint
+You are a CLI AI Agent. Try not to use markdown but simple text
+renderable inside a terminal.
+</code></pre></div>
+
+<h2 id="soulmd-在-prompt-中的位置">SOUL.md 在 prompt 中的位置</h2>
+<p><code>SOUL.md</code> 位于 <code>~/.hermes/SOUL.md</code>，作为 agent 的身份标识——系统 prompt 的第一个部分。<code>prompt_builder.py</code> 中的加载逻辑如下：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># From agent/prompt_builder.py (simplified)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">load_soul_md</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+    <span class="n">soul_path</span> <span class="o">=</span> <span class="n">get_hermes_home</span><span class="p">()</span> <span class="o">/</span> <span class="s2">&quot;SOUL.md&quot;</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">soul_path</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+        <span class="k">return</span> <span class="kc">None</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">soul_path</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">_scan_context_content</span><span class="p">(</span><span class="n">content</span><span class="p">,</span> <span class="s2">&quot;SOUL.md&quot;</span><span class="p">)</span>  <span class="c1"># Security scan</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">_truncate_content</span><span class="p">(</span><span class="n">content</span><span class="p">,</span> <span class="s2">&quot;SOUL.md&quot;</span><span class="p">)</span>       <span class="c1"># Cap defaults to 20k chars, configurable</span>
+    <span class="k">return</span> <span class="n">content</span>
+</code></pre></div>
+
+<p>当 <code>load_soul_md()</code> 返回内容时，它会替换硬编码的 <code>DEFAULT_AGENT_IDENTITY</code>。随后调用 <code>build_context_files_prompt()</code> 时传入 <code>skip_soul=True</code>，以防止 SOUL.md 出现两次（一次作为身份，一次作为上下文文件）。</p>
+<p>若 <code>SOUL.md</code> 不存在，系统将回退到：</p>
+<div class="highlight"><pre><span></span><code>You are Hermes Agent, built by Nous Research. Be direct: match the length
+of your reply to the weight of the ask — a one-line question gets a
+one-line answer, and finished work gets a short report of what changed,
+what&#39;s verified, and what&#39;s left, never a replay of the process. No
+filler (&quot;Great question,&quot; &quot;I&#39;d be happy to&quot;), no restating the request
+back, no re-summarizing what you already said, no narrating tool calls
+the user can see. Plain claims over adjectives; when unsure, say so
+plainly. Agree because it&#39;s right, not because the user said it. Depth
+is earned — give it when the user asks for detail, teaches, or the
+stakes demand it, not by default.
+</code></pre></div>
+
+<h2 id="上下文文件的注入方式">上下文文件的注入方式</h2>
+<p><code>build_context_files_prompt()</code> 使用<strong>优先级系统</strong>——只加载一种项目上下文类型（先匹配先赢）：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># From agent/prompt_builder.py (simplified)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">build_context_files_prompt</span><span class="p">(</span><span class="n">cwd</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">skip_soul</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+    <span class="n">cwd_path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">cwd</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+
+    <span class="c1"># Priority: first match wins — only ONE project context loaded</span>
+    <span class="n">project_context</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="n">_load_hermes_md</span><span class="p">(</span><span class="n">cwd_path</span><span class="p">)</span>       <span class="c1"># 1. .hermes.md / HERMES.md (walks to git root)</span>
+        <span class="ow">or</span> <span class="n">_load_agents_md</span><span class="p">(</span><span class="n">cwd_path</span><span class="p">)</span>    <span class="c1"># 2. AGENTS.md (cwd only)</span>
+        <span class="ow">or</span> <span class="n">_load_claude_md</span><span class="p">(</span><span class="n">cwd_path</span><span class="p">)</span>    <span class="c1"># 3. CLAUDE.md (cwd only)</span>
+        <span class="ow">or</span> <span class="n">_load_cursorrules</span><span class="p">(</span><span class="n">cwd_path</span><span class="p">)</span>  <span class="c1"># 4. .cursorrules / .cursor/rules/*.mdc</span>
+    <span class="p">)</span>
+
+    <span class="n">sections</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">if</span> <span class="n">project_context</span><span class="p">:</span>
+        <span class="n">sections</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">project_context</span><span class="p">)</span>
+
+    <span class="c1"># SOUL.md from HERMES_HOME (independent of project context)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">skip_soul</span><span class="p">:</span>
+        <span class="n">soul_content</span> <span class="o">=</span> <span class="n">load_soul_md</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">soul_content</span><span class="p">:</span>
+            <span class="n">sections</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">soul_content</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">sections</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;&quot;</span>
+
+    <span class="k">return</span> <span class="p">(</span>
+        <span class="s2">&quot;# Project Context</span><span class="se">\n\n</span><span class="s2">&quot;</span>
+        <span class="s2">&quot;The following project context files have been loaded &quot;</span>
+        <span class="s2">&quot;and should be followed:</span><span class="se">\n\n</span><span class="s2">&quot;</span>
+        <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">sections</span><span class="p">)</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h3 id="上下文文件发现详情">上下文文件发现详情</h3>
+<table>
+<thead>
+<tr>
+<th>优先级</th>
+<th>文件</th>
+<th>搜索范围</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>.hermes.md</code>、<code>HERMES.md</code></td>
+<td>从 CWD 向上至 git 根目录</td>
+<td>Hermes 原生项目配置</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>AGENTS.md</code></td>
+<td>仅 CWD</td>
+<td>常见 agent 指令文件</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>CLAUDE.md</code></td>
+<td>仅 CWD</td>
+<td>Claude Code 兼容性</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>.cursorrules</code>、<code>.cursor/rules/*.mdc</code></td>
+<td>仅 CWD</td>
+<td>Cursor 兼容性</td>
+</tr>
+</tbody>
+</table>
+<p>所有上下文文件均会：
+- <strong>安全扫描</strong> — 检查 prompt 注入模式（不可见 unicode、"ignore previous instructions"、凭据窃取尝试）
+- <strong>截断处理</strong> — 使用 70/20 头尾比例上限为 20,000 字符，并附截断标记
+- <strong>剥离 YAML frontmatter</strong> — <code>.hermes.md</code> 的 frontmatter 会被移除（保留供未来配置覆盖使用）</p>
+<h2 id="仅在-api-调用时生效的层">仅在 API 调用时生效的层</h2>
+<p>以下内容刻意<em>不</em>作为已缓存系统 prompt 的一部分持久化：</p>
+<ul>
+<li><code>ephemeral_system_prompt</code></li>
+<li>prefill 消息</li>
+<li>gateway 派生的会话上下文覆盖层</li>
+<li>注入当前轮次用户消息的后续轮次 Honcho 召回内容</li>
+</ul>
+<p>这种分离使稳定前缀保持稳定，从而有效缓存。</p>
+<h2 id="记忆快照">记忆快照</h2>
+<p>本地记忆和用户配置文件数据在会话开始时作为冻结快照注入。会话中途的写入操作会更新磁盘状态，但不会修改已构建的系统 prompt，直到新会话开始或强制重建时才生效。</p>
+<h2 id="上下文文件">上下文文件</h2>
+<p><code>agent/prompt_builder.py</code> 使用<strong>优先级系统</strong>扫描并清理项目上下文文件——只加载一种类型（先匹配先赢）：</p>
+<ol>
+<li><code>.hermes.md</code> / <code>HERMES.md</code>（向上遍历至 git 根目录）</li>
+<li><code>AGENTS.md</code>（启动时的 CWD；子目录在会话期间通过 <code>agent/subdirectory_hints.py</code> 逐步发现）</li>
+<li><code>CLAUDE.md</code>（仅 CWD）</li>
+<li><code>.cursorrules</code> / <code>.cursor/rules/*.mdc</code>（仅 CWD）</li>
+</ol>
+<p><code>SOUL.md</code> 通过 <code>load_soul_md()</code> 单独加载用于身份槽位。加载成功后，<code>build_context_files_prompt(skip_soul=True)</code> 会防止其出现两次。</p>
+<p>长文件在注入前会被截断。</p>
+<h2 id="skills-索引">Skills 索引</h2>
+<p>当 skills 工具可用时，skills 系统会向 prompt 贡献一个紧凑的 skills 索引。</p>
+<h2 id="支持的-prompt-自定义入口">支持的 prompt 自定义入口</h2>
+<p>大多数用户应将 <code>agent/prompt_builder.py</code> 视为实现代码，而非配置入口。推荐的自定义路径是修改 Hermes 已加载的 prompt 输入，而非直接编辑 Python 模板。</p>
+<h3 id="优先使用这些入口">优先使用这些入口</h3>
+<ul>
+<li><code>~/.hermes/SOUL.md</code> — 用自定义 agent 角色和固定行为替换内置默认身份块。</li>
+<li><code>~/.hermes/MEMORY.md</code> 和 <code>~/.hermes/USER.md</code> — 提供应在新会话中快照的持久跨会话事实和用户配置文件数据。</li>
+<li>项目上下文文件，如 <code>.hermes.md</code>、<code>HERMES.md</code>、<code>AGENTS.md</code>、<code>CLAUDE.md</code> 或 <code>.cursorrules</code> — 注入仓库特定的工作规则。</li>
+<li>Skills — 打包可复用的工作流和参考资料，无需编辑核心 prompt 代码。</li>
+<li>可选系统 prompt 配置 / API 覆盖 — 添加部署特定的指令文本，无需 fork Hermes。</li>
+<li>临时覆盖层，如 <code>HERMES_EPHEMERAL_SYSTEM_PROMPT</code> 或 prefill 消息 — 添加不应成为已缓存 prompt 前缀一部分的轮次级指导。</li>
+</ul>
+<h3 id="何时应编辑代码">何时应编辑代码</h3>
+<p>仅当你刻意维护一个 fork 或向上游贡献行为变更时，才编辑 <code>agent/prompt_builder.py</code>。该文件为每个会话组装 prompt 管道、缓存边界和注入顺序。直接编辑该文件是全局产品变更，而非针对单个用户的 prompt 自定义。</p>
+<p>换言之：</p>
+<ul>
+<li>若想要不同的助手身份，编辑 <code>SOUL.md</code></li>
+<li>若想要不同的仓库规则，编辑项目上下文文件</li>
+<li>若想要可复用的操作流程，添加或修改 skills</li>
+<li>若想改变 Hermes 为所有人组装 prompt 的方式，修改 Python 代码并将其视为代码贡献</li>
+</ul>
+<h2 id="prompt-组装为何如此拆分">Prompt 组装为何如此拆分</h2>
+<p>该架构刻意优化以：</p>
+<ul>
+<li>保留提供商侧的 prompt 缓存</li>
+<li>避免不必要地修改历史记录</li>
+<li>保持记忆语义清晰可理解</li>
+<li>允许 gateway/ACP/CLI 添加上下文而不污染持久 prompt 状态</li>
+</ul>
+<h2 id="相关文档">相关文档</h2>
+<ul>
+<li><a href="context-compression-and-caching.html">上下文压缩与 Prompt 缓存</a></li>
+<li><a href="session-storage.html">会话存储</a></li>
+<li><a href="gateway-internals.html">Gateway 内部机制</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/prompt-assembly</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#已缓存的系统-prompt-层">已缓存的系统 prompt 层</a></li>
+<li class="lvl3"><a href="#具体示例组装后的系统-prompt">具体示例：组装后的系统 prompt</a></li>
+<li class="lvl2"><a href="#soulmd-在-prompt-中的位置">SOUL.md 在 prompt 中的位置</a></li>
+<li class="lvl2"><a href="#上下文文件的注入方式">上下文文件的注入方式</a></li>
+<li class="lvl3"><a href="#上下文文件发现详情">上下文文件发现详情</a></li>
+<li class="lvl2"><a href="#仅在-api-调用时生效的层">仅在 API 调用时生效的层</a></li>
+<li class="lvl2"><a href="#记忆快照">记忆快照</a></li>
+<li class="lvl2"><a href="#上下文文件">上下文文件</a></li>
+<li class="lvl2"><a href="#skills-索引">Skills 索引</a></li>
+<li class="lvl2"><a href="#支持的-prompt-自定义入口">支持的 prompt 自定义入口</a></li>
+<li class="lvl3"><a href="#优先使用这些入口">优先使用这些入口</a></li>
+<li class="lvl3"><a href="#何时应编辑代码">何时应编辑代码</a></li>
+<li class="lvl2"><a href="#prompt-组装为何如此拆分">Prompt 组装为何如此拆分</a></li>
+<li class="lvl2"><a href="#相关文档">相关文档</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

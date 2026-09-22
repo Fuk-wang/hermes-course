@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dynamic Workflow — Plan-in-code fan-outs, adversarial verification, waves · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-dynamic-workflow</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="dynamic-workflow">Dynamic Workflow</h1>
+<p>Plan-in-code fan-outs, adversarial verification, waves.</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/autonomous-ai-agents/dynamic-workflow</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/autonomous-ai-agents/dynamic-workflow</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>2.0.0</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>Teknium + Hermes Agent</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>orchestration</code>, <code>fan-out</code>, <code>subagents</code>, <code>delegation</code>, <code>verification</code>, <code>migration</code>, <code>audit</code>, <code>research</code>, <code>campaign</code></td>
+</tr>
+<tr>
+<td>Related skills</td>
+<td><a href="../../bundled/autonomous-ai-agents/autonomous-ai-agents-hermes-agent.html"><code>hermes-agent</code></a>, <a href="../../bundled/software-development/software-development-simplify-code.html"><code>simplify-code</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="dynamic-workflow-skill">Dynamic Workflow Skill</h1>
+<p>Runs large fan-out work as a workflow: the plan, the loop and every intermediate
+result live in a script and on disk, so the parent's context holds only verified
+results. Covers one-shot fan-outs, adversarial convergence (attempts + refuters),
+and multi-wave campaigns that integrate dozens of worker branches. It does not
+make <code>delegate_task</code> durable across restarts; that is the kanban swarm's job.</p>
+<h2 id="when-to-use">When to Use</h2>
+<p>Reach for it when the unit of work is clear (a file, an endpoint, a record) and
+there are more units than one context can hold. Skip it for under ~10 units or
+for serial chains. For a refactor or fix campaign on hermes-agent itself, load
+<code>hermes-agent</code> (the dev workflow) alongside; this skill owns the fan-out shape.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li><code>delegate_task</code> available and <code>delegation.max_concurrent_children</code> sized for
+  the wave (default 10; the runtime rejects a <code>tasks=[]</code> larger than that with a
+  clear error rather than queueing). <code>delegation.max_spawn_depth &gt;= 2</code> only if
+  children must fan out themselves.</li>
+</ul>
+<!-- no-tmp: ok — explains why a literal /tmp is wrong -->
+<ul>
+<li>A writable run directory resolved from the terminal environment's temp dir (<code>$TMPDIR</code>, else the platform temp dir). Never a literal <code>/tmp</code>:
+  Termux has no such directory and native Windows breaks on it. Use <code>&lt;tmp&gt;/wf_&lt;name&gt;_&lt;uuid&gt;/</code>, unique per
+  run, so an interrupted earlier run cannot leave stale outputs to be misread.</li>
+<li><code>execute_code</code> for the deterministic layer (only <code>web_search</code>, <code>web_extract</code>,
+  <code>read_file</code>, <code>write_file</code>, <code>search_files</code>, <code>terminal</code>, <code>patch</code> exist inside it).</li>
+</ul>
+<h2 id="how-to-run">How to Run</h2>
+<p>Two layers, split by a real capability boundary:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Layer A - <code>execute_code</code> script</th>
+<th>Layer B - <code>delegate_task</code> batch</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Use for</td>
+<td>DETERMINISTIC work: fetch N URLs, parse N files, run N commands, template N outputs, build manifests, merge outputs</td>
+<td>LLM-JUDGMENT work: classify, review, decide, write, refute, refactor one unit</td>
+</tr>
+<tr>
+<td>Holds</td>
+<td>loop, branching, intermediate variables</td>
+<td>nothing; one call with <code>tasks=[...]</code>, each task its own isolated agent</td>
+</tr>
+<tr>
+<td>Tools</td>
+<td>the sandbox set above; it can NOT call <code>delegate_task</code></td>
+<td>the parent's toolsets, inherited unchanged (no per-task narrowing); children lose <code>delegate_task</code>, <code>clarify</code>, <code>memory</code>, <code>send_message</code>, <code>cronjob_manage</code></td>
+</tr>
+<tr>
+<td>Concurrency</td>
+<td>yours (<code>ThreadPoolExecutor</code>, batches)</td>
+<td>bounded by <code>delegation.max_concurrent_children</code></td>
+</tr>
+<tr>
+<td>Cost</td>
+<td>tool calls only</td>
+<td>one full agent tree per task; multiplies linearly</td>
+</tr>
+</tbody>
+</table>
+<p>Do the deterministic part in Layer A first, fan out only the irreducibly-LLM
+step in Layer B, synthesize on the parent.</p>
+<h3 id="background-first-results-re-enter-as-messages">Background-first: results re-enter as messages</h3>
+<p>A top-level <code>delegate_task</code> returns immediately with one handle per task; each
+child's result re-enters the conversation as a new message when it finishes. You
+cannot read <code>out_*.csv</code> on the line after the call. Finish whatever does not
+depend on the children, give a one-line status, and END YOUR TURN; act on each
+result message as it lands. An ordinary follow-up user message does not cancel
+children; <code>/stop</code>, <code>/new</code> and process exit do. Only a delegation issued by an
+orchestrator subagent (depth &gt; 0) is synchronous.</p>
+<h2 id="quick-reference">Quick Reference</h2>
+<ul>
+<li>Unit must be answerable without sibling output, else it is serial.</li>
+<li>Manifest: one unit per line in <code>&lt;run&gt;/manifest.jsonl</code>; print count + run dir.</li>
+<li>Per child: ~8-12 mechanical edits, or ~2-3k lines of reading, or ~50-70 KB of
+  corpus; size by the LARGEST unit. Structured output goes to files, never the
+  <code>summary</code> field (it truncates under load); delimiter-separated lines over JSON.</li>
+<li>Parent verifies file count and per-run freshness before merging.</li>
+<li>A "stalled" child usually completed its write; check the filesystem first.</li>
+<li>Scoped slice first (one directory, 20 records), report token cost, then scale.</li>
+</ul>
+<h2 id="procedure">Procedure</h2>
+<h3 id="one-shot-fan-out">One-shot fan-out</h3>
+<ol>
+<li>Decompose into independent units.</li>
+<li>Layer A pre-pass writes the manifest.</li>
+<li>Size chunks against the limits above; for more tasks than
+   <code>max_concurrent_children</code>, issue bounded waves yourself.</li>
+<li>Layer B: one <code>delegate_task(tasks=[...])</code>; each task reads its slice, writes
+   <code>&lt;run&gt;/out_&lt;i&gt;.csv</code>, prints a status word, stops.</li>
+<li>End the turn. As result messages arrive, read the files, verify, merge; the
+   cross-cutting synthesis stays on the parent.</li>
+</ol>
+<h3 id="adversarial-convergence-finding-quality-work">Adversarial convergence (finding-quality work)</h3>
+<ol>
+<li>Independent attempts: the SAME question to N children (2-4) with DIFFERENT
+   framings in each <code>context</code>, each writing one claim per line to
+   <code>&lt;run&gt;/attempt_&lt;i&gt;.md</code>. Located, individually falsifiable claims only
+   ("<code>POST /api/users/:id/role</code> in <code>src/routes/users.ts:142</code> has no role check");
+   a refuter cannot break "the auth layer has problems".</li>
+<li>Merge and dedupe on the parent; note the agreement count per claim.</li>
+<li>Refuters: a second batch told to BREAK each claim with counter-evidence,
+   emitting <code>claim_idx|survives|counter_evidence</code>. Give them the sources, not the
+   attempts' reasoning.</li>
+<li>Surface only survivors; drop refuted claims with a one-line reason.</li>
+<li>Feed new claims from round 2 through one more refutation; stop when a round
+   adds no survivors, cap at 3 rounds.</li>
+</ol>
+<p>The same mechanic protects the parent from its own wrong premises: when you
+hand children a heuristic ("every patch target on a facade is a dead seam"),
+tell them to refute it with evidence before acting on it. Four squads doing so
+turned a 647-site blanket rewrite into 59 real fixes and saved 130+ green tests.</p>
+<h3 id="campaign-shape-dozens-of-workers-several-waves-hours">Campaign shape (dozens of workers, several waves, hours)</h3>
+<p>The one-shot recipe does not scale to a whole-codebase pass. What did:</p>
+<ol>
+<li>Measure first (LOC, hotspots, dead symbols, oracle corpora) and write ONE
+   shared <code>BRIEF.md</code> plus a per-cluster <code>task_&lt;cluster&gt;.md</code>. Every child reads
+   both. When the fleet drifts (children shaving docstrings instead of cutting
+   code), patch the brief once and steer; re-dispatched children inherit the fix.</li>
+<li>Exclusive ownership: one cluster of files per worker, edits outside it are
+   discarded at integration. Sub-fan-outs inside one file own line RANGES and
+   define helpers inside their range so diffs merge cleanly.</li>
+<li>Commit per verified step, locally, no push, no PR, no rebase from children.
+   Committed state is the only handoff; every worker that died mid-campaign lost
+   exactly its uncommitted tail. A worker sharing a worktree index commits with
+   <code>git commit -- &lt;paths&gt;</code> only; a bare commit swept a sibling's staged hunks.</li>
+<li>Fleet size 12-16 concurrent. Above ~40 processes on one OAuth grant the
+   hourly token refresh stampedes into 401s and kills the wave. Queue the rest.</li>
+<li>Parent liveness: a child reporting <code>completed</code> with a few dozen log lines, or
+   with 0 commits on its branch, has not finished; look for its sub-branches or
+   re-dispatch it with the predecessor's worktree and diff.</li>
+<li>Integration per round: freeze a base SHA, rebase clean branches mechanically,
+   give each conflicting branch its own rebase worker ("main's behaviour wins,
+   re-applied inside the new structure"), merge onto one integration branch,
+   run the FULL suite on the combined tree. Collisions that every branch passed
+   alone appear only here. The next round branches from the integrated commit
+   so its workers cannot conflict with each other.</li>
+<li>Before declaring a round integrated: <code>git rev-list --count &lt;integration&gt;..&lt;branch&gt;</code>
+   is 0 for EVERY branch. Workers keep committing after you merge their tip;
+   168 commits across six slices were once left behind that way.</li>
+<li>Test runs: exactly one runner on the box, behind a lock file, at high <code>-j</code>.
+   Many parallel low-<code>-j</code> runners were slower AND killed each other's process
+   groups. Red files are re-run on a bare <code>origin/main</code> worktree in the same
+   venv; identical per-file failure sets are pre-existing, not yours.</li>
+<li>Forward-port at the end, not per round: freeze main's SHA, fan out the
+   conflicted files by directory to workers editing ONE merge worktree with
+   no commits, then the parent commits the merge once. CI never runs on a
+   conflicted PR, so re-merge main before every push.</li>
+<li>Live QA is its own wave: one squad per surface, isolated <code>HERMES_HOME</code>,
+    expectation written before the check, evidence on disk, report only, and a
+    PR-vs-main difference is the only thing that counts as a regression. Green
+    unit tests missed the one P0 (a logged-in code path no test exercised).</li>
+<li>Reviewer claims get the same treatment as child claims: A/B against the
+    base before "restoring" anything. Several confidently stated review deltas
+    already behaved that way on base.</li>
+<li>A parent restart needs a <code>HANDOFF.md</code>: why it died, which handles are dead,
+    per-branch scorecard (LOC delta, import smoke, targeted tests), and the exact
+    re-dispatch text. Snapshot every dirty worktree into a <code>wip:</code> commit first.</li>
+</ol>
+<h2 id="pitfalls">Pitfalls</h2>
+<ul>
+<li>Calling <code>delegate_task</code> inside an <code>execute_code</code> script: not in the sandbox.</li>
+<li>Synthesizing on the same turn as the fan-out call: the files do not exist yet.</li>
+<li>Promising background-durable-for-days from <code>delegate_task</code>: it is turn-scoped
+  and dies with the process. Durable graph = kanban swarm; one-off = <code>cronjob</code>.</li>
+<li>Trusting <code>summary</code> for content, or <code>status=completed</code> for completion.</li>
+<li>Same framing in every "independent" attempt: they collapse to one answer.</li>
+<li><code>git stash</code> anywhere in a worktree campaign: <code>refs/stash</code> is shared across
+  worktrees and another worker will pop your edits. Compare via a temp worktree.</li>
+<li>Reporting a hit target when the honest number is lower. Say "16% so far, here
+  is the path to 30%" and run the next round.</li>
+</ul>
+<h2 id="verification">Verification</h2>
+<ul>
+<li>Manifest line count matches the expected unit count.</li>
+<li>Every <code>out_*.csv</code> exists and was written this run.</li>
+<li>Every dropped claim has recorded counter-evidence; every surfaced claim went
+  through refutation.</li>
+<li>Campaign: every branch at 0 unmerged commits, full suite on the integrated
+  tree with reds triaged against bare main, live QA report per surface, token
+  cost reported on the scoped slice before the full run.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-dynamic-workflow</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#when-to-use">When to Use</a></li>
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#how-to-run">How to Run</a></li>
+<li class="lvl3"><a href="#background-first-results-re-enter-as-messages">Background-first: results re-enter as messages</a></li>
+<li class="lvl2"><a href="#quick-reference">Quick Reference</a></li>
+<li class="lvl2"><a href="#procedure">Procedure</a></li>
+<li class="lvl3"><a href="#one-shot-fan-out">One-shot fan-out</a></li>
+<li class="lvl3"><a href="#adversarial-convergence-finding-quality-work">Adversarial convergence (finding-quality work)</a></li>
+<li class="lvl3"><a href="#campaign-shape-dozens-of-workers-several-waves-hours">Campaign shape (dozens of workers, several waves, hours)</a></li>
+<li class="lvl2"><a href="#pitfalls">Pitfalls</a></li>
+<li class="lvl2"><a href="#verification">Verification</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Running Hermes on a Personal or Work Machine · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/secure-hermes-on-a-work-machine</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="running-hermes-on-a-personal-or-work-machine">Running Hermes on a Personal or Work Machine</h1>
+<p>You're about to run an agent on the machine you live on — a personal laptop or an employer-managed workstation. What's the safe posture?</p>
+<p>Short answer: the defaults already do most of the work. Hermes ships secure-by-default, with a defense-in-depth model covering command approval, file-write safety, and credential handling. This page walks through what's on out of the box, which knobs to tighten for a shared or work machine, and how to undo mistakes when they happen. Every control here is covered in depth in the <a href="../user-guide/security.html">Security</a> guide.</p>
+<h2 id="what-the-defaults-already-protect">What the Defaults Already Protect</h2>
+<p>Fresh install, no configuration — these protections are active:</p>
+<p><strong>Dangerous commands require approval.</strong> Before executing any command, Hermes checks it against a curated list of dangerous patterns — recursive deletes, writes to <code>/etc/</code>, disk operations, pipe-to-shell, and more. The default <code>approvals.mode: smart</code> uses an auxiliary LLM to assess risk: low-risk commands are auto-approved for that command only, genuinely dangerous commands are auto-denied, and uncertain cases escalate to a manual prompt.</p>
+<p><strong>Approval prompts fail closed.</strong> If you don't respond to an approval prompt within the timeout (default 300 seconds), the command is <strong>denied</strong>. Walking away from your desk never silently approves anything.</p>
+<p><strong>A hardline blocklist is the always-on floor.</strong> Some commands — <code>rm -rf /</code>, fork bombs, zeroing a physical disk — are refused <strong>regardless</strong> of approval mode, <code>--yolo</code>, or an explicit "allow always". The blocklist trips before the approval layer even sees the command, and there is no override flag.</p>
+<p><strong>File writes to sensitive paths are blocked.</strong> The <code>write_file</code> and <code>patch</code> tools cannot touch OS credential stores (<code>~/.ssh/</code>, <code>~/.aws/</code>, <code>~/.kube/</code>, <code>/etc/sudoers</code>, <code>~/.netrc</code>), Hermes credential stores (<code>auth.json</code>, <code>.env</code>, pairing data), or project secret files (<code>.env</code>, <code>.env.local</code>, <code>.envrc</code>) anywhere on disk. Blocked writes return an error immediately — there is no approval prompt and no way to override from the chat UI.</p>
+<p><strong>Secrets are redacted from output.</strong> <code>security.redact_secrets</code> is on by default: patterns that look like API keys, tokens, and passwords in tool output are redacted before they enter the conversation context and logs.</p>
+<p><strong>Your data goes only where you point it.</strong> API calls go <strong>only to the LLM provider you configure</strong>. Hermes Agent does not collect telemetry, usage data, or analytics. Your conversations, memory, and skills are stored locally in <code>~/.hermes/</code>. See the <a href="../reference/faq.html#is-my-data-sent-anywhere">FAQ</a>.</p>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>There's more below the surface — SSRF protection on all URL-capable tools, filtered environments for MCP subprocesses, prompt-injection scanning of context files. The <a href="../user-guide/security.html">Security</a> page documents every layer.</p>
+</div>
+<h2 id="tightening-for-a-shared-or-work-machine">Tightening for a Shared or Work Machine</h2>
+<p>On a machine with employer data, production credentials, or other people's files, layer these on top of the defaults.</p>
+<h3 id="switch-approvals-to-manual">Switch approvals to manual</h3>
+<p><code>smart</code> mode auto-approves low-risk commands. If you want to see every flagged command yourself:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">approvals</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">manual</span>
+</code></pre></div>
+
+<p>Manual mode always prompts you before executing a flagged command.</p>
+<h3 id="add-your-own-deny-rules">Add your own deny rules</h3>
+<p><code>approvals.deny</code> is a list of glob patterns that block matching terminal commands unconditionally — even under <code>--yolo</code>, <code>/yolo</code>, or <code>mode: off</code>. It's the user-editable counterpart to the built-in hardline blocklist. Use it to declare things that must never run on this machine:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">approvals</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">deny</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;git</span><span class="nv"> </span><span class="s">push</span><span class="nv"> </span><span class="s">--force*&quot;</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;*curl*|*sh*&quot;</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;dd</span><span class="nv"> </span><span class="s">if=*</span><span class="nv"> </span><span class="s">of=/dev/*&quot;</span>
+</code></pre></div>
+
+<p>Patterns are case-insensitive <a href="https://docs.python.org/3/library/fnmatch.html" class="ext" target="_blank" rel="noopener">fnmatch</a> globs matched against the whole command text, and matching runs over the same normalized/deobfuscated variants the dangerous-pattern detector uses, so simple quoting tricks don't slip past a rule. Always quote patterns — a bare leading <code>*</code> is a YAML parse error. Changes take effect immediately, no restart needed. Details: <a href="../user-guide/security.html#user-defined-deny-rules-approvalsdeny">User-Defined Deny Rules</a>.</p>
+<h3 id="sandbox-file-writes">Sandbox file writes</h3>
+<p><code>HERMES_WRITE_SAFE_ROOT</code> restricts <code>write_file</code> and <code>patch</code> to the directory prefix(es) you list — anything outside is hard-blocked. Multiple roots are separated by <code>:</code> on Unix:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_WRITE_SAFE_ROOT</span><span class="o">=</span>/path/to/project:/home/you/.hermes
+</code></pre></div>
+
+<p>Sensitive paths inside the safe root are still blocked — pointing it at <code>$HOME</code> does not allow writing <code>~/.ssh/id_rsa</code>.</p>
+<div class="admonition adm-caution"><p class="adm-title">Caution</p>
+<p>Don't add this to <code>~/.hermes/.env</code> casually. If you set it to a project directory only, the agent cannot write to <code>~/.hermes/cron/jobs.json</code>, profile skills, or other Hermes state outside that prefix. Include your Hermes home as a second root, as above.</p>
+</div>
+<h3 id="move-command-execution-off-the-host">Move command execution off the host</h3>
+<p>The strongest isolation is not running commands on your machine at all. The terminal tool supports multiple <a href="../user-guide/features/tools.html#terminal-backends">backends</a>:</p>
+<table>
+<thead>
+<tr>
+<th>Backend</th>
+<th>Isolation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>local</code></td>
+<td>None — runs on host (dangerous-command checks apply)</td>
+</tr>
+<tr>
+<td><code>docker</code></td>
+<td>Container — the container itself is the security boundary</td>
+</tr>
+<tr>
+<td><code>ssh</code></td>
+<td>Remote machine — keeps execution on a separate server</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nt">terminal</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">docker</span>
+<span class="w">  </span><span class="nt">docker_image</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;nikolaik/python-nodejs:python3.11-nodejs20&quot;</span>
+<span class="w">  </span><span class="nt">docker_forward_env</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">  </span><span class="c1"># Explicit allowlist only; empty keeps secrets out of the container</span>
+</code></pre></div>
+
+<p>Every Docker container runs with hardened settings — all Linux capabilities dropped (with a minimal add-back set), <code>no-new-privileges</code>, a process-count limit, and size-limited tmpfs mounts. With a container backend, destructive commands inside the container can't harm the host, which is why dangerous-command checks are skipped there.</p>
+<p>For <code>ssh</code>, set <code>terminal.backend: ssh</code> in <code>config.yaml</code> and provide host details via <code>TERMINAL_SSH_HOST</code>, <code>TERMINAL_SSH_USER</code>, and <code>TERMINAL_SSH_KEY</code> in <code>~/.hermes/.env</code>. See <a href="../user-guide/security.html#network-isolation">Network Isolation</a>.</p>
+<h3 id="if-messaging-is-on-allowlists-and-pairing">If messaging is on: allowlists and pairing</h3>
+<p>Running the <a href="../user-guide/security.html#user-authorization-gateway">gateway</a> on this machine? The default is already deny: if no allowlists are configured and <code>GATEWAY_ALLOW_ALL_USERS</code> is not set, <strong>all users are denied</strong>. Keep it explicit:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/.env</span>
+<span class="nv">TELEGRAM_ALLOWED_USERS</span><span class="o">=</span><span class="m">123456789</span>
+<span class="nv">GATEWAY_ALLOWED_USERS</span><span class="o">=</span><span class="m">123456789</span>
+</code></pre></div>
+
+<p>Or use DM pairing instead of hardcoding IDs: unknown users receive a one-time pairing code, and you approve them from the CLI with <code>hermes pairing approve &lt;platform&gt; &lt;code&gt;</code>. Never set <code>GATEWAY_ALLOW_ALL_USERS=true</code> on a machine you care about.</p>
+<h2 id="the-undo-layer-checkpoints-and-rollback">The Undo Layer: Checkpoints and <code>/rollback</code></h2>
+<p>Approval gates prevent damage; <a href="../user-guide/checkpoints-and-rollback.html">checkpoints</a> reverse it. When enabled, Hermes automatically snapshots your project before destructive operations — <code>write_file</code>, <code>patch</code>, and destructive terminal commands like <code>rm</code>, <code>mv</code>, <code>sed -i</code>, and <code>git reset</code> — into a shadow git store under <code>~/.hermes/checkpoints/store/</code>. Your real project <code>.git</code> is never touched.</p>
+<p>Checkpoints are opt-in. Enable per-session:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>chat<span class="w"> </span>--checkpoints
+</code></pre></div>
+
+<p>Or globally:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">checkpoints</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>Then, in a session:</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/rollback</code></td>
+<td>List all checkpoints with change stats</td>
+</tr>
+<tr>
+<td><code>/rollback diff &lt;N&gt;</code></td>
+<td>Preview what changed since checkpoint N</td>
+</tr>
+<tr>
+<td><code>/rollback &lt;N&gt;</code></td>
+<td>Restore to checkpoint N (also undoes the last chat turn)</td>
+</tr>
+<tr>
+<td><code>/rollback &lt;N&gt; &lt;file&gt;</code></td>
+<td>Restore a single file from checkpoint N</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Preview with <code>/rollback diff &lt;N&gt;</code> before restoring, and combine checkpoints with git worktrees for maximum safety — each Hermes session in its own worktree, with checkpoints as an extra layer.</p>
+</div>
+<h2 id="what-this-threat-model-is--and-isnt">What This Threat Model Is — and Isn't</h2>
+<p>Be clear-eyed about what these controls defend against. As the <a href="../user-guide/security.html#user-defined-deny-rules-approvalsdeny">Security</a> guide puts it:</p>
+<blockquote>
+<p>Deny rules are a guardrail against an honest-but-wrong agent, the same threat model as the dangerous-pattern detector. They are not a sandbox against a deliberately adversarial process — for that, use an isolated backend (Docker, Modal) or an egress-restricted environment.</p>
+</blockquote>
+<p>The same applies to the file-write guards: they apply to <code>write_file</code> and <code>patch</code> only, while the <code>terminal</code> tool runs as the same OS user. The denylist reduces accidental damage and gives models a clear stop signal; it does not sandbox a hostile or compromised agent. If your requirement is containment rather than guardrails, the answer is an isolated terminal backend — that's the boundary designed for it.</p>
+<h2 id="a-cautious-starting-config">A Cautious Starting Config</h2>
+<p>Everything above, assembled. Adjust to taste in <code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">approvals</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">manual</span><span class="w">                  </span><span class="c1"># See every flagged command yourself</span>
+<span class="w">  </span><span class="nt">timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span><span class="w">                  </span><span class="c1"># Unanswered prompts are denied (fail-closed)</span>
+<span class="w">  </span><span class="nt">deny</span><span class="p">:</span><span class="w">                         </span><span class="c1"># Never-run list — survives even /yolo</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;git</span><span class="nv"> </span><span class="s">push</span><span class="nv"> </span><span class="s">--force*&quot;</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;*curl*|*sh*&quot;</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;dd</span><span class="nv"> </span><span class="s">if=*</span><span class="nv"> </span><span class="s">of=/dev/*&quot;</span>
+
+<span class="nt">security</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">redact_secrets</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">          </span><span class="c1"># Already the default; stated here for clarity</span>
+
+<span class="nt">checkpoints</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">                 </span><span class="c1"># Snapshot before destructive operations</span>
+
+<span class="nt">terminal</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">docker</span><span class="w">               </span><span class="c1"># Or ssh — keep execution off the host</span>
+<span class="w">  </span><span class="nt">docker_forward_env</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">        </span><span class="c1"># No host secrets inside the container</span>
+</code></pre></div>
+
+<p>And in <code>~/.hermes/.env</code>, if you want the write sandbox:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">HERMES_WRITE_SAFE_ROOT</span><span class="o">=</span>/path/to/project:/home/you/.hermes
+</code></pre></div>
+
+<h2 id="see-also">See Also</h2>
+<ul>
+<li><strong><a href="../user-guide/security.html">Security</a></strong> — the full defense-in-depth reference: every approval pattern, container hardening flags, gateway authorization, MCP credential filtering</li>
+<li><strong><a href="../user-guide/checkpoints-and-rollback.html">Checkpoints &amp; Rollback</a></strong> — configuration, store maintenance, and restore workflows</li>
+<li><strong><a href="../user-guide/features/tools.html">Tools &amp; Toolsets</a></strong> — all terminal backends and their configuration</li>
+<li><strong><a href="../user-guide/configuration.html">Configuration</a></strong> — the complete <code>config.yaml</code> reference</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/secure-hermes-on-a-work-machine</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#what-the-defaults-already-protect">What the Defaults Already Protect</a></li>
+<li class="lvl2"><a href="#tightening-for-a-shared-or-work-machine">Tightening for a Shared or Work Machine</a></li>
+<li class="lvl3"><a href="#switch-approvals-to-manual">Switch approvals to manual</a></li>
+<li class="lvl3"><a href="#add-your-own-deny-rules">Add your own deny rules</a></li>
+<li class="lvl3"><a href="#sandbox-file-writes">Sandbox file writes</a></li>
+<li class="lvl3"><a href="#move-command-execution-off-the-host">Move command execution off the host</a></li>
+<li class="lvl3"><a href="#if-messaging-is-on-allowlists-and-pairing">If messaging is on: allowlists and pairing</a></li>
+<li class="lvl2"><a href="#the-undo-layer-checkpoints-and-rollback">The Undo Layer: Checkpoints and /rollback</a></li>
+<li class="lvl2"><a href="#what-this-threat-model-is--and-isnt">What This Threat Model Is — and Isn&#x27;t</a></li>
+<li class="lvl2"><a href="#a-cautious-starting-config">A Cautious Starting Config</a></li>
+<li class="lvl2"><a href="#see-also">See Also</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

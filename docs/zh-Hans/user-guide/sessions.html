@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sessions（会话） · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/sessions</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="sessions会话">Sessions（会话）</h1>
+<p>Hermes Agent 自动将每次对话保存为一个 session。Session 支持对话恢复、跨 session 搜索以及完整的对话历史管理。</p>
+<h2 id="session-的工作原理">Session 的工作原理</h2>
+<p>每次对话——无论来自 CLI、Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Teams 还是其他任何消息平台——都会以完整消息历史的形式存储为一个 session。Session 记录在：</p>
+<ol>
+<li><strong>SQLite 数据库</strong>（<code>~/.hermes/state.db</code>）——包含 FTS5 全文搜索的结构化 session 元数据，以及完整消息历史</li>
+</ol>
+<p>SQLite 数据库存储：
+- Session ID、来源平台、用户 ID
+- <strong>Session 标题</strong>（唯一、人类可读的名称）
+- 模型名称和配置
+- 系统 prompt（提示词）快照
+- 完整消息历史（角色、内容、工具调用、工具结果）
+- Token 计数（输入/输出）
+- 时间戳（started_at、ended_at）
+- 父 session ID（用于压缩触发的 session 分割）</p>
+<h3 id="哪些内容计入上下文">哪些内容计入上下文</h3>
+<p>Hermes 存储 session 历史以便恢复对话，但不会在每次对话时重新发送所有历史字节。每轮对话中，模型看到的是：所选系统 prompt、当前对话窗口，以及 Hermes 为该轮显式注入的内容。</p>
+<p>媒体附件作为轮次范围内的输入处理：</p>
+<ul>
+<li>图片可以原生附加到下一次模型调用，或在当前模型不支持原生视觉时预先分析为文字描述。</li>
+<li>音频在配置了语音转文字时会被转录为文本。</li>
+<li>文本文档可以将提取的文本包含在内；其他文档类型通常以本地保存路径和简短说明来表示。</li>
+<li>附件路径和提取/派生的文本可能出现在对话记录中，但原始图片、音频或二进制文件字节不会被反复复制到后续 prompt 中。</li>
+</ul>
+<p>例如，如果用户发送一张图片并要求 Hermes 制作表情包，Hermes 可能会用视觉能力检查该图片一次并运行图像处理脚本。后续轮次不会自动将原始 JPEG 带入上下文，只携带写入对话的内容，例如用户的请求、简短的图片描述、本地缓存路径或最终的助手回复。</p>
+<p>上下文增长最常见的原因不是媒体文件本身，而是冗长的文本：粘贴的转录、完整日志、大型工具输出、长 diff、重复的状态报告以及详细的证明转储。优先使用摘要、文件路径、重点摘录和工具支持的查找，而不是将大型内容复制到聊天中。</p>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>当 session 变长时使用 <code>/compress</code>，用 <code>/new</code> 开启新线程，仅在需要从存储中删除旧的已结束 session 时才使用 <code>hermes sessions prune</code>。压缩会减少活跃上下文，而不是隐私删除。向 <code>/new</code> 传入名称（例如 <code>/new payments-refactor</code>）可以预先设置新 session 的初始标题——便于之后通过 <code>/resume &lt;name&gt;</code> 或 <code>/sessions</code> 选择器找到它。</p>
+</div>
+<h3 id="session-来源">Session 来源</h3>
+<p>每个 session 都标记了其来源平台：</p>
+<table>
+<thead>
+<tr>
+<th>来源</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cli</code></td>
+<td>交互式 CLI（<code>hermes</code> 或 <code>hermes chat</code>）</td>
+</tr>
+<tr>
+<td><code>telegram</code></td>
+<td>Telegram 消息</td>
+</tr>
+<tr>
+<td><code>discord</code></td>
+<td>Discord 服务器/私信</td>
+</tr>
+<tr>
+<td><code>slack</code></td>
+<td>Slack 工作区</td>
+</tr>
+<tr>
+<td><code>whatsapp</code></td>
+<td>WhatsApp 消息</td>
+</tr>
+<tr>
+<td><code>signal</code></td>
+<td>Signal 消息</td>
+</tr>
+<tr>
+<td><code>matrix</code></td>
+<td>Matrix 房间和私信</td>
+</tr>
+<tr>
+<td><code>mattermost</code></td>
+<td>Mattermost 频道</td>
+</tr>
+<tr>
+<td><code>email</code></td>
+<td>电子邮件（IMAP/SMTP）</td>
+</tr>
+<tr>
+<td><code>sms</code></td>
+<td>通过 Twilio 的短信</td>
+</tr>
+<tr>
+<td><code>dingtalk</code></td>
+<td>钉钉消息</td>
+</tr>
+<tr>
+<td><code>feishu</code></td>
+<td>飞书/Lark 消息</td>
+</tr>
+<tr>
+<td><code>wecom</code></td>
+<td>企业微信</td>
+</tr>
+<tr>
+<td><code>weixin</code></td>
+<td>微信（个人版）</td>
+</tr>
+<tr>
+<td><code>bluebubbles</code></td>
+<td>通过 BlueBubbles macOS 服务器的 Apple iMessage</td>
+</tr>
+<tr>
+<td><code>qqbot</code></td>
+<td>QQ Bot（腾讯 QQ）通过官方 API v2</td>
+</tr>
+<tr>
+<td><code>homeassistant</code></td>
+<td>Home Assistant 对话</td>
+</tr>
+<tr>
+<td><code>webhook</code></td>
+<td>传入 webhook</td>
+</tr>
+<tr>
+<td><code>api-server</code></td>
+<td>API 服务器请求</td>
+</tr>
+<tr>
+<td><code>acp</code></td>
+<td>ACP 编辑器集成</td>
+</tr>
+<tr>
+<td><code>cron</code></td>
+<td>定时 cron 任务</td>
+</tr>
+<tr>
+<td><code>batch</code></td>
+<td>批处理运行</td>
+</tr>
+</tbody>
+</table>
+<h2 id="cli-session-恢复">CLI Session 恢复</h2>
+<p>使用 <code>--continue</code> 或 <code>--resume</code> 从 CLI 恢复之前的对话：</p>
+<h3 id="继续上次-session">继续上次 Session</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 恢复最近的 CLI session</span>
+hermes<span class="w"> </span>--continue
+hermes<span class="w"> </span>-c
+
+<span class="c1"># 或使用 chat 子命令</span>
+hermes<span class="w"> </span>chat<span class="w"> </span>--continue
+hermes<span class="w"> </span>chat<span class="w"> </span>-c
+</code></pre></div>
+
+<p>这会从 SQLite 数据库中查找最近的 <code>cli</code> session 并加载其完整对话历史。</p>
+<h3 id="按名称恢复">按名称恢复</h3>
+<p>如果你已为 session 设置了标题（见下方<a href="#session-naming">Session 命名</a>），可以按名称恢复：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 恢复一个命名 session</span>
+hermes<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;my project&quot;</span>
+
+<span class="c1"># 如果存在谱系变体（my project、my project #2、my project #3），</span>
+<span class="c1"># 会自动恢复最新的一个</span>
+hermes<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;my project&quot;</span><span class="w">   </span><span class="c1"># → 恢复 &quot;my project #3&quot;</span>
+</code></pre></div>
+
+<h3 id="恢复特定-session">恢复特定 Session</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 按 ID 恢复特定 session</span>
+hermes<span class="w"> </span>--resume<span class="w"> </span>20250305_091523_a1b2c3d4
+hermes<span class="w"> </span>-r<span class="w"> </span>20250305_091523_a1b2c3d4
+
+<span class="c1"># 按标题恢复</span>
+hermes<span class="w"> </span>--resume<span class="w"> </span><span class="s2">&quot;refactoring auth&quot;</span>
+
+<span class="c1"># 或使用 chat 子命令</span>
+hermes<span class="w"> </span>chat<span class="w"> </span>--resume<span class="w"> </span>20250305_091523_a1b2c3d4
+</code></pre></div>
+
+<p>Session ID 在退出 CLI session 时显示，也可通过 <code>hermes sessions list</code> 查找。</p>
+<h3 id="恢复时的对话摘要">恢复时的对话摘要</h3>
+<p>恢复 session 时，Hermes 会在输入提示符前以样式化面板显示之前对话的紧凑摘要：</p>
+<p><img className="docs-terminal-figure" src="../../../assets/img/docs/session-recap.svg" alt="恢复 Hermes session 时显示的「上次对话」摘要面板的样式化预览。" /></p>
+<p className="docs-figure-caption">恢复模式会在返回实时提示符前显示一个紧凑摘要面板，包含最近的用户和助手轮次。</p>
+
+<p>摘要内容：
+- 显示<strong>用户消息</strong>（金色 <code>●</code>）和<strong>助手回复</strong>（绿色 <code>◆</code>）
+- <strong>截断</strong>长消息（用户 300 字符，助手 200 字符/3 行）
+- <strong>折叠工具调用</strong>为带工具名称的计数（例如 <code>[3 tool calls: terminal, web_search]</code>）
+- <strong>隐藏</strong>系统消息、工具结果和内部推理
+- <strong>最多</strong>显示最近 10 轮，并以"... N earlier messages ..."指示器标注
+- 使用<strong>暗色样式</strong>与活跃对话区分</p>
+<p>要禁用摘要并保留最简单的单行行为，在 <code>~/.hermes/config.yaml</code> 中设置：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">display</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">resume_display</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">minimal</span><span class="w">   </span><span class="c1"># 默认值: full</span>
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>Session ID 格式为 <code>YYYYMMDD_HHMMSS_&lt;hex&gt;</code>——CLI/TUI session 使用 6 位十六进制后缀（例如 <code>20250305_091523_a1b2c3</code>），gateway session 使用 8 位后缀（例如 <code>20250305_091523_a1b2c3d4</code>）。可以按 ID（完整或唯一前缀）或按标题恢复——<code>-c</code> 和 <code>-r</code> 均支持两种方式。</p>
+</div>
+<h2 id="跨平台切换">跨平台切换</h2>
+<p>在 CLI session 中使用 <code>/handoff &lt;platform&gt;</code> 将实时对话转移到消息平台的主频道。Agent 会从 CLI 停止的地方精确接续——相同的 session id、完整的角色感知对话记录、工具调用一并保留。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 在 CLI session 内</span>
+/handoff<span class="w"> </span>telegram
+</code></pre></div>
+
+<p>执行过程：</p>
+<ol>
+<li>CLI 验证 <code>&lt;platform&gt;</code> 已启用且已设置主频道（在目标聊天中运行一次 <code>/sethome</code> 即可配置）。</li>
+<li>CLI 将 session 标记为待处理并<strong>阻塞轮询 gateway</strong>。如果 agent 正在处理轮次，则拒绝操作——请等待当前响应完成后再执行。</li>
+<li>Gateway 监视器认领切换请求，并向目标适配器请求新线程：</li>
+<li><strong>Telegram</strong> — 开启新的论坛话题（如果在聊天中启用了 Bot API 9.4+ Topics 模式则为私信话题，或论坛超级群组话题）。</li>
+<li><strong>Discord</strong> — 在主文字频道下创建 1440 分钟自动归档的线程。</li>
+<li><strong>Slack</strong> — 发布一条种子消息并使用其 <code>ts</code> 作为线程锚点。</li>
+<li><strong>Matrix</strong> — 发布一条种子消息并使用其事件 id 作为线程根（<code>m.thread</code> 关系）。</li>
+<li><strong>WhatsApp / Signal / SMS</strong> — 无原生线程，回退到直接使用主频道。</li>
+<li>Gateway 将目标键重新绑定到你现有的 CLI session id，然后伪造一个合成用户轮次，要求 agent 确认并总结。回复会出现在新线程中。</li>
+<li>Gateway 确认成功后，CLI 打印 <code>/resume</code> 提示并干净退出：</li>
+</ol>
+<p><code>↻ Handoff complete. The session is now active on telegram.
+     Resume it on this CLI later with: /resume my-session-title</code></p>
+<ol>
+<li>从此时起，对话在该平台上继续。在新线程中回复——该频道中任何已授权的用户共享同一 session，之后线程中任何真实用户消息都能无缝加入，因为线程 session 的键不含 <code>user_id</code>。</li>
+</ol>
+<p><strong>恢复到 CLI：</strong> 当你想回到桌面时，只需运行 <code>/resume &lt;title&gt;</code>（或在 shell 中运行 <code>hermes -r "&lt;title&gt;"</code>），从平台停止的地方继续。</p>
+<p><strong>故障模式：</strong>
+- 未配置主频道 → CLI 拒绝并提示 <code>/sethome</code>。
+- 平台未启用/gateway 未运行 → CLI 在 60 秒后超时并显示明确消息，CLI session 保持完整。
+- 线程创建失败（权限不足、话题模式未开启）→ 直接回退到主频道并仍然完成切换；没有线程隔离，但切换本身有效。
+- <code>adapter.send</code> 失败（速率限制、临时 API 错误）→ 切换标记为失败并附带原因；行被清除以便重试。</p>
+<p><strong>值得注意的限制：</strong> 对于无线程能力的多用户群组主频道平台，合成轮次以私信风格 session 为键。这对自私信主频道（典型设置）有效，但对真正的共享群聊并不理想。线程支持覆盖 Telegram / Discord / Slack / Matrix——这是最常见的情况——因此大多数设置不会遇到此问题。</p>
+<h2 id="session-naming">Session 命名</h2>
+<p>为 session 设置人类可读的标题，便于查找和恢复。</p>
+<h3 id="自动生成标题">自动生成标题</h3>
+<p>Hermes 在第一次交换后自动为每个 session 生成简短的描述性标题（3–7 个词）。这在后台线程中使用快速辅助模型运行，不增加延迟。浏览 <code>hermes sessions list</code> 或 <code>hermes sessions browse</code> 时可以看到自动生成的标题。</p>
+<p>自动命名每个 session 只触发一次，如果你已手动设置标题则跳过。</p>
+<h3 id="手动设置标题">手动设置标题</h3>
+<p>在任何聊天 session（CLI 或 gateway）中使用 <code>/title</code> 斜杠命令：</p>
+<div class="highlight"><pre><span></span><code>/title my research project
+</code></pre></div>
+
+<p>标题立即生效。如果 session 尚未在数据库中创建（例如在发送第一条消息之前运行 <code>/title</code>），则会排队等待 session 启动后应用。</p>
+<p>也可以从命令行重命名现有 session：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>sessions<span class="w"> </span>rename<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span><span class="s2">&quot;refactoring auth module&quot;</span>
+</code></pre></div>
+
+<h3 id="标题规则">标题规则</h3>
+<ul>
+<li><strong>唯一</strong>——不能有两个 session 共享同一标题</li>
+<li><strong>最多 100 个字符</strong>——保持列表输出整洁</li>
+<li><strong>净化处理</strong>——控制字符、零宽字符和 RTL 覆盖字符会被自动去除</li>
+<li><strong>普通 Unicode 均可</strong>——emoji、CJK 字符、带重音字符均支持</li>
+</ul>
+<h3 id="压缩时的自动谱系">压缩时的自动谱系</h3>
+<p>当 session 的上下文被压缩（通过 <code>/compress</code> 手动或自动触发）时，Hermes 会创建一个新的续接 session。如果原 session 有标题，新 session 会自动获得带编号的标题：</p>
+<div class="highlight"><pre><span></span><code>&quot;my project&quot; → &quot;my project #2&quot; → &quot;my project #3&quot;
+</code></pre></div>
+
+<p>按名称恢复时（<code>hermes -c "my project"</code>），会自动选取谱系中最新的 session。</p>
+<h3 id="在消息平台中使用-title">在消息平台中使用 /title</h3>
+<p><code>/title</code> 命令在所有 gateway 平台（Telegram、Discord、Slack、WhatsApp）中均可使用：</p>
+<ul>
+<li><code>/title My Research</code> — 设置 session 标题</li>
+<li><code>/title</code> — 显示当前标题</li>
+</ul>
+<h2 id="session-管理命令">Session 管理命令</h2>
+<p>Hermes 通过 <code>hermes sessions</code> 提供完整的 session 管理命令集：</p>
+<h3 id="列出-session">列出 Session</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 列出最近的 session（默认：最近 20 个）</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>list
+
+<span class="c1"># 按平台过滤</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>list<span class="w"> </span>--source<span class="w"> </span>telegram
+
+<span class="c1"># 显示更多 session</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>list<span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span>
+</code></pre></div>
+
+<p>当 session 有标题时，输出显示标题、预览和相对时间戳：</p>
+<div class="highlight"><pre><span></span><code>Title                  Preview                                  Last Active   ID
+────────────────────────────────────────────────────────────────────────────────────────────────
+refactoring auth       Help me refactor the auth module please   2h ago        20250305_091523_a
+my project #3          Can you check the test failures?          yesterday     20250304_143022_e
+—                      What&#39;s the weather in Las Vegas?          3d ago        20250303_101500_f
+</code></pre></div>
+
+<p>当没有 session 有标题时，使用更简单的格式：</p>
+<div class="highlight"><pre><span></span><code>Preview                                            Last Active   Src    ID
+──────────────────────────────────────────────────────────────────────────────────────
+Help me refactor the auth module please             2h ago        cli    20250305_091523_a
+What&#39;s the weather in Las Vegas?                    3d ago        tele   20250303_101500_f
+</code></pre></div>
+
+<h3 id="导出-session">导出 Session</h3>
+<p><code>hermes sessions export</code> 是所有导出格式的统一入口，用 <code>--format</code> 选择：</p>
+<table>
+<thead>
+<tr>
+<th>格式</th>
+<th>输出</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>jsonl</code>（默认）</td>
+<td>每个 session 一个 JSON 对象</td>
+<td>备份、机器可读的往返格式</td>
+</tr>
+<tr>
+<td><code>md</code> / <code>qmd</code></td>
+<td>每个 session 一个 Markdown/Quarto 文件 + manifest</td>
+<td>可读归档、笔记</td>
+</tr>
+<tr>
+<td><code>html</code></td>
+<td>单个独立页面（多 session 带侧边栏）</td>
+<td>分享、浏览</td>
+</tr>
+<tr>
+<td><code>trace</code></td>
+<td>Claude Code JSONL</td>
+<td>HF Agent Trace Viewer、<code>--upload</code></td>
+</tr>
+</tbody>
+</table>
+<p>另有 <code>--only user-prompts</code> 只导出你的 prompt（jsonl 或 md）。</p>
+<p>所有格式共享同一套选择方式：<code>--session-id</code> 导出单个 session，或使用与 <code>prune</code> / <code>archive</code> 相同的完整过滤器进行批量导出 — <code>--older-than</code> / <code>--newer-than</code> / <code>--before</code> / <code>--after</code>（时长如 <code>5h</code>/<code>2d</code>/<code>1w</code>、纯数字天数或 ISO 时间戳）、<code>--source</code>、<code>--title</code>、<code>--model</code>、<code>--provider</code>、<code>--cwd</code>、<code>--min/--max-messages</code>、<code>--min/--max-tokens</code>、<code>--min/--max-cost</code>、<code>--min/--max-tool-calls</code>、<code>--user</code>、<code>--chat-id</code>、<code>--chat-type</code>、<code>--branch</code>、<code>--end-reason</code>。<code>--dry-run</code> 可预览匹配集而不写入。<code>--redact</code> 在任意格式下从导出内容中清除密钥（API key、token、凭据）— 任何打算分享的导出都建议加上。注意：带过滤器的批量导出只匹配<em>已结束</em>的 session；不带过滤器的 <code>export</code> 会导出所有 session（包括活跃的）。</p>
+<h4 id="jsonl默认">JSONL（默认）</h4>
+<div class="highlight"><pre><span></span><code><span class="c1"># 将所有 session 导出到 JSONL 文件</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>backup.jsonl
+
+<span class="c1"># 导出特定平台的 session</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>telegram-history.jsonl<span class="w"> </span>--source<span class="w"> </span>telegram
+
+<span class="c1"># 导出单个 session</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>session.jsonl<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4
+
+<span class="c1"># 从导出内容中脱敏 API key/token/凭据</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>backup.jsonl<span class="w"> </span>--redact
+</code></pre></div>
+
+<p>导出文件每行包含一个 JSON 对象，包含完整的 session 元数据和所有消息。</p>
+<h4 id="html">HTML</h4>
+<p><code>--format html</code> 生成一个完全独立的 HTML 文件 — 无远程依赖 — 带样式化的消息气泡、可折叠的工具输出，多 session 导出时还带侧边栏导航：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 将一个 session 导出为独立 HTML 页面</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>html<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>transcript.html
+
+<span class="c1"># 将最近一周的所有 Telegram session 导出到一个文件，并脱敏</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>html<span class="w"> </span>--newer-than<span class="w"> </span>1w<span class="w"> </span>--source<span class="w"> </span>telegram<span class="w"> </span>--redact<span class="w"> </span>archive.html
+</code></pre></div>
+
+<h4 id="只导出-prompt">只导出 Prompt</h4>
+<p><code>--only user-prompts</code> 只导出你写的 prompt — 不含助手回复、工具输出或系统上下文。适合构建 prompt 库或回顾你问过什么：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 每个 prompt 一条 JSONL 记录（session id、序号、时间戳、文本）</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>prompts.jsonl<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--only<span class="w"> </span>user-prompts
+
+<span class="c1"># Markdown 格式，直接输出到 stdout</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>-<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--only<span class="w"> </span>user-prompts<span class="w"> </span>--format<span class="w"> </span>md
+</code></pre></div>
+
+<p>支持 <code>--format jsonl</code>（默认）或 <code>md</code>，批量导出时同样支持全部过滤器，也可与 <code>--redact</code> 组合。</p>
+<h4 id="tracehf-agent-trace-viewer">Trace（HF Agent Trace Viewer）</h4>
+<p><code>--format trace</code> 生成 Claude Code JSONL — Hugging Face Hub 的 <a href="https://huggingface.co/docs/hub/agent-traces" class="ext" target="_blank" rel="noopener">Agent Trace Viewer</a> 可自动识别的转录格式。可以写入本地文件，或加 <code>--upload</code> 推送到你自己的私有 <code>hermes-traces</code> 数据集（读取 <code>HF_TOKEN</code>）：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 最近一个 session 的 trace，输出到 stdout</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>trace
+
+<span class="c1"># 将一个 session 导出为本地 trace 文件</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>trace<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>trace.jsonl
+
+<span class="c1"># 直接上传到你的私有 HF traces 数据集</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>trace<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--upload
+</code></pre></div>
+
+<p>Trace 导出默认强制脱敏（它们本来就是要离开本机的）；<code>--no-redact</code> 需人工审查后才建议使用。<code>--upload</code> 默认私有，除非加 <code>--public</code>。带过滤器的批量 trace 导出会为每个 session 写一个 <code>&lt;id&gt;.trace.jsonl</code>。</p>
+<h4 id="markdown--qmd">Markdown / QMD</h4>
+<p>当你想在隐藏或删除旧 session 之前保留一份可读的文件归档时，传入 <code>--format md</code> 或 <code>--format qmd</code>。Markdown/QMD 导出会为每个 session 写入一个文件到目录中（默认：<code>~/.hermes/session-exports</code>）。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 将单个 session 导出为 Markdown</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>md<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4
+
+<span class="c1"># 将压缩链（compression lineage）导出为一个逻辑文档</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>md<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--lineage<span class="w"> </span>logical
+
+<span class="c1"># 预览 90 天前已结束的 session，不写入文件</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>md<span class="w"> </span>--older-than<span class="w"> </span><span class="m">90</span><span class="w"> </span>--dry-run
+
+<span class="c1"># 将 2 周前已结束的 Telegram session 导出为 QMD 文件</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>qmd<span class="w"> </span>--older-than<span class="w"> </span>2w<span class="w"> </span>--source<span class="w"> </span>telegram
+
+<span class="c1"># 导出长的 Claude session，并脱敏</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>md<span class="w"> </span>--model<span class="w"> </span>sonnet<span class="w"> </span>--min-messages<span class="w"> </span><span class="m">50</span><span class="w"> </span>--redact
+
+<span class="c1"># 导出并在校验通过后删除一个明确指定的 session</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--format<span class="w"> </span>md<span class="w"> </span>--session-id<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--delete-after-verified<span class="w"> </span>--yes
+</code></pre></div>
+
+<p>Markdown/QMD 导出为每个 session 写入一个 <code>.md</code> 或 <code>.qmd</code> 文件，并附带一个 <code>manifest.jsonl</code>，记录文件路径、消息数量、lineage id 和 SHA-256。批量导出必须带至少一个过滤条件，不带过滤条件的批量导出会被拒绝。<code>--delete-after-verified</code> 仅限与 <code>--session-id</code> 搭配使用，且必须加 <code>--yes</code>。<code>--redact</code> 会在写入前从消息内容和工具输出中清除密钥（API key、token、凭据）— 任何打算分享的导出都建议加上。</p>
+<h3 id="删除-session">删除 Session</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 删除特定 session（需确认）</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>delete<span class="w"> </span>20250305_091523_a1b2c3d4
+
+<span class="c1"># 不需确认直接删除</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>delete<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>--yes
+</code></pre></div>
+
+<h3 id="重命名-session">重命名 Session</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 设置或更改 session 的标题</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>rename<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span><span class="s2">&quot;debugging auth flow&quot;</span>
+
+<span class="c1"># 多词标题在 CLI 中不需要引号</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>rename<span class="w"> </span>20250305_091523_a1b2c3d4<span class="w"> </span>debugging<span class="w"> </span>auth<span class="w"> </span>flow
+</code></pre></div>
+
+<p>如果标题已被另一个 session 使用，则显示错误。</p>
+<h3 id="清理旧-session">清理旧 Session</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 删除 90 天前已结束的 session（默认）</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune
+
+<span class="c1"># 自定义时间阈值</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--older-than<span class="w"> </span><span class="m">30</span>
+
+<span class="c1"># 仅清理特定平台的 session</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--source<span class="w"> </span>telegram<span class="w"> </span>--older-than<span class="w"> </span><span class="m">60</span>
+
+<span class="c1"># 跳过确认</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--older-than<span class="w"> </span><span class="m">30</span><span class="w"> </span>--yes
+</code></pre></div>
+
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>清理仅删除<strong>已结束</strong>的 session（已被显式结束或自动重置的 session）。活跃 session 永远不会被清理。</p>
+</div>
+<h3 id="session-统计">Session 统计</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>sessions<span class="w"> </span>stats
+</code></pre></div>
+
+<p>输出：</p>
+<div class="highlight"><pre><span></span><code>Total sessions: 142
+Total messages: 3847
+  cli: 89 sessions
+  telegram: 38 sessions
+  discord: 15 sessions
+Database size: 12.4 MB
+</code></pre></div>
+
+<p>如需更深入的分析——token 用量、费用估算、工具分解和活动模式——请使用 <a href="../reference/cli-commands.html#hermes-insights"><code>hermes insights</code></a>。</p>
+<h2 id="session-搜索工具">Session 搜索工具</h2>
+<p>Agent 内置了 <code>session_search</code> 工具，使用 SQLite 的 FTS5 引擎对所有历史对话进行全文搜索，并允许 agent 滚动浏览找到的任何 session。无需 LLM 调用、无需摘要、无截断。每种调用形式都从数据库返回实际消息。</p>
+<h3 id="三种调用形式">三种调用形式</h3>
+<p>工具根据你设置的参数推断意图，没有 <code>mode</code> 参数。</p>
+<p><strong>1. 发现——传入 <code>query</code>：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="n">session_search</span><span class="p">(</span><span class="n">query</span><span class="o">=</span><span class="s2">&quot;auth refactor&quot;</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+</code></pre></div>
+
+<p>运行 FTS5，按 session 谱系去重，返回前 N 个 session。每个结果包含：</p>
+<ul>
+<li><code>session_id</code>、<code>title</code>、<code>when</code>、<code>source</code></li>
+<li><code>snippet</code> — FTS5 高亮的匹配摘录</li>
+<li><code>bookend_start</code> — session 的前 3 条用户+助手消息（目标/开场）</li>
+<li><code>messages</code> — FTS5 匹配点前后各 ±5 条消息，锚点消息有标记（命中上下文）</li>
+<li><code>bookend_end</code> — session 的最后 3 条用户+助手消息（结论/决策）</li>
+<li><code>match_message_id</code>、<code>messages_before</code>、<code>messages_after</code></li>
+</ul>
+<p>书签+窗口共同重建目标→命中→结论，无需加载完整对话记录。在真实 session 数据库上的典型耗时：15–50ms。</p>
+<p><strong>2. 滚动——传入 <code>session_id</code> + <code>around_message_id</code>：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="n">session_search</span><span class="p">(</span><span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;20260510_174648_805cc2&quot;</span><span class="p">,</span> <span class="n">around_message_id</span><span class="o">=</span><span class="mi">590803</span><span class="p">,</span> <span class="n">window</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+</code></pre></div>
+
+<p>返回以锚点为中心的 ±<code>window</code> 条消息窗口。无 FTS5，无书签——只是切片。在发现调用后需要比默认 ±5 窗口更多上下文时使用。</p>
+<ul>
+<li>向<strong>前</strong>滚动：将 <code>messages[-1].id</code> 作为 <code>around_message_id</code> 传回</li>
+<li>向<strong>后</strong>滚动：将 <code>messages[0].id</code> 作为 <code>around_message_id</code> 传回</li>
+<li>边界消息在两个窗口中均出现，作为定向标记</li>
+<li>当 <code>messages_before</code> 或 <code>messages_after</code> 小于 <code>window</code> 时，表示已到达 session 的开头或结尾</li>
+</ul>
+<p>每次滚动调用的典型耗时：1–2ms。</p>
+<p><strong>3. 浏览——无参数：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="n">session_search</span><span class="p">()</span>
+</code></pre></div>
+
+<p>按时间顺序返回最近的 session（标题、预览、时间戳）。当用户询问"我在做什么"而未指定主题时很有用。</p>
+<h3 id="fts5-查询语法">FTS5 查询语法</h3>
+<p>关键词模式支持标准 FTS5 查询语法：</p>
+<ul>
+<li>简单关键词：<code>docker deployment</code>（FTS5 默认为 AND）</li>
+<li>短语：<code>"exact phrase"</code></li>
+<li>布尔：<code>docker OR kubernetes</code>、<code>python NOT java</code></li>
+<li>前缀：<code>deploy*</code></li>
+</ul>
+<h3 id="可选参数">可选参数</h3>
+<ul>
+<li><code>sort</code> — <code>newest</code> 或 <code>oldest</code>，在 FTS5 排名之上排序。省略则仅按相关性排序（默认；适合探索性召回）。对于"我们在哪里停下了 X"的问题使用 <code>newest</code>，对于"X 是怎么开始的"的问题使用 <code>oldest</code>。</li>
+<li><code>role_filter</code> — 逗号分隔的角色列表。发现模式默认为 <code>user,assistant</code>（工具输出通常是噪音）。传入 <code>user,assistant,tool</code> 以包含工具输出（调试工具行为），或传入 <code>tool</code> 仅搜索工具输出。</li>
+</ul>
+<h3 id="使用时机">使用时机</h3>
+<p>Agent 被提示在以下情况自动使用 session 搜索：</p>
+<blockquote>
+<p><em>"当用户引用过去对话中的内容，或你怀疑存在相关的先前上下文时，在要求用户重复之前先使用 session_search 召回。"</em></p>
+</blockquote>
+<p>典型触发词：「我们之前做过这个」、「还记得吗」、「上次」、「正如我提到的」，或任何当前窗口中没有的项目/人物/概念的引用。</p>
+<h2 id="各平台-session-跟踪">各平台 Session 跟踪</h2>
+<h3 id="gateway-session">Gateway Session</h3>
+<p>在消息平台上，session 通过从消息来源构建的确定性 session 键来标识：</p>
+<table>
+<thead>
+<tr>
+<th>聊天类型</th>
+<th>默认键格式</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Telegram 私信</td>
+<td><code>agent:main:telegram:dm:&lt;chat_id&gt;</code></td>
+<td>每个私信聊天一个 session</td>
+</tr>
+<tr>
+<td>Discord 私信</td>
+<td><code>agent:main:discord:dm:&lt;chat_id&gt;</code></td>
+<td>每个私信聊天一个 session</td>
+</tr>
+<tr>
+<td>WhatsApp 私信</td>
+<td><code>agent:main:whatsapp:dm:&lt;canonical_identifier&gt;</code></td>
+<td>每个私信用户一个 session（存在映射时 LID/手机号别名合并为一个身份）</td>
+</tr>
+<tr>
+<td>群聊</td>
+<td><code>agent:main:&lt;platform&gt;:group:&lt;chat_id&gt;:&lt;user_id&gt;</code></td>
+<td>当平台暴露用户 ID 时，群内每用户独立 session</td>
+</tr>
+<tr>
+<td>群组线程/话题</td>
+<td><code>agent:main:&lt;platform&gt;:group:&lt;chat_id&gt;:&lt;thread_id&gt;</code></td>
+<td>所有线程参与者共享 session（默认）。设置 <code>thread_sessions_per_user: true</code> 则每用户独立。</td>
+</tr>
+<tr>
+<td>频道</td>
+<td><code>agent:main:&lt;platform&gt;:channel:&lt;chat_id&gt;:&lt;user_id&gt;</code></td>
+<td>当平台暴露用户 ID 时，频道内每用户独立 session</td>
+</tr>
+</tbody>
+</table>
+<p>当 Hermes 无法获取共享聊天的参与者标识符时，回退为该房间共享一个 session。</p>
+<h3 id="共享与隔离的群组-session">共享与隔离的群组 Session</h3>
+<p>默认情况下，Hermes 在 <code>config.yaml</code> 中使用 <code>group_sessions_per_user: true</code>。这意味着：</p>
+<ul>
+<li>Alice 和 Bob 可以在同一个 Discord 频道中与 Hermes 对话，而不共享对话历史</li>
+<li>一个用户的长时间工具密集型任务不会污染另一个用户的上下文窗口</li>
+<li>中断处理也保持每用户独立，因为运行中的 agent 键与隔离的 session 键匹配</li>
+</ul>
+<p>如果你想要一个共享的"房间大脑"，设置：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">group_sessions_per_user</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<p>这会将群组/频道恢复为每个房间一个共享 session，保留共享的对话上下文，但也共享 token 费用、中断状态和上下文增长。</p>
+<h3 id="会话连续性">会话连续性</h3>
+<p>Gateway 不会因空闲时间或每日时间边界而重置对话。需要新对话时使用 <code>/new</code>
+或 <code>/reset</code>；上下文压缩仍会自动运行。旧的 <code>session_reset</code> 配置、重置策略覆盖和
+重置计时环境变量均被忽略。缓存中的 agent 可以释放资源，但不会替换持久化对话。
+重启恢复的新鲜度限制仅约束自动继续执行，不会清除用户发送消息时加载的历史。</p>
+<h2 id="存储位置">存储位置</h2>
+<table>
+<thead>
+<tr>
+<th>内容</th>
+<th>路径</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SQLite 数据库</td>
+<td><code>~/.hermes/state.db</code></td>
+<td>所有 session 元数据 + 带 FTS5 的消息</td>
+</tr>
+<tr>
+<td>Gateway 消息</td>
+<td><code>~/.hermes/state.db</code></td>
+<td>SQLite——所有 session 消息的权威存储</td>
+</tr>
+<tr>
+<td>Gateway 路由索引</td>
+<td><code>~/.hermes/sessions/sessions.json</code></td>
+<td>将 session 键映射到活跃 session ID（来源元数据、过期标志）</td>
+</tr>
+</tbody>
+</table>
+<p>SQLite 数据库使用 WAL 模式支持并发读取和单写入，非常适合 gateway 的多平台架构。</p>
+<div class="admonition adm-note"><p class="adm-title">遗留 JSONL 对话记录</p>
+<p>在 state.db 成为权威存储之前创建的 session 可能在 <code>~/.hermes/sessions/</code> 中留有
+<code>*.jsonl</code> 文件。Hermes 不再写入或读取这些文件。在确认对应 session 存在于
+state.db 后可安全删除。</p>
+</div>
+<h3 id="数据库-schema">数据库 Schema</h3>
+<p><code>state.db</code> 中的关键表：</p>
+<ul>
+<li><strong>sessions</strong> — session 元数据（id、source、user_id、model、title、时间戳、token 计数）。标题有唯一索引（允许 NULL 标题，只有非 NULL 标题必须唯一）。</li>
+<li><strong>messages</strong> — 完整消息历史（role、content、tool_calls、tool_name、token_count）</li>
+<li><strong>messages_fts</strong> — 用于跨消息内容全文搜索的 FTS5 虚拟表</li>
+</ul>
+<h2 id="session-过期与清理">Session 过期与清理</h2>
+<h3 id="自动清理">自动清理</h3>
+<ul>
+<li>Gateway 会话会持续保留；请使用 <code>/new</code> 或 <code>/reset</code> 显式开始新会话</li>
+<li>重置前，agent 保存即将过期 session 中的记忆和技能</li>
+<li>可选自动清理：当 <code>sessions.auto_prune</code> 为 <code>true</code> 时，在 CLI/gateway 启动时清理早于 <code>sessions.retention_days</code>（默认 90）天的已结束 session</li>
+<li>实际删除了行的清理操作完成后，如果距离上次成功执行 <code>VACUUM</code> 已达到 <code>sessions.min_vacuum_interval_days</code>（默认 30）天，<code>state.db</code> 会执行 <code>VACUUM</code> 以回收磁盘空间（SQLite 在普通 DELETE 后不会缩小文件）</li>
+<li>清理最多每 <code>sessions.min_interval_hours</code>（默认 24）小时运行一次；上次运行时间戳记录在 <code>state.db</code> 内部，因此在同一 <code>HERMES_HOME</code> 下的所有 Hermes 进程间共享</li>
+</ul>
+<p>默认为<strong>关闭</strong>——session 历史对 <code>session_search</code> 召回很有价值，静默删除可能会让用户感到意外。在 <code>~/.hermes/config.yaml</code> 中启用：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">sessions</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">auto_prune</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">          </span><span class="c1"># 选择启用——默认为 false</span>
+<span class="w">  </span><span class="nt">retention_days</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">90</span><span class="w">        </span><span class="c1"># 保留已结束 session 的天数</span>
+<span class="w">  </span><span class="nt">vacuum_after_prune</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">  </span><span class="c1"># 清理后回收磁盘空间</span>
+<span class="w">  </span><span class="nt">min_vacuum_interval_days</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span><span class="w"> </span><span class="c1"># 数据库重写的最短间隔天数</span>
+<span class="w">  </span><span class="nt">min_interval_hours</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">24</span><span class="w">    </span><span class="c1"># 清理间隔不短于此值</span>
+</code></pre></div>
+
+<p>活跃 session 永远不会被自动清理，无论时间多长。</p>
+<h3 id="手动清理">手动清理</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 清理 90 天前的 session</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune
+
+<span class="c1"># 删除特定 session</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span>delete<span class="w"> </span>&lt;session_id&gt;
+
+<span class="c1"># 清理前先导出（备份）</span>
+hermes<span class="w"> </span>sessions<span class="w"> </span><span class="nb">export</span><span class="w"> </span>backup.jsonl
+hermes<span class="w"> </span>sessions<span class="w"> </span>prune<span class="w"> </span>--older-than<span class="w"> </span><span class="m">30</span><span class="w"> </span>--yes
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p>数据库增长缓慢（典型情况：数百个 session 约 10–15 MB），session 历史为跨历史对话的 <code>session_search</code> 召回提供支持，因此自动清理默认关闭。如果你运行繁重的 gateway/cron 工作负载且 <code>state.db</code> 明显影响性能（已观察到的故障模式：约 1000 个 session 的 384 MB state.db 导致 FTS5 插入和 <code>/resume</code> 列表变慢），则启用它。使用 <code>hermes sessions prune</code> 进行一次性清理，无需开启自动清理。</p>
+</div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/sessions</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#session-的工作原理">Session 的工作原理</a></li>
+<li class="lvl3"><a href="#哪些内容计入上下文">哪些内容计入上下文</a></li>
+<li class="lvl3"><a href="#session-来源">Session 来源</a></li>
+<li class="lvl2"><a href="#cli-session-恢复">CLI Session 恢复</a></li>
+<li class="lvl3"><a href="#继续上次-session">继续上次 Session</a></li>
+<li class="lvl3"><a href="#按名称恢复">按名称恢复</a></li>
+<li class="lvl3"><a href="#恢复特定-session">恢复特定 Session</a></li>
+<li class="lvl3"><a href="#恢复时的对话摘要">恢复时的对话摘要</a></li>
+<li class="lvl2"><a href="#跨平台切换">跨平台切换</a></li>
+<li class="lvl2"><a href="#session-naming">Session 命名</a></li>
+<li class="lvl3"><a href="#自动生成标题">自动生成标题</a></li>
+<li class="lvl3"><a href="#手动设置标题">手动设置标题</a></li>
+<li class="lvl3"><a href="#标题规则">标题规则</a></li>
+<li class="lvl3"><a href="#压缩时的自动谱系">压缩时的自动谱系</a></li>
+<li class="lvl3"><a href="#在消息平台中使用-title">在消息平台中使用 /title</a></li>
+<li class="lvl2"><a href="#session-管理命令">Session 管理命令</a></li>
+<li class="lvl3"><a href="#列出-session">列出 Session</a></li>
+<li class="lvl3"><a href="#导出-session">导出 Session</a></li>
+<li class="lvl3"><a href="#删除-session">删除 Session</a></li>
+<li class="lvl3"><a href="#重命名-session">重命名 Session</a></li>
+<li class="lvl3"><a href="#清理旧-session">清理旧 Session</a></li>
+<li class="lvl3"><a href="#session-统计">Session 统计</a></li>
+<li class="lvl2"><a href="#session-搜索工具">Session 搜索工具</a></li>
+<li class="lvl3"><a href="#三种调用形式">三种调用形式</a></li>
+<li class="lvl3"><a href="#fts5-查询语法">FTS5 查询语法</a></li>
+<li class="lvl3"><a href="#可选参数">可选参数</a></li>
+<li class="lvl3"><a href="#使用时机">使用时机</a></li>
+<li class="lvl2"><a href="#各平台-session-跟踪">各平台 Session 跟踪</a></li>
+<li class="lvl3"><a href="#gateway-session">Gateway Session</a></li>
+<li class="lvl3"><a href="#共享与隔离的群组-session">共享与隔离的群组 Session</a></li>
+<li class="lvl3"><a href="#会话连续性">会话连续性</a></li>
+<li class="lvl2"><a href="#存储位置">存储位置</a></li>
+<li class="lvl3"><a href="#数据库-schema">数据库 Schema</a></li>
+<li class="lvl2"><a href="#session-过期与清理">Session 过期与清理</a></li>
+<li class="lvl3"><a href="#自动清理">自动清理</a></li>
+<li class="lvl3"><a href="#手动清理">手动清理</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

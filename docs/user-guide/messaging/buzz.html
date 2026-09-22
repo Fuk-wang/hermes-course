@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buzz · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/messaging/buzz</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="buzz">Buzz</h1>
+<p>The Buzz adapter connects Hermes to a <a href="https://github.com/block/buzz" class="ext" target="_blank" rel="noopener">Buzz</a> community — Block's open-source human+agent collaboration platform built on the Nostr protocol — and relays messages between Buzz channels (or DMs) and the agent. Outbound traffic shells out to the <code>buzz</code> CLI binary ("JSON in, JSON out"); inbound uses a native Nostr WebSocket subscription (via the already-bundled <code>websockets</code> package) with CLI polling as fallback. <strong>No extra Python packages are required</strong> — just the <code>buzz</code> binary.</p>
+<p>Buzz renders markdown, so agent replies keep their formatting. Images are delivered as uploads (local files) or links (URLs). Replies can thread onto an existing message via its event id. When progress or status messages are enabled, they inherit the triggering Buzz event as their reply anchor instead of appearing as unrelated top-level channel posts.</p>
+<p>Files sent <strong>to</strong> the agent are fetched back off the relay with the agent's authenticated identity and cached locally, so tools receive a real file path rather than a <code>/media/…</code> URL that anonymous requests cannot read. Images, audio, video, and documents (PDFs and the like) are all handled.</p>
+<p>Inbound messages arrive over a persistent NIP-42-authenticated Nostr WebSocket subscription by default (near-instant delivery), with automatic fallback to CLI polling when the WebSocket can't be established. Outbound messages always go through the <code>buzz</code> CLI. Control it with <code>transport</code> / <code>BUZZ_TRANSPORT</code>: <code>auto</code> (default), <code>websocket</code> (require WS, fail otherwise), or <code>poll</code>. If your relay membership uses NIP-OA owner attestation, set <code>BUZZ_AUTH_TAG</code> to the four-string auth tag JSON.</p>
+<blockquote>
+<p>Run <code>hermes gateway setup</code> and pick <strong>Buzz</strong> for a guided walk-through.</p>
+</blockquote>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>The <code>buzz</code> CLI binary on your <code>PATH</code> (or point <code>BUZZ_CLI_PATH</code> at it) — build it from the <a href="https://github.com/block/buzz" class="ext" target="_blank" rel="noopener">Buzz repo</a> with <code>cargo build --release -p buzz-cli</code></li>
+<li>A Buzz community relay URL (e.g. <code>https://mycommunity.communities.buzz.xyz</code>)</li>
+<li>A Nostr private key (nsec or hex) whose identity is already a <strong>member</strong> of that community</li>
+</ul>
+<h2 id="configure-hermes">Configure Hermes</h2>
+<p>You can configure Buzz two ways — the <code>gateway</code> block in <code>config.yaml</code> (canonical) or environment variables (which override it). The private key is a <strong>secret</strong> and always belongs in <code>~/.hermes/.env</code>.</p>
+<h3 id="option-a--configyaml">Option A — config.yaml</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">buzz</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">      </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">relay_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://mycommunity.communities.buzz.xyz</span>
+<span class="w">        </span><span class="nt">attachment_hosts</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">         </span><span class="c1"># additional exact HTTPS host[:port] origins for inbound files</span>
+<span class="w">        </span><span class="nt">channels</span><span class="p">:</span><span class="w">                  </span><span class="c1"># channel UUIDs to watch (empty = all joined)</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ccc2bc1a-7a82-5a8f-8c4e-57a070cbe7cd</span>
+<span class="w">        </span><span class="nt">home_channel</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ccc2bc1a-7a82-5a8f-8c4e-57a070cbe7cd</span>
+<span class="w">        </span><span class="nt">poll_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span><span class="w">           </span><span class="c1"># seconds between inbound poll sweeps</span>
+<span class="w">        </span><span class="nt">cli_path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">               </span><span class="c1"># buzz binary (default: PATH, then ~/bin/buzz)</span>
+<span class="w">        </span><span class="nt">credentials_file</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">       </span><span class="c1"># JSON file with the nsec (BUZZ_PRIVATE_KEY fallback)</span>
+<span class="w">        </span><span class="nt">allowed_users</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">          </span><span class="c1"># empty = allow all; hex pubkeys or npubs</span>
+</code></pre></div>
+
+<p>Plus, in <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code>BUZZ_PRIVATE_KEY=nsec1...
+</code></pre></div>
+
+<h3 id="option-b--environment-variables">Option B — environment variables</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th style="text-align: center;">Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BUZZ_RELAY_URL</code></td>
+<td style="text-align: center;">✅</td>
+<td>Base URL of the community relay</td>
+</tr>
+<tr>
+<td><code>BUZZ_PRIVATE_KEY</code></td>
+<td style="text-align: center;">✅</td>
+<td>Nostr private key (nsec or hex) — the only secret</td>
+</tr>
+<tr>
+<td><code>BUZZ_CHANNELS</code></td>
+<td style="text-align: center;">—</td>
+<td>Comma-separated channel UUIDs to watch (default: all joined channels)</td>
+</tr>
+<tr>
+<td><code>BUZZ_HOME_CHANNEL</code></td>
+<td style="text-align: center;">—</td>
+<td>Channel UUID for cron / notification delivery (defaults to the first watched channel)</td>
+</tr>
+<tr>
+<td><code>BUZZ_ALLOWED_USERS</code></td>
+<td style="text-align: center;">—</td>
+<td>Comma-separated npubs or hex pubkeys allowed to talk to the agent</td>
+</tr>
+<tr>
+<td><code>BUZZ_ALLOW_ALL_USERS</code></td>
+<td style="text-align: center;">—</td>
+<td>Allow any community member to talk to the agent</td>
+</tr>
+<tr>
+<td><code>BUZZ_POLL_INTERVAL</code></td>
+<td style="text-align: center;">—</td>
+<td>Seconds between inbound poll sweeps (default: 4)</td>
+</tr>
+<tr>
+<td><code>BUZZ_CLI_PATH</code></td>
+<td style="text-align: center;">—</td>
+<td>Path to the <code>buzz</code> binary (default: <code>buzz</code> on PATH, then <code>~/bin/buzz</code>)</td>
+</tr>
+<tr>
+<td><code>BUZZ_CREDENTIALS_FILE</code></td>
+<td style="text-align: center;">—</td>
+<td>JSON credentials file holding the nsec, used when <code>BUZZ_PRIVATE_KEY</code> is unset</td>
+</tr>
+</tbody>
+</table>
+<h2 id="recommended-default-settings">Recommended default settings</h2>
+<p>When wiring up Buzz, set these defaults in <code>config.yaml</code> to keep the channel clean and the agent focused on final results rather than its internal tool execution log. These match the behavior on Telegram and email, which already suppress intermediate tool output.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">display</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">buzz</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">interim_assistant_messages</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># suppress intermediate tool results, reasoning comments, and progress updates — only the final response reaches the channel</span>
+<span class="w">      </span><span class="nt">tool_progress</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">off</span><span class="w">                  </span><span class="c1"># suppress tool progress bubbles (e.g., &quot;Running terminal command...&quot;, &quot;Reading file...&quot;)</span>
+<span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">buzz</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">      </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">relay_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://mycommunity.communities.buzz.xyz</span>
+<span class="w">        </span><span class="nt">attachment_hosts</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">         </span><span class="c1"># additional exact HTTPS host[:port] origins for inbound files</span>
+<span class="w">        </span><span class="nt">channels</span><span class="p">:</span><span class="w">                         </span><span class="c1"># channel UUIDs to watch (empty = all joined)</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ccc2bc1a-7a82-5a8f-8c4e-57a070cbe7cd</span>
+<span class="w">        </span><span class="nt">home_channel</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ccc2bc1a-7a82-5a8f-8c4e-57a070cbe7cd</span>
+<span class="w">        </span><span class="nt">poll_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span><span class="w">                  </span><span class="c1"># seconds between inbound poll sweeps (default 4 — balances latency vs. relay load)</span>
+<span class="w">        </span><span class="nt">cli_path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">                      </span><span class="c1"># buzz binary (default: PATH, then ~/bin/buzz)</span>
+<span class="w">        </span><span class="nt">credentials_file</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">              </span><span class="c1"># JSON file with the nsec (BUZZ_PRIVATE_KEY fallback)</span>
+<span class="w">        </span><span class="nt">allowed_users</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span><span class="w">                 </span><span class="c1"># empty = allow all if allow_all_users is true; otherwise restrict to listed npubs/hex pubkeys</span>
+<span class="w">        </span><span class="nt">require_mention</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">             </span><span class="c1"># in channels: only respond when addressed (@name, npub, or hex pubkey); DMs always dispatch regardless</span>
+<span class="w">        </span><span class="nt">allow_all_users</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">            </span><span class="c1"># set true for community mode (everyone can chat, only owner is admin); false for private mode (only allowed_users)</span>
+</code></pre></div>
+
+<p><strong>Why these defaults:</strong></p>
+<ul>
+<li><code>interim_assistant_messages: false</code> — prevents intermediate tool results, reasoning comments, and progress updates from being posted as separate messages to the channel. Only the final response goes to the channel.</li>
+<li><code>tool_progress: off</code> — suppresses tool progress bubbles (e.g., "Running terminal command...", "Reading file..."). Keeps the channel focused on actual results, not process.</li>
+<li><code>poll_interval: 4</code> — balances inbound latency (up to 4s delay) against relay load. Lower values increase polling frequency; higher values reduce it.</li>
+<li><code>allowed_users: []</code> + <code>allow_all_users: false</code> — private mode by default. Only listed users can interact. Set <code>allow_all_users: true</code> for community mode where everyone can chat (admin tier still restricted to the owner).</li>
+<li><code>require_mention: true</code> — in channels, the agent only responds when addressed. DMs always dispatch regardless of this setting.</li>
+</ul>
+<p><strong>Rationale:</strong> Channels are for final results and conversation, not for the agent's internal tool execution log. Users see the final answer, not the steps taken to get there. This matches the behavior on Telegram and email, which already have these defaults.</p>
+<p><strong>Exception:</strong> If you want users to see tool progress (e.g., for long-running operations), set <code>tool_progress: all</code> — but <code>interim_assistant_messages</code> should still be <code>false</code> to avoid spamming with every tool result.</p>
+<h2 id="mentions-channels-and-dms">Mentions, channels, and DMs</h2>
+<ul>
+<li>In shared channels the agent only responds when <strong>addressed</strong> — by <code>@name</code>, its npub, or its hex pubkey. Everything else is ignored.</li>
+<li>Direct messages always reach the agent, no mention needed.</li>
+<li>The agent's own messages are never dispatched back to it (self-echo suppression by pubkey), and every event is de-duplicated by event id against a per-channel high-water mark.</li>
+</ul>
+<h2 id="reply-threading">Reply threading</h2>
+<p>Replies are threaded by default: the agent's answer (and any enabled progress/status messages) is anchored to the message that triggered it. Anchoring is NIP-10 aware — when the triggering message was already <strong>inside</strong> a thread, the agent replies to that thread's <em>root</em>, so the answer joins the existing thread instead of nesting a new one-message sub-thread under every turn.</p>
+<p>To post replies flat at the channel level instead, set either of these (they are equivalent; <code>reply_in_thread</code> matches the key Slack uses):</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">buzz</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">reply_to_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">off</span><span class="w">          </span><span class="c1"># PlatformConfig-level, like Discord/Telegram</span>
+<span class="w">      </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">reply_in_thread</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">    </span><span class="c1"># Slack-style key; env: BUZZ_REPLY_IN_THREAD</span>
+</code></pre></div>
+
+<p>The opt-out applies to <strong>all</strong> send paths — final answers, streamed updates, interim commentary, tool-progress bubbles, and out-of-process cron delivery (<code>deliver=buzz</code>).</p>
+<h2 id="access-control">Access control</h2>
+<p>By default the allow-list is empty, which means every community member who mentions the agent gets a response only if <code>BUZZ_ALLOW_ALL_USERS=true</code>; otherwise restrict access by listing npubs or hex pubkeys in <code>BUZZ_ALLOWED_USERS</code> (or <code>allowed_users</code> in config.yaml). Community membership itself is enforced by the relay — only members can post.</p>
+<p>The allow-list also gates <strong>inbound attachments</strong>: relay media is fetched with the agent's own Buzz credentials, so a download only happens for a sender the gateway explicitly authorizes. A denied, missing, or failed authorization leaves the message text untouched and makes no credentialed request.</p>
+<p>Cron jobs and notifications (<code>deliver=buzz</code>) are delivered to the <strong>home channel</strong> — <code>BUZZ_HOME_CHANNEL</code> if set, otherwise the first watched channel — and work even when cron runs outside the gateway process.</p>
+<h2 id="inbound-attachments">Inbound attachments</h2>
+<p>Buzz messages with native NIP-94 <code>imeta</code> tags can deliver images, audio,
+video, and documents to the agent. Hermes downloads attachments only after
+the message has passed self-echo, addressing, and sender authorization checks.
+Each file must use HTTPS and declare an exact byte size and SHA-256 digest;
+redirects, URL credentials, fragments, oversized payloads, and integrity
+mismatches are rejected.</p>
+<p>The relay's own HTTPS origin is trusted automatically. If a community stores
+media on another public origin, add its exact <code>host</code> or <code>host:port</code> to
+<code>attachment_hosts</code> under <code>gateway.platforms.buzz.extra</code>. Non-default ports
+must be listed explicitly. Protected media that requires authenticated
+retrieval through the Buzz CLI is not handled by this native public-URL path.</p>
+<h2 id="run-the-gateway">Run the gateway</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>start
+</code></pre></div>
+
+<p>Check status with <code>hermes gateway status</code> — Buzz connection state is reported there, including for env-only setups.</p>
+<h2 id="notes-and-limitations">Notes and limitations</h2>
+<ul>
+<li><strong><code>BUZZ_*</code> env vars are available in terminal tool children for Buzz sessions</strong> — the agent can invoke the <code>buzz</code> CLI directly (e.g. <code>buzz messages send ...</code>) because <code>BUZZ_PRIVATE_KEY</code>, <code>BUZZ_AUTH_TAG</code>, <code>BUZZ_RELAY_URL</code>, and the other <code>BUZZ_*</code> variables are passed through to terminal subprocesses when the session's platform is <code>buzz</code> or the process is a Buzz Desktop managed agent (<code>BUZZ_MANAGED_AGENT</code>). Non-Buzz sessions on the same host, <code>execute_code</code>, and other non-terminal spawns remain sealed.</li>
+<li><strong>Inbound streaming has a watchdog.</strong> On the WebSocket transport a connection that goes quiet for five minutes, or whose socket the relay closed underneath us, is torn down and reconnected with backoff; while that happens the gateway health (<code>/health/detailed</code>, dashboard status) reports Buzz as <code>retrying</code>, not <code>connected</code>. On the <code>poll</code> transport the adapter polls <code>buzz messages get</code> per watched channel every <code>poll_interval</code> seconds (default 4), so expect up to one interval of latency.</li>
+<li>On (re)connect the adapter seeds its high-water mark from the newest events, so channel history is never replayed into the agent.</li>
+<li>New DM conversations are discovered automatically (every few poll sweeps).</li>
+<li>The private key is passed to the CLI via the subprocess environment — it never appears in argv or logs.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/messaging/buzz</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#configure-hermes">Configure Hermes</a></li>
+<li class="lvl3"><a href="#option-a--configyaml">Option A — config.yaml</a></li>
+<li class="lvl3"><a href="#option-b--environment-variables">Option B — environment variables</a></li>
+<li class="lvl2"><a href="#recommended-default-settings">Recommended default settings</a></li>
+<li class="lvl2"><a href="#mentions-channels-and-dms">Mentions, channels, and DMs</a></li>
+<li class="lvl2"><a href="#reply-threading">Reply threading</a></li>
+<li class="lvl2"><a href="#access-control">Access control</a></li>
+<li class="lvl2"><a href="#inbound-attachments">Inbound attachments</a></li>
+<li class="lvl2"><a href="#run-the-gateway">Run the gateway</a></li>
+<li class="lvl2"><a href="#notes-and-limitations">Notes and limitations</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

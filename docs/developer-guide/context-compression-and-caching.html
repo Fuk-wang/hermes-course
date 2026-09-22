@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Context Compression and Caching · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/context-compression-and-caching</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="context-compression-and-caching">Context Compression and Caching</h1>
+<p>Hermes Agent uses a dual compression system and Anthropic prompt caching to
+manage context window usage efficiently across long conversations.</p>
+<p>Source files: <code>agent/context_engine.py</code> (ABC), <code>agent/context_compressor.py</code> (default engine),
+<code>agent/prompt_caching.py</code>, <code>gateway/run_turn.py</code> (session hygiene), <code>agent/compression_facade.py</code> (search for <code>_compress_context</code>)</p>
+<h2 id="bedrock-context-window-cache">Bedrock context window cache</h2>
+<p>Bedrock context resolution in <code>agent/model_metadata.py</code> uses this precedence:</p>
+<ul>
+<li><strong>Explicit overrides win.</strong> Configured context lengths take priority over cache,
+  probes, and the static table.</li>
+<li><strong>Provider-confirmed limits persist.</strong> A successful probe or a limit learned
+  from a provider error remains authoritative, even below the static table.
+  The compressor uses the same value after restart.</li>
+<li><strong>Legacy entries are revalidated.</strong> Old scalar entries have no provenance and
+  may be either probe results or fallbacks. Their size does not establish which.</li>
+<li><strong>Failed probes use the current table without persisting it.</strong> Failures have a
+  five-minute in-memory cooldown scoped to Hermes home, endpoint, model, and
+  region. Expiry or explicit cache invalidation permits another attempt.</li>
+</ul>
+<p>The cache remains at <code>context_length_cache.yaml</code> under the active Hermes home.
+<code>context_lengths</code> retains scalar values for older readers. An additive
+<code>bedrock_confirmed_v1</code> map binds each confirmed key to its exact value in the
+same atomic write. Generic writes clear that key's provenance. Older writers
+may drop the additive map, which causes revalidation after upgrading again.
+Downgrading remains readable but restores the older runtime's resolution rules.</p>
+<p>The static fallback for <code>xai.grok-4.6</code> (including <code>global.</code> and <code>us.</code> inference
+profiles) is 500,000 tokens, per the
+<a href="https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-xai-grok-4-6.html" class="ext" target="_blank" rel="noopener">AWS model card</a>.
+This is Bedrock-specific, not the direct xAI API window. Existing compression
+rules still apply: without output reservation, the small-window 75% threshold floor
+yields 375,000 at this window, which the default <code>threshold_tokens</code> cap (256,000) then lowers.</p>
+<h2 id="pluggable-context-engine">Pluggable Context Engine</h2>
+<p>Context management is built on the <code>ContextEngine</code> ABC (<code>agent/context_engine.py</code>). The built-in <code>ContextCompressor</code> is the default implementation, but plugins can replace it with alternative engines (e.g., Lossless Context Management).</p>
+<div class="highlight"><pre><span></span><code><span class="nt">context</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">engine</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;compressor&quot;</span><span class="w">    </span><span class="c1"># default — built-in lossy summarization</span>
+<span class="w">  </span><span class="nt">engine</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;lcm&quot;</span><span class="w">           </span><span class="c1"># example — plugin providing lossless context</span>
+</code></pre></div>
+
+<p>The engine is responsible for:
+- Deciding when compaction should fire (<code>should_compress()</code>)
+- Performing compaction (<code>compress()</code>)
+- Optionally exposing tools the agent can call (e.g., <code>lcm_grep</code>)
+- Tracking token usage from API responses</p>
+<p>Selection is config-driven via <code>context.engine</code> in <code>config.yaml</code>. The resolution order:
+1. Check <code>plugins/context_engine/&lt;name&gt;/</code> directory
+2. Check general plugin system (<code>register_context_engine()</code>)
+3. Fall back to built-in <code>ContextCompressor</code></p>
+<p>Plugin engines are <strong>never auto-activated</strong> — the user must explicitly set <code>context.engine</code> to the plugin's name. The default <code>"compressor"</code> always uses the built-in.</p>
+<p>Configure via <code>hermes plugins</code> → Provider Plugins → Context Engine, or edit <code>config.yaml</code> directly.</p>
+<p>For building a context engine plugin, see <a href="context-engine-plugin.html">Context Engine Plugins</a>.</p>
+<h2 id="dual-compression-system">Dual Compression System</h2>
+<p>Hermes has two separate compression layers that operate independently:</p>
+<div class="highlight"><pre><span></span><code>                     ┌──────────────────────────┐
+  Incoming message   │   Gateway Session Hygiene │  Fires at 85% of context
+  ─────────────────► │   (pre-agent, rough est.) │  Safety net for large sessions
+                     └─────────────┬────────────┘
+                                   │
+                                   ▼
+                     ┌──────────────────────────┐
+                     │   Agent ContextCompressor │  Fires at 50% of context (default)
+                     │   (in-loop, real tokens)  │  Normal context management
+                     └──────────────────────────┘
+</code></pre></div>
+
+<h3 id="1-gateway-session-hygiene-85-threshold">1. Gateway Session Hygiene (85% threshold)</h3>
+<p>Located in <code>gateway/run_turn.py</code> (search for <code>Session hygiene</code>). This is a <strong>safety net</strong> that
+runs before the agent processes a message. It prevents API failures when sessions
+grow too large between turns (e.g., overnight accumulation in Telegram/Discord).</p>
+<ul>
+<li><strong>Threshold</strong>: Fixed at 85% of model context length</li>
+<li><strong>Token source</strong>: Prefers actual API-reported tokens from last turn, then the
+  usage anchor persisted on the session row (real count + delta of what was
+  appended since; survives gateway restarts), and only then the rough
+  character-based estimate (<code>estimate_messages_tokens_rough</code>)</li>
+<li><strong>Fires</strong>: Only when <code>len(history) &gt;= 4</code> and compression is enabled</li>
+<li><strong>Purpose</strong>: Catch sessions that escaped the agent's own compressor</li>
+</ul>
+<p>The gateway hygiene threshold is intentionally higher than the agent's compressor.
+Setting it at 50% (same as the agent) caused premature compression on every turn
+in long gateway sessions.</p>
+<h3 id="2-agent-contextcompressor-50-threshold-configurable">2. Agent ContextCompressor (50% threshold, configurable)</h3>
+<p>Located in <code>agent/context_compressor.py</code>. This is the <strong>primary compression
+system</strong> that runs inside the agent's tool loop with access to accurate,
+API-reported token counts.</p>
+<h4 id="token-accounting-provider-anchors-and-explicit-heuristic-fallbacks">Token accounting: provider anchors and explicit heuristic fallbacks</h4>
+<p>Every compaction gate (turn-start preflight, idle, pre-API pressure, post-tool)
+asks the <strong>usage anchor</strong> first (<code>agent/usage_anchor.py</code>): the provider's last
+prompt and completion token counts plus a rough estimate of ONLY the messages appended since
+that response. The anchor identifies the priced transcript by a content
+fingerprint, so it survives the gateway re-reading history from the DB every
+turn, and it is persisted on the session row so a fresh process (<code>--resume</code>,
+desktop per-turn <code>serve</code>) restores it while the durable transcript still
+matches. Compaction, session reset and codex-native compaction clear it.</p>
+<p>For the built-in engine's <strong>turn-start and pre-API threshold gates</strong>, without an
+anchor (first request, rewind/edit-resend), a whole-context rough estimate over
+threshold <strong>waits one request</strong> for provider evidence
+(<code>should_defer_preflight_to_real_usage</code>). This includes estimates at or above the
+entire context window: estimate magnitude does not prove that a request will fail.
+After a model switch, old usage is cleared and the new provider adjudicates the
+first request too; a genuinely oversized request can incur one rejected request
+before reactive recovery.</p>
+<p>The wait is not a disable. Once a response omits usage, the existing heuristic
+fallback remains available; real usage already over threshold and provider-proven
+overflow still allow compression. A post-compaction latch waits for one response
+and is consumed even if that response omits usage. Recovery remains bounded by the
+compression attempt budget and no-progress guards, not an indefinite resend loop.</p>
+<p>This is <strong>not an exact-count-only policy</strong>, nor closure of #104462's literal
+never-estimate acceptance. The following policies remain unchanged:</p>
+<ul>
+<li>An anchor includes the provider's prompt and completion tokens plus a <strong>rough
+  appended-message delta</strong> (the first appended assistant is already covered by
+  completion usage). A large new tool result can therefore still cross a threshold
+  on an estimated delta. Boundary fingerprint matching does not fingerprint the
+  whole prefix, model, tools, or system prompt.</li>
+<li>Opt-in idle compaction uses its own floor/cooldown and can act on unanchored
+  pressure; it does not share the threshold gate's one-request wait.</li>
+<li>Pre-agent gateway hygiene retains its rough-history fallback and hard-message
+  safety valve. The replay harness's <code>gateway</code> shape reloads transcript dictionaries;
+  it does <strong>not</strong> exercise that separate hygiene policy.</li>
+<li>Post-tool usage-less fallback, micro-compaction, summary/tail sizing, pruning and
+  overflow progress checks still use local estimates. Native compaction keeps its
+  provider-specific ownership and checkpoint latch.</li>
+</ul>
+<p>Provider count endpoints remain deferred. Eliminating these remaining estimates
+requires an explicit policy decision: accept the documented liveness fallbacks,
+or replace them with provider evidence while defining behavior for providers that
+never return usage. Simply disabling all unanchored maintenance is not equivalent.</p>
+<p><code>evals/token_accounting/replay_gates.py</code> covers below-window and past-window
+inflation, real-over-threshold controls, reload/restore anchors, and local HTTP
+overflow/usage-less recovery with real compression but fixed local summary text.
+These are scripted control-flow checks, not vendor tokenizer or billing evidence.</p>
+<p>Opaque provider blobs (<code>encrypted_content</code> on Codex reasoning / compaction
+items) contribute 0 to every local estimate; only real usage ever prices them.</p>
+<p>Images are priced at the per-image cost <strong>learned from the provider's usage</strong>
+(<code>agent/image_token_cost.py</code>), not a vendor formula: on a response whose delta
+since the previous anchor introduced N images, the residual between the real
+<code>prompt_tokens</code> and the text-only projection is N × the provider's price. The
+value is kept per <code>model@host</code> in <code>~/.hermes/cache/image_token_costs.json</code> and
+bound per turn so the trigger estimator, the tail-budget walk and gateway
+hygiene all use the same figure. Before the first vision turn a flat 1,500
+default applies.</p>
+<h4 id="failure-cooldown-and-provider-proven-overflow">Failure cooldown and provider-proven overflow</h4>
+<p>A failed or stalled summary attempt arms a per-session <strong>failure cooldown</strong>
+(escalating 60s → 300s → 900s, never shorter than
+<code>compression.context_timeout_seconds</code>, persisted in <code>state.db</code>). While it is
+armed, ordinary threshold-triggered compaction is deferred so a broken summary
+backend does not re-fire every turn. Timeouts and stalls escalate on one
+counter; a summary that ends in <code>finish_reason=length</code> (output cap hit, the
+transcript is preserved) escalates on its own counter along the same
+60s → 300s → 900s rungs, so a later turn — such as an async delegation
+completion arriving after the cooldown lapsed — cannot re-issue the same
+capped request every 30 seconds (#69637). JSON-decode, closed-stream and
+empty-content failures stay on a flat 30 s cooldown. Three paths run a real
+attempt anyway:</p>
+<ul>
+<li>Manual <code>/compress</code> (<code>force=True</code>) — clears the cooldown and retries.</li>
+<li>The same-turn <code>fallback_chain</code> retry after a stalled primary route — the
+  cancelled primary's own stall cooldown must not suppress it (<code>bypass_cooldown</code>).
+  If that pinned route's summary call fails, compress() still commits its
+  deterministic fallback summary (default <code>abort_on_summary_failure: false</code>);
+  the log then says "committed a deterministic fallback summary", not
+  "recovered".</li>
+<li><strong>Repeated stall → deterministic fallback.</strong> A first stall keeps the
+  transcript, arms the cooldown and lets the LLM route retry after it lapses.
+  When the route stalls <em>again</em> while a stall-class failure is still on the
+  ladder (<code>_consecutive_timeout_failures &gt;= 1</code>), the retry ladder ends with a
+  deterministic rung: the worker is re-run with the summary LLM skipped
+  (<code>DETERMINISTIC_SUMMARY_ROUTE</code> pin) and commits the static fallback summary
+  through the ordinary lease/fence/watermark pipeline — the same degrade a
+  failed summary call gets — instead of "continuing without compression" and
+  re-entering the same silent stream every turn (#112420).
+  <code>abort_on_summary_failure: true</code> still aborts (nothing dropped). A committed
+  compaction rebinds the compressor and resets the ladder count, so each
+  compaction cycle grants the LLM route one stall before escalating; the
+  persisted cooldown row still paces attempts across turns and restarts.</li>
+<li><strong>Summary provider overloaded → abort, transcript kept.</strong> When the summary
+  call fails with a provider-overload error (<code>overloaded</code>, <code>at capacity</code>,
+  HTTP 529) and the one-shot main-model retry also fails, compress() aborts
+  and preserves the transcript unchanged instead of committing the
+  deterministic fallback; the warning names the overload
+  (<code>failure_class=summary_overload_failure</code>) and <code>/compress</code> retries once
+  capacity recovers. Auth/quota, network and empty-content failures already
+  abort the same way.</li>
+<li><strong>Provider-proven overflow</strong> — when the provider itself rejects the request
+  with a context-length error, the recovery pass ignores the cooldown for one
+  bounded attempt (<code>max_compression_attempts</code>) without clearing it. Deferring
+  here would wedge the session: every turn would bounce off the provider and
+  the next failure would extend the ladder (#100661). If that attempt fails,
+  the cooldown is recorded normally.</li>
+</ul>
+<h2 id="configuration">Configuration</h2>
+<p>All compression settings are read from <code>config.yaml</code> under the <code>compression</code> key:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">compression</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">              </span><span class="c1"># Enable/disable compression (default: true)</span>
+<span class="w">  </span><span class="nt">threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.50</span><span class="w">            </span><span class="c1"># Fraction of context window (default: 0.50 = 50%)</span>
+<span class="w">  </span><span class="c1"># model_thresholds:        # Per-model threshold overrides (substring match,</span>
+<span class="w">  </span><span class="c1">#   &quot;glm-5.2&quot;: 0.40        # longest key wins). See &quot;Per-model threshold</span>
+<span class="w">  </span><span class="c1">#   &quot;claude-sonnet&quot;: 0.35  # overrides&quot; below.</span>
+<span class="w">  </span><span class="nt">target_ratio</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.20</span><span class="w">         </span><span class="c1"># How much of threshold to keep as tail (default: 0.20)</span>
+<span class="w">  </span><span class="nt">tail_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">lean</span><span class="w">            </span><span class="c1"># Tail retention policy: lean | legacy (default: lean)</span>
+<span class="w">  </span><span class="nt">protect_last_n</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">20</span><span class="w">         </span><span class="c1"># Minimum protected tail messages (default: 20)</span>
+<span class="w">  </span><span class="nt">min_tail_user_messages</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span><span class="w">  </span><span class="c1"># Real user messages guaranteed in the tail (default: 1)</span>
+<span class="w">  </span><span class="nt">codex_gpt55_autoraise</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">  </span><span class="c1"># gpt-5.5 on Codex OAuth: raise trigger to 85% (default: true)</span>
+<span class="w">  </span><span class="nt">codex_gpt55_autoraise_notice</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">  </span><span class="c1"># Show the one-time autoraise notice (default: true)</span>
+<span class="w">  </span><span class="nt">codex_app_server_auto</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">native</span><span class="w">  </span><span class="c1"># native|hermes|off for Codex app-server thread compaction</span>
+<span class="w">  </span><span class="nt">codex_responses_native</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">  </span><span class="c1"># Opt-in server compaction: gpt-5.6 on OpenAI/Codex; Astra on Codex OAuth</span>
+<span class="w">  </span><span class="nt">codex_responses_compact_threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">null</span><span class="w">  </span><span class="c1"># Server compaction trigger; only used when codex_responses_native: true</span>
+<span class="w">  </span><span class="nt">in_place</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">             </span><span class="c1"># Compact on the same session id, no rotation (default: true)</span>
+
+<span class="c1"># Summarization model/provider configured under auxiliary:</span>
+<span class="nt">auxiliary</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">compression</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">null</span><span class="w">              </span><span class="c1"># Override model for summaries (default: auto-detect)</span>
+<span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">auto</span><span class="w">           </span><span class="c1"># Provider: &quot;auto&quot;, &quot;openrouter&quot;, &quot;nous&quot;, &quot;main&quot;, etc.</span>
+<span class="w">    </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">null</span><span class="w">           </span><span class="c1"># Custom OpenAI-compatible endpoint</span>
+</code></pre></div>
+
+<h3 id="parameter-details">Parameter Details</h3>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Default</th>
+<th>Range</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>threshold</code></td>
+<td><code>0.50</code></td>
+<td>0.0-1.0</td>
+<td>Compression triggers when prompt tokens ≥ <code>threshold × context_length</code> (floored at 0.75 below 512K windows)</td>
+</tr>
+<tr>
+<td><code>threshold_tokens</code></td>
+<td><code>256000</code></td>
+<td>int or <code>null</code></td>
+<td>Absolute cap on the trigger: compaction fires at the lower of the ratio trigger and this count, so a 1M window compacts at 256K instead of 500K. <code>null</code> = ratio-only</td>
+</tr>
+<tr>
+<td><code>model_thresholds</code></td>
+<td><code>{}</code></td>
+<td>map</td>
+<td>Per-model overrides of <code>threshold</code>. Keys are substring-matched against the model name (longest match wins); <code>"&lt;provider&gt;:&lt;substring&gt;"</code> keys apply only on that provider. The small-context floor still applies on top (see below)</td>
+</tr>
+<tr>
+<td><code>target_ratio</code></td>
+<td><code>0.20</code></td>
+<td>0.10-0.80</td>
+<td>Controls tail protection token budget: <code>threshold_tokens × target_ratio</code> (legacy mode only — <code>lean</code> uses its own clamp)</td>
+</tr>
+<tr>
+<td><code>tail_mode</code></td>
+<td><code>lean</code></td>
+<td><code>lean</code>, <code>legacy</code></td>
+<td>Tail retention policy. <code>legacy</code> keeps a <code>target_ratio</code>-sized verbatim tail (~100K+ tokens on big-window models without the <code>threshold_tokens</code> cap). <code>lean</code> keeps a clamped tail of <code>2.5% × context window</code> (10K floor, 25K cap) and instead carries continuity in the summary: a detailed identifier-preserving session log (produced by the same single summary request — lean compaction makes exactly one auxiliary LLM call per attempt), a mechanically extracted anchor index (PR numbers, SHAs, paths, error strings — regex, never paraphrased), every real user message quoted verbatim (newest-first budget), and a <code>session_search</code> recovery pointer so the agent can re-access anything summarized away. Oversized regions are evenly sampled into the summarizer input (with explicit elision markers) rather than triggering extra calls. Result on 500K-token real sessions: ~49K retained vs ~162K, with higher recall when paired with recovery (see <code>evals/compaction/results/</code>). Old tool results inside the lean tail are demoted to one-line stubs carrying a recovery pointer</td>
+</tr>
+<tr>
+<td><code>protect_last_n</code></td>
+<td><code>20</code></td>
+<td>≥1</td>
+<td>Minimum number of recent messages always preserved</td>
+</tr>
+<tr>
+<td><code>min_tail_user_messages</code></td>
+<td><code>1</code></td>
+<td>≥1</td>
+<td>Minimum number of REAL (actionable) user messages guaranteed to survive in the uncompressed tail. <code>1</code> = the existing single last-user anchor (behavior-preserving default). Raise to e.g. <code>3</code> to keep the last 3 real user turns verbatim even when bulky tool outputs fill the tail token budget. Blank platform echoes, compaction handoffs, and synthetic continuation rows never count toward N. The guarantee wins over the tail token budget — the tail may exceed the budget when the anchor pulls the cut back</td>
+</tr>
+<tr>
+<td><code>protect_first_n</code></td>
+<td><code>3</code></td>
+<td>(hardcoded)</td>
+<td>System prompt + first exchange always preserved</td>
+</tr>
+<tr>
+<td><code>idle_compact_after_seconds</code></td>
+<td><code>0</code></td>
+<td>≥0 seconds</td>
+<td>Opt-in: compact up front when a session resumes after this many seconds idle (0 = disabled). Skips when context ≤ threshold × target_ratio; honors cooldown/anti-thrash/lock guards</td>
+</tr>
+<tr>
+<td><code>codex_gpt55_autoraise</code></td>
+<td><code>true</code></td>
+<td>bool</td>
+<td>Raise the trigger to 85% for gpt-5.4/5.5/5.6 and gpt-6 Astra on the ChatGPT Codex OAuth route (see below). Set <code>false</code> to keep the global <code>threshold</code></td>
+</tr>
+<tr>
+<td><code>codex_gpt55_autoraise_notice</code></td>
+<td><code>true</code></td>
+<td>bool</td>
+<td>Show the one-time Codex gpt-5.5 autoraise notice. Set <code>false</code> to keep the 85% autoraise but suppress the banner</td>
+</tr>
+<tr>
+<td><code>codex_app_server_auto</code></td>
+<td><code>native</code></td>
+<td><code>native</code>, <code>hermes</code>, <code>off</code></td>
+<td>Thread-compaction mode for Codex app-server sessions (see below)</td>
+</tr>
+<tr>
+<td><code>codex_responses_native</code></td>
+<td><code>false</code></td>
+<td>bool</td>
+<td>Opt in to OpenAI's server-side compaction on the Responses API. Engages for gpt-5.6-family models on the direct OpenAI API or a ChatGPT Codex subscription, and exact <code>gpt-6-astra</code> on official Codex OAuth (see below)</td>
+</tr>
+<tr>
+<td><code>codex_responses_compact_threshold</code></td>
+<td><code>null</code></td>
+<td><code>null</code> or positive integer</td>
+<td>Server-side compaction trigger, read <strong>only when <code>codex_responses_native: true</code></strong> — it never changes when local compression fires; the local trigger is <code>threshold</code> (ratio) capped by <code>threshold_tokens</code>. <code>null</code> follows the resolved local compression trigger with an 8,192 token safety margin. A positive integer remains absolute and only clamps downward when required. Invalid values use automatic behavior. Automatic mode falls back to <code>200000</code> when no usable local trigger exists</td>
+</tr>
+<tr>
+<td><code>in_place</code></td>
+<td><code>true</code></td>
+<td>bool</td>
+<td>Compact on the same session id instead of rotating to a new one (see below)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="in-place-compaction-single-stable-session-id">In-place compaction (single stable session id)</h3>
+<p>With <code>compression.in_place: true</code> (the default), a compaction <strong>rewrites the live message list on the same session id</strong>: the system prompt is rebuilt, the summarized middle is swapped in, and the pre-compaction turns are soft-archived under the same id (<code>active=0, compacted=1</code> in the session store) — still searchable via <code>session_search</code> and recoverable, never deleted. There is no <code>parent_session_id</code> chain and no <code>name #N</code> renumbering; one conversation keeps one durable id for its whole life. This eliminated the session-rotation bug cluster (lost <code>/goal</code> state, orphaned sessions, search gaps across boundaries).</p>
+<p>Consumers observe the mode rather than diffing session ids:</p>
+<ul>
+<li>The <code>session:compress</code> event carries <code>in_place: true/false</code> and <code>old_session_id</code> (empty string in in-place mode, since there is no old id).</li>
+<li>The gateway re-baselines transcript handling from the agent's rotation-independent <code>_last_compaction_in_place</code> flag, not from an id-change diff.</li>
+</ul>
+<p>Set <code>in_place: false</code> to restore the legacy rotating path, where each compaction commits a new session id linked to the previous one via <code>parent_session_id</code>.</p>
+<h3 id="auxiliary-feasibility-and-tail-retention">Auxiliary feasibility and tail retention</h3>
+<p>A smaller auxiliary compression model can lower the live compression trigger without
+changing the selected tail policy. In <code>lean</code> mode the selection budget remains based
+on the <strong>main model's context window</strong>: 2.5%, clamped to 10K–25K tokens. For example,
+a 1M main model (<code>threshold_tokens: null</code>) with a 512K auxiliary model retains a 25K
+selection budget even when feasibility lowers its trigger from 850K to 512K. Explicit <code>legacy</code> mode instead
+recomputes <code>threshold_tokens × target_ratio</code> (102,400 tokens at 512K × 0.20).
+These are tail-selection budgets, not strict limits on the entire compacted context:
+protected messages, boundary alignment, summaries, and anchors can add tokens.</p>
+<p>The lowered trigger is a durable ceiling on the compressor, so window corrections for the
+same model (a provider-reported limit, a grown local window) keep it. Whenever the main
+runtime changes — <code>/model</code>, fallback activation, or the restore back to the primary — the
+auxiliary model is re-probed immediately: the trigger is clamped again before the first
+compaction on the new window, or restored to the main model's own value when the
+auxiliary model now fits.</p>
+<h3 id="per-model-threshold-overrides">Per-model threshold overrides</h3>
+<p><code>compression.model_thresholds</code> lets you trigger compaction at different points
+depending on the active model — useful when you swap between models with very
+different context windows (e.g. a 1M-context model can compress later while a
+128K model should compress earlier):</p>
+<div class="highlight"><pre><span></span><code><span class="nt">compression</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.50</span>
+<span class="w">  </span><span class="nt">model_thresholds</span><span class="p">:</span>
+<span class="w">    </span><span class="s">&quot;glm-5.2&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.40</span>
+<span class="w">    </span><span class="s">&quot;glm-5.2-1M&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.25</span>
+<span class="w">    </span><span class="s">&quot;claude-sonnet&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.35</span>
+<span class="w">    </span><span class="s">&quot;openai-codex:astra&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.85</span><span class="w">   </span><span class="c1"># only on the Codex OAuth route (272K cap)</span>
+</code></pre></div>
+
+<p>Resolution rules:</p>
+<ul>
+<li>Keys are <strong>substring-matched</strong> against the model name; the <strong>longest
+  matching key wins</strong> (<code>glm-5.2-1M</code> beats <code>glm-5.2</code> for model <code>glm-5.2-1M</code>).</li>
+<li>Keys may be <strong>provider-scoped</strong> as <code>"&lt;provider&gt;:&lt;substring&gt;"</code> (e.g.
+  <code>"openai-codex:astra": 0.85</code>). A scoped key only matches when the session's
+  provider is that route, so the same slug served with a different window
+  elsewhere (OpenRouter, Nous, direct OpenAI) keeps the global <code>threshold</code>.
+  Ranking uses the model substring only, so <code>"astra-900k"</code> still beats
+  <code>"openai-codex:astra"</code> for the 900K picker; a scoped key beats a bare key
+  with the identical substring.</li>
+<li>When no key matches (or the map is empty), the global <code>threshold</code> applies.</li>
+<li>The override is re-resolved on every <code>/model</code> switch; switching to a model
+  with no matching key falls back to the global <code>threshold</code>.</li>
+<li>The <strong>small-context floor still applies on top</strong> of overrides (raise-only):
+  models with context windows below 512K are floored at <code>0.75</code>, so an
+  override below the floor is raised to <code>0.75</code>, while an override above it
+  (e.g. <code>0.80</code>) wins.</li>
+</ul>
+<p>Plugin context engines can reuse the same resolution logic via
+<code>from agent.context_compressor import resolve_model_threshold</code>; engines that
+override <code>update_model()</code> own their own compaction policy and may ignore the
+map.</p>
+<h3 id="codex-gpt-5x--astra-threshold-autoraise">Codex gpt-5.x / Astra threshold autoraise</h3>
+<p>The ChatGPT Codex OAuth backend hard-caps gpt-5.4/5.5/5.6 and gpt-6 Astra at a <strong>272K</strong> context window
+(the same slug exposes 1.05M on OpenAI's direct API and OpenRouter, and 400K on
+GitHub Copilot). At the default 50% trigger, compaction would fire at ~136K —
+half the window the model can actually use. When the active route is Codex
+OAuth (<code>provider: openai-codex</code>) and the model is one of those families (Astra
+matches any slug containing <code>astra</code>; the opt-in <code>-900k</code> picker variants are
+excluded because they already unlock the wider window), Hermes raises the
+trigger to <strong>85%</strong> (~231K) and shows a notice with the opt-out command. The
+notice is shown once per profile — a marker under <code>$HERMES_HOME</code>
+(<code>.codex_gpt55_autoraise_notice</code>) records that it ran, so repeated agent/session
+inits (e.g. every inbound gateway message) don't re-emit it; if the raised
+threshold later changes it re-notifies once. Only this exact route is affected;
+the same models on any other provider keep your global <code>threshold</code>. To opt back down to
+the global value:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>compression.codex_gpt55_autoraise<span class="w"> </span><span class="nb">false</span>
+</code></pre></div>
+
+<p>To keep the 85% autoraise but hide only the one-time notice:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>compression.codex_gpt55_autoraise_notice<span class="w"> </span><span class="nb">false</span>
+</code></pre></div>
+
+<h3 id="codex-large-context--900k-picker-variants-opt-in">Codex large-context <code>-900k</code> picker variants (opt-in)</h3>
+<p>The ChatGPT Codex backend <em>advertises</em> a 272K window for the gpt-5.4 and
+gpt-5.6 (Sol/Terra/Luna) families, but actually accepts ~911K input tokens
+for ChatGPT-subscription accounts (live-verified Aug 2026). Hermes keeps the
+<strong>advertised 272K as the default</strong> for the base slugs — a bigger window means
+more tokens per request and much faster subscription-usage burn, so the large
+window is strictly opt-in.</p>
+<p>To use the large window, pick the explicit <code>-900k</code> variant in <code>/model</code> (e.g.
+<code>gpt-5.6-sol-900k</code>, <code>gpt-5.6-terra-900k</code>, <code>gpt-5.6-luna-900k</code>,
+<code>gpt-5.4-900k</code>). These are Hermes-side aliases: the suffix is stripped before
+the model id is sent to the backend, and pricing/usage accounting treats them
+as the base model. Slugs that genuinely enforce 272K (gpt-5.5, gpt-5.4-mini)
+have no <code>-900k</code> variant. When the authenticated Codex catalog publishes a
+<code>max_context_window</code> below 900K for the base slug (e.g. 872K), the <code>-900k</code>
+variant resolves to that live maximum instead; 900K remains the offline
+fallback and a published maximum above 900K does not raise it.</p>
+<p>Compaction thresholds follow the window: base slugs (272K) get the <strong>85%
+autoraise</strong> described above, while <code>-900k</code> variants keep your global
+<code>compression.threshold</code> (default 50%, ~450K) — the autoraise exists to stop
+wasting a small window, which a 900K window doesn't need.</p>
+<h3 id="codex-app-server-thread-compaction">Codex app-server thread compaction</h3>
+<p>Codex app-server sessions (<code>api_mode: codex_app_server</code> — the codex CLI/agent
+runtime) are different from every other route: the codex agent owns the backing
+thread context, so Hermes' auxiliary summarizer cannot shrink it — rewriting the
+local transcript mirror leaves the real thread growing unbounded until a hard
+context reset. For this runtime, compaction goes through the app-server's own
+mechanism instead:</p>
+<ul>
+<li>Manual compaction (<code>/compress</code>) asks the app-server to compact the thread
+  (<code>thread/compact/start</code>) and waits for the compaction turn to complete.</li>
+<li>Automatic compaction is controlled by <code>compression.codex_app_server_auto</code>:
+  the default <code>native</code> lets the app-server decide when to compact and Hermes
+  records the resulting compaction events (compression counters, session
+  events). Set <code>hermes</code> to let Hermes' compression threshold initiate
+  app-server compaction, or <code>off</code> to disable Hermes-initiated automatic
+  compaction entirely (codex may still compact natively).</li>
+</ul>
+<p>Hermes' local transcript is never rewritten on this runtime — state.db records
+the compaction boundary while the visible transcript stays intact. All other
+routes (including Codex OAuth chat sessions) keep Hermes' summary compressor.</p>
+<h3 id="native-responses-compaction-gpt-56-and-astra-on-supported-routes">Native Responses compaction (gpt-5.6 and Astra on supported routes)</h3>
+<p>OpenAI's Responses API supports server-side compaction: when a request includes
+<code>context_management: [{type: "compaction", compact_threshold: N}]</code> and the
+rendered input crosses N tokens, the server prunes older context into an opaque
+encrypted <code>compaction</code> output item. Hermes captures that item into the
+assistant message's existing replay sidecar and sends it back on subsequent
+turns, standing in for the pruned history — long-horizon recall without a
+client-side summary pass, and ZDR-friendly (<code>store: false</code>, no
+<code>previous_response_id</code>).</p>
+<p>Opt in with <code>compression.codex_responses_native: true</code>. The gate is deliberately
+narrow, re-checked on every request:</p>
+<ul>
+<li><strong>Models:</strong> the gpt-5.6 family, plus exact <code>gpt-6-astra</code> on official Codex
+  subscription OAuth. Astra on the direct API, Astra variants and other GPT-6
+  models are excluded. gpt-5.1/5.2 return HTTP 500 or stall the stream when the
+  field is present (no structured rejection to downgrade on, verified live Aug 2026).</li>
+<li><strong>Routes:</strong> <code>api.openai.com</code> (OpenAI API key) or the ChatGPT Codex backend
+  (Codex subscription OAuth) only. xAI, GitHub/Copilot, OpenRouter, relays, and
+  local servers never see the field.</li>
+</ul>
+<p>For Astra, both the resolved <code>openai-codex</code> provider and an official HTTPS
+<code>chatgpt.com/backend-api/codex</code> endpoint are required. A trusted proxy override
+does not enable Astra compaction. This uses the existing automatic
+<code>context_management</code> path and does not add <code>configuration_update</code> history.</p>
+<p>Everything else about compression is unchanged: the local compressor stays
+armed as the fallback owner (the native threshold is clamped ~8K tokens below
+the local trigger so the server compacts first), and a structured provider
+rejection of the field disables native compaction for the session and retries
+the request without it. Switching the session to a non-eligible model or route
+simply stops the field from being sent — captured checkpoints are dropped from
+replay by the existing cross-issuer guard when the endpoint changes.</p>
+<p><code>compression.codex_responses_compact_threshold</code> is consulted only while
+<code>codex_responses_native: true</code> is in effect; with native compaction off (the
+default) it is ignored and local compression triggers on <code>threshold</code> /
+<code>threshold_tokens</code> alone. By default, <code>codex_responses_compact_threshold: null</code>
+derives the native threshold from the resolved local trigger. For example, a local trigger
+of 765,000 selects 756,808. Set a positive integer to preserve an absolute
+threshold such as 200,000. Invalid values select automatic behavior. If no
+usable local trigger exists, automatic mode uses 200,000. The provider minimum
+is 1,024 tokens, so an unusually small local trigger at or below that floor
+cannot preserve strict native first ordering.</p>
+<h3 id="computed-values-for-a-200k-context-model-at-defaults">Computed Values (for a 200K context model at defaults)</h3>
+<div class="highlight"><pre><span></span><code>context_length       = 200,000
+threshold_tokens     = 200,000 × 0.50 = 100,000
+tail_token_budget    = 100,000 × 0.20 = 20,000
+max_summary_tokens   = min(200,000 × 0.05, 12,000) = 10,000
+</code></pre></div>
+
+<div class="admonition adm-note"><p class="adm-title">Threshold is derived from the MAIN model&#x27;s context window</p>
+<p><code>threshold_tokens</code> is <code>threshold × context_length</code> (then capped by <code>compression.threshold_tokens</code>), where <code>context_length</code>
+is the <strong>main agent model's</strong> context window — never the auxiliary/summary
+model's. On a 262,144-token model at the default <code>0.50</code>, the threshold is
+<code>262,144 × 0.50 = 131,072</code>. That number being close to a common "128K context"
+is a coincidence of the percentage, not a sign that the auxiliary model's window
+is the trigger. The auxiliary model's context window is a separate concern — see
+the "Summary model context length" warning below for how it affects whether a
+summary can be produced, not when compression fires.</p>
+</div>
+<h2 id="compression-algorithm">Compression Algorithm</h2>
+<p>The <code>ContextCompressor.compress()</code> method follows a 4-phase algorithm:</p>
+<h3 id="phase-1-prune-old-tool-results-cheap-no-llm-call">Phase 1: Prune Old Tool Results (cheap, no LLM call)</h3>
+<p>Old tool results (&gt;200 chars) outside the protected tail are replaced with:</p>
+<div class="highlight"><pre><span></span><code>[Old tool output cleared to save context space]
+</code></pre></div>
+
+<p>This is a cheap pre-pass that saves significant tokens from verbose tool
+outputs (file contents, terminal output, search results).</p>
+<h3 id="phase-2-determine-boundaries">Phase 2: Determine Boundaries</h3>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────────────────┐
+│  Message list                                               │
+│                                                             │
+│  [0..2]  ← protect_first_n (system + first exchange)        │
+│  [3..N]  ← middle turns → SUMMARIZED                        │
+│  [N..end] ← tail (by token budget OR protect_last_n)        │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<p>Tail protection is <strong>token-budget based</strong>: walks backward from the end,
+accumulating tokens until the budget is exhausted. Falls back to the fixed
+<code>protect_last_n</code> count if the budget would protect fewer messages.</p>
+<p>Boundaries are aligned to avoid splitting tool_call/tool_result groups.
+The <code>_align_boundary_backward()</code> method walks past consecutive tool results
+to find the parent assistant message, keeping groups intact.</p>
+<h3 id="phase-3-generate-structured-summary">Phase 3: Generate Structured Summary</h3>
+<div class="admonition adm-warning"><p class="adm-title">Summary model context length</p>
+<p>The summary model must have a context window <strong>at least as large</strong> as the main agent model's. The entire middle section is sent to the summary model in a single <code>call_llm(task="compression")</code> call. If the summary model's context is smaller, the API returns a context-length error — <code>_generate_summary()</code> catches it, logs a warning, and returns <code>None</code>. The compressor then drops the middle turns <strong>without a summary</strong>, silently losing conversation context. This is the most common cause of degraded compaction quality.</p>
+</div>
+<p>The middle turns are summarized using the auxiliary LLM with a structured
+template:</p>
+<div class="highlight"><pre><span></span><code>## Goal
+[What the user is trying to accomplish]
+
+## Constraints &amp; Preferences
+[User preferences, coding style, constraints, important decisions]
+
+## Progress
+### Done
+[Completed work — specific file paths, commands run, results]
+### In Progress
+[Work currently underway]
+### Blocked
+[Any blockers or issues encountered]
+
+## Key Decisions
+[Important technical decisions and why]
+
+## Relevant Files
+[Files read, modified, or created — with brief note on each]
+
+## Next Steps
+[What needs to happen next]
+
+## Critical Context
+[Specific values, error messages, configuration details]
+</code></pre></div>
+
+<p>Summary budget scales with the amount of content being compressed:
+- Formula: <code>content_tokens × 0.20</code> (the <code>_SUMMARY_RATIO</code> constant)
+- Minimum: 2,000 tokens
+- Maximum: <code>min(context_length × 0.05, 12,000)</code> tokens</p>
+<h3 id="phase-4-assemble-compressed-messages">Phase 4: Assemble Compressed Messages</h3>
+<p>The compressed message list is:
+1. Head messages (with a note appended to system prompt on first compression)
+2. Summary message (role chosen to avoid consecutive same-role violations)
+3. Tail messages (unmodified)</p>
+<p>Orphaned tool_call/tool_result pairs are cleaned up by <code>_sanitize_tool_pairs()</code>:
+- Tool results referencing removed calls → removed
+- Tool calls whose results were removed → stub result injected</p>
+<h3 id="iterative-re-compression">Iterative Re-compression</h3>
+<p>On subsequent compressions, the previous summary is passed to the LLM with
+instructions to <strong>update</strong> it rather than summarize from scratch. This preserves
+information across multiple compactions — items move from "In Progress" to "Done",
+new progress is added, and obsolete information is removed.</p>
+<p>The <code>_previous_summary</code> field on the compressor instance stores the last summary
+text for this purpose.</p>
+<h2 id="beforeafter-example">Before/After Example</h2>
+<h3 id="before-compression-45-messages-95k-tokens">Before Compression (45 messages, ~95K tokens)</h3>
+<div class="highlight"><pre><span></span><code>[0] system:    &quot;You are a helpful assistant...&quot; (system prompt)
+[1] user:      &quot;Help me set up a FastAPI project&quot;
+[2] assistant: &lt;tool_call&gt; terminal: mkdir project &lt;/tool_call&gt;
+[3] tool:      &quot;directory created&quot;
+[4] assistant: &lt;tool_call&gt; write_file: main.py &lt;/tool_call&gt;
+[5] tool:      &quot;file written (2.3KB)&quot;
+    ... 30 more turns of file editing, testing, debugging ...
+[38] assistant: &lt;tool_call&gt; terminal: pytest &lt;/tool_call&gt;
+[39] tool:      &quot;8 passed, 2 failed\n...&quot;  (5KB output)
+[40] user:      &quot;Fix the failing tests&quot;
+[41] assistant: &lt;tool_call&gt; read_file: tests/test_api.py &lt;/tool_call&gt;
+[42] tool:      &quot;import pytest\n...&quot;  (3KB)
+[43] assistant: &quot;I see the issue with the test fixtures...&quot;
+[44] user:      &quot;Great, also add error handling&quot;
+</code></pre></div>
+
+<h3 id="after-compression-25-messages-45k-tokens">After Compression (25 messages, ~45K tokens)</h3>
+<div class="highlight"><pre><span></span><code>[0] system:    &quot;You are a helpful assistant...
+               [Note: Some earlier conversation turns have been compacted...]&quot;
+[1] user:      &quot;Help me set up a FastAPI project&quot;
+[2] assistant: &quot;[CONTEXT COMPACTION] Earlier turns were compacted...
+
+               ## Goal
+               Set up a FastAPI project with tests and error handling
+
+               ## Progress
+               ### Done
+               - Created project structure: main.py, tests/, requirements.txt
+               - Implemented 5 API endpoints in main.py
+               - Wrote 10 test cases in tests/test_api.py
+               - 8/10 tests passing
+
+               ### In Progress
+               - Fixing 2 failing tests (test_create_user, test_delete_user)
+
+               ## Relevant Files
+               - main.py — FastAPI app with 5 endpoints
+               - tests/test_api.py — 10 test cases
+               - requirements.txt — fastapi, pytest, httpx
+
+               ## Next Steps
+               - Fix failing test fixtures
+               - Add error handling&quot;
+[3] user:      &quot;Fix the failing tests&quot;
+[4] assistant: &lt;tool_call&gt; read_file: tests/test_api.py &lt;/tool_call&gt;
+[5] tool:      &quot;import pytest\n...&quot;
+[6] assistant: &quot;I see the issue with the test fixtures...&quot;
+[7] user:      &quot;Great, also add error handling&quot;
+</code></pre></div>
+
+<h2 id="prompt-caching-anthropic">Prompt Caching (Anthropic)</h2>
+<p>Source: <code>agent/prompt_caching.py</code></p>
+<p>Reduces input token costs by ~75% on multi-turn conversations by caching the
+conversation prefix. Uses Anthropic's <code>cache_control</code> breakpoints.</p>
+<h3 id="strategy-system_and_3">Strategy: system_and_3</h3>
+<p>Anthropic allows a maximum of 4 <code>cache_control</code> breakpoints per request. Hermes
+uses the "system_and_3" strategy:</p>
+<div class="highlight"><pre><span></span><code>Breakpoint 1: System prompt           (stable across all turns)
+Breakpoint 2: 3rd-to-last non-system message  ─┐
+Breakpoint 3: 2nd-to-last non-system message   ├─ Rolling window
+Breakpoint 4: Last non-system message          ─┘
+</code></pre></div>
+
+<h3 id="how-it-works">How It Works</h3>
+<p><code>apply_anthropic_cache_control()</code> deep-copies the messages and injects
+<code>cache_control</code> markers:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Cache marker format</span>
+<span class="n">marker</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;ephemeral&quot;</span><span class="p">}</span>
+<span class="c1"># Or for 1-hour TTL:</span>
+<span class="n">marker</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;ephemeral&quot;</span><span class="p">,</span> <span class="s2">&quot;ttl&quot;</span><span class="p">:</span> <span class="s2">&quot;1h&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>The marker is applied differently based on content type:</p>
+<table>
+<thead>
+<tr>
+<th>Content Type</th>
+<th>Where Marker Goes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>String content</td>
+<td>Converted to <code>[{"type": "text", "text": ..., "cache_control": ...}]</code></td>
+</tr>
+<tr>
+<td>List content</td>
+<td>Added to the last element's dict</td>
+</tr>
+<tr>
+<td>None/empty</td>
+<td>Added as <code>msg["cache_control"]</code></td>
+</tr>
+<tr>
+<td>Tool messages</td>
+<td>Added as <code>msg["cache_control"]</code> (native Anthropic only)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="cache-aware-design-patterns">Cache-Aware Design Patterns</h3>
+<ol>
+<li>
+<p><strong>Stable system prompt</strong>: The system prompt is breakpoint 1 and cached across
+   all turns. Avoid mutating it mid-conversation (compression appends a note
+   only on the first compaction).</p>
+</li>
+<li>
+<p><strong>Message ordering matters</strong>: Cache hits require prefix matching. Adding or
+   removing messages in the middle invalidates the cache for everything after.</p>
+</li>
+<li>
+<p><strong>Compression cache interaction</strong>: After compression, the cache is invalidated
+   for the compressed region but the system prompt cache survives. The rolling
+   3-message window re-establishes caching within 1-2 turns.</p>
+</li>
+<li>
+<p><strong>TTL selection</strong>: Default is <code>5m</code> (5 minutes). Use <code>1h</code> for long-running
+   sessions where the user takes breaks between turns.</p>
+</li>
+<li>
+<p><strong>Model identity is part of the cache key</strong>: Provider-side caches are scoped
+   to the model (and account/API key) serving the request. Any mid-conversation
+   model change — an explicit <code>/model</code> switch, primary-model fallback, or a
+   credential-pool rotation onto a different account — means the next request
+   gets zero cache hits and re-reads the full conversation at undiscounted
+   input price. This is inherent to how provider caches work, not something
+   Hermes can avoid; user-facing docs for <code>/model</code>, fallback providers, and
+   credential pools carry cost warnings for this reason. Don't add features
+   that silently swap the model or credentials mid-session.</p>
+</li>
+</ol>
+<h3 id="enabling-prompt-caching">Enabling Prompt Caching</h3>
+<p>Prompt caching is automatically enabled when:
+- The model is an Anthropic Claude model (detected by model name)
+- The provider supports <code>cache_control</code> (native Anthropic API or OpenRouter)</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml — TTL is configurable (must be &quot;5m&quot; or &quot;1h&quot;)</span>
+<span class="nt">prompt_caching</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">cache_ttl</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;5m&quot;</span>
+</code></pre></div>
+
+<p>The CLI shows caching status at startup:</p>
+<div class="highlight"><pre><span></span><code>💾 Prompt caching: ENABLED (Claude via OpenRouter, 5m TTL)
+</code></pre></div>
+
+<h2 id="context-pressure-warnings">Context Pressure Warnings</h2>
+<p>Intermediate context-pressure warnings have been removed (see the iteration-budget block in <code>agent/turn_iteration_prep.py</code>, which notes: "No intermediate pressure warnings — they caused models to 'give up' prematurely on complex tasks"). Compression fires when prompt tokens reach the configured <code>compression.threshold</code> (default 50%) with no prior warning step; gateway session hygiene fires as the secondary safety net at 85% of the model's context window.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/context-compression-and-caching</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#bedrock-context-window-cache">Bedrock context window cache</a></li>
+<li class="lvl2"><a href="#pluggable-context-engine">Pluggable Context Engine</a></li>
+<li class="lvl2"><a href="#dual-compression-system">Dual Compression System</a></li>
+<li class="lvl3"><a href="#1-gateway-session-hygiene-85-threshold">1. Gateway Session Hygiene (85% threshold)</a></li>
+<li class="lvl3"><a href="#2-agent-contextcompressor-50-threshold-configurable">2. Agent ContextCompressor (50% threshold, configurable)</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl3"><a href="#parameter-details">Parameter Details</a></li>
+<li class="lvl3"><a href="#in-place-compaction-single-stable-session-id">In-place compaction (single stable session id)</a></li>
+<li class="lvl3"><a href="#auxiliary-feasibility-and-tail-retention">Auxiliary feasibility and tail retention</a></li>
+<li class="lvl3"><a href="#per-model-threshold-overrides">Per-model threshold overrides</a></li>
+<li class="lvl3"><a href="#codex-gpt-5x--astra-threshold-autoraise">Codex gpt-5.x / Astra threshold autoraise</a></li>
+<li class="lvl3"><a href="#codex-large-context--900k-picker-variants-opt-in">Codex large-context -900k picker variants (opt-in)</a></li>
+<li class="lvl3"><a href="#codex-app-server-thread-compaction">Codex app-server thread compaction</a></li>
+<li class="lvl3"><a href="#native-responses-compaction-gpt-56-and-astra-on-supported-routes">Native Responses compaction (gpt-5.6 and Astra on supported routes)</a></li>
+<li class="lvl3"><a href="#computed-values-for-a-200k-context-model-at-defaults">Computed Values (for a 200K context model at defaults)</a></li>
+<li class="lvl2"><a href="#compression-algorithm">Compression Algorithm</a></li>
+<li class="lvl3"><a href="#phase-1-prune-old-tool-results-cheap-no-llm-call">Phase 1: Prune Old Tool Results (cheap, no LLM call)</a></li>
+<li class="lvl3"><a href="#phase-2-determine-boundaries">Phase 2: Determine Boundaries</a></li>
+<li class="lvl3"><a href="#phase-3-generate-structured-summary">Phase 3: Generate Structured Summary</a></li>
+<li class="lvl3"><a href="#phase-4-assemble-compressed-messages">Phase 4: Assemble Compressed Messages</a></li>
+<li class="lvl3"><a href="#iterative-re-compression">Iterative Re-compression</a></li>
+<li class="lvl2"><a href="#beforeafter-example">Before/After Example</a></li>
+<li class="lvl3"><a href="#before-compression-45-messages-95k-tokens">Before Compression (45 messages, ~95K tokens)</a></li>
+<li class="lvl3"><a href="#after-compression-25-messages-45k-tokens">After Compression (25 messages, ~45K tokens)</a></li>
+<li class="lvl2"><a href="#prompt-caching-anthropic">Prompt Caching (Anthropic)</a></li>
+<li class="lvl3"><a href="#strategy-system_and_3">Strategy: system_and_3</a></li>
+<li class="lvl3"><a href="#how-it-works">How It Works</a></li>
+<li class="lvl3"><a href="#cache-aware-design-patterns">Cache-Aware Design Patterns</a></li>
+<li class="lvl3"><a href="#enabling-prompt-caching">Enabling Prompt Caching</a></li>
+<li class="lvl2"><a href="#context-pressure-warnings">Context Pressure Warnings</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

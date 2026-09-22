@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kanban worker lanes · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/kanban-worker-lanes</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="kanban-worker-lanes">Kanban worker lanes</h1>
+<p>A <strong>worker lane</strong> is a class of process that the kanban dispatcher can route tasks to. Each lane has an identity (the assignee string), a spawn mechanism, and a contract for what it must do with the task once spawned.</p>
+<p>This page is the contract. It exists for two audiences:</p>
+<ul>
+<li><strong>Operators</strong> picking which lanes to wire into a board (which profiles to create, which assignees to use).</li>
+<li><strong>Plugin / integration authors</strong> wanting to add a new lane shape (a CLI worker that wraps Codex / Claude Code / OpenCode, a containerised review worker, a non-Hermes service that pulls tasks via the API).</li>
+</ul>
+<p>If you're writing the worker code itself — the agent that runs <em>inside</em> a lane — the kanban lifecycle and reference details are injected into the worker's system prompt automatically (the <code>KANBAN_GUIDANCE</code> block in <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py" class="ext" target="_blank" rel="noopener"><code>agent/prompt_builder.py</code></a>).</p>
+<h2 id="the-hierarchy">The hierarchy</h2>
+<div class="highlight"><pre><span></span><code>Hermes Kanban  =  canonical task lifecycle + audit trail
+Worker lane    =  implementation executor for one assigned card
+Reviewer       =  human or human-proxy that gates &quot;done&quot;
+GitHub PR      =  upstreamable artifact (optional, for code lanes)
+</code></pre></div>
+
+<p>Hermes Kanban owns lifecycle truth — <code>ready</code> → <code>running</code> → <code>review</code> / <code>blocked</code> / <code>done</code> / <code>archived</code>. Worker lanes execute work but never own that truth; everything they do flows back through the kanban kernel via the <code>kanban_*</code> tools (or, for non-Hermes external workers, via the API). Reviewers gate the transition from "code change written" to "task done."</p>
+<h2 id="what-a-lane-provides">What a lane provides</h2>
+<p>To be a kanban worker lane, an integration must provide three things:</p>
+<h3 id="1-an-assignee-string">1. An assignee string</h3>
+<p>The dispatcher matches <code>task.assignee</code> against either a Hermes profile name (the default lane shape) or a registered non-spawnable identifier (the plugin lane shape — see <a href="#adding-an-external-cli-worker-lane">Adding an external CLI worker lane</a> below). Tasks whose assignee doesn't resolve are left on <code>ready</code> with a <code>skipped_nonspawnable</code> event so a board operator can fix them; they are not silently dropped or executed by an arbitrary fallback.</p>
+<h3 id="2-a-spawn-mechanism">2. A spawn mechanism</h3>
+<p>For Hermes profile lanes, the dispatcher's <code>_default_spawn</code> runs <code>hermes -p &lt;assignee&gt; chat -q &lt;prompt&gt;</code> (or the equivalent module form when the <code>hermes</code> shim isn't on <code>$PATH</code>) inside the task's pinned workspace, with these env vars set:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Carries</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>HERMES_KANBAN_TASK</code></td>
+<td>the task id the worker is operating on</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_DB</code></td>
+<td>absolute path to the per-board SQLite file</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_BOARD</code></td>
+<td>board slug</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_WORKSPACES_ROOT</code></td>
+<td>root of the board's workspace tree</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_WORKSPACE</code></td>
+<td>absolute path to <em>this</em> task's workspace</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_RUN_ID</code></td>
+<td>the current run's id (for the lifecycle gate)</td>
+</tr>
+<tr>
+<td><code>HERMES_KANBAN_CLAIM_LOCK</code></td>
+<td>the claim lock string (<code>&lt;host&gt;:&lt;pid&gt;:&lt;uuid&gt;</code>)</td>
+</tr>
+<tr>
+<td><code>HERMES_PROFILE</code></td>
+<td>the worker's own profile name (for <code>kanban_comment</code> author attribution)</td>
+</tr>
+<tr>
+<td><code>HERMES_TENANT</code></td>
+<td>tenant namespace, if the task has one</td>
+</tr>
+</tbody>
+</table>
+<p>For non-Hermes lanes (registered via a plugin), the plugin supplies its own <code>spawn_fn</code> callable that gets <code>task</code>, <code>workspace</code>, and <code>board</code> and returns an optional pid for crash detection.</p>
+<h3 id="descendant-process-scope">Descendant process scope</h3>
+<p>A task assignment belongs to the dispatcher worker, not to every program it starts.
+Hermes subprocess helpers carry a non-owner fence into shells, execution kernels,
+cron deliveries, hooks, language servers, and ordinary stdio MCP servers. Later
+children remain fenced even when a script removes the inherited task ID: CLI and
+tool mutations are rejected, rather than treating that script as an orchestrator.
+Board/database routing and workspace paths are retained. Descendants can read an
+existing board without running schema migrations; its owner must initialize it.
+The fence is scoped to the lineage's board root (the marker's value is that root, plus the
+dispatcher-pinned <code>HERMES_KANBAN_DB</code>): a descendant that works against a different Kanban
+home — a test or reproduction under a scratch <code>HERMES_HOME</code> — gets a normal read-write board.</p>
+<p>The dispatcher explicitly grants a newly assigned worker its own scope. The managed
+Hermes-tools MCP endpoint can likewise act for its supervising worker, while the
+executor's ordinary shell children remain fenced. Workers may only perform lifecycle
+handoffs and attach files to their assigned task; <code>unblock</code> remains orchestrator-only.
+Cross-task comments and follow-up task creation retain their existing behavior.</p>
+<p>Integration authors spawning code should use
+<code>agent.delegation_context.delegated_child_subprocess_env</code> at the actual spawn, after
+merging environment overrides. It preserves the caller's credential/profile policy.
+This is cooperative runtime scoping, <strong>not OS confinement</strong>: it does not prevent
+arbitrary code from deliberately erasing lineage metadata or opening SQLite directly.</p>
+<h3 id="3-a-lifecycle-terminator">3. A lifecycle terminator</h3>
+<p>Every claim must end in exactly one of:</p>
+<ul>
+<li><code>kanban_complete(summary=..., metadata=...)</code> — task succeeds, status flips to <code>done</code>.</li>
+<li><code>kanban_request_review(summary=..., metadata=..., reviewer=...)</code> — same-card implementation is complete and enters first-class review; status flips to <code>review</code>. The dispatcher loads the bundled <code>sdlc-review</code> skill unless <code>kanban.review_dispatch</code> is disabled. A reviewer approves with <code>kanban_complete</code>, returns actionable rework with <code>kanban_request_changes</code>, or escalates a genuine external blocker with <code>kanban_block</code>.</li>
+<li><code>kanban_block(reason=...)</code> — task waits for human input, status flips to <code>blocked</code>. The dispatcher respawns when <code>kanban_unblock</code> runs.</li>
+<li>The worker process exits without a tool call. The kernel reaps it and emits <code>crashed</code> (PID died) or <code>gave_up</code> (consecutive-failure breaker tripped) or <code>timed_out</code> (max_runtime exceeded). This is the failure path; healthy workers don't end here.</li>
+</ul>
+<p>The kanban kernel enforces that exactly one of these terminates each run. A worker that calls neither and exits normally is treated as crashed.</p>
+<h2 id="outputs-and-the-review-handoff">Outputs and the review handoff</h2>
+<p>For code-changing tasks, pick the review model encoded by the task graph:</p>
+<ul>
+<li><strong>Same-card review:</strong> call <code>kanban_request_review(summary=..., metadata=..., reviewer=...)</code>. The task enters <code>review</code> without touching block recurrence accounting. The dispatcher claims it with the bundled <code>sdlc-review</code> skill by default. The reviewer approves with <code>kanban_complete</code>, calls <code>kanban_request_changes(reason=...)</code> to close the review run and route the task back to its original implementer, or blocks only for a genuine external escalation.</li>
+<li><strong>Pre-created downstream review/QA/release card:</strong> <code>kanban_show</code> lists child IDs; inspect those cards with <code>kanban_show(task_id=...)</code> before choosing the terminal action. When a child is the downstream review/QA/release phase, call <code>kanban_complete</code> on the implementation phase. It cannot promote until this parent is <code>done</code>/<code>archived</code>. Do not additionally request same-card review and never sticky-block the parent with <code>review-required:</code> — either choice strands or duplicates the downstream lane.</li>
+<li><strong>Human-only boards:</strong> set <code>kanban.review_dispatch: false</code>. A task can then remain in <code>review</code> until a human approves it or uses <code>reopen-review</code>/the dashboard to return it to <code>ready</code>/<code>todo</code>.</li>
+</ul>
+<p>Both review models carry their structured handoff on the lifecycle transition itself. Do not place secrets, tokens, or raw PII in <code>summary</code> or <code>metadata</code>; run rows are durable.</p>
+<p>The injected <code>KANBAN_GUIDANCE</code> covers both graph shapes, <code>kanban_complete</code>, the same-card review loop, and <code>kanban_block</code> for genuine blockers.</p>
+<h2 id="logs-and-audit-trail">Logs and audit trail</h2>
+<p>The dispatcher writes per-task worker stdout/stderr to <code>&lt;board-root&gt;/logs/&lt;task_id&gt;.log</code>. Logs are auditable from kanban metadata:</p>
+<ul>
+<li><code>task_runs</code> rows carry the <code>log_path</code>, exit code (where available), summary, and metadata.</li>
+<li><code>task_events</code> rows carry every state transition (<code>promoted</code>, <code>claimed</code>, <code>heartbeat</code>, <code>completed</code>, <code>blocked</code>, <code>review_requested</code>, <code>changes_requested</code>, <code>review_reopened</code>, <code>gave_up</code>, <code>crashed</code>, <code>timed_out</code>, <code>reclaimed</code>, <code>claim_extended</code>).</li>
+<li><code>kanban_show</code> returns both, so a reviewer (or a follow-up worker) reading the task gets the full history without needing dashboard access.</li>
+</ul>
+<p>The dashboard renders run history with summaries, metadata blocks, and exit-status badges. CLI users can run <code>hermes kanban tail &lt;task_id&gt;</code> to follow live, or <code>hermes kanban runs &lt;task_id&gt;</code> for the historical attempt list.</p>
+<h2 id="existing-lane-shapes">Existing lane shapes</h2>
+<h3 id="hermes-profile-lane-default">Hermes profile lane (default)</h3>
+<p>The shape every kanban worker takes today: the assignee is a profile name, the dispatcher spawns <code>hermes -p &lt;profile&gt;</code>, the worker gets the <code>KANBAN_GUIDANCE</code> system-prompt block injected automatically, and uses the <code>kanban_*</code> tools to terminate the run. No setup beyond defining the profile.</p>
+<p>When you create profiles for your fleet, choose names that match the <em>role</em> you want the orchestrator to route to. The orchestrator (when there is one) discovers your profile names via <code>hermes profile list</code> — there's no fixed roster the system assumes (the orchestrator side of the contract is part of the injected <code>KANBAN_GUIDANCE</code>).</p>
+<h3 id="orchestrator-profile-lane">Orchestrator profile lane</h3>
+<p>A specialisation of the profile lane: an orchestrator is a Hermes profile whose toolset includes <code>kanban</code> but excludes <code>terminal</code> / <code>file</code> / <code>code</code> / <code>web</code> for implementation. Its job is decomposing a high-level goal into child tasks via <code>kanban_create</code> + <code>kanban_link</code> and stepping back. The orchestrator skill encodes the anti-temptation rules.</p>
+<h2 id="adding-an-external-cli-worker-lane">Adding an external CLI worker lane</h2>
+<p>Wiring a non-Hermes CLI tool (Codex CLI, Claude Code CLI, OpenCode CLI, a local coding-model runner, etc.) as a kanban worker lane is <em>not yet a paved path</em>. The dispatcher's spawn function is pluggable (<code>spawn_fn</code> is a parameter on <code>dispatch_once</code>), and a plugin could register its own <code>spawn_fn</code> for a non-Hermes assignee, but the surrounding integration work — wrapping the CLI's exit code into <code>kanban_complete</code> / <code>kanban_block</code> calls, mapping the CLI's workspace/sandbox conventions onto the dispatcher's <code>HERMES_KANBAN_WORKSPACE</code> env, handling auth and per-CLI policy — is still per-integration design work.</p>
+<p>If you're considering adding a CLI lane, open an issue describing the specific CLI and the workflow you're trying to enable. The contract above is the constraints any such lane must satisfy; the implementation shape (one plugin per CLI vs a generic CLI-runner plugin parameterised by config) is open.</p>
+<p>The historical issue for this is <a href="https://github.com/NousResearch/hermes-agent/issues/19931" class="ext" target="_blank" rel="noopener">#19931</a> and the closed-not-merged Codex-specific PR <a href="https://github.com/NousResearch/hermes-agent/pull/19924" class="ext" target="_blank" rel="noopener">#19924</a> — those describe the original architecture proposal but didn't land a runner.</p>
+<h2 id="failure-modes-the-dispatcher-handles">Failure modes the dispatcher handles</h2>
+<p>So lane authors don't have to reimplement these:</p>
+<ul>
+<li><strong>Stale claim TTL</strong> — a worker that claims and then never heartbeats / completes / blocks gets reclaimed after <code>DEFAULT_CLAIM_TTL_SECONDS</code> (15 min default) — but only if the worker process has actually died. A live worker (slow model spending 20+ min in one tool-free LLM call) gets the claim <em>extended</em> instead of killed; only a dead PID is reclaimed.</li>
+<li><strong>Crashed worker</strong> — a worker whose host-local PID has vanished is detected by <code>detect_crashed_workers</code> and reaped; the task increments <code>consecutive_failures</code> and may auto-block when the breaker trips.</li>
+<li><strong>Run-level retry</strong> — when a task is retried (post-block, post-crash, post-reclaim), the worker can use the <code>expected_run_id</code> parameter on terminating tools to fail fast if its own run was already superseded.</li>
+<li><strong>Per-task max runtime</strong> — <code>task.max_runtime_seconds</code> hard-caps wall-clock time per run, regardless of PID liveness. Catches genuinely-deadlocked workers that the live-PID extension would otherwise keep running.</li>
+<li><strong>Stranded-task detection</strong> — a ready task whose assignee never produces a claim within <code>kanban.stranded_threshold_seconds</code> (default 30 min) shows up in <code>hermes kanban diagnostics</code> as a <code>stranded_in_ready</code> warning. Severity escalates to error at 2x the threshold and critical at 6x. Catches typo'd assignees, deleted profiles, and down external worker pools in one signal — identity-agnostic, no per-board allowlist to curate.</li>
+<li><strong>Running with open parents</strong> — a <code>running</code> card whose direct parent is not <code>done</code>/<code>archived</code> (the parent reopened mid-run, or the link predates the running-child refusal) shows a <code>running_with_open_parents</code> warning: the dependency gate is not serialising the two runs and <code>kanban_complete</code> will be refused until the parent finishes. Read-only; suggests <code>hermes kanban unlink</code>.</li>
+<li><strong>Legacy review dependency deadlock</strong> — a parent sticky-blocked with <code>review-required:</code> while one or more direct children remain dependency-gated in <code>todo</code> produces an immediate <code>review_dependency_deadlock</code> error. The diagnostic is read-only: it suggests completing the finished phase or unlinking the incorrect edge but never removes a user block automatically.</li>
+</ul>
+<h2 id="related">Related</h2>
+<ul>
+<li><a href="kanban.html">Kanban overview</a> — the user-facing intro.</li>
+<li><a href="kanban-tutorial.html">Kanban tutorial</a> — walkthrough with the dashboard open.</li>
+<li><a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py" class="ext" target="_blank" rel="noopener"><code>KANBAN_GUIDANCE</code></a> — the worker + orchestrator lifecycle injected into every kanban worker's system prompt.</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban-worker-lanes</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#the-hierarchy">The hierarchy</a></li>
+<li class="lvl2"><a href="#what-a-lane-provides">What a lane provides</a></li>
+<li class="lvl3"><a href="#1-an-assignee-string">1. An assignee string</a></li>
+<li class="lvl3"><a href="#2-a-spawn-mechanism">2. A spawn mechanism</a></li>
+<li class="lvl3"><a href="#descendant-process-scope">Descendant process scope</a></li>
+<li class="lvl3"><a href="#3-a-lifecycle-terminator">3. A lifecycle terminator</a></li>
+<li class="lvl2"><a href="#outputs-and-the-review-handoff">Outputs and the review handoff</a></li>
+<li class="lvl2"><a href="#logs-and-audit-trail">Logs and audit trail</a></li>
+<li class="lvl2"><a href="#existing-lane-shapes">Existing lane shapes</a></li>
+<li class="lvl3"><a href="#hermes-profile-lane-default">Hermes profile lane (default)</a></li>
+<li class="lvl3"><a href="#orchestrator-profile-lane">Orchestrator profile lane</a></li>
+<li class="lvl2"><a href="#adding-an-external-cli-worker-lane">Adding an external CLI worker lane</a></li>
+<li class="lvl2"><a href="#failure-modes-the-dispatcher-handles">Failure modes the dispatcher handles</a></li>
+<li class="lvl2"><a href="#related">Related</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

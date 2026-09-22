@@ -1,0 +1,1734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kanban (Multi-Agent Board) · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/kanban</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="kanban--multi-agent-profile-collaboration">Kanban — Multi-Agent Profile Collaboration</h1>
+<blockquote>
+<p><strong>Want a walkthrough?</strong> Read the <a href="kanban-tutorial.html">Kanban tutorial</a> — four user stories (solo dev, fleet farming, role pipeline with retry, circuit breaker) with dashboard screenshots of each. This page is the reference; the tutorial is the narrative.</p>
+</blockquote>
+<p>Hermes Kanban is a durable task board, shared across all your Hermes profiles, that lets multiple named agents collaborate on work without fragile in-process subagent swarms. Every task is a row in <code>~/.hermes/kanban.db</code>; every handoff is a row anyone can read and write; every worker is a full OS process with its own identity.</p>
+<h3 id="completion-checkpoints-before-the-iteration-cap">Completion checkpoints before the iteration cap</h3>
+<p>Dispatcher-owned workers get one checkpoint notice near 90% of their finite iteration
+budget, attached to a fresh tool result while another tool-capable call remains. Use
+<code>agent.budget_warning_ratio</code> to choose an earlier threshold. Tiny budgets warn no later
+than their penultimate iteration; a one-iteration run has no pre-cap checkpoint window.
+The notice is saved in the session transcript before the next request. Workers should
+call <code>kanban_complete</code> only after verifying the task contract, or persist a progress
+comment and continue. A commit or diff alone never automatically completes a task.</p>
+<p>The hard cap, toolless final summary, and consecutive-failure circuit breaker are
+unchanged: workers that still exhaust their budget remain subject to bounded retries.
+This is a reporting opportunity, not a guarantee that a model will heed the notice.
+Ordinary conversations and delegated children do not inherit the automatic Kanban
+checkpoint; their iteration warning remains opt-in.</p>
+<h3 id="two-surfaces-the-model-talks-through-tools-you-talk-through-the-cli">Two surfaces: the model talks through tools, you talk through the CLI</h3>
+<p>The board has two front doors, both backed by the same <code>~/.hermes/kanban.db</code>:</p>
+<ul>
+<li><strong>Agents drive the board through a dedicated <code>kanban_*</code> toolset</strong> — <code>kanban_show</code>, <code>kanban_list</code>, <code>kanban_complete</code>, <code>kanban_request_review</code>, <code>kanban_request_changes</code>, <code>kanban_block</code>, <code>kanban_heartbeat</code>, <code>kanban_comment</code>, <code>kanban_attach</code>, <code>kanban_attach_url</code>, <code>kanban_attachments</code>, <code>kanban_create</code>, <code>kanban_link</code>, <code>kanban_unblock</code>. The dispatcher spawns each worker with these tools already in its schema; orchestrator profiles can also enable the <code>kanban</code> toolset explicitly. The model reads and routes tasks by calling tools directly, <em>not</em> by shelling out to <code>hermes kanban</code>. See <a href="#how-workers-interact-with-the-board">How workers interact with the board</a> below.</li>
+<li><strong>You (and scripts, and cron) drive the board through <code>hermes kanban …</code></strong> on the CLI, <code>/kanban …</code> as a slash command, or the dashboard. These are for humans and automation — the places without a tool-calling model behind them.</li>
+</ul>
+<p>Both surfaces route through the same <code>kanban_db</code> layer, so reads see a consistent view and writes can't drift. The rest of this page shows CLI examples because they're easy to copy-paste, but every CLI verb has a tool-call equivalent the model uses.</p>
+<p>This is the shape that covers the workloads <code>delegate_task</code> can't:</p>
+<ul>
+<li><strong>Research triage</strong> — parallel researchers + analyst + writer, human-in-the-loop.</li>
+<li><strong>Scheduled ops</strong> — recurring daily briefs that build a journal over weeks.</li>
+<li><strong>Digital twins</strong> — persistent named assistants (<code>inbox-triage</code>, <code>ops-review</code>) that accumulate memory over time.</li>
+<li><strong>Engineering pipelines</strong> — decompose → implement in parallel worktrees → review → iterate → PR.</li>
+<li><strong>Fleet work</strong> — one specialist managing N subjects (50 social accounts, 12 monitored services).</li>
+</ul>
+<p>The eight canonical collaboration patterns are catalogued in <a href="#collaboration-patterns">Collaboration patterns</a> below.</p>
+<h2 id="pr-completion-contracts">PR completion contracts</h2>
+<p>Declare PR work at creation with <code>--completion-contract OWNER/REPO</code> (or an exact
+<code>https://github.com/OWNER/REPO/pull/123</code> URL for existing work). <code>kanban_create</code>
+accepts the same <code>completion_contract</code>. Use <code>local-only</code> for intentionally local
+work; existing and undeclared cards retain that default. Prose URLs are not policy.</p>
+<p>After publishing, pass <code>metadata.published_pr</code> to completion. The first matching
+URL binds the card permanently; retries cannot substitute a green sibling PR.
+CLI <code>show --json</code> and <code>kanban_show</code> expose the persisted contract.</p>
+<p>The shared <code>complete_task</code> boundary covers worker tools, CLI, review approval and
+dashboard completion. It reads classic branch protection and active ruleset
+required contexts, paginates exact-head check runs and legacy statuses, then
+re-reads the PR head/base. Optional failed/skipped telemetry does not veto accepted
+required checks. Missing, pending, failed, cancelled, timed-out, stale, skipped or
+neutral <strong>required</strong> evidence cannot complete the card. Neither can zero-run
+acceptance, unreadable policy or GitHub API failures. A repository without required
+checks needs a local-only contract. <code>gh</code> must be authenticated with read access to
+the repository's checks and rules; no remote writes are performed by this gate.</p>
+<p>Rejection retains the active card and workspace. Durable <code>pr_acceptance</code> events
+store PR URL, SHA, required contexts, check IDs/URLs, classifications and recovery
+instructions; <code>last_failure_error</code> surfaces the next step. Fix failures, rerun
+infrastructure checks or wait, then retry completion. Use <code>kanban_block</code> when
+human action is needed. Generic GitHub <code>failure</code> cannot establish whether a test
+or artifact upload failed; inspect its retained URL. Explicit infrastructure
+conclusions and API failures are classified separately. No extra worker is spawned.</p>
+<p>Receipt persistence and the terminal write recheck run/status/contract ownership
+under one SQLite lock: a reclaimed worker cannot complete or attach acceptance to
+the new run. The final GitHub read is a completion-time snapshot, not a distributed
+transaction or a continuous post-completion monitor. This is a single-user lifecycle
+guard, not OS isolation against arbitrary direct database writes. GitHub Enterprise
+is not covered. Related publication/lifecycle work: #91230, #84254, #52311; local
+verification and publication alone are not remote acceptance.</p>
+<h2 id="kanban-vs-delegate_task">Kanban vs. <code>delegate_task</code></h2>
+<p>They look similar; they are not the same primitive.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>delegate_task</code></th>
+<th>Kanban</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Shape</td>
+<td>RPC call (fork → join)</td>
+<td>Durable message queue + state machine</td>
+</tr>
+<tr>
+<td>Parent</td>
+<td>Blocks until child returns</td>
+<td>Fire-and-forget after <code>create</code></td>
+</tr>
+<tr>
+<td>Child identity</td>
+<td>Anonymous subagent</td>
+<td>Named profile with persistent memory</td>
+</tr>
+<tr>
+<td>Resumability</td>
+<td>None — failed = failed</td>
+<td>Block → unblock → re-run; crash → reclaim</td>
+</tr>
+<tr>
+<td>Human in the loop</td>
+<td>Not supported</td>
+<td>Comment / unblock at any point</td>
+</tr>
+<tr>
+<td>Agents per task</td>
+<td>One call = one subagent</td>
+<td>N agents over task's life (retry, review, follow-up)</td>
+</tr>
+<tr>
+<td>Audit trail</td>
+<td>Lost on context compression</td>
+<td>Durable rows in SQLite forever</td>
+</tr>
+<tr>
+<td>Coordination</td>
+<td>Hierarchical (caller → callee)</td>
+<td>Peer — any profile reads/writes any task</td>
+</tr>
+</tbody>
+</table>
+<p><strong>One-sentence distinction:</strong> <code>delegate_task</code> is a function call; Kanban is a work queue where every handoff is a row any profile (or human) can see and edit.</p>
+<div class="admonition adm-caution"><p class="adm-title">Don&#x27;t link a support card to the card it is meant to unblock</p>
+<p>A worker that is blocked on <code>t_parent</code> and creates a support card for the missing piece must <strong>not</strong> <code>kanban_link(t_parent, t_support)</code>: the link makes the support card a <em>child</em> of the blocked parent, so it is gated behind the parent it exists to unblock and neither card ever runs. Reference the parent id in the support card's body instead. <code>link</code>/<code>kanban_link</code> report <code>gated: true</code> and record a <code>dependency_wait</code> event when they demote a <code>ready</code> child (and <code>kanban_create</code> with <code>parents</code> does the same when it parks the new card), so the deadlock is visible on the board; <code>hermes kanban unlink &lt;parent&gt; &lt;child&gt;</code> releases it.</p>
+</div>
+<p><strong>Use <code>delegate_task</code> when</strong> the parent agent needs a short reasoning answer before continuing, no humans involved, result goes back into the parent's context.</p>
+<p><strong>Use Kanban when</strong> work crosses agent boundaries, needs to survive restarts, might need human input, might be picked up by a different role, or needs to be discoverable after the fact.</p>
+<p>They coexist: a kanban worker may call <code>delegate_task</code> internally during its run.</p>
+<h2 id="core-concepts">Core concepts</h2>
+<ul>
+<li><strong>Board</strong> — a standalone queue of tasks with its own SQLite DB, workspaces
+  directory, and dispatcher loop. A single install can have many boards
+  (e.g. one per project, repo, or domain); see <a href="#boards-multi-project">Boards (multi-project)</a>
+  below. Single-project users stay on the <code>default</code> board and never see the
+  word "board" outside this docs section.</li>
+<li><strong>Task</strong> — a row with title, optional body, one assignee (a profile name), status (<code>triage | todo | ready | running | blocked | review | done | archived</code>), optional tenant namespace, optional idempotency key (dedup for retried automation).</li>
+<li><strong>Link</strong> — <code>task_links</code> row recording a parent → child dependency. The dispatcher promotes <code>todo → ready</code> when all parents are <code>done</code>. Adding a link to a running child is rejected because it cannot gate work already claimed; the one exception is an active worker linking its own card, with dispatcher-provided run ownership, immediately before a dependency-block handoff.</li>
+<li><strong>Comment</strong> — the inter-agent protocol. Agents and humans append comments; when a worker is (re-)spawned it reads the full comment thread as part of its context.</li>
+<li><strong>Workspace</strong> — the directory a worker operates in. Three kinds:</li>
+<li><code>scratch</code> (default) — fresh tmp dir under <code>~/.hermes/kanban/workspaces/&lt;id&gt;/</code> (or <code>~/.hermes/kanban/boards/&lt;slug&gt;/workspaces/&lt;id&gt;/</code> on non-default boards). <strong>Deleted when the task completes</strong> — scratch is ephemeral by design. Files explicitly declared through <code>kanban_complete(artifacts=[...])</code> or <code>kanban_request_review(artifacts=[...])</code> are copied into durable per-task attachment storage before cleanup (a review handoff stages them at handoff time, since the reviewer's later completion is what deletes the scratch workspace); existing deliverable paths in legacy completion summaries receive the same treatment. Other scratch files are removed. A missing declared scratch artifact keeps the task in-flight so the worker can correct the path and retry. Use <code>worktree:</code> or <code>dir:&lt;path&gt;</code> when the whole workspace should remain available. The first time a scratch workspace is created on an install, the dispatcher logs a warning and emits a <code>tip_scratch_workspace</code> event on the task (visible via <code>hermes kanban show &lt;id&gt;</code>).</li>
+<li><code>dir:&lt;path&gt;</code> — an existing shared directory (Obsidian vault, mail ops dir, per-account folder). <strong>Must be an absolute path.</strong> Relative paths like <code>dir:../tenants/foo/</code> are rejected at dispatch because they'd resolve against whatever CWD the dispatcher happens to be in, which is ambiguous and a confused-deputy escape vector. The path is otherwise trusted — it's your box, your filesystem, the worker runs with your uid. This is the trusted-local-user threat model; kanban is single-host by design. <strong>Preserved on completion.</strong></li>
+<li><code>worktree</code> — a git worktree under <code>.worktrees/&lt;id&gt;/</code> for coding tasks. Use <code>worktree:&lt;path&gt;</code> to pin the exact target path. Worker-side <code>git worktree add</code> creates it, using <code>--branch</code> when provided. <strong>Preserved on completion.</strong></li>
+<li><strong>Dispatcher</strong> — a long-lived loop that, every N seconds (default 60): reclaims stale claims, reclaims crashed workers (PID gone but TTL not yet expired), reaps workers that outlived their finished run (a worker still alive after its own <code>kanban_complete</code>/<code>kanban_block</code> is terminated once its run has been closed for two minutes, leaving it time to finish its final turn — matched by PID <em>and</em> spawn-time fingerprint, so a recycled PID is never signalled; recorded as a <code>terminal_worker_reaped</code> event), promotes ready tasks, atomically claims, spawns assigned profiles. Runs <strong>inside the gateway</strong> by default (<code>kanban.dispatch_in_gateway: true</code>). One dispatcher sweeps all boards per tick; workers are spawned with <code>HERMES_KANBAN_BOARD</code> pinned so they can't see other boards. After <code>kanban.failure_limit</code> consecutive spawn failures on the same task (default: 2) the dispatcher auto-blocks it with the last error as the reason — prevents thrashing on tasks whose profile doesn't exist, workspace can't mount, etc.</li>
+<li><strong>Tenant</strong> — optional string namespace <em>within</em> a board. One specialist fleet can serve multiple businesses (<code>--tenant business-a</code>) with data isolation by workspace path and memory key prefix. Tenants are a soft filter; boards are the hard isolation boundary.</li>
+</ul>
+<h2 id="boards-multi-project">Boards (multi-project)</h2>
+<p>Boards let you separate unrelated streams of work — one per project, repo,
+or domain — into isolated queues. A new install has exactly one board
+called <code>default</code> (DB at <code>~/.hermes/kanban.db</code> for back-compat). Users who
+only want one stream of work never need to know about boards; the feature
+is opt-in.</p>
+<p>Per-board isolation is absolute:</p>
+<ul>
+<li>Separate SQLite DB per board (<code>~/.hermes/kanban/boards/&lt;slug&gt;/kanban.db</code>).</li>
+<li>Separate <code>workspaces/</code> and <code>logs/</code> directories.</li>
+<li>Workers spawned for a task see <strong>only</strong> their board's tasks — the
+  dispatcher sets <code>HERMES_KANBAN_BOARD</code> in the child env and every
+  <code>kanban_*</code> tool the worker has access to reads it.</li>
+<li>Linking tasks across boards is not allowed (keeps the schema simple; if
+  you really need cross-project refs, use free-text mentions and look
+  them up by id manually).</li>
+</ul>
+<h3 id="managing-boards-from-the-cli">Managing boards from the CLI</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># See what&#39;s on disk. Fresh installs show only &quot;default&quot;.</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>list
+
+<span class="c1"># Create a new board.</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>create<span class="w"> </span>atm10-server<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--name<span class="w"> </span><span class="s2">&quot;ATM10 Server&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--description<span class="w"> </span><span class="s2">&quot;Minecraft modded server ops&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--icon<span class="w"> </span>🎮<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--switch<span class="w">                   </span><span class="c1"># optional: make it the active board</span>
+
+<span class="c1"># Operate on a specific board without switching.</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>--board<span class="w"> </span>atm10-server<span class="w"> </span>list
+hermes<span class="w"> </span>kanban<span class="w"> </span>--board<span class="w"> </span>atm10-server<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Restart ATM server&quot;</span><span class="w"> </span>--assignee<span class="w"> </span>ops
+
+<span class="c1"># Change which board is &quot;current&quot; for subsequent calls.</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>switch<span class="w"> </span>atm10-server
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>show<span class="w">             </span><span class="c1"># who&#39;s active right now?</span>
+
+<span class="c1"># Rename the display name (the slug is immutable — it&#39;s the directory name).</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>rename<span class="w"> </span>atm10-server<span class="w"> </span><span class="s2">&quot;ATM10 (Prod)&quot;</span>
+
+<span class="c1"># Archive (default) — moves the board&#39;s dir to boards/_archived/&lt;slug&gt;-&lt;ts&gt;/.</span>
+<span class="c1"># Recoverable by moving the dir back.</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>rm<span class="w"> </span>atm10-server
+
+<span class="c1"># Hard delete — `rm -rf` the board dir. No recovery.</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>boards<span class="w"> </span>rm<span class="w"> </span>atm10-server<span class="w"> </span>--delete
+</code></pre></div>
+
+<p>Board resolution order (highest precedence first):</p>
+<ol>
+<li>Explicit <code>--board &lt;slug&gt;</code> on the CLI call.</li>
+<li><code>HERMES_KANBAN_BOARD</code> env var (set by the dispatcher when spawning a
+   worker, so workers can't see other boards).</li>
+<li><code>~/.hermes/kanban/current</code> — the slug persisted by <code>hermes kanban
+   boards switch</code>.</li>
+<li><code>default</code>.</li>
+</ol>
+<p>Slugs are validated: lowercase alphanumerics + hyphens + underscores, 1-64
+chars, must start with alphanumeric. Uppercase input is auto-downcased.
+Anything else (slashes, spaces, dots, <code>..</code>) is rejected at the CLI layer
+so path-traversal tricks can't name a board.</p>
+<h3 id="managing-boards-from-the-dashboard">Managing boards from the dashboard</h3>
+<p><code>hermes dashboard</code> → Kanban tab shows a board switcher at the top as soon
+as more than one board exists (or any board has tasks). Single-board users
+see only a small <code>+ New board</code> button; the switcher is hidden until it
+matters.</p>
+<ul>
+<li><strong>Board dropdown</strong> — pick the active board. Your selection is saved to
+  the browser's <code>localStorage</code> so it persists across reloads without
+  shifting the CLI's <code>current</code> pointer out from under a terminal you left
+  open.</li>
+<li><strong>+ New board</strong> — opens a modal asking for slug, display name,
+  description, icon, project directory, and (when any Project exists) a
+  <strong>Project</strong> selector. Option to auto-switch to the new board.</li>
+<li><strong>Settings</strong> — opens a modal for editing the current board's display
+  name, description, and <strong>project directory</strong> (<code>default_workdir</code>). The
+  project directory is the board-level workspace default every new task
+  inherits (git repo → preserved worktree, plain dir → preserved
+  directory); each task can still override it at creation time. Clearing
+  the field reverts new tasks to disposable scratch workspaces — unless a
+  Project is bound, in which case the Project's primary folder is used;
+  unbind the project first to fall back to scratch.</li>
+<li><strong>Project</strong> (in both modals) — binds the board to a Hermes Project
+  (the board's <code>project_id</code>).
+  Tasks created on a bound board inherit the Project; picking a project
+  while the directory field is blank also seeds the project directory
+  with the Project's primary folder. The bound project shows as a
+  <code>Project: &lt;name&gt;</code> badge next to the board dropdown; its <code>×</code> unbinds the
+  board (sends <code>project_id: ""</code>) without touching the project directory,
+  and <code>No binding</code> in Settings does the same on save. The selector only
+  appears when at least one Project exists.</li>
+<li><strong>Archive</strong> — only shown on non-<code>default</code> boards. Confirms, then moves
+  the board dir to <code>boards/_archived/</code>.</li>
+</ul>
+<p>All dashboard API endpoints accept <code>?board=&lt;slug&gt;</code> for board scoping. The
+events WebSocket is pinned to a board at connection time; switching in
+the UI opens a fresh WS against the new board.</p>
+<h3 id="switching-boards-in-the-desktop-app">Switching boards in the Desktop app</h3>
+<p>In the Desktop app the board switcher sits in the header row at the top of
+the Kanban page, beside the page title: a <strong>Board</strong> control showing the current board's
+name and task count, with a chevron — hover it for "Switch board". Click
+it to pick another board, or to rename, configure, export, import,
+create, or archive boards. Like the dashboard, the desktop keeps its own
+selection (persisted locally) and does not move the CLI's <code>current</code>
+pointer.</p>
+<h2 id="file-attachments">File attachments</h2>
+<p>Tasks can carry file attachments — PDFs, images, source documents — so a
+worker has the source material it needs without you pasting paths into the
+body and hoping it finds them.</p>
+<ul>
+<li><strong>Upload</strong> — open a task in the dashboard drawer and use the
+  <strong>Attachments</strong> section's <em>Upload file</em> button (multiple files at once
+  are fine). Each upload is capped at 25 MB.</li>
+<li><strong>Storage</strong> — files land under
+  <code>&lt;hermes-home&gt;/kanban/attachments/&lt;task_id&gt;/</code> for the default board, or
+  <code>&lt;hermes-home&gt;/kanban/boards/&lt;slug&gt;/attachments/&lt;task_id&gt;/</code> for a named
+  board. Set <code>HERMES_KANBAN_ATTACHMENTS_ROOT</code> to pin a custom location.</li>
+<li><strong>What the worker sees</strong> — when the dispatcher hands a task to a worker,
+  the worker's context includes an <strong>Attachments</strong> section listing each
+  file's name and its <strong>absolute path</strong>. The worker has full file/terminal
+  tool access, so it reads attachments directly (<code>read_file</code>, or shell
+  tools like <code>pdftotext</code>).</li>
+<li><strong>Download / remove</strong> — the drawer lists each attachment with a download
+  link and a remove (×) control. Removing an attachment deletes its
+  metadata row; the on-disk file is deleted only when no other attachment
+  row still references it (a file shared by several tasks stays until its
+  last reference is removed). From the CLI, <code>hermes kanban attach-rm
+  ATTACHMENT_ID</code> removes an attachment the same way.</li>
+</ul>
+<div class="admonition adm-note"><p class="adm-title">Remote terminal backends</p>
+<p>Attachment paths resolve directly on the <strong>local</strong> terminal backend, which
+is the default for Kanban workers. If you run workers on a remote backend
+(Docker, Modal), mount the board's <code>attachments/</code> directory into the
+sandbox so the absolute paths in the worker context are reachable.</p>
+</div>
+<h2 id="quick-start">Quick start</h2>
+<p>The commands below are <strong>you</strong> (the human) setting up the board and creating tasks. Once a task is assigned, the dispatcher spawns the assigned profile as a worker, and from there <strong>the model drives the task through <code>kanban_*</code> tool calls, not CLI commands</strong> — see <a href="#how-workers-interact-with-the-board">How workers interact with the board</a>.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. Create the board (you)</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>init
+
+<span class="c1"># 2. Start the gateway (hosts the embedded dispatcher)</span>
+hermes<span class="w"> </span>gateway<span class="w"> </span>start
+
+<span class="c1"># 3. Create a task (you — or an orchestrator agent via kanban_create)</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;research AI funding landscape&quot;</span><span class="w"> </span>--assignee<span class="w"> </span>researcher
+
+<span class="c1"># 4. Watch activity live (you)</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>watch
+
+<span class="c1"># 5. See the board (you)</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>list
+hermes<span class="w"> </span>kanban<span class="w"> </span>stats
+</code></pre></div>
+
+<p>When the dispatcher picks up <code>t_abcd</code> and spawns the <code>researcher</code> profile, the very first thing that worker's model does is call <code>kanban_show()</code> to read its task. It doesn't run <code>hermes kanban show t_abcd</code>.</p>
+<h3 id="gateway-embedded-dispatcher-default">Gateway-embedded dispatcher (default)</h3>
+<p>The dispatcher runs inside the gateway process. Nothing to install, no
+separate service to manage — if the gateway is up, ready tasks get picked
+up on the next tick (60s by default).</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">kanban</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">dispatch_in_gateway</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">        </span><span class="c1"># default</span>
+<span class="w">  </span><span class="nt">dispatch_interval_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60</span><span class="w">    </span><span class="c1"># default</span>
+<span class="w">  </span><span class="nt">review_dispatch</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">            </span><span class="c1"># default: spawn the assigned profile with</span>
+<span class="w">                                   </span><span class="c1"># the bundled sdlc-review skill. Set false</span>
+<span class="w">                                   </span><span class="c1"># for human-only review boards.</span>
+<span class="w">  </span><span class="c1"># dispatch_profiles: [sage]       # unset (key omitted): this home may claim</span>
+<span class="w">                                   </span><span class="c1"># cards for any existing profile. Set to a</span>
+<span class="w">                                   </span><span class="c1"># list (or comma-separated string) of profile</span>
+<span class="w">                                   </span><span class="c1"># names to restrict which assignees this home</span>
+<span class="w">                                   </span><span class="c1"># claims. Fail-closed: an empty list, `null`</span>
+<span class="w">                                   </span><span class="c1"># or a bare `dispatch_profiles:` claims</span>
+<span class="w">                                   </span><span class="c1"># nothing, and so does an unreadable config.</span>
+</code></pre></div>
+
+<p>Override the config flag at runtime via <code>HERMES_KANBAN_DISPATCH_IN_GATEWAY=0</code>
+for debugging. Standard gateway supervision applies: run <code>hermes gateway
+start</code> directly, or wire the gateway up as a systemd user unit (see the
+gateway docs). Without a running gateway, <code>ready</code> tasks stay where they are
+until one comes up — <code>hermes kanban create</code> warns about this at creation
+time.</p>
+<h4 id="workers-and-systemd-cgroups">Workers and systemd cgroups</h4>
+<p>Workers are fire-and-forget processes that outlive the dispatcher tick, so
+wherever the dispatcher runs inside a systemd unit the worker is launched in
+its own transient scope (<code>systemd-run --user --scope --unit hermes-worker-kanban-&lt;task&gt;-run-&lt;run&gt;</code>)
+and survives that unit's exit or restart. Creating the scope needs the
+dispatching user's session bus (<code>/run/user/&lt;uid&gt;/bus</code>); on a system-level
+install give the user one with <code>sudo loginctl enable-linger &lt;user&gt;</code>.</p>
+<ul>
+<li><strong>Gateway dispatcher</strong> (<code>dispatch_in_gateway: true</code>, gateway under systemd):
+  the scope is mandatory. If the bus is unreachable the spawn is refused and
+  recorded on the card as an <em>infrastructure</em> failure — <code>spawn_failed</code> with
+  <code>metadata.infrastructure: true</code>, the linger remedy in <code>last_failure_error</code>,
+  a warning in the gateway log — and the card stays <code>ready</code>. It does <strong>not</strong>
+  advance <code>consecutive_failures</code>, so a host blip never parks cards as a bare
+  <code>blocked</code>; the respawn guard spaces the retries (<code>infrastructure_cooldown</code>,
+  same window as the rate-limit cooldown) until the bus is back.</li>
+<li><strong><code>hermes kanban dispatch</code> from your own unit</strong> (a <code>Type=oneshot</code> timer, a
+  sequencer service): the worker gets the same scope when the bus is
+  reachable. Without one the worker is still spawned — inside <em>your</em> unit's
+  cgroup — and the dispatcher logs once, loudly, that the unit's exit will kill
+  it. <code>Type=oneshot</code> with the default <code>KillMode=control-group</code> loses every
+  worker within a second of the pass finishing; either enable linger so the
+  scope can be created, or set <code>KillMode=process</code> on that unit so its exit
+  only kills the dispatcher itself.</li>
+</ul>
+<p>Running <code>hermes kanban daemon</code> as a separate process is <strong>deprecated</strong>;
+use the gateway. If you truly cannot run the gateway (headless host
+policy forbids long-lived services, etc.) a <code>--force</code> escape hatch keeps
+the old standalone daemon alive for one release cycle, but running both
+a gateway-embedded dispatcher AND a standalone daemon against the same
+<code>kanban.db</code> causes claim races and is not supported.</p>
+<h3 id="shared-boards-across-homes">Shared boards across homes</h3>
+<p>Mounting one <code>kanban.db</code> in several Hermes homes (containers, fleet hosts) shares
+the board, but profile names are home-local and every home has a root profile
+named <code>default</code> — so <code>default</code> collides by construction. The dispatcher's spawn
+gate checks <code>profile_exists(assignee)</code> against the <em>claiming</em> home, and without
+further configuration every home's dispatcher considers a card assigned to
+<code>default</code> claimable, so the wrong home can claim and run it. Either give each
+home unique profile names and never assign cards to <code>default</code> on a shared board,
+or set <code>kanban.dispatch_profiles</code> per home to declare exactly which assignees
+that home may claim — anything else lands in the dispatcher's
+<code>skipped_nonspawnable</code> bucket instead of spawning, and no longer counts as
+spawnable work for the gateway's wake-up probe.</p>
+<h3 id="idempotent-create-for-automation--webhooks">Idempotent create (for automation / webhooks)</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># First call creates the task. Any subsequent call with the same key</span>
+<span class="c1"># returns the existing task id instead of duplicating.</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;nightly ops review&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>ops<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--idempotency-key<span class="w"> </span><span class="s2">&quot;nightly-ops-</span><span class="k">$(</span>date<span class="w"> </span>-u<span class="w"> </span>+%Y-%m-%d<span class="k">)</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--json
+</code></pre></div>
+
+<h3 id="bulk-cli-verbs">Bulk CLI verbs</h3>
+<p>All the lifecycle verbs accept multiple ids so you can clean up a batch
+in one command:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span><span class="nb">complete</span><span class="w"> </span>t_abc<span class="w"> </span>t_def<span class="w"> </span>t_hij<span class="w"> </span>--result<span class="w"> </span><span class="s2">&quot;batch wrap&quot;</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>archive<span class="w">  </span>t_abc<span class="w"> </span>t_def<span class="w"> </span>t_hij
+hermes<span class="w"> </span>kanban<span class="w"> </span>unblock<span class="w">  </span>t_abc<span class="w"> </span>t_def
+hermes<span class="w"> </span>kanban<span class="w"> </span>block<span class="w">    </span>t_abc<span class="w"> </span><span class="s2">&quot;need input&quot;</span><span class="w"> </span>--ids<span class="w"> </span>t_def<span class="w"> </span>t_hij
+</code></pre></div>
+
+<div class="admonition adm-note"><p class="adm-title">Where an unblocked task lands</p>
+<p><code>unblock</code> restores the safe source phase: <strong><code>review</code></strong> for reviewer-origin work
+whose parents are complete, <strong><code>ready</code></strong> for implementation work whose parents
+are complete, or <strong><code>todo</code></strong> while any parent remains open. A <code>todo</code> task keeps
+its source-phase provenance and returns to <code>review</code> or <code>ready</code> automatically
+when the dependency gate clears. <code>unblock</code> never routes directly to <code>triage</code>.</p>
+<p>If you unblock a task and it later shows up in <strong><code>triage</code></strong>, the unblock is not
+what put it there. A subsequent <em>re-block for the same reason</em> did: after a task
+is blocked → unblocked → re-blocked for the same cause <code>BLOCK_RECURRENCE_LIMIT</code>
+times (default <code>2</code>), the unblock-loop breaker stops sending it back to <code>blocked</code>
+— where a cron would just keep unblocking it — and routes it to <code>triage</code> for
+orchestration attention. This is a deterministic DB guard, not an LLM judgment call, and
+a task's body text cannot opt out of it: the recurrence counter deliberately
+survives each unblock (it resets only on a successful <code>complete</code>). To keep an
+unblocked task in the work pool, resolve <em>why it keeps re-blocking</em> (unfinished
+parent, missing input, unmet capability) before unblocking, or raise
+<code>BLOCK_RECURRENCE_LIMIT</code> if the loop is expected.</p>
+</div>
+<h2 id="enabling-tools-for-a-chat-profile">Enabling tools for a chat profile</h2>
+<p>The Desktop Kanban plugin displays the board; it does not grant the chat agent
+permission to manage tasks. Enable the <code>kanban</code> toolset for the profile and
+platform that should orchestrate work:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>-p<span class="w"> </span>planner<span class="w"> </span>tools<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>kanban<span class="w">                      </span><span class="c1"># CLI / TUI / Desktop chats</span>
+hermes<span class="w"> </span>-p<span class="w"> </span>planner<span class="w"> </span>tools<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>kanban<span class="w"> </span>--platform<span class="w"> </span>telegram<span class="w">  </span><span class="c1"># a gateway platform</span>
+</code></pre></div>
+
+<p>Each platform has its own selection under <code>platform_toolsets.&lt;platform&gt;</code> in
+<code>config.yaml</code>; the toolset is also a checkbox in <code>hermes tools</code> and the dashboard.
+A gateway agent that has it can <code>kanban_create</code> from a chat and is auto-subscribed
+to that task's completion/block notifications in the same thread. Start a new chat
+after changing this setting; existing conversations retain their tool schemas and
+prompt cache. <code>agent.disabled_toolsets</code> remains authoritative. Legacy top-level
+<code>toolsets: [kanban]</code> is honoured as a fallback only when no platform selection was
+saved; <code>all</code> alone is not a Kanban opt-in.</p>
+<p>Dispatcher-owned workers receive their task lifecycle tools automatically.
+<code>delegate_task</code> children do not gain permission to mutate the board.</p>
+<h2 id="how-workers-interact-with-the-board">How workers interact with the board</h2>
+<p><strong>Workers do not shell out to <code>hermes kanban</code>.</strong> When the dispatcher spawns a worker it sets <code>HERMES_KANBAN_TASK=t_abcd</code> in the child's env, and that env var flips on a dedicated <strong>kanban toolset</strong> in the model's schema. The same toolset is also available to orchestrator profiles that enable <code>kanban</code> in their toolsets config. These tools read and mutate the board directly via the Python <code>kanban_db</code> layer, same as the CLI does. A running worker calls these like any other tool; it never sees or needs the <code>hermes kanban</code> CLI.</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Purpose</th>
+<th>Required params</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kanban_show</code></td>
+<td>Read the current task (title, body, prior attempts, parent handoffs, comments, full pre-formatted <code>worker_context</code>). Defaults to the env's task id.</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>kanban_list</code></td>
+<td>List task summaries with filters for <code>assignee</code>, <code>status</code>, <code>tenant</code>, archived visibility, and limit. Intended for orchestrators discovering board work.</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>kanban_complete</code></td>
+<td>Finish with <code>summary</code> + <code>metadata</code> structured handoff.</td>
+<td>at least one of <code>summary</code> / <code>result</code></td>
+</tr>
+<tr>
+<td><code>kanban_request_review</code></td>
+<td>Start same-card review with a durable <code>summary</code>, optional <code>metadata</code>, and optional reviewer profile. The task moves to <code>review</code>; this is not a block.</td>
+<td><code>summary</code></td>
+</tr>
+<tr>
+<td><code>kanban_request_changes</code></td>
+<td>Reviewer verdict from an active review run. Closes that run, reapplies parent gating, and routes the task to its original implementer without block-loop accounting.</td>
+<td><code>reason</code></td>
+</tr>
+<tr>
+<td><code>kanban_block</code></td>
+<td>Stop work and route by why: <code>kind=dependency</code> (waits in <code>todo</code>, auto-resumes when an incomplete parent finishes; with no open parent it is recorded as <code>needs_input</code> instead, since the wait could never be satisfied), <code>needs_input</code>/<code>capability</code>/<code>transient</code> (surface to a human). Repeated same-kind re-blocks auto-escalate to <code>triage</code>.</td>
+<td><code>reason</code></td>
+</tr>
+<tr>
+<td><code>kanban_heartbeat</code></td>
+<td>Signal liveness during long operations. Pure side-effect.</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>kanban_comment</code></td>
+<td>Append a durable note to the task thread.</td>
+<td><code>task_id</code>, <code>body</code></td>
+</tr>
+<tr>
+<td><code>kanban_attach</code></td>
+<td>Attach a file to a task by passing its bytes inline (base64); stored under the task's attachments dir (25 MB cap).</td>
+<td>file bytes + name</td>
+</tr>
+<tr>
+<td><code>kanban_attach_url</code></td>
+<td>Attach a file to a task by URL.</td>
+<td><code>url</code></td>
+</tr>
+<tr>
+<td><code>kanban_attachments</code></td>
+<td>List a task's attachments.</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>kanban_create</code></td>
+<td>(Orchestrators) fan out into child tasks with an <code>assignee</code>, optional <code>parents</code>, <code>skills</code>, etc. Returns <code>gated: true</code> + <code>gated_by</code> when an open parent parked the new card in <code>todo</code>.</td>
+<td><code>title</code>, <code>assignee</code></td>
+</tr>
+<tr>
+<td><code>kanban_link</code></td>
+<td>(Orchestrators) add a <code>parent_id → child_id</code> dependency edge after the fact. Returns <code>gated: true</code> when the child was <code>ready</code> and got demoted back to <code>todo</code> because the parent is not done — the child will only run after the parent completes. Refused with <code>child is already running</code> when the child is already claimed — an edge added after the claim cannot serialise the run (a worker may still link its <em>own</em> running card ahead of a <code>kind=dependency</code> block).</td>
+<td><code>parent_id</code>, <code>child_id</code></td>
+</tr>
+<tr>
+<td><code>kanban_unblock</code></td>
+<td>(Orchestrators) restore a blocked task to its source phase (<code>review</code> or <code>ready</code>), or <code>todo</code> while a parent remains open.</td>
+<td><code>task_id</code></td>
+</tr>
+</tbody>
+</table>
+<p>A typical worker turn looks like:</p>
+<div class="highlight"><pre><span></span><code># Model&#39;s tool calls, in order:
+kanban_show()                                     # no args — uses HERMES_KANBAN_TASK
+# (model reads the returned worker_context, does the work via terminal/file tools)
+kanban_heartbeat(note=&quot;halfway through — 4 of 8 files transformed&quot;)
+# (more work)
+kanban_complete(
+    summary=&quot;migrated limiter.py to token-bucket; added 14 tests, all pass&quot;,
+    metadata={&quot;changed_files&quot;: [&quot;limiter.py&quot;, &quot;tests/test_limiter.py&quot;], &quot;tests_run&quot;: 14},
+)
+</code></pre></div>
+
+<p>An <strong>orchestrator</strong> worker fans out instead:</p>
+<div class="highlight"><pre><span></span><code>kanban_show()
+kanban_create(
+    title=&quot;research ICP funding 2024-2026&quot;,
+    assignee=&quot;researcher-a&quot;,
+    body=&quot;focus on seed + series A, North America, AI-adjacent&quot;,
+)
+# → returns {&quot;task_id&quot;: &quot;t_r1&quot;, ...}
+kanban_create(title=&quot;research ICP funding — EU angle&quot;, assignee=&quot;researcher-b&quot;, body=&quot;…&quot;)
+# → returns {&quot;task_id&quot;: &quot;t_r2&quot;, ...}
+kanban_create(
+    title=&quot;synthesize findings into launch brief&quot;,
+    assignee=&quot;writer&quot;,
+    parents=[&quot;t_r1&quot;, &quot;t_r2&quot;],                     # promotes to ready when both complete
+    body=&quot;one-pager, 300 words, neutral tone&quot;,
+)
+kanban_complete(summary=&quot;decomposed into 2 research tasks + 1 writer; linked dependencies&quot;)
+</code></pre></div>
+
+<p>The "(Orchestrators)" tools — <code>kanban_list</code>, <code>kanban_create</code>, <code>kanban_link</code>, <code>kanban_unblock</code>, and <code>kanban_comment</code> on foreign tasks — are available through the same toolset; the convention (encoded in the auto-injected kanban guidance) is that worker profiles don't fan out or route unrelated work, and orchestrator profiles don't execute implementation work. Dispatcher-spawned workers are still task-scoped for destructive lifecycle operations and cannot mutate unrelated tasks.</p>
+<h3 id="why-tools-instead-of-shelling-to-hermes-kanban">Why tools instead of shelling to <code>hermes kanban</code></h3>
+<p>Three reasons:</p>
+<ol>
+<li><strong>Backend portability.</strong> Workers whose terminal tool points at a remote backend (Docker / Modal / Singularity / SSH) would run <code>hermes kanban complete</code> <em>inside</em> the container, where <code>hermes</code> isn't installed and <code>~/.hermes/kanban.db</code> isn't mounted. The kanban tools run in the agent's own Python process and always reach <code>~/.hermes/kanban.db</code> regardless of terminal backend.</li>
+<li><strong>No shell-quoting fragility.</strong> Passing <code>--metadata '{"files": [...]}'</code> through shlex + argparse is a latent footgun. Structured tool args skip it entirely.</li>
+<li><strong>Better errors.</strong> Tool results are structured JSON the model can reason about, not stderr strings it has to parse.</li>
+</ol>
+<p><strong>Zero schema footprint on normal sessions.</strong> A regular <code>hermes chat</code> session has zero <code>kanban_*</code> tools in its schema unless the active profile explicitly enables the <code>kanban</code> toolset for orchestrator work. Dispatcher-spawned task workers get task-scoped tools because <code>HERMES_KANBAN_TASK</code> is set; orchestrator profiles get the broader routing surface through config. No tool bloat for users who never touch kanban.</p>
+<p>The auto-injected kanban guidance teaches the model which tool to call when and in what order. It is injected only for the dispatcher-spawned worker that owns the task: an interactive session that merely has the <code>kanban</code> toolset enabled keeps the tools but is not told it "has been assigned ONE task", and a <code>delegate_task</code> child or a cron run fired from inside a worker — which inherit the worker's <code>HERMES_KANBAN_TASK</code> — neither receives the worker protocol nor records a terminal outcome against the worker's card when its own turn budget runs out.</p>
+<h3 id="recommended-handoff-evidence">Recommended handoff evidence</h3>
+<p><code>kanban_complete(summary=..., metadata={...})</code> is intentionally flexible:
+the summary is the human-readable closeout, and <code>metadata</code> is the
+machine-readable handoff that downstream agents, reviewers, or dashboards can
+reuse without scraping prose.</p>
+<p>For engineering and review tasks, prefer this optional metadata shape:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;changed_files&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;path/to/file.py&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;verification&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;pytest tests/hermes_cli/test_kanban_db.py -q&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;dependencies&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;parent task id or external issue, if any&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;blocked_reason&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;retry_notes&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;what failed before, if this was a retry&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;residual_risk&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;what was not tested or still needs human review&quot;</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>These keys are a convention, not a schema requirement. The useful property is
+that every worker leaves enough evidence for the next reader to answer four
+questions quickly:</p>
+<ol>
+<li>What changed?</li>
+<li>How was it verified?</li>
+<li>What can unblock or retry this if it fails?</li>
+<li>What risk is still deliberately left open?</li>
+</ol>
+<p>Keep secrets, raw logs, tokens, OAuth material, and unrelated transcripts out of
+<code>metadata</code>. Store pointers and summaries instead. If a task has no files or
+tests, say so explicitly in <code>summary</code> and use <code>metadata</code> for the evidence that
+does exist, such as source URLs, issue ids, or manual review steps.</p>
+<h3 id="the-worker-lifecycle">The worker lifecycle</h3>
+<p>Every profile that works kanban tasks automatically gets the worker lifecycle — it's injected into the worker's system prompt at spawn (the <code>KANBAN_GUIDANCE</code> block), so there is <strong>nothing to install or configure</strong>. It teaches the worker the full lifecycle in <strong>tool calls</strong>, not CLI commands:</p>
+<ol>
+<li>On spawn, call <code>kanban_show()</code> to read title + body + parent handoffs + prior attempts + full comment thread.</li>
+<li><code>cd $HERMES_KANBAN_WORKSPACE</code> (via the terminal tool) and do the work there.</li>
+<li>Call <code>kanban_heartbeat(note="...")</code> every few minutes during long operations. <strong>If your work may run longer than 1 hour, call <code>kanban_heartbeat</code> at least once an hour</strong> — the dispatcher reclaims tasks that have been running past <code>kanban.dispatch_stale_timeout_seconds</code> (default 4 h) with no heartbeat in the last hour, on the assumption the worker crashed without cleanup. A reclaim is benign (the task goes back to <code>ready</code> for re-dispatch without a failure-counter tick) but you lose your current run's progress.</li>
+<li>Complete with <code>kanban_complete(summary="...", metadata={...})</code>, hand a code change off for same-card review with <code>kanban_request_review(summary="...")</code>, or <code>kanban_block(reason="...")</code> if stuck.</li>
+</ol>
+<p>Normal tool activity also extends the claim automatically (the worker mirrors its in-process liveness onto the board about once a minute). That bridge only works for a process the dispatcher spawned itself: a process that carries <code>HERMES_DELEGATED_CHILD_CONTEXT</code> next to <code>HERMES_KANBAN_TASK</code> (a <code>delegate_task</code> descendant, or a hand-launched copy of a worker's environment) is fenced from the board — its auto-heartbeat logs one <code>kanban auto-heartbeat for task … refused</code> warning and <code>kanban_complete</code> / <code>kanban_request_review</code> refuse. Fix the launch (let the dispatcher spawn the worker) rather than exporting the marker away.</p>
+<p>That final terminal board call (<code>kanban_complete</code> / <code>kanban_request_review</code> /
+<code>kanban_block</code>; reviewers end with <code>kanban_complete</code> or <code>kanban_request_changes</code>)
+is part of the worker
+protocol. If the worker process exits with status 0 while the task is still
+<code>running</code>, the dispatcher treats that as a protocol violation and emits a
+<code>protocol_violation</code> event. A dispatcher-spawned worker whose turn failed
+therefore exits non-zero: <code>1</code> for an ordinary failure, <code>75</code>
+(<code>EX_TEMPFAIL</code>) when the provider was rate-limited, overloaded, returning
+5xx or timing out, or the account hit a billing/quota wall — the dispatcher records that run as <code>rate_limited</code> and
+requeues the task without counting a failure, so a quota window is never
+booked as a protocol violation — and <code>78</code> (<code>EX_CONFIG</code>) when the provider
+rejected something a retry cannot fix: the profile's credential (401/403,
+revoked or invalid key), the model (404 / model not found) or the TLS chain.
+That <strong>terminal provider error</strong> trips the circuit breaker on the first
+occurrence: the dispatcher records the run as <code>crashed</code> with
+<code>exit_kind: terminal_provider</code>, emits <code>gave_up</code> with <code>terminal_provider: true</code>
+and parks the card <code>blocked</code> (sticky — <code>recompute_ready</code> will not auto-resume
+it) with the provider's own words in <code>last_failure_error</code>, instead of
+re-spawning into the same wall until <code>kanban.failure_limit</code> / <code>max_retries</code>
+is spent. Both lanes get the same booking: a reviewer worker that dies on a
+revoked key parks the card exactly like an implementer. <code>hermes kanban show</code>
+surfaces it as <em>Provider rejected this profile's credential or model — blocked
+after one attempt</em>; fix the assignee profile's provider (<code>hermes -p &lt;profile&gt;
+auth</code> / <code>setup</code>), then <code>hermes kanban unblock &lt;id&gt;</code>. The worker also writes its exit code as the
+last line of its own log (<code>[kanban-worker-exit] rc=&lt;code&gt;</code>), so a per-tick
+<code>hermes kanban dispatch</code> process — which never reaped the worker and cannot
+read its exit status — books the same death the same way the gateway-embedded
+dispatcher does; a worker killed before it reaches that line is a plain
+<code>crashed</code> (<code>pid &lt;n&gt; not alive</code>).</p>
+<p><strong>Agent-side prevention:</strong> Before the worker exits, Hermes injects up to two
+synthetic nudges when it detects the model is about to stop without a terminal
+board tool call. This catches the common case where the model narrates the next
+step ("Let me write the report") and stops with <code>finish_reason=stop</code>. The nudge
+reminds the model to call <code>kanban_complete</code>, <code>kanban_request_review</code> or <code>kanban_block</code>
+immediately. A worker that already handed its card off (<code>kanban_request_review</code>, or
+<code>kanban_request_changes</code> from a reviewer) is never nudged — the handoff is its terminal
+call, and the nudge never asks it to <code>kanban_complete</code> a card that is under review. This
+guard is active only for the dispatcher-spawned worker itself (<code>HERMES_KANBAN_TASK</code> is
+set and the run owns that task) — <code>delegate_task</code> children and cron jobs run inside
+the worker inherit the variable but are never nudged, since they have no board tools —
+and can be disabled with <code>HERMES_KANBAN_STOP_NUDGE=0</code>.</p>
+<p><strong>Dispatcher-side recovery:</strong> If the nudges are exhausted or the worker crashes
+before reaching the nudge, the dispatcher gives the violation a <strong>bounded retry</strong>
+(up to <code>_PROTOCOL_VIOLATION_FAILURE_LIMIT</code> consecutive violations, default 3)
+before auto-blocking the task instead of respawning it into the same loop. The
+budget counts only <em>consecutive</em> clean-exit protocol violations — interleaved
+rate-limited requeues are neutral, and any other failure kind resets the
+streak — and a per-task <code>max_retries</code> overrides the bound. A card blocked by
+this budget stays blocked (it is not auto-promoted like a below-<code>failure_limit</code>
+breaker block) until <code>hermes kanban unblock &lt;id&gt;</code>, which also grants a fresh
+retry budget. This usually means
+the model wrote a plain-text answer and exited without using the Kanban tool
+surface.</p>
+<p>The lifecycle plus the load-bearing reference details (workspace kinds, deliverable <code>artifacts</code>, claiming created cards) ship in that system-prompt block, so every worker has them regardless of which profile it runs under — no per-profile skill setup required.</p>
+<p><strong>Worker session names.</strong> A worker's session is titled after its card (<code>Fix the swap modal</code>, or <code>Kanban task &lt;id&gt;</code> when the board row can't be read) at spawn, so <code>hermes sessions</code> and session search show the card, not a model's guess. Workers never make the auxiliary <code>title_generation</code> model call that names interactive sessions; a manual <code>/title</code> in a worker session still wins.</p>
+<h3 id="pinning-extra-skills-to-a-specific-task">Pinning extra skills to a specific task</h3>
+<p>Sometimes a single task needs specialist context the assignee profile doesn't carry by default — a translation job that needs the <code>translation</code> skill, a review task that needs <code>github-code-review</code>, a security audit that needs <code>security-pr-audit</code>. Rather than editing the assignee's profile every time, attach the skills directly to the task.</p>
+<p><strong>From an orchestrator agent</strong> (the usual case — one agent routing work to another), use the <code>kanban_create</code> tool's <code>skills</code> array:</p>
+<div class="highlight"><pre><span></span><code>kanban_create(
+    title=&quot;translate README to Japanese&quot;,
+    assignee=&quot;linguist&quot;,
+    skills=[&quot;translation&quot;],
+)
+
+kanban_create(
+    title=&quot;audit auth flow&quot;,
+    assignee=&quot;reviewer&quot;,
+    skills=[&quot;security-pr-audit&quot;, &quot;github-code-review&quot;],
+)
+</code></pre></div>
+
+<p><strong>From a human (CLI / slash command)</strong>, repeat <code>--skill</code> for each one:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;translate README to Japanese&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>linguist<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--skill<span class="w"> </span>translation
+
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;audit auth flow&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>reviewer<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--skill<span class="w"> </span>security-pr-audit<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--skill<span class="w"> </span>github-code-review
+</code></pre></div>
+
+<p><strong>From the dashboard</strong>, type the skills comma-separated into the <strong>skills</strong> field of the create-task dialog.</p>
+<p>The dispatcher emits one <code>--skills &lt;name&gt;</code> flag per skill listed, so the worker spawns with all of them loaded on top of the auto-injected kanban guidance. The skill names must match skills that are actually installed on the assignee's profile (run <code>hermes skills list</code> to see what's available); there's no runtime install.</p>
+<h3 id="per-task-model-override">Per-task model override</h3>
+<p>Pin a task's worker to a specific model (and optionally provider), independent of the assignee profile's default:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># At creation</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;hard refactor&quot;</span><span class="w"> </span>--assignee<span class="w"> </span>coder<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--model<span class="w"> </span>claude-opus-4.6<span class="w"> </span>--provider<span class="w"> </span>anthropic
+
+<span class="c1"># Or later — takes effect on the next dispatch</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>set-model<span class="w"> </span>t_abcd<span class="w"> </span>claude-opus-4.6<span class="w"> </span>--provider<span class="w"> </span>anthropic
+hermes<span class="w"> </span>kanban<span class="w"> </span>set-model<span class="w"> </span>t_abcd<span class="w"> </span>none<span class="w">    </span><span class="c1"># clear the override</span>
+</code></pre></div>
+
+<p>The dispatcher spawns the worker with the pinned model (<code>--provider &lt;name&gt;</code> is passed when set; <code>--provider</code> requires a model). The dashboard's per-task model dropdown drives the same <code>model_override</code> field. With no override, the worker uses its profile's configured model.</p>
+<h3 id="cost-strategy-frontier-orchestrator-inexpensive-workers">Cost strategy: frontier orchestrator, inexpensive workers</h3>
+<p>Kanban's per-profile configs make the planner/worker cost split natural. Decomposing a project into well-scoped cards takes frontier-level judgment; executing a card that already carries a clear goal, context, and handoff evidence usually doesn't — and the workers are where the vast majority of tokens are spent, so the worker model is where the cost lives. Run your orchestrator/dispatcher profile on a frontier model and point worker profiles at inexpensive models. Each profile has its own <code>config.yaml</code> under <code>~/.hermes/profiles/&lt;name&gt;/</code>, and the dispatcher injects the profile-scoped <code>HERMES_HOME</code> when it spawns <code>hermes -p &lt;assignee&gt;</code>, so each worker reads its own profile's model settings:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml (orchestrator / dispatcher profile)</span>
+<span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-frontier-model&quot;</span>
+
+<span class="c1"># ~/.hermes/profiles/coder/config.yaml (worker profile)</span>
+<span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-inexpensive-model&quot;</span>
+
+<span class="c1"># ~/.hermes/profiles/researcher/config.yaml (another worker profile)</span>
+<span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-inexpensive-model&quot;</span>
+</code></pre></div>
+
+<p>For the occasional quality-sensitive card, pin just that task back to a stronger model with the <a href="#per-task-model-override">per-task model override</a> (<code>--model</code>/<code>--provider</code> at create time, <code>hermes kanban set-model</code> later, or the dashboard's model dropdown) — no profile edits needed.</p>
+<h3 id="lifecycle-plugin-hooks">Lifecycle plugin hooks</h3>
+<p>Board transitions fire <a href="hooks.html#plugin-hooks">plugin hooks</a>: <code>kanban_task_claimed</code>, <code>kanban_task_completed</code>, and <code>kanban_task_blocked</code>, each carrying <code>task_id</code> and <code>profile_name</code>. Hooks fire <strong>after</strong> the board DB change commits, so callbacks always see durable state. Note the process split: <code>kanban_task_claimed</code> fires in the <strong>dispatcher</strong> process, while <code>kanban_task_completed</code>/<code>kanban_task_blocked</code> fire in the <strong>worker</strong> process — register the hook in the dispatcher profile to observe every transition centrally.</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">on_blocked</span><span class="p">(</span><span class="n">task_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">profile_name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kw</span><span class="p">):</span>
+        <span class="n">ctx</span><span class="o">.</span><span class="n">dispatch_tool</span><span class="p">(</span><span class="s2">&quot;terminal&quot;</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;notify-send &#39;kanban blocked: </span><span class="si">{</span><span class="n">task_id</span><span class="si">}</span><span class="s2">&#39;&quot;</span><span class="p">})</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;kanban_task_blocked&quot;</span><span class="p">,</span> <span class="n">on_blocked</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="goal-mode-cards---goal">Goal-mode cards (<code>--goal</code>)</h3>
+<p>By default each worker gets <strong>one shot</strong> at its card — do the work, call <code>kanban_complete</code>/<code>kanban_block</code>, exit. Pass <code>--goal</code> (CLI) or <code>goal_mode=True</code> (the <code>kanban_create</code> tool / dashboard) to instead run that worker in a <strong>goal loop</strong>, the same Ralph-style engine behind the <code>/goal</code> slash command: after every turn an auxiliary judge checks the worker's output against the card's title + body (treated as the acceptance criteria), and if the work isn't done — and the turn budget remains — the worker keeps going <strong>in the same session</strong> until the judge agrees, the worker terminates the task itself, or the budget runs out (which <strong>blocks</strong> the card for human review rather than exiting silently). If the judge rules the goal <strong>unachievable</strong> as written, the card is blocked immediately with the judge's reason — an impossible card is never marked done, and <code>kanban complete</code> / <code>kanban request-review</code> on such a card are rejected with a pointer to <code>kanban block</code> or re-scoping.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Translate the docs site to French&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--body<span class="w"> </span><span class="s2">&quot;Acceptance: every page translated, no English left, links intact.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>linguist<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--goal<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--goal-max-turns<span class="w"> </span><span class="m">15</span><span class="w">      </span><span class="c1"># optional; default 20</span>
+</code></pre></div>
+
+<p>Use it for open-ended, multi-step, or "keep going until X is true" cards. Skip it for cheap one-shot work — the per-turn judge overhead isn't worth it, and the dispatcher's existing retry/circuit-breaker already handles transient worker failures. The judge is only as good as your goal text, so write the body as <strong>explicit acceptance criteria</strong>.</p>
+<p>The judge gate on <code>kanban complete</code> / <code>kanban request-review</code> (and the matching <code>kanban_complete</code> / <code>kanban_request_review</code> tools) only rejects on a <strong>real verdict</strong>. If the judge call itself fails — relay error, auth, timeout — the handoff is allowed and a <code>goal judge unreachable … allowing lifecycle handoff</code> warning lands in the log, so an unreachable judge never blocks a human approval. The headless CLI gate sends the same per-task relay-affinity key (<code>kanban:&lt;task-id&gt;</code>) as <code>specify</code>/<code>decompose</code>, so relays that require a session key accept the judge request.</p>
+<p>A goal-mode worker's <strong>Worker log</strong> (dashboard drawer, <code>hermes kanban log &lt;id&gt;</code>) carries the same live tool feed as any other worker's, plus one <code>kanban goal loop: turn N/M verdict=…</code> line per judged turn, so you can follow what the loop is doing while the card is running.</p>
+<div class="admonition adm-note"><p class="adm-title">Goal-mode cards borrow the `/goal` engine — they don&#x27;t connect to it</p>
+<p><code>--goal</code> runs the continuation loop <em>inside that one card's worker session</em>. It shares the engine with the <a href="goals.html"><code>/goal</code> slash command</a>, not the state: setting a <code>/goal</code> in a chat session never creates, claims, or moves a kanban card, and a goal-mode card's loop is invisible to any chat session's <code>/goal status</code>. If you want this conversation to keep iterating, use <a href="goals.html"><code>/goal</code></a>; if you want work on the board, create a card.</p>
+</div>
+<h3 id="how-the-orchestrator-behaves">How the orchestrator behaves</h3>
+<p>A <strong>well-behaved orchestrator does not do the work itself.</strong> It decomposes the user's goal into tasks, links them, assigns each to one of the profiles you've set up, and steps back. The orchestrator guidance — anti-temptation rules, a Step-0 profile-discovery prompt (the dispatcher silently fails on unknown assignee names, so the orchestrator must ground every card in profiles that actually exist on your machine), and a decomposition playbook keyed on <code>kanban_create</code> / <code>kanban_link</code> / <code>kanban_comment</code> — is injected into the worker's system prompt automatically; there is nothing to install.</p>
+<p>A canonical orchestrator turn (two parallel researchers handing off to a writer):</p>
+<div class="highlight"><pre><span></span><code># Goal from user: &quot;draft a launch post on the ICP funding landscape&quot;
+kanban_create(title=&quot;research ICP funding, NA angle&quot;,  assignee=&quot;researcher-a&quot;, body=&quot;…&quot;)  # → t_r1
+kanban_create(title=&quot;research ICP funding, EU angle&quot;,  assignee=&quot;researcher-b&quot;, body=&quot;…&quot;)  # → t_r2
+kanban_create(
+    title=&quot;synthesize ICP funding research into launch post draft&quot;,
+    assignee=&quot;writer&quot;,
+    parents=[&quot;t_r1&quot;, &quot;t_r2&quot;],        # promoted to &#39;ready&#39; when both researchers complete
+    body=&quot;one-pager, neutral tone, cite sources inline&quot;,
+)                                     # → t_w1
+# Optional: add cross-cutting deps discovered later without re-creating tasks
+kanban_link(parent_id=&quot;t_r1&quot;, child_id=&quot;t_followup&quot;)
+kanban_complete(
+    summary=&quot;decomposed into 2 parallel research tasks → 1 synthesis task; writer starts when both researchers finish&quot;,
+)
+</code></pre></div>
+
+<p>The orchestrator guidance ships in the worker's system prompt automatically — there is nothing to install or sync per profile.</p>
+<p><strong>Decide before you fan out.</strong> Design decisions belong to the orchestrator, not to the workers. If two parallel cards would each have to pick the same thing — a naming scheme, a schema, a file format, an API shape — the orchestrator decides it once and stamps the decision into <strong>both</strong> card bodies. Workers cannot see sibling cards, so every child card body must carry every decision it depends on. Example: for the parallel cards "build the exporter" and "build the importer", don't let each worker invent its own file format — pick one up front (say, newline-delimited JSON with a <code>version</code> field) and write it into both bodies, or the two halves will never round-trip.</p>
+<p>For best results, pair it with a profile whose toolsets are restricted to board operations (<code>kanban</code>, <code>gateway</code>, <code>memory</code>) so the orchestrator literally cannot execute implementation tasks even if it tries.</p>
+<h2 id="dashboard-gui">Dashboard (GUI)</h2>
+<p>The <code>/kanban</code> CLI and slash command are enough to run the board headlessly, but a visual board is often the right interface for humans-in-the-loop: triage, cross-profile supervision, reading comment threads, and dragging cards between columns. Hermes ships this as a <strong>bundled dashboard plugin</strong> at <code>plugins/kanban/</code> — not a core feature, not a separate service — following the model laid out in <a href="extending-the-dashboard.html">Extending the Dashboard</a>.</p>
+<p>Open it with:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>init<span class="w">      </span><span class="c1"># one-time: create kanban.db if not already present</span>
+hermes<span class="w"> </span>dashboard<span class="w">        </span><span class="c1"># &quot;Kanban&quot; tab appears in the nav, after &quot;Skills&quot;</span>
+</code></pre></div>
+
+<h3 id="what-the-plugin-gives-you">What the plugin gives you</h3>
+<ul>
+<li>A <strong>Kanban</strong> tab showing one column per status: <code>triage</code>, <code>todo</code>, <code>ready</code>, <code>running</code>, <code>blocked</code>, <code>done</code> (plus <code>archived</code> when the toggle is on).</li>
+<li><code>triage</code> is the parking column for rough ideas. By default (<code>kanban.auto_decompose: true</code>), the dispatcher auto-runs the <strong>decomposer</strong> on tasks that land here. The built-in decomposer uses the <code>auxiliary.kanban_decomposer</code> model path, reads your profile roster (with descriptions), and fans the task out into a small graph of child tasks routed to the best-fit specialists. The original task stays alive as the parent of every child so its assignee (<code>kanban.orchestrator_profile</code>, else the assignee the task already had, else the active default profile) wakes back up to judge completion when everything finishes. Flip the <strong>Orchestration: Auto/Manual</strong> pill at the top of the page (emerald = Auto, muted gray = Manual), or by editing <code>config.yaml</code> directly. Both modes coexist with <code>hermes kanban specify</code> - that's still available as a single-task spec rewrite when you don't want fan-out.</li>
+<li>Cards show the task id, title, priority badge, tenant tag, assigned profile, comment/link counts, a <strong>progress pill</strong> (<code>N/M</code> children done when the task has dependents), and "created N ago". A per-card checkbox enables multi-select.</li>
+<li><strong>Per-profile lanes inside Running</strong> — toolbar checkbox toggles sub-grouping of the Running column by assignee.</li>
+<li><strong>Live updates via WebSocket</strong> — the plugin tails the append-only <code>task_events</code> table on a short poll interval; the board reflects changes the instant any profile (CLI, gateway, or another dashboard tab) acts. Reloads are debounced so a burst of events triggers a single refetch.</li>
+<li><strong>Drag-drop</strong> cards between columns to change status. The drop sends <code>PATCH /api/plugins/kanban/tasks/:id</code> which routes through the same <code>kanban_db</code> code the CLI uses — the three surfaces can never drift. Moves into destructive statuses (<code>done</code>, <code>archived</code>, <code>blocked</code>) prompt for confirmation. Touch devices use a pointer-based fallback so the board is usable from a tablet.</li>
+<li><strong>Create-task dialog</strong> — click <code>+</code> on any column header to open a modal with labeled fields: title, assignee, priority, skills, workspace kind/path (seeded from the board's project directory; per-task override), goal mode, and (optionally) a parent task from a dropdown over every existing task. Press Enter to create the task, Shift+Enter to insert a newline in the title field, or Escape to cancel. Creating from the Triage column automatically parks the new task in triage.</li>
+<li><strong>Multi-select with bulk actions</strong> — shift/ctrl-click a card or tick its checkbox to add it to the selection. A bulk action bar appears at the top with batch status transitions, archive, and reassign (by profile dropdown, or "(unassign)"). Destructive batches confirm first. Per-id partial failures are reported without aborting the rest.</li>
+<li><strong>Click a card</strong> (without shift/ctrl) to open a side drawer (Escape or click-outside closes) with:</li>
+<li><strong>Editable title</strong> — click the heading to rename.</li>
+<li><strong>Editable assignee / priority</strong> — click the meta row to rewrite.</li>
+<li><strong>Editable description</strong> — markdown-rendered by default (headings, bold, italic, inline code, fenced code, <code>http(s)</code> / <code>mailto:</code> links, bullet lists), with an "edit" button that swaps in a textarea. Markdown rendering is a tiny, XSS-safe renderer — every substitution runs on HTML-escaped input, only <code>http(s)</code> / <code>mailto:</code> links pass through, and <code>target="_blank"</code> + <code>rel="noopener noreferrer"</code> are always set.</li>
+<li><strong>Dependency editor</strong> — chip list of parents and children, each with an <code>×</code> to unlink, plus dropdowns over every other task to add a new parent or child. Cycle attempts are rejected server-side with a clear message.</li>
+<li><strong>Status action row</strong> (→ triage / → ready / → running / block / unblock / complete / archive) with confirm prompts for destructive transitions. For cards in the <strong>Triage</strong> column the row also exposes two LLM-driven actions: <strong>⚗ Decompose</strong> fans the task out into a graph of child tasks routed to specialist profiles by description, and <strong>✨ Specify</strong> does a single-task spec rewrite. Decompose falls back to specify-style promotion when the LLM decides the task doesn't benefit from fan-out, so it's a strict superset. Both are reachable from the CLI (<code>hermes kanban decompose &lt;id&gt;</code> / <code>specify &lt;id&gt;</code> / <code>--all</code>), from any gateway platform (<code>/kanban decompose &lt;id&gt;</code>), and programmatically via <code>POST /api/plugins/kanban/tasks/:id/decompose</code> and <code>…/specify</code>. Configure the models under <code>auxiliary.kanban_decomposer</code> and <code>auxiliary.triage_specifier</code> in <code>config.yaml</code>.</li>
+<li>Result section (also markdown-rendered), comment thread with Enter-to-submit, the last 20 events.</li>
+<li><strong>Toolbar filters</strong> — free-text search, tenant dropdown (defaults to <code>dashboard.kanban.default_tenant</code> from <code>config.yaml</code>), assignee dropdown, "show archived" toggle, "lanes by profile" toggle, and a <strong>Nudge dispatcher</strong> button so you don't have to wait for the next 60 s tick.</li>
+</ul>
+<p>Visually the target is the familiar Linear / Fusion layout: dark theme, column headers with counts, coloured status dots, pill chips for priority and tenant. The plugin reads only theme CSS vars (<code>--color-*</code>, <code>--radius</code>, <code>--font-mono</code>, ...), so it reskins automatically with whichever dashboard theme is active.</p>
+<h3 id="auto-vs-manual-orchestration">Auto vs Manual orchestration</h3>
+<p>The kanban board has two ways to handle a task you drop into the Triage column:</p>
+<p><strong>Auto (default)</strong> — <code>kanban.auto_decompose: true</code>. The gateway-embedded dispatcher runs the <strong>decomposer</strong> on each tick, capped by <code>kanban.auto_decompose_per_tick</code> (default 3 tasks per tick) so a bulk-load of triage tasks doesn't burst-spend the auxiliary LLM. The decomposer uses the built-in decomposition prompt plus the <code>auxiliary.kanban_decomposer</code> model path, reads your installed profiles + their descriptions, and asks the LLM to produce a JSON task graph: which tasks to spawn, who they go to, and which depend on which. The original triage task becomes the parent of every leaf in the graph, so it stays alive until the whole graph completes - and then promotes back to <code>ready</code> so its assignee (<code>kanban.orchestrator_profile</code>, else the assignee the task already had, else the active default profile) can judge completion and add more tasks if the work isn't done. This is the "drop a one-liner, walk away" flow.</p>
+<p>A completed built-in fan-out is recorded atomically with its child graph. Moving
+that root back to Triage does not create another graph; ordinary prerequisite
+links do not prevent a task's first decomposition. The completion marker survives
+event retention until the task is deleted. This is not semantic deduplication of
+independently created manual graphs, nor a repair for previously pruned history.</p>
+<p>When a new task omits its tenant, creation inherits the first nonempty tenant
+among its parents, in supplied order. An explicit tenant (including the worker's
+active tenant passed by tools) wins. Boards remain the hard isolation boundary.</p>
+<p><strong>Manual</strong> — <code>kanban.auto_decompose: false</code>. Triage tasks stay in triage until you act. Click the <strong>⚗ Decompose</strong> button on a card, run <code>hermes kanban decompose &lt;id&gt;</code> (or <code>--all</code>), or use <code>/kanban decompose &lt;id&gt;</code> from a chat. This matches the pre-decomposer behavior of the board, useful when you want full control over what runs when.</p>
+<p><strong>Important boundary:</strong> Manual mode disables only the built-in Triage decomposer. It does not prevent a profile from calling <code>kanban_create</code>, and it does not disable creator-session wake-ups. With <code>kanban.auto_subscribe_on_create: true</code>, a task's terminal event resumes the originating agent with a synthetic status turn so it can inspect the handoff and decide whether genuinely new follow-up work is needed. Set <code>auto_subscribe_on_create: false</code> when task completion should remain passive. For provenance, built-in decomposer children use <code>created_by=auto-decomposer</code>; tasks created by a resumed profile carry that profile name instead.</p>
+<p>Flip between the two modes from the <strong>Orchestration: Auto/Manual</strong> pill at the top of the kanban page (emerald = Auto, muted gray = Manual), or by editing <code>config.yaml</code> directly. Both modes coexist with <code>hermes kanban specify</code> — that's still available as a single-task spec rewrite when you don't want fan-out.</p>
+<p>The decomposer's routing decisions depend on profile descriptions, which is a per-profile labeling primitive you set with <code>hermes profile create --description "..."</code>, <code>hermes profile describe &lt;name&gt; --text "..."</code>, <code>hermes profile describe &lt;name&gt; --auto</code> (LLM-generates from the profile's installed skills + model), or the dashboard's per-profile editor in the expanded <strong>Orchestration settings</strong> panel. Profiles without a description still appear in the roster — they're routable by name, just less precisely. The decomposer NEVER lands a child task with <code>assignee=None</code>: when the LLM picks an unknown profile, the child gets routed to <code>kanban.default_assignee</code>, else the root task's assignee (if it names an existing profile), else the active default profile.</p>
+<p><code>kanban.orchestrator_profile</code> does not load that profile's prompt, skills, or custom logic into the decomposition call. It controls who owns the root/orchestration task after fan-out. To change the decomposer's model/provider, configure <code>auxiliary.kanban_decomposer</code>. To use a profile's custom task-splitting logic instead of the built-in decomposer, switch to Manual mode and have that profile create or decompose tasks explicitly.</p>
+<p>Config knobs (all under <code>kanban:</code> in <code>~/.hermes/config.yaml</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>auto_decompose</code></td>
+<td><code>true</code></td>
+<td>Dispatcher auto-runs the built-in decomposer for Triage tasks every tick. It does not gate profile-driven <code>kanban_create</code> calls or creator wake turns.</td>
+</tr>
+<tr>
+<td><code>auto_decompose_per_tick</code></td>
+<td><code>3</code></td>
+<td>Cap on decompositions per dispatcher tick. Excess defers to the next tick.</td>
+</tr>
+<tr>
+<td><code>orchestrator_profile</code></td>
+<td><code>""</code></td>
+<td>Profile assigned to the root/orchestration task after decomposition. Empty = the root task keeps its own assignee, else the active default profile.</td>
+</tr>
+<tr>
+<td><code>default_assignee</code></td>
+<td><code>""</code></td>
+<td>Where a child task lands when the LLM picks an unknown profile. Empty = fall back to the root task's assignee, else the active default.</td>
+</tr>
+<tr>
+<td><code>auto_subscribe_on_create</code></td>
+<td><code>true</code></td>
+<td>When <code>kanban_create</code> runs inside a persistent gateway/TUI session, terminal events resume that originating agent with a synthetic status turn. Set to <code>false</code> for passive completion or to require explicit <code>kanban_notify-subscribe</code> calls. Independent of <code>auto_decompose</code>.</td>
+</tr>
+<tr>
+<td><code>notify_in_gateway</code></td>
+<td><code>true</code></td>
+<td>Poll and deliver Kanban subscriptions from this gateway. Set to <code>false</code> on profiles that own no notification subscriptions to stop the idle five-second notifier poll. Independent of <code>dispatch_in_gateway</code>; non-dispatch gateways may still own profile-specific delivery adapters.</td>
+</tr>
+<tr>
+<td><code>done_sub_retention_days</code></td>
+<td><code>30</code></td>
+<td>Notify subscriptions survive <code>done</code> (reopen-safe) and are removed on <code>archived</code>. The notifier GC purges subscriptions whose task has been <code>done</code> or <code>blocked</code> with no new events for this many days, bounding sub-table growth on boards that never archive. <code>0</code> disables the sweep.</td>
+</tr>
+</tbody>
+</table>
+<p>And the two auxiliary LLM slots:</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>auxiliary.kanban_decomposer</code></td>
+<td>Model that produces the task graph (called by Decompose). Set <code>provider</code>/<code>model</code> to override the main chat model.</td>
+</tr>
+<tr>
+<td><code>auxiliary.profile_describer</code></td>
+<td>Model that auto-generates profile descriptions (called by <code>hermes profile describe --auto</code>).</td>
+</tr>
+</tbody>
+</table>
+<h3 id="architecture">Architecture</h3>
+<p>The GUI is strictly a <strong>read-through-the-DB + write-through-kanban_db</strong> layer with no domain logic of its own:</p>
+<!-- ascii-guard-ignore -->
+
+<div class="highlight"><pre><span></span><code>┌────────────────────────┐      WebSocket (tails task_events)
+│   React SPA (plugin)   │ ◀──────────────────────────────────┐
+│   HTML5 drag-and-drop  │                                    │
+└──────────┬─────────────┘                                    │
+           │ REST over fetchJSON                              │
+           ▼                                                  │
+┌────────────────────────┐     writes call kanban_db.*        │
+│  FastAPI router        │     directly — same code path      │
+│  plugins/kanban/       │     the CLI /kanban verbs use      │
+│  dashboard/plugin_api.py                                    │
+└──────────┬─────────────┘                                    │
+           │                                                  │
+           ▼                                                  │
+┌────────────────────────┐                                    │
+│  ~/.hermes/kanban.db   │ ───── append task_events ──────────┘
+│  (WAL, shared)         │
+└────────────────────────┘
+</code></pre></div>
+
+<!-- ascii-guard-ignore-end -->
+
+<h3 id="rest-surface">REST surface</h3>
+<p>All routes are mounted under <code>/api/plugins/kanban/</code> and protected by the dashboard's ephemeral session token:</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/board?tenant=&lt;name&gt;&amp;include_archived=…</code></td>
+<td>Full board grouped by status column, plus tenants + assignees for filter dropdowns</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/tasks/:id</code></td>
+<td>Task + comments + events + links</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tasks</code></td>
+<td>Create (wraps <code>kanban_db.create_task</code>, accepts <code>triage: bool</code> and <code>parents: [id, …]</code>)</td>
+</tr>
+<tr>
+<td><code>PATCH</code></td>
+<td><code>/tasks/:id</code></td>
+<td>Status / assignee / priority / title / body / result</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tasks/bulk</code></td>
+<td>Apply the same patch (status / archive / assignee / priority) to every id in <code>ids</code>. Per-id failures reported without aborting siblings</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tasks/:id/comments</code></td>
+<td>Append a comment</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tasks/:id/specify</code></td>
+<td>Run the triage specifier — auxiliary LLM fleshes out the task body and promotes it from <code>triage</code> to <code>todo</code>. Returns <code>{ok, task_id, reason, new_title}</code>; <code>ok=false</code> with a human-readable reason on "not in triage" / no aux client / LLM error is a 200, not a 4xx</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tasks/:id/decompose</code></td>
+<td>Run the kanban decomposer — auxiliary LLM produces a task graph and the helper atomically creates the children + links the root + flips <code>triage → todo</code>. Returns <code>{ok, task_id, reason, fanout, child_ids, new_title}</code>. Same 200-on-LLM-error convention as <code>/specify</code>.</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/profiles</code></td>
+<td>List installed profiles with their descriptions (consumed by the dashboard's profile-description editor and the orchestrator picker).</td>
+</tr>
+<tr>
+<td><code>PATCH</code></td>
+<td><code>/profiles/:name</code></td>
+<td>Set or clear a profile's description (user-authored — <code>description_auto: false</code>). Returns <code>{ok, profile, description}</code>.</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/profiles/:name/describe-auto</code></td>
+<td>Generate a description for a profile via <code>auxiliary.profile_describer</code>. Persists with <code>description_auto: true</code> so the dashboard can surface a "review" badge.</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/orchestration</code></td>
+<td>Read the kanban orchestration settings (<code>orchestrator_profile</code>, <code>default_assignee</code>, <code>auto_decompose</code>) plus the <em>resolved</em> effective values after fallbacks.</td>
+</tr>
+<tr>
+<td><code>PUT</code></td>
+<td><code>/orchestration</code></td>
+<td>Update one or more of the three orchestration keys in <code>config.yaml</code>. Validates that non-empty profile names actually exist.</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/links</code></td>
+<td>Add a dependency (<code>parent_id</code> → <code>child_id</code>)</td>
+</tr>
+<tr>
+<td><code>DELETE</code></td>
+<td><code>/links?parent_id=…&amp;child_id=…</code></td>
+<td>Remove a dependency</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/dispatch?max=…&amp;dry_run=…</code></td>
+<td>Nudge the dispatcher — skip the 60 s wait</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/config</code></td>
+<td>Read <code>dashboard.kanban</code> preferences from <code>config.yaml</code> — <code>default_tenant</code>, <code>lane_by_profile</code>, <code>include_archived_by_default</code>, <code>render_markdown</code></td>
+</tr>
+<tr>
+<td><code>WS</code></td>
+<td><code>/events?since=&lt;event_id&gt;</code></td>
+<td>Live stream of <code>task_events</code> rows</td>
+</tr>
+</tbody>
+</table>
+<p>Every handler is a thin wrapper — the plugin is ~700 lines of Python (router + WebSocket tail + bulk batcher + config reader) and adds no new business logic. A tiny <code>_conn()</code> helper auto-initializes <code>kanban.db</code> on every read and write, so a fresh install works whether the user opened the dashboard first, hit the REST API directly, or ran <code>hermes kanban init</code>.</p>
+<h3 id="dashboard-config">Dashboard config</h3>
+<p>Any of these keys under <code>dashboard.kanban</code> in <code>~/.hermes/config.yaml</code> changes the tab's defaults — the plugin reads them at load time via <code>GET /config</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">dashboard</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">kanban</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">default_tenant</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">acme</span><span class="w">              </span><span class="c1"># preselects the tenant filter</span>
+<span class="w">    </span><span class="nt">lane_by_profile</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">             </span><span class="c1"># default for the &quot;lanes by profile&quot; toggle</span>
+<span class="w">    </span><span class="nt">include_archived_by_default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">    </span><span class="nt">render_markdown</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">             </span><span class="c1"># set false for plain &lt;pre&gt; rendering</span>
+</code></pre></div>
+
+<p>Each key is optional and falls back to the shown default.</p>
+<h3 id="security-model">Security model</h3>
+<p>The dashboard's HTTP auth middleware <a href="extending-the-dashboard.html#backend-api-routes">explicitly skips <code>/api/plugins/</code></a> — plugin routes are unauthenticated by design because the dashboard binds to localhost by default. That means the kanban REST surface is reachable from any process on the host.</p>
+<p>The WebSocket takes one additional step: it requires the dashboard's ephemeral session token as a <code>?token=…</code> query parameter (browsers can't set <code>Authorization</code> on an upgrade request), matching the pattern used by the in-browser PTY bridge.</p>
+<p>If you run <code>hermes dashboard --host 0.0.0.0</code>, every plugin route — kanban included — becomes reachable from the network. <strong>Don't do that on a shared host.</strong> The board contains task bodies, comments, and workspace paths; an attacker reaching these routes gets read access to your entire collaboration surface and can also create / reassign / archive tasks.</p>
+<p>Tasks in <code>~/.hermes/kanban.db</code> are profile-agnostic on purpose (that's the coordination primitive). If you open the dashboard with <code>hermes -p &lt;profile&gt; dashboard</code>, the board still shows tasks created by any other profile on the host. Same user owns all profiles, but this is worth knowing if multiple personas coexist.</p>
+<h3 id="live-updates">Live updates</h3>
+<p><code>task_events</code> is an append-only SQLite table with a monotonic <code>id</code>. The WebSocket endpoint holds each client's last-seen event id and pushes new rows as they land. When a burst of events arrives, the frontend reloads the (very cheap) board endpoint — simpler and more correct than trying to patch local state from every event kind. WAL mode means the read loop never blocks the dispatcher's <code>BEGIN IMMEDIATE</code> claim transactions.</p>
+<h3 id="extending-it">Extending it</h3>
+<p>The plugin uses the standard Hermes dashboard plugin contract — see <a href="extending-the-dashboard.html">Extending the Dashboard</a> for the full manifest reference, shell slots, page-scoped slots, and the Plugin SDK. Extra columns, custom card chrome, tenant-filtered layouts, or full <code>tab.override</code> replacements are all expressible without forking this plugin.</p>
+<p>To disable without removing: add <code>dashboard.plugins.kanban.enabled: false</code> to <code>config.yaml</code> (or delete <code>plugins/kanban/dashboard/manifest.json</code>).</p>
+<h3 id="scope-boundary">Scope boundary</h3>
+<p>The GUI is deliberately thin. Everything the plugin does is reachable from the CLI; the plugin just makes it comfortable for humans. Auto-assignment, budgets, governance gates, and org-chart views remain user-space — a router profile, another plugin, or a reuse of <code>tools/approval.py</code> — exactly as listed in the out-of-scope section of the design spec.</p>
+<h2 id="cli-command-reference">CLI command reference</h2>
+<p>This is the surface <strong>you</strong> (or scripts, cron, the dashboard) use to drive the board. Workers running inside the dispatcher use the <code>kanban_*</code> <a href="#how-workers-interact-with-the-board">tool surface</a> for the same operations — the CLI here and the tools there both route through <code>kanban_db</code>, so the two surfaces agree by construction.</p>
+<div class="highlight"><pre><span></span><code>hermes kanban init                                     # create kanban.db + print daemon hint
+hermes kanban create &quot;&lt;title&gt;&quot; [--body ...] [--assignee &lt;profile&gt;]
+                                [--parent &lt;id&gt;]... [--tenant &lt;name&gt;]
+                                [--workspace scratch|worktree|worktree:&lt;path&gt;|dir:&lt;path&gt;]
+                                [--branch &lt;name&gt;]
+                                [--priority N] [--triage] [--idempotency-key KEY]
+                                [--max-runtime 30m|2h|1d|&lt;seconds&gt;]
+                                [--max-retries N]
+                                [--goal] [--goal-max-turns N]
+                                [--skill &lt;name&gt;]...
+                                [--json]
+hermes kanban list [--mine] [--assignee P] [--status S] [--tenant T] [--archived]
+        [--workflow-template-id &lt;id&gt;] [--current-step-key &lt;key&gt;]
+        [--sort created|created-desc|priority|priority-desc|status|assignee|title|updated]
+        [--json]
+hermes kanban show &lt;id&gt; [--json]
+hermes kanban assign &lt;id&gt; &lt;profile&gt;                    # or &#39;none&#39; to unassign
+hermes kanban reassign &lt;id&gt;... &lt;profile&gt;               # bulk re-assign tasks to a profile
+hermes kanban edit &lt;id&gt; [--title ...] [--body ...]     # edit task title / body / priority in place
+        [--priority N]
+hermes kanban promote &lt;id&gt;...                          # move todo/blocked tasks to ready (recovery)
+hermes kanban schedule &lt;id&gt; --at &lt;ISO8601&gt;             # set/clear a task&#39;s scheduled_at start time
+hermes kanban diagnostics [--json]                     # board health snapshot (alias: diag)
+hermes kanban link &lt;parent_id&gt; &lt;child_id&gt;
+hermes kanban unlink &lt;parent_id&gt; &lt;child_id&gt;
+hermes kanban claim &lt;id&gt; [--ttl SECONDS]
+hermes kanban comment &lt;id&gt; &quot;&lt;text&gt;&quot; [--author NAME]
+
+# Bulk verbs — accept multiple ids:
+hermes kanban complete &lt;id&gt;... [--result &quot;...&quot;] [--force]
+hermes kanban block &lt;id&gt; &quot;&lt;reason&gt;&quot; [--ids &lt;id&gt;...]
+hermes kanban unblock &lt;id&gt;...
+hermes kanban archive &lt;id&gt;...
+
+hermes kanban request-review &lt;id&gt; [--summary &quot;...&quot;] [--metadata JSON] [--reviewer PROFILE]
+hermes kanban request-changes &lt;id&gt; &quot;&lt;required changes&gt;&quot;               # active reviewer -&gt; implementer
+hermes kanban reopen-review  &lt;id&gt;... [--reason &quot;...&quot;]                 # changes requested: &#39;review&#39; -&gt; ready/todo
+
+hermes kanban tail &lt;id&gt;                                # follow a single task&#39;s event stream
+hermes kanban watch [--assignee P] [--tenant T]        # live stream ALL events to the terminal
+        [--kinds completed,blocked,…] [--interval SECS]
+hermes kanban heartbeat &lt;id&gt; [--note &quot;...&quot;]            # worker liveness signal for long ops
+hermes kanban runs &lt;id&gt; [--json]                       # attempt history (one row per run)
+hermes kanban assignees [--json]                       # profiles on disk + per-assignee task counts
+hermes kanban dispatch [--dry-run] [--max N]           # one-shot pass
+        [--failure-limit N] [--json]
+hermes kanban daemon --force                           # DEPRECATED — standalone dispatcher (use `hermes gateway start` instead)
+        [--failure-limit N] [--pidfile PATH] [-v]
+hermes kanban stats [--json]                           # per-status + per-assignee counts
+hermes kanban log &lt;id&gt; [--tail BYTES]                  # worker log from ~/.hermes/kanban/logs/
+hermes kanban notify-subscribe &lt;id&gt;                    # gateway bridge hook (used by /kanban in the gateway)
+        --platform &lt;name&gt; --chat-id &lt;id&gt; [--thread-id &lt;id&gt;] [--user-id &lt;id&gt;]
+        [--chat-type dm|group|channel|thread] [--delivery-mode notify|notify+wake|wake]
+hermes kanban notify-list [&lt;id&gt;] [--json]
+hermes kanban notify-unsubscribe &lt;id&gt;
+        --platform &lt;name&gt; --chat-id &lt;id&gt; [--thread-id &lt;id&gt;]
+hermes kanban context &lt;id&gt;                             # what a worker sees
+hermes kanban specify [&lt;id&gt; | --all] [--tenant T]      # flesh out a triage-column idea
+        [--author NAME] [--json]                       #   into a full spec and promote to todo
+hermes kanban gc [--event-retention-days N]            # workspaces + old events + old logs
+        [--log-retention-days N]
+</code></pre></div>
+
+<p>All commands are also available as a slash command in the interactive CLI and in the messaging gateway (see <a href="#kanban-slash-command"><code>/kanban</code> slash command</a> below).</p>
+<p><code>--max-retries</code> is a per-task circuit-breaker override for the dispatcher. <code>--max-retries 1</code> blocks the task on the first non-successful attempt, while <code>--max-retries 3</code> allows two retries and blocks on the third failure. Omit it to use <code>kanban.failure_limit</code> from <code>config.yaml</code>, then the built-in default.</p>
+<h3 id="concurrency-scheduling-and-child-promotion-config">Concurrency, scheduling, and child promotion config</h3>
+<table>
+<thead>
+<tr>
+<th>Config key</th>
+<th>Default</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kanban.max_in_progress</code></td>
+<td>unset (unlimited)</td>
+<td>Caps the number of simultaneously running tasks. When the board already has N running, the dispatcher skips spawning more — useful for slow workers (local LLMs, resource-constrained hosts) so they finish what they have before more pile up and time out. Invalid or below-1 values log a warning and behave as unlimited.</td>
+</tr>
+<tr>
+<td><code>kanban.max_in_progress_per_profile</code></td>
+<td>unset (unlimited)</td>
+<td>Per-profile variant of <code>max_in_progress</code> — caps how many tasks any single assignee profile may run concurrently. Useful when one profile is slow or rate-limited but others should keep flowing. Applies alongside the board-wide <code>max_in_progress</code>; both must allow a spawn for it to proceed.</td>
+</tr>
+<tr>
+<td><code>kanban.dispatch_profiles</code></td>
+<td>unset (any existing profile)</td>
+<td>Per-home claim allowlist for boards shared across Hermes homes. When the key is present, this home's dispatcher only claims cards whose assignee is listed — fail-closed: an empty list, <code>null</code> or a bare <code>dispatch_profiles:</code> claims nothing, and a config read that fails logs a warning and claims nothing; other assignees land in <code>skipped_nonspawnable</code>. Only omitting the key means "any existing profile". <code>hermes kanban diagnostics</code> prints the resolved value for this home (<code>any</code>, the listed names, or <code>none (fail-closed: …)</code>). See <a href="#shared-boards-across-homes">Shared boards across homes</a>.</td>
+</tr>
+<tr>
+<td><code>kanban.auto_promote_children</code></td>
+<td><code>true</code></td>
+<td>After <code>decompose_triage_task()</code> produces children with no parent-blocker dependencies, they're automatically promoted to <code>ready</code> so the dispatcher can pick them up. Set to <code>false</code> to require manual review — children stay in <code>todo</code> until you promote them.</td>
+</tr>
+<tr>
+<td><code>kanban.default_workdir</code></td>
+<td>unset</td>
+<td>Board-level default working directory applied to new tasks when neither <code>--workspace</code> nor the task itself overrides it. Per-task <code>workspace:</code> still wins.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nt">kanban</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">max_in_progress</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+<span class="w">  </span><span class="nt">auto_promote_children</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">  </span><span class="nt">default_workdir</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/work/active-project</span>
+</code></pre></div>
+
+<h3 id="scheduled-task-starts-scheduled_at">Scheduled task starts (<code>scheduled_at</code>)</h3>
+<p>Set <code>scheduled_at</code> on a task to delay dispatch until a specific time. The dispatcher skips ready tasks whose <code>scheduled_at</code> is in the future and picks them up on the first tick after that timestamp.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;nightly backup audit&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--assignee<span class="w"> </span>ops<span class="w"> </span>--scheduled-at<span class="w"> </span><span class="s2">&quot;2026-06-01T03:00:00Z&quot;</span>
+</code></pre></div>
+
+<h3 id="respawn-guard">Respawn guard</h3>
+<p>The dispatcher refuses to re-spawn a ready task when it hit a quota/auth/429 error on the previous run (<code>blocker_auth</code>), or completed a run successfully within the guard window (<code>recent_success</code>), or a recent task comment links to a GitHub PR (<code>active_pr</code>). Two cooldowns hold a card without ever counting against it: <code>rate_limit_cooldown</code> after a quota-wall requeue and <code>infrastructure_cooldown</code> after the host refused to place the worker (no restart-safe systemd scope — see <a href="#workers-and-systemd-cgroups">Workers and systemd cgroups</a>); both share the <code>HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS</code> window (default 300 s). This prevents repeat worker storms on the same bug or task while a human catches up. See the <code>respawn_guarded</code> row in the <a href="#event-reference">event reference</a>.</p>
+<p>To see why a ready card is not spawning, run <code>hermes kanban dispatch --dry-run</code> — the output lists <code>Guarded (&lt;reason&gt;): &lt;task id&gt;</code> per held card (and <code>respawn_guarded</code>, <code>rate_limited</code>, <code>skipped_locked</code>, <code>memory_pressure</code> with <code>--json</code>). The gateway's and the standalone daemon's "dispatcher stuck" warning also names what the last tick held back, e.g. <code>Last tick held back: active_pr=1</code>.</p>
+<p><code>recent_success</code> and <code>active_pr</code> hold the <strong>ready</strong> lane only — they are the inputs to a review handoff, not signals against one. To have a reviewer, closer or other recovery profile pick up a card whose PR is already open, either move it to the review lane with <code>hermes kanban request-review &lt;id&gt;</code> (accepted from <code>ready</code> as well as <code>running</code>; the review-lane spawn is not subject to either guard) or hand the ready card to that profile with <code>hermes kanban assign &lt;id&gt; &lt;profile&gt;</code>: a handoff recorded <em>after</em> the PR comment — an operator reassign, a reviewer's changes-requested verdict, or a review reopen — lifts <code>active_pr</code> for the profile now named on the card, because that PR is exactly what it must work on. Only a change to a <em>different</em> profile counts: re-assigning the same profile, unassigning, or the dispatcher's own <code>kanban.default_assignee</code> fill-in does not lift the guard, so the assignee that opened the PR is still not re-spawned against it after a crash, reclaim or no-op reassign, and a newer PR comment posted after the handoff guards again. A deliberate re-queue after a success (drag <code>done→ready</code>, <code>unblock</code>, re-promotion) also lifts <code>recent_success</code>, so a manual re-run is never silently held for the whole window.</p>
+<h3 id="drag-to-delete-and-bulk-delete-dashboard">Drag-to-delete and bulk delete (dashboard)</h3>
+<p>The dashboard exposes a <strong>trash drop zone</strong> on the kanban page — drag any card into it to delete the task (cascades through <code>task_events</code>, child links, and subscriptions). A confirmation prompt protects against accidents. Bulk delete is also reachable via <code>DELETE /api/plugins/kanban/tasks</code> with a JSON body <code>{"ids": ["t_abc", "t_def", ...]}</code>.</p>
+<h3 id="worker-visibility-endpoints">Worker visibility endpoints</h3>
+<p>The dashboard plugin API now exposes these read-only endpoints (plus a run-control verb) for external monitors:</p>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Returns</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/plugins/kanban/workers/active</code></td>
+<td>Currently spawned workers with PID, profile, task id, started-at, last heartbeat</td>
+</tr>
+<tr>
+<td><code>GET /api/plugins/kanban/runs/{id}</code></td>
+<td>Single-run detail — task id, status, started/ended, exit code, log path</td>
+</tr>
+<tr>
+<td><code>POST /api/plugins/kanban/runs/{run_id}/terminate</code></td>
+<td>Terminate a reclaimable run — stops the worker and frees the task for re-dispatch</td>
+</tr>
+<tr>
+<td><code>GET /api/plugins/kanban/inspect</code></td>
+<td>Combined dispatcher snapshot — backlog, in-progress count vs. <code>max_in_progress</code>, recent events</td>
+</tr>
+</tbody>
+</table>
+<p>All of these are gated by the same dashboard plugin auth as the rest of the kanban plugin API.</p>
+<h3 id="kanban-swarm-topology-helper">Kanban Swarm topology helper</h3>
+<p><code>hermes kanban swarm</code> creates a durable <strong>Kanban Swarm v1</strong> graph in one shot: a completed root/blackboard card, N parallel worker cards, a verifier card gated on all workers, and a synthesizer card gated on the verifier. Shared swarm context (the "blackboard") is stored as structured JSON comments on the root card so any worker can read it.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>swarm<span class="w"> </span><span class="s2">&quot;Design a multi-region failover plan&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--workers<span class="w"> </span>researcher,architect,sre<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--verifier<span class="w"> </span>reviewer<span class="w"> </span>--synthesizer<span class="w"> </span>writer
+</code></pre></div>
+
+<p>The resulting graph is committed atomically: dispatchers and dashboard readers see either no new swarm or the complete topology, never a partially linked root/worker/verifier graph. It then dispatches normally — workers run in parallel, the verifier wakes after they all finish, and the synthesizer wakes after the verifier marks the work clean.</p>
+<h2 id="kanban-slash-command"><code>/kanban</code> slash command</h2>
+<p>Every <code>hermes kanban &lt;action&gt;</code> verb is also reachable as <code>/kanban &lt;action&gt;</code> — from inside an interactive <code>hermes chat</code> session <strong>and</strong> from any gateway platform (Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Mattermost, email, SMS). Both surfaces call the exact same <code>hermes_cli.kanban.run_slash()</code> entry point that reuses the <code>hermes kanban</code> argparse tree, so the argument surface, flags, and output format are identical across CLI, <code>/kanban</code>, and <code>hermes kanban</code>. You don't have to leave the chat to drive the board.</p>
+<div class="highlight"><pre><span></span><code>/kanban list
+/kanban show t_abcd
+/kanban create &quot;write launch post&quot; --assignee writer --parent t_research
+/kanban comment t_abcd &quot;looks good, ship it&quot;
+/kanban unblock t_abcd
+/kanban dispatch --max 3
+/kanban specify t_abcd                  # flesh out a triage one-liner into a real spec
+/kanban specify --all --tenant engineering  # sweep every triage task in one tenant
+</code></pre></div>
+
+<p>Quote multi-word arguments the same way you would on a shell — <code>run_slash</code> parses the rest of the line with <code>shlex.split</code>, so <code>"..."</code> and <code>'...'</code> both work.</p>
+<h3 id="mid-run-usage-kanban-bypasses-the-running-agent-guard">Mid-run usage: <code>/kanban</code> bypasses the running-agent guard</h3>
+<p>The gateway normally queues slash commands and user messages while an agent is still thinking — that's what stops you from accidentally starting a second turn while the first is in flight. <strong><code>/kanban</code> is explicitly exempted from this guard.</strong> The board lives in <code>~/.hermes/kanban.db</code>, not in the running agent's state, so reads (<code>list</code>, <code>show</code>, <code>context</code>, <code>tail</code>, <code>watch</code>, <code>stats</code>, <code>runs</code>) and writes (<code>comment</code>, <code>unblock</code>, <code>block</code>, <code>assign</code>, <code>archive</code>, <code>create</code>, <code>link</code>, …) all go through immediately, even mid-turn.</p>
+<p>This is the whole point of the separation:</p>
+<ul>
+<li>A worker blocks waiting on a peer → you send <code>/kanban unblock t_abcd</code> from your phone and the dispatcher picks the peer up on its next tick. The blocked worker isn't interrupted — it just stops being blocked.</li>
+<li>You spot a card that needs human context → <code>/kanban comment t_xyz "use the 2026 schema, not 2025"</code> lands on the task thread and the <em>next</em> run of that task will read it in <code>kanban_show()</code>.</li>
+<li>You want to know what your fleet is doing without stopping the orchestrator → <code>/kanban list --mine</code> or <code>/kanban stats</code> inspects the board without touching your main conversation.</li>
+</ul>
+<h3 id="auto-subscribe-on-kanban-create-gateway-only">Auto-subscribe on <code>/kanban create</code> (gateway only)</h3>
+<p>When you create a task from the gateway with <code>/kanban create "…"</code>, the originating chat (platform + chat id + thread id) is automatically subscribed to that task's terminal events (<code>completed</code>, <code>blocked</code>, <code>gave_up</code>, <code>crashed</code>, <code>timed_out</code>). You'll get one message back per terminal event — including the first line of the worker's result summary on <code>completed</code> — without having to poll or remember the task id.</p>
+<div class="highlight"><pre><span></span><code>you&gt; /kanban create &quot;transcribe today&#39;s podcast&quot; --assignee transcriber
+bot&gt; Created t_9fc1a3  (ready, assignee=transcriber)
+     (subscribed — you&#39;ll be notified when t_9fc1a3 completes or blocks)
+
+… ~8 minutes later …
+
+bot&gt; ✓ t_9fc1a3 completed by transcriber
+     transcribed 42 minutes, saved to podcast/2026-05-04.md
+</code></pre></div>
+
+<p>Subscriptions survive a task reaching <code>done</code> — completion is reversible (a reviewer or controller can reopen a done task), so the origin session keeps getting notified through reopen cycles. They auto-remove on <code>archived</code> (the irreversible end state). On boards that never archive, a GC sweep purges subscriptions for tasks that have sat in <code>done</code> or <code>blocked</code> with no new activity for <code>kanban.done_sub_retention_days</code> days (default 30; set 0 to disable), so stale rows don't accumulate forever. If you script a create with <code>--json</code> (machine output) the auto-subscribe is skipped — the assumption is that scripted callers want to manage subscriptions explicitly via <code>/kanban notify-subscribe</code>.</p>
+<p>Dispatcher workers creating tasks through <code>kanban_create</code> or <code>hermes kanban create</code>
+copy the owning task's durable notification subscriptions even without <code>parents</code>
+dependency links. Destinations, route anchors, and delivery modes are preserved;
+a passive subscription is not upgraded to a wake by auto-subscribe. This copies
+existing subscriptions independently of <code>auto_subscribe_on_create</code>, which controls
+adding the current conversation as a new destination. No destination is invented
+for a bare CLI session or a worker whose owning task has no subscriptions.</p>
+<p>For <code>kanban_create</code>, session lineage resolves in this order: explicit <code>session_id</code>,
+the owning worker task's durable session, request-scoped API origin, then the
+current session. A candidate id is stamped only when it has a row in the active
+profile's <code>state.db</code> <code>sessions</code> table; an id that resolves nowhere (a session whose
+row was never written, or an id inherited from another process) leaves
+<code>session_id</code> NULL rather than pointing at a session no database can resolve.
+Built-in decomposition also inherits its root's durable session. Session lineage is not itself a notification destination: changing
+<code>session_id</code> does not replace existing subscriptions; use <code>notify-subscribe</code> and
+<code>notify-unsubscribe</code> to change where events are delivered.</p>
+<p>A chat-originated auto-subscribe is created in <code>notify+wake</code> mode: on a terminal event the destination agent both receives the passive message <strong>and</strong> takes a real turn, so it can read the board context and reply in its own voice. See <a href="#delivery-modes">Delivery modes</a> below.</p>
+<h3 id="output-truncation-in-messaging">Output truncation in messaging</h3>
+<p>Gateway platforms have practical message-length caps. If <code>/kanban list</code>, <code>/kanban show</code>, or <code>/kanban tail</code> produce more than ~3800 characters of output, the response is truncated with a <code>… (truncated; use \</code>hermes kanban …` in your terminal for full output)` footer. The CLI surface has no such cap.</p>
+<h3 id="autocomplete">Autocomplete</h3>
+<p>In the interactive CLI, typing <code>/kanban</code> and hitting Tab cycles through the built-in subcommand list (<code>list</code>, <code>ls</code>, <code>show</code>, <code>create</code>, <code>assign</code>, <code>link</code>, <code>unlink</code>, <code>claim</code>, <code>comment</code>, <code>complete</code>, <code>block</code>, <code>unblock</code>, <code>archive</code>, <code>tail</code>, <code>dispatch</code>, <code>context</code>, <code>init</code>, <code>gc</code>). The remaining verbs listed in the CLI reference above (<code>watch</code>, <code>stats</code>, <code>runs</code>, <code>log</code>, <code>assignees</code>, <code>heartbeat</code>, <code>notify-subscribe</code>, <code>notify-list</code>, <code>notify-unsubscribe</code>, <code>daemon</code>) also work — they're just not in the autocomplete hint list yet.</p>
+<h2 id="collaboration-patterns">Collaboration patterns</h2>
+<p>The board supports these eight patterns without any new primitives:</p>
+<table>
+<thead>
+<tr>
+<th>Pattern</th>
+<th>Shape</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>P1 Fan-out</strong></td>
+<td>N siblings, same role</td>
+<td>"research 5 angles in parallel"</td>
+</tr>
+<tr>
+<td><strong>P2 Pipeline</strong></td>
+<td>role chain: scout → editor → writer</td>
+<td>daily brief assembly</td>
+</tr>
+<tr>
+<td><strong>P3 Voting / quorum</strong></td>
+<td>N siblings + 1 aggregator</td>
+<td>3 researchers → 1 reviewer picks</td>
+</tr>
+<tr>
+<td><strong>P4 Long-running journal</strong></td>
+<td>same profile + shared dir + cron</td>
+<td>Obsidian vault</td>
+</tr>
+<tr>
+<td><strong>P5 Human-in-the-loop</strong></td>
+<td>worker blocks → user comments → unblock</td>
+<td>ambiguous decisions</td>
+</tr>
+<tr>
+<td><strong>P6 <code>@mention</code></strong></td>
+<td>inline routing from prose</td>
+<td><code>@reviewer look at this</code></td>
+</tr>
+<tr>
+<td><strong>P7 Thread-scoped workspace</strong></td>
+<td><code>/kanban here</code> in a thread</td>
+<td>per-project gateway threads</td>
+</tr>
+<tr>
+<td><strong>P8 Fleet farming</strong></td>
+<td>one profile, N subjects</td>
+<td>50 social accounts</td>
+</tr>
+<tr>
+<td><strong>P9 Triage specifier</strong></td>
+<td>rough idea → <code>triage</code> → <code>hermes kanban specify</code> expands body → <code>todo</code></td>
+<td>"turn this one-liner into a spec'd task"</td>
+</tr>
+</tbody>
+</table>
+<h2 id="handing-context-to-follow-up-cards-the-parent-link">Handing context to follow-up cards (the parent link)</h2>
+<p>A parent link is not just a scheduling gate — it is the context handoff channel from a <strong>completed</strong> card to a new one. When you create a card with <code>--parent &lt;done-card-id&gt;</code>, two things happen:</p>
+<ol>
+<li><strong>It's immediately eligible.</strong> <code>create_task</code> sets status by parent state: a child whose parents are all <code>done</code> is created directly in <code>ready</code> — no waiting, no manual promotion. (Children of still-open parents sit in <code>todo</code> until <code>recompute_ready</code> promotes them when the last parent finishes.)</li>
+<li><strong>The parent's handoff rides along.</strong> The worker context assembled for the child (<code>build_worker_context</code>, what <code>kanban_show()</code> returns) contains a <code>## Parent task results</code> section with each parent's completion <code>summary</code> and <code>metadata</code>, verbatim:</li>
+</ol>
+<div class="highlight"><pre><span></span><code>## Parent task results
+### t_77c26979 (completed just now)
+Added exponential backoff with jitter to the retry helper.
+_metadata_: `{&quot;changed_files&quot;: [&quot;hermes_cli/retry.py&quot;, &quot;tests/test_retry.py&quot;], &quot;decisions&quot;: [&quot;capped backoff at 60s&quot;, &quot;jitter = full&quot;]}`
+</code></pre></div>
+
+<p>This is why the pattern for follow-up work on a finished card is <strong>a new child card, not reopening the done card</strong>. Completed cards are immutable history — their context flows forward through the parent link. Same-card rework (retry loops on a failing card) is a different mechanism: prior attempts on the <em>same</em> card surface as "prior attempts" in that card's own context.</p>
+<p>A worktree or branch alone is not a substitute: repo state tells the follow-up worker <em>what</em> the code looks like, but not <em>why</em> — the decisions, tests run, and files touched live in the parent's structured handoff, not in git. Evidence that didn't exist when the parent completed (e.g. a CI log that failed later) belongs in the new card's <strong>body</strong>.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Implementation card t_impl is done. CI fails two hours later.</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Fix CI failure from t_impl: test_retry flakes on 3.11&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>coder<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--parent<span class="w"> </span>t_impl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--body<span class="w"> </span><span class="s2">&quot;</span><span class="k">$(</span>cat<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<span class="s">CI run #4812 failed after t_impl merged.</span>
+<span class="s">Log excerpt: FAILED tests/test_retry.py::test_backoff_jitter - TimeoutError</span>
+<span class="s">Acceptance: tests/test_retry.py green on 3.11 and 3.12 in CI.</span>
+<span class="s">Use a fresh worktree/branch; do not force-push the original branch.</span>
+<span class="s">EOF</span>
+<span class="k">)</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>The remediation worker spawns with the original card's summary and metadata (changed files, decisions) already in context, plus the fresh evidence you put in the body.</p>
+<h3 id="reconciling-colliding-worker-branches">Reconciling colliding worker branches</h3>
+<p>In engineering pipelines (P1/P2 with worktrees), two workers' branches can
+conflict when merged. Don't let either worker self-adjudicate — the colliding
+agent lacks its peer's context and reliably overwrites the other side or
+abandons its own. Instead, create a reconciliation card assigned to a <strong>third,
+neutral profile</strong> with <strong>both</strong> conflicted cards linked as parents: the parent
+links carry both sides' completion summaries into the reconciler's context, so
+it receives both diffs <em>and</em> both intents. The bundled
+<a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/autonomous-ai-agents/agent-merge-conflict-arbiter/SKILL.md" class="ext" target="_blank" rel="noopener"><code>agent-merge-conflict-arbiter</code> optional skill</a>
+gives that worker the full procedure: classify each conflicted hunk, resolve
+impartially, verify, and hand back a summary naming every decision.</p>
+<h3 id="collision-hotspots-in-parallel-campaigns">Collision hotspots in parallel campaigns</h3>
+<p>In wide campaigns some files become collision magnets: many workers each add a
+little to the same file, nobody owns keeping it small, and it turns into the
+site of constant merge conflicts. The mitigation is a comment convention, not a
+new primitive. A worker that notices its diff keeps colliding with siblings in
+one file — or that a file it touches keeps appearing in other cards' recent
+comments — should not silently pile on. Instead it leaves a comment on its own
+card with a recognizable prefix:</p>
+<div class="highlight"><pre><span></span><code>hotspot: hermes_cli/kanban_db.py — third conflicting edit to the dispatch loop this wave
+</code></pre></div>
+
+<p>and repeats the flag in its completion <code>metadata</code>. Orchestrators (or humans
+reviewing the board) who see <strong>two or more <code>hotspot:</code> comments naming the same
+path</strong> should create a dedicated refactor/decomposition card for that file
+<strong>before</strong> queuing more work that touches it — splitting the magnet file is
+cheaper than reconciling every future collision it would cause. For conflicts
+that have <em>already</em> happened, use the reconciliation-card pattern above with
+the <code>agent-merge-conflict-arbiter</code> optional skill; hotspot flagging is the upstream fix that keeps
+the reconciler from becoming a standing lane.</p>
+<h2 id="multi-tenant-usage">Multi-tenant usage</h2>
+<p>When one specialist fleet serves multiple businesses, tag each task with a tenant:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;monthly report&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--assignee<span class="w"> </span>researcher<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--tenant<span class="w"> </span>business-a<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--workspace<span class="w"> </span>dir:~/tenants/business-a/data/
+</code></pre></div>
+
+<p>Workers receive <code>$HERMES_TENANT</code> and namespace their memory writes by prefix. The board, the dispatcher, and the profile definitions are all shared; only the data is scoped.</p>
+<h2 id="desktop-notifications">Desktop notifications</h2>
+<p>The Desktop app's Kanban plugin surfaces the same terminal events natively — no gateway platform required. While the Kanban board's live event socket is connected, each <code>completed</code>, <code>blocked</code>, <code>gave_up</code>, <code>crashed</code>, <code>timed_out</code>, or routed-to-triage (<code>block_loop_detected</code>) event raises an in-app toast with the worker's handoff (summary, block reason, or error) and an "Open Kanban" action. When you're away from the Hermes window, the same event also fires a native OS notification (gated by <strong>Settings ▸ Notifications ▸ Plugin notifications</strong>), so a task hitting a blocker while you're in another app still reaches you.</p>
+<p>Coverage window: desktop notifications ride the live event stream, so they fire only while the app is running with the Kanban plugin enabled. Events that land while the app is closed are not replayed as notifications on next launch — use a gateway subscription (below) for delivery that must survive the app being closed.</p>
+<h2 id="gateway-notifications">Gateway notifications</h2>
+<p>When you run <code>/kanban create …</code> from the gateway (Telegram, Discord, Slack, etc.), the originating chat is automatically subscribed to the new task. The gateway's background notifier polls <code>task_events</code> every few seconds and delivers one message per terminal event (<code>completed</code>, <code>blocked</code>, <code>gave_up</code>, <code>crashed</code>, <code>timed_out</code>) to that chat. Completed tasks also send the first line of the worker's <code>--result</code> so you see the outcome without having to <code>/kanban show</code>.</p>
+<p>You can manage subscriptions explicitly from the CLI — useful when a script / cron job wants to notify a chat it didn't originate from:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>notify-subscribe<span class="w"> </span>t_abcd<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--platform<span class="w"> </span>telegram<span class="w"> </span>--chat-id<span class="w"> </span><span class="m">12345678</span><span class="w"> </span>--thread-id<span class="w"> </span><span class="m">7</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--chat-type<span class="w"> </span>group<span class="w"> </span>--delivery-mode<span class="w"> </span>notify+wake
+hermes<span class="w"> </span>kanban<span class="w"> </span>notify-list
+hermes<span class="w"> </span>kanban<span class="w"> </span>notify-unsubscribe<span class="w"> </span>t_abcd<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--platform<span class="w"> </span>telegram<span class="w"> </span>--chat-id<span class="w"> </span><span class="m">12345678</span><span class="w"> </span>--thread-id<span class="w"> </span><span class="m">7</span>
+</code></pre></div>
+
+<p>A subscription removes itself automatically once the task reaches <code>done</code> or <code>archived</code>; no cleanup needed.</p>
+<p><strong>Discord threads under <code>profile_routes</code>:</strong> when the gateway multiplexes profiles and routes a <em>channel</em>
+to a profile, a subscription created from the CLI for a <em>thread</em> in that channel needs the thread's route
+anchors, or the notifier cannot match it to any route and skips it (logged once at WARNING). Pass them
+explicitly — <code>--parent-chat-id &lt;channel id&gt;</code> and, for Discord, <code>--guild-id &lt;guild id&gt;</code>:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>notify-subscribe<span class="w"> </span>t_abcd<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--platform<span class="w"> </span>discord<span class="w"> </span>--chat-id<span class="w"> </span>&lt;thread<span class="w"> </span>id&gt;<span class="w"> </span>--thread-id<span class="w"> </span>&lt;thread<span class="w"> </span>id&gt;<span class="w"> </span>--chat-type<span class="w"> </span>thread<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--parent-chat-id<span class="w"> </span>&lt;channel<span class="w"> </span>id&gt;<span class="w"> </span>--guild-id<span class="w"> </span>&lt;guild<span class="w"> </span>id&gt;<span class="w"> </span>--delivery-mode<span class="w"> </span>notify+wake
+</code></pre></div>
+
+<p>Subscriptions created from inside the chat (<code>/kanban create</code>, <code>kanban_create</code>) record these anchors automatically.</p>
+<h3 id="delivery-modes">Delivery modes</h3>
+<p><code>--delivery-mode</code> controls <strong>how</strong> the notifier reacts to a terminal event. Every subscription is in one of three modes (<code>notify</code> is the default and the original behavior):</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Passive message</th>
+<th>Wakes the agent</th>
+<th>Use it when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>notify</code></td>
+<td>yes</td>
+<td>no</td>
+<td>You just want a heads-up message in the chat (default).</td>
+</tr>
+<tr>
+<td><code>notify+wake</code></td>
+<td>yes</td>
+<td>yes</td>
+<td>You also want the destination agent to take a real turn — read the board context and reply in its own voice. Chat-originated auto-subscribes use this.</td>
+</tr>
+<tr>
+<td><code>wake</code></td>
+<td>no</td>
+<td>yes</td>
+<td>You only want the agent to act on the event, with no separate ping.</td>
+</tr>
+</tbody>
+</table>
+<p>For <code>notify+wake</code>, delivery completes only once the wake is admitted to the adapter's turn queue as well as the passive ping being sent. Missing handlers, rejected routes, and full queues are retried on later notifier ticks without expiring the subscription. Sent pings are checkpointed separately in SQLite, so a rejected wake does not repeat an already checkpointed ping. <code>notify</code> remains passive and never starts a turn. Admission is not a guarantee of model execution or a successful reply; normal turn gates still apply. This is not exactly-once delivery: a process crash between a send and its checkpoint can repeat the ping, and the existing claim-before-delivery cursor is not a crash-recoverable queue.</p>
+<p>A "wake" forges a synthetic inbound message to the destination gateway agent so it takes a normal turn (reads the comment + result, reasons, replies) instead of getting a one-line passive notification. It only fires when the notifier runs inside a live gateway process; otherwise a <code>notify+wake</code> subscription still delivers its passive message, while a <code>wake</code>-only subscription does nothing in that process.</p>
+<p><strong>Which events wake.</strong> The ones that return a task outcome or require orchestration attention: <code>completed</code>, <code>blocked</code>, <code>gave_up</code>, <code>crashed</code>, <code>timed_out</code>, <code>review_requested</code> (a worker finished the implementation and handed off via <code>kanban_request_review</code>) and <code>block_loop_detected</code> (the task was routed to <code>triage</code> after repeated blocks). <code>status</code>, <code>archived</code> and <code>unblocked</code> are delivered but never wake — they are bookkeeping transitions, not attention signals. When a <code>completed</code> or <code>review_requested</code> event carries a summary, that handoff rides the wake turn, so the woken agent sees what the worker actually did.</p>
+<p><code>--chat-type</code> (<code>dm</code> | <code>group</code> | <code>channel</code> | <code>thread</code>) records the originating chat's type so a woken turn resolves the operator's <strong>real</strong> session: <code>build_session_key</code> keys groups, channels, and threads differently from DMs, so an inaccurate <code>chat_type</code> would route the wake into a separate, context-less session. The <code>/kanban</code> auto-subscribe and slash-command paths capture this automatically — you only set it by hand when subscribing a chat from a script or cron. Omit it to leave an existing subscription unchanged (new subscriptions default to <code>dm</code>).</p>
+<h3 id="multi-profile-setups-delivery-is-profile-owned">Multi-profile setups: delivery is profile-owned</h3>
+<p>In a one-gateway-per-profile deployment (one dispatcher, separate gateway
+processes for <code>writer</code>, <code>admin</code>, etc. — see the <a href="kanban-multi-gateway.html">multi-gateway
+guide</a>),
+dispatch and delivery have separate owners:</p>
+<ul>
+<li><strong>Dispatch stays single-owner.</strong> Exactly one gateway keeps
+  <code>kanban.dispatch_in_gateway: true</code> and runs the dispatcher; every other
+  gateway sets it to <code>false</code>.</li>
+<li><strong>Notification delivery is profile-owned.</strong> Every gateway — including
+  non-dispatch ones — runs the notifier and polls only subscriptions stamped
+  with a profile whose platform adapters it hosts. A task created from the
+  <code>writer</code> profile's Telegram gets its <code>completed</code>/<code>blocked</code> message delivered
+  by the <code>writer</code> gateway, even though the <code>default</code> gateway did the
+  dispatching.</li>
+<li><strong>Route-only multiplex profiles</strong> can use the primary adapter when the
+  subscription's persisted platform, chat, thread, scope and parent-channel
+  anchors resolve to that exact served profile through <code>gateway.profile_routes</code>.
+  A connected secondary adapter remains authoritative; a partial secondary
+  adapter registry never falls back to the primary bot. Unmatched, reassigned,
+  disabled or ambiguous routes remain undelivered and retryable. Old rows
+  missing required routing anchors are not guessed into a profile. Wake turns keep
+  the destination profile's runtime scope and the authorized transport.</li>
+<li><strong>Stateless (<code>api_server</code>) subscriptions</strong> carry a raw session id, which no
+  <code>profile_routes</code> entry can anchor (there is no chat/thread/guild discriminator
+  on a session). A served profile is authorized exactly when the subscription's
+  session lives in that profile's own <code>state.db</code> — the shared listener mirrors
+  <code>/p/&lt;profile&gt;/</code>, so the session store is the ownership proof, never the
+  platform. The wake then runs in that profile's runtime scope and resumes that
+  exact session in-process, so no second listener and no secondary
+  <code>API_SERVER_KEY</code> is involved. A session that is unknown, stamped for another
+  profile, or owned by an unserved profile stays undelivered and retryable, and
+  the default profile's own <code>api_server</code> subscriptions are unaffected.</li>
+<li><strong>Legacy subscriptions</strong> created before profile stamping (no
+  <code>notifier_profile</code> on the row) are delivered only by the gateway that holds
+  the actual dispatcher singleton lock, so two gateways never race for them.</li>
+</ul>
+<p>Duplicate delivery across gateways is prevented by the atomic per-event claim
+in the board DB. No relays, credential sharing, or extra dispatchers are
+needed — each profile gateway simply delivers through its own adapters.</p>
+<h2 id="runs--one-row-per-attempt">Runs — one row per attempt</h2>
+<p>A task is a logical unit of work; a <strong>run</strong> is one attempt to execute it. When the dispatcher claims a ready task it creates a row in <code>task_runs</code> and points <code>tasks.current_run_id</code> at it. When that attempt ends — completed, blocked, crashed, timed out, spawn-failed, reclaimed — the run row closes with an <code>outcome</code> and the task's pointer clears. A task that's been attempted three times has three <code>task_runs</code> rows.</p>
+<p>Why two tables instead of just mutating the task: you need <strong>full attempt history</strong> for real-world postmortems ("the second reviewer attempt got to approve, the third merged"), and you need a clean place to hang per-attempt metadata — which files changed, which tests ran, which findings a reviewer noted. Those are run facts, not task facts.</p>
+<p>Runs are also where <strong>structured handoff</strong> lives. When a worker completes a task (via <code>kanban_complete(...)</code>) it can pass:</p>
+<ul>
+<li><code>summary</code> (tool param) / <code>--summary</code> (CLI) — human handoff; goes on the run; downstream children see it in their <code>build_worker_context</code>.</li>
+<li><code>metadata</code> (tool param) / <code>--metadata</code> (CLI) — free-form JSON dict on the run; children see it serialized alongside the summary.</li>
+<li><code>result</code> (tool param) / <code>--result</code> (CLI) — short log line that goes on the task row (legacy field, kept for back-compat).</li>
+</ul>
+<p>Downstream children read the most recent completed run's summary + metadata for each parent. Retrying workers read the prior attempts on their own task (outcome, summary, error) so they don't repeat a path that already failed.</p>
+<div class="highlight"><pre><span></span><code># What a worker actually does — a tool call, from inside the agent loop:
+kanban_complete(
+    summary=&quot;implemented token bucket, keys on user_id with IP fallback, all tests pass&quot;,
+    metadata={&quot;changed_files&quot;: [&quot;limiter.py&quot;, &quot;tests/test_limiter.py&quot;], &quot;tests_run&quot;: 14},
+    result=&quot;rate limiter shipped&quot;,
+)
+</code></pre></div>
+
+<p>The same handoff is reachable from the CLI when you (the human) need to close out a task a worker can't — e.g. a task that was abandoned, or one you marked done manually from the dashboard:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span><span class="nb">complete</span><span class="w"> </span>t_abcd<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--result<span class="w"> </span><span class="s2">&quot;rate limiter shipped&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--summary<span class="w"> </span><span class="s2">&quot;implemented token bucket, keys on user_id with IP fallback, all tests pass&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--metadata<span class="w"> </span><span class="s1">&#39;{&quot;changed_files&quot;: [&quot;limiter.py&quot;, &quot;tests/test_limiter.py&quot;], &quot;tests_run&quot;: 14}&#39;</span>
+
+<span class="c1"># Review the attempt history on a retried task:</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>runs<span class="w"> </span>t_abcd
+<span class="c1">#   #  OUTCOME       PROFILE           ELAPSED  STARTED</span>
+<span class="c1">#   1  blocked       worker               12s  2026-04-27 14:02</span>
+<span class="c1">#        → BLOCKED: need decision on rate-limit key</span>
+<span class="c1">#   2  completed     worker                8m   2026-04-27 15:18</span>
+<span class="c1">#        → implemented token bucket, keys on user_id with IP fallback</span>
+</code></pre></div>
+
+<p>Runs are exposed on the dashboard (Run History section in the drawer, one coloured row per attempt) and on the REST API (<code>GET /api/plugins/kanban/tasks/:id</code> returns a <code>runs[]</code> array). <code>PATCH /api/plugins/kanban/tasks/:id</code> with <code>{status: "done", summary, metadata}</code> forwards both to the kernel, so the dashboard's "mark done" button is CLI-equivalent. <code>task_events</code> rows carry the <code>run_id</code> they belong to so the UI can group them by attempt, and the <code>completed</code> event embeds the first-line summary in its payload (capped at 400 chars) so gateway notifiers can render structured handoffs without a second SQL round-trip.</p>
+<p><strong>Bulk close caveat.</strong> <code>hermes kanban complete a b c --summary X</code> is refused — structured handoff is per-run, so copy-pasting the same summary to N tasks is almost always wrong. Bulk close <em>without</em> <code>--summary</code> / <code>--metadata</code> still works for the common "I finished a pile of admin tasks" case.</p>
+<p><strong>Dependency refusal on complete names the parents.</strong> <code>kanban_complete</code> / <code>hermes kanban complete</code> / the dashboard's "mark done" and "request review" actions (single and bulk) on a card whose direct parent is not <code>done</code>/<code>archived</code> (a parent reopened mid-run, or an edge that predates the running-child refusal) reports <code>unsatisfied parent dependencies: t_… (todo)</code> instead of the generic "unknown id, stale run, or already terminal" text; the card stays in-flight. <code>kanban_show</code> lists the same parents under <code>unsatisfied_parents</code>, and <code>hermes kanban show</code> / <code>hermes kanban diagnostics</code> / the dashboard raise a <code>running_with_open_parents</code> warning on a running card in that state. Finish the parent or <code>hermes kanban unlink &lt;parent&gt; &lt;child&gt;</code>; there is no force path through the dependency gate.</p>
+<p><strong>Live-claim guard on complete.</strong> A <code>running</code> task whose worker holds a live claim is only completed by that worker (<code>kanban_complete</code> from inside the run) or by an explicit operator override: <code>hermes kanban complete &lt;id&gt; --force</code> and the dashboard's "mark done" action. A claim-less <code>hermes kanban complete &lt;id&gt;</code> or an orchestrator session's <code>kanban_complete</code> is refused with a pointer to <code>--force</code> / <code>hermes kanban reclaim</code>, so a second session can no longer close a live worker's run underneath it. Completing <code>ready</code>, <code>blocked</code> or <code>review</code> cards without a claim is unchanged.</p>
+<p><strong>Reclaimed runs from status changes.</strong> If you drag a running task off <code>running</code> in the dashboard (back to <code>ready</code>, or straight to <code>todo</code>), or archive a task that was still running, the in-flight run closes with <code>outcome='reclaimed'</code> rather than being orphaned. The <code>task_runs</code> row is always in a terminal state when <code>tasks.current_run_id</code> is <code>NULL</code>, and vice versa — that invariant holds across CLI, dashboard, dispatcher, and notifier.</p>
+<p><strong>Synthetic runs for never-claimed completions.</strong> Completing or blocking a task that was never claimed (e.g. a human closes a <code>ready</code> task from the dashboard with a summary, or a CLI user runs <code>hermes kanban complete &lt;ready-task&gt; --summary X</code>) would otherwise drop the handoff. Instead the kernel inserts a zero-duration run row (<code>started_at == ended_at</code>) carrying the summary / metadata / reason so attempt history stays complete. The <code>completed</code> / <code>blocked</code> event's <code>run_id</code> points at that row.</p>
+<p><strong>Live drawer refresh.</strong> When the dashboard's WebSocket event stream reports new events for the task the user is currently viewing, the drawer reloads itself (via a per-task event counter threaded into its <code>useEffect</code> dependency list). Closing and reopening is no longer required to see a run's new row or updated outcome.</p>
+<h3 id="forward-compatibility">Forward compatibility</h3>
+<p>Two nullable columns on <code>tasks</code> are reserved for v2 workflow routing: <code>workflow_template_id</code> (which template this task belongs to) and <code>current_step_key</code> (which step in that template is active). The v1 kernel ignores them for routing but lets clients write them, so a v2 release can add the routing machinery without another schema migration.</p>
+<h2 id="event-reference">Event reference</h2>
+<p>Every transition appends a row to <code>task_events</code>. Each row carries an optional <code>run_id</code> so UIs can group events by attempt. Kinds group into three clusters so filtering is easy (<code>hermes kanban watch --kinds completed,gave_up,timed_out</code>):</p>
+<p><strong>Lifecycle</strong> (what changed about the task as a logical unit):</p>
+<table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>Payload</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>created</code></td>
+<td><code>{assignee, status, parents, tenant}</code></td>
+<td>Task inserted. <code>run_id</code> is <code>NULL</code>.</td>
+</tr>
+<tr>
+<td><code>promoted</code></td>
+<td>—</td>
+<td><code>todo → ready</code> because all parents hit <code>done</code>. <code>run_id</code> is <code>NULL</code>.</td>
+</tr>
+<tr>
+<td><code>claimed</code></td>
+<td><code>{lock, expires, run_id}</code></td>
+<td>Dispatcher atomically claimed a <code>ready</code> task for spawn.</td>
+</tr>
+<tr>
+<td><code>completed</code></td>
+<td><code>{result_len, summary?}</code></td>
+<td>Worker wrote <code>--result</code> / <code>--summary</code> and task hit <code>done</code>. <code>summary</code> is the first-line handoff (400-char cap); full version lives on the run row. If <code>complete_task</code> is called on a never-claimed task with handoff fields, a zero-duration run is synthesized so <code>run_id</code> still points at something.</td>
+</tr>
+<tr>
+<td><code>blocked</code></td>
+<td><code>{reason, kind, recurrences}</code></td>
+<td>Worker or human flipped the task to <code>blocked</code>. <code>kind</code> is the typed block reason (<code>needs_input</code>, <code>capability</code>, <code>transient</code>, or <code>null</code> for a generic block); <code>recurrences</code> is the unblock-loop counter. A <code>kind=dependency</code> block with no incomplete parent lands here as <code>needs_input</code> (payload adds <code>requested_kind: dependency</code>, <code>rekind_reason: no_open_parent</code>) because <code>todo</code> would only get it re-promoted and respawned on the next dispatch tick. Synthesizes a zero-duration run when called on a never-claimed task with <code>--reason</code>.</td>
+</tr>
+<tr>
+<td><code>dependency_wait</code></td>
+<td><code>{reason, kind}</code> or <code>{reason: parent_not_done, demoted: true, parent}</code></td>
+<td>Worker blocked with <code>kind=dependency</code> while at least one parent is still open — the task is only waiting on another task, so it routes to <code>todo</code> (parent-gated, auto-promoted) instead of <code>blocked</code> and no recurrence is counted. No human needed. Also emitted when <code>link</code>/<code>kanban_link</code> puts a <code>ready</code> child under a parent that is not <code>done</code>: the child drops back to <code>todo</code> and this event records why (the <code>ready → running</code> claim re-checks parents, so nothing can run it until the parent completes or the link is removed with <code>hermes kanban unlink</code>).</td>
+</tr>
+<tr>
+<td><code>block_loop_detected</code></td>
+<td><code>{reason, kind, recurrences, limit}</code></td>
+<td>A task was unblocked and re-blocked for the same reason <code>BLOCK_RECURRENCE_LIMIT</code> times (default 2). Instead of landing in <code>blocked</code> again — where a cron would keep unblocking it — it routes to <code>triage</code> for orchestration attention, breaking the unblock↔re-block loop.</td>
+</tr>
+<tr>
+<td><code>unblocked</code></td>
+<td>—</td>
+<td><code>blocked → ready</code> (or <code>todo</code> if parents are still open), either manually or via <code>/unblock</code>. Resets the dispatcher's <code>consecutive_failures</code> but deliberately preserves <code>block_recurrences</code> so the loop breaker keeps its memory. <code>run_id</code> is <code>NULL</code>.</td>
+</tr>
+<tr>
+<td><code>archived</code></td>
+<td>—</td>
+<td>Hidden from the default board. If the task was still running, carries the <code>run_id</code> of the run that was reclaimed as a side effect.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Edits</strong> (human-driven changes that aren't transitions):</p>
+<table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>Payload</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>assigned</code></td>
+<td><code>{assignee}</code></td>
+<td>Assignee changed (including unassignment).</td>
+</tr>
+<tr>
+<td><code>edited</code></td>
+<td><code>{fields}</code></td>
+<td>Title or body updated.</td>
+</tr>
+<tr>
+<td><code>reprioritized</code></td>
+<td><code>{priority}</code></td>
+<td>Priority changed.</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td><code>{status}</code></td>
+<td>Dashboard drag-drop wrote a status directly (e.g. <code>todo → ready</code>). Carries the <code>run_id</code> of the run that was reclaimed when dragging off <code>running</code>; otherwise <code>run_id</code> is NULL.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Worker telemetry</strong> (about the execution process, not the logical task):</p>
+<table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>Payload</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>spawned</code></td>
+<td><code>{pid}</code></td>
+<td>Dispatcher successfully started a worker process.</td>
+</tr>
+<tr>
+<td><code>heartbeat</code></td>
+<td><code>{note?}</code></td>
+<td>Worker called <code>hermes kanban heartbeat $TASK</code> to signal liveness during long operations.</td>
+</tr>
+<tr>
+<td><code>reclaimed</code></td>
+<td><code>{stale_lock}</code></td>
+<td>Claim TTL expired without a completion; task goes back to <code>ready</code>. An automatic reclaim counts as one non-successful attempt toward the <code>gave_up</code> breaker (a claim that never spawned a worker would otherwise loop claim → reclaim → claim forever); an operator <code>reclaim</code> resets the counter instead.</td>
+</tr>
+<tr>
+<td><code>crashed</code></td>
+<td><code>{pid, claimer, exit_kind?, exit_code?, worker_output?}</code></td>
+<td>Worker PID no longer alive but TTL hadn't expired yet. <code>worker_output</code> is the tail of the worker's own log (its final response or the rendered provider error, chrome stripped, ≤ 400 chars) and is also appended to the task's <code>last_failure_error</code>, so the board shows <em>why</em> instead of only the exit code.</td>
+</tr>
+<tr>
+<td><code>timed_out</code></td>
+<td><code>{pid, elapsed_seconds, limit_seconds, sigkill}</code></td>
+<td><code>max_runtime_seconds</code> exceeded; dispatcher SIGTERM'd (then SIGKILL'd after 5 s grace) and re-queued.</td>
+</tr>
+<tr>
+<td><code>stale</code></td>
+<td><code>{elapsed_seconds, last_heartbeat_at, heartbeat_age_seconds, timeout_seconds, pid, terminated}</code></td>
+<td>Task ran longer than <code>kanban.dispatch_stale_timeout_seconds</code> (default 4 h) AND no <code>kanban_heartbeat</code> arrived in the last hour. Dispatcher SIGTERM'd the host-local worker (if any), reset the task to <code>ready</code> for re-dispatch. Does NOT tick the failure counter (stale is dispatcher-side absence detection, not a worker fault). Workers running long operations should call <code>kanban_heartbeat</code> at least once an hour to avoid this.</td>
+</tr>
+<tr>
+<td><code>reconciled</code></td>
+<td><code>{reason, claim_lock, claim_expires, worker_pid}</code></td>
+<td>Orphaned-card reconciliation: the card was <code>running</code> with broken claim bookkeeping (<code>claim_lock</code> or <code>claim_expires</code> NULL — crash mid-claim, manual SQL, DB restore) and no live worker, so none of the TTL/crash/stale paths could ever recover it. The dispatcher requeued it to <code>ready</code> with an explanatory comment. Gated by <code>kanban.reconcile_orphans</code> in config.yaml (default <code>true</code>).</td>
+</tr>
+<tr>
+<td><code>respawn_guarded</code></td>
+<td><code>{reason}</code></td>
+<td>Dispatcher refused to re-spawn this ready task this tick. Reasons: <code>infrastructure_cooldown</code> (the host refused the last spawn — no restart-safe systemd scope — and the cooldown has not elapsed; never counted against the card), <code>rate_limit_cooldown</code> (the last run hit a quota wall; same cooldown, never counted), <code>blocker_auth</code> (last failure was a quota/auth/429 error — wait for the rate window to reset), <code>recent_success</code> (a completed run happened in the last hour — wait for review before re-running), <code>active_pr</code> (a GitHub PR URL appears in a recent comment — a prior worker already opened a PR). The task stays in <code>ready</code>; the next tick gets another chance to spawn. If the underlying condition persists, the normal <code>consecutive_failures</code> circuit breaker will auto-block via <code>gave_up</code> after <code>failure_limit</code> failures.</td>
+</tr>
+<tr>
+<td><code>spawn_failed</code></td>
+<td><code>{error, failures}</code></td>
+<td>One spawn attempt failed (missing PATH, workspace unmountable, …). Counter increments; task returns to <code>ready</code> for retry.</td>
+</tr>
+<tr>
+<td><code>protocol_violation</code></td>
+<td><code>{pid, claimer, exit_code, protocol_violation, worker_output?}</code></td>
+<td>Worker exited successfully while the task was still <code>running</code>, usually because it answered without a terminal board call (<code>kanban_complete</code>, <code>kanban_request_review</code> or <code>kanban_block</code>). Emitted on every violation (the payload's <code>protocol_violation: true</code> marker is copied into the run metadata and feeds the violation-only retry budget). Below the budget — up to <code>_PROTOCOL_VIOLATION_FAILURE_LIMIT</code> (default 3) <em>consecutive</em> violations, per-task <code>max_retries</code> overriding — the task simply returns to <code>ready</code> for another attempt; when the streak reaches the bound the dispatcher also emits <code>gave_up</code> and auto-blocks. <code>worker_output</code> carries the worker's own last printed text (usually its explanation of why it stopped), also folded into <code>last_failure_error</code> and shown to the retry worker as the prior-attempt error.</td>
+</tr>
+<tr>
+<td><code>gave_up</code></td>
+<td><code>{failures, effective_limit, limit_source, error, terminal_provider?}</code></td>
+<td>Circuit breaker fired after N consecutive non-successful attempts. Task auto-blocks with the last error. The effective limit resolves as task <code>max_retries</code>, then dispatcher <code>failure_limit</code> / <code>kanban.failure_limit</code>, then the built-in default. <code>terminal_provider: true</code> means the worker exited <code>78</code> on a provider error a retry cannot fix (credential revoked, model gone) and the breaker fired on that first attempt, sticky, regardless of the limit.</td>
+</tr>
+</tbody>
+</table>
+<p><code>hermes kanban tail &lt;id&gt;</code> shows these for a single task. <code>hermes kanban watch</code> streams them board-wide.</p>
+<h2 id="out-of-scope">Out of scope</h2>
+<p>Kanban is deliberately single-host. <code>~/.hermes/kanban.db</code> is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use <code>delegate_task</code> / a message queue to bridge them.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl3"><a href="#completion-checkpoints-before-the-iteration-cap">Completion checkpoints before the iteration cap</a></li>
+<li class="lvl3"><a href="#two-surfaces-the-model-talks-through-tools-you-talk-through-the-cli">Two surfaces: the model talks through tools, you talk through the CLI</a></li>
+<li class="lvl2"><a href="#pr-completion-contracts">PR completion contracts</a></li>
+<li class="lvl2"><a href="#kanban-vs-delegate_task">Kanban vs. delegate_task</a></li>
+<li class="lvl2"><a href="#core-concepts">Core concepts</a></li>
+<li class="lvl2"><a href="#boards-multi-project">Boards (multi-project)</a></li>
+<li class="lvl3"><a href="#managing-boards-from-the-cli">Managing boards from the CLI</a></li>
+<li class="lvl3"><a href="#managing-boards-from-the-dashboard">Managing boards from the dashboard</a></li>
+<li class="lvl3"><a href="#switching-boards-in-the-desktop-app">Switching boards in the Desktop app</a></li>
+<li class="lvl2"><a href="#file-attachments">File attachments</a></li>
+<li class="lvl2"><a href="#quick-start">Quick start</a></li>
+<li class="lvl3"><a href="#gateway-embedded-dispatcher-default">Gateway-embedded dispatcher (default)</a></li>
+<li class="lvl3"><a href="#shared-boards-across-homes">Shared boards across homes</a></li>
+<li class="lvl3"><a href="#idempotent-create-for-automation--webhooks">Idempotent create (for automation / webhooks)</a></li>
+<li class="lvl3"><a href="#bulk-cli-verbs">Bulk CLI verbs</a></li>
+<li class="lvl2"><a href="#enabling-tools-for-a-chat-profile">Enabling tools for a chat profile</a></li>
+<li class="lvl2"><a href="#how-workers-interact-with-the-board">How workers interact with the board</a></li>
+<li class="lvl3"><a href="#why-tools-instead-of-shelling-to-hermes-kanban">Why tools instead of shelling to hermes kanban</a></li>
+<li class="lvl3"><a href="#recommended-handoff-evidence">Recommended handoff evidence</a></li>
+<li class="lvl3"><a href="#the-worker-lifecycle">The worker lifecycle</a></li>
+<li class="lvl3"><a href="#pinning-extra-skills-to-a-specific-task">Pinning extra skills to a specific task</a></li>
+<li class="lvl3"><a href="#per-task-model-override">Per-task model override</a></li>
+<li class="lvl3"><a href="#cost-strategy-frontier-orchestrator-inexpensive-workers">Cost strategy: frontier orchestrator, inexpensive workers</a></li>
+<li class="lvl3"><a href="#lifecycle-plugin-hooks">Lifecycle plugin hooks</a></li>
+<li class="lvl3"><a href="#goal-mode-cards---goal">Goal-mode cards (--goal)</a></li>
+<li class="lvl3"><a href="#how-the-orchestrator-behaves">How the orchestrator behaves</a></li>
+<li class="lvl2"><a href="#dashboard-gui">Dashboard (GUI)</a></li>
+<li class="lvl3"><a href="#what-the-plugin-gives-you">What the plugin gives you</a></li>
+<li class="lvl3"><a href="#auto-vs-manual-orchestration">Auto vs Manual orchestration</a></li>
+<li class="lvl3"><a href="#architecture">Architecture</a></li>
+<li class="lvl3"><a href="#rest-surface">REST surface</a></li>
+<li class="lvl3"><a href="#dashboard-config">Dashboard config</a></li>
+<li class="lvl3"><a href="#security-model">Security model</a></li>
+<li class="lvl3"><a href="#live-updates">Live updates</a></li>
+<li class="lvl3"><a href="#extending-it">Extending it</a></li>
+<li class="lvl3"><a href="#scope-boundary">Scope boundary</a></li>
+<li class="lvl2"><a href="#cli-command-reference">CLI command reference</a></li>
+<li class="lvl3"><a href="#concurrency-scheduling-and-child-promotion-config">Concurrency, scheduling, and child promotion config</a></li>
+<li class="lvl3"><a href="#scheduled-task-starts-scheduled_at">Scheduled task starts (scheduled_at)</a></li>
+<li class="lvl3"><a href="#respawn-guard">Respawn guard</a></li>
+<li class="lvl3"><a href="#drag-to-delete-and-bulk-delete-dashboard">Drag-to-delete and bulk delete (dashboard)</a></li>
+<li class="lvl3"><a href="#worker-visibility-endpoints">Worker visibility endpoints</a></li>
+<li class="lvl3"><a href="#kanban-swarm-topology-helper">Kanban Swarm topology helper</a></li>
+<li class="lvl2"><a href="#kanban-slash-command">/kanban slash command</a></li>
+<li class="lvl3"><a href="#mid-run-usage-kanban-bypasses-the-running-agent-guard">Mid-run usage: /kanban bypasses the running-agent guard</a></li>
+<li class="lvl3"><a href="#auto-subscribe-on-kanban-create-gateway-only">Auto-subscribe on /kanban create (gateway only)</a></li>
+<li class="lvl3"><a href="#output-truncation-in-messaging">Output truncation in messaging</a></li>
+<li class="lvl3"><a href="#autocomplete">Autocomplete</a></li>
+<li class="lvl2"><a href="#collaboration-patterns">Collaboration patterns</a></li>
+<li class="lvl2"><a href="#handing-context-to-follow-up-cards-the-parent-link">Handing context to follow-up cards (the parent link)</a></li>
+<li class="lvl3"><a href="#reconciling-colliding-worker-branches">Reconciling colliding worker branches</a></li>
+<li class="lvl3"><a href="#collision-hotspots-in-parallel-campaigns">Collision hotspots in parallel campaigns</a></li>
+<li class="lvl2"><a href="#multi-tenant-usage">Multi-tenant usage</a></li>
+<li class="lvl2"><a href="#desktop-notifications">Desktop notifications</a></li>
+<li class="lvl2"><a href="#gateway-notifications">Gateway notifications</a></li>
+<li class="lvl3"><a href="#delivery-modes">Delivery modes</a></li>
+<li class="lvl3"><a href="#multi-profile-setups-delivery-is-profile-owned">Multi-profile setups: delivery is profile-owned</a></li>
+<li class="lvl2"><a href="#runs--one-row-per-attempt">Runs — one row per attempt</a></li>
+<li class="lvl3"><a href="#forward-compatibility">Forward compatibility</a></li>
+<li class="lvl2"><a href="#event-reference">Event reference</a></li>
+<li class="lvl2"><a href="#out-of-scope">Out of scope</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

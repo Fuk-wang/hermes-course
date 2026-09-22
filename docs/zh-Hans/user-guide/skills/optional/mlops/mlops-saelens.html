@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>稀疏自编码器训练 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/optional/mlops/mlops-saelens</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="稀疏自编码器训练">稀疏自编码器训练</h1>
+<p>提供使用 SAELens 训练和分析稀疏自编码器（SAE）的指导，将神经网络激活分解为可解释特征。适用于发现可解释特征、分析叠加现象，或研究语言模型中的单义性表示。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>可选 — 通过 <code>hermes skills install official/mlops/saelens</code> 安装</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>optional-skills/mlops/saelens</code></td>
+</tr>
+<tr>
+<td>版本</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>作者</td>
+<td>Orchestra Research</td>
+</tr>
+<tr>
+<td>许可证</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>依赖</td>
+<td><code>sae-lens&gt;=6.0.0</code>, <code>transformer-lens&gt;=2.0.0</code>, <code>torch&gt;=2.0.0</code></td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>标签</td>
+<td><code>Sparse Autoencoders</code>, <code>SAE</code>, <code>Mechanistic Interpretability</code>, <code>Feature Discovery</code>, <code>Superposition</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发该 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。</p>
+</div>
+<h1 id="saelens用于机制可解释性的稀疏自编码器">SAELens：用于机制可解释性的稀疏自编码器</h1>
+<p>SAELens 是训练和分析稀疏自编码器（SAE）的主要库。SAE 是一种将多义性神经网络激活分解为稀疏、可解释特征的技术，基于 Anthropic 在单义性方面的开创性研究。</p>
+<p><strong>GitHub</strong>：<a href="https://github.com/jbloomAus/SAELens" class="ext" target="_blank" rel="noopener">jbloomAus/SAELens</a>（1,100+ stars）</p>
+<h2 id="问题背景多义性与叠加superposition">问题背景：多义性与叠加（Superposition）</h2>
+<p>神经网络中的单个神经元是<strong>多义性</strong>的——它们在多种语义不同的上下文中激活。这是因为模型使用<strong>叠加</strong>（superposition）来表示比神经元数量更多的特征，从而使可解释性变得困难。</p>
+<p><strong>SAE 的解决方案</strong>：将密集激活分解为稀疏的单义性特征——对于任意给定输入，通常只有少量特征激活，且每个特征对应一个可解释的概念。</p>
+<h2 id="何时使用-saelens">何时使用 SAELens</h2>
+<p><strong>在以下情况下使用 SAELens：</strong>
+- 发现模型激活中的可解释特征
+- 理解模型学到了哪些概念
+- 研究叠加现象和特征几何结构
+- 执行基于特征的引导（steering）或消融（ablation）
+- 分析安全相关特征（欺骗、偏见、有害内容）</p>
+<p><strong>在以下情况下考虑替代方案：</strong>
+- 需要基础激活分析 → 直接使用 <strong>TransformerLens</strong>
+- 需要因果干预实验 → 使用 <strong>pyvene</strong> 或 <strong>TransformerLens</strong>
+- 需要生产环境引导 → 考虑直接激活工程</p>
+<h2 id="安装">安装</h2>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>sae-lens
+</code></pre></div>
+
+<p>要求：Python 3.10+，transformer-lens&gt;=2.0.0</p>
+<h2 id="核心概念">核心概念</h2>
+<h3 id="sae-学到了什么">SAE 学到了什么</h3>
+<p>SAE 通过稀疏瓶颈重建模型激活：</p>
+<div class="highlight"><pre><span></span><code>Input Activation → Encoder → Sparse Features → Decoder → Reconstructed Activation
+    (d_model)       ↓        (d_sae &gt;&gt; d_model)    ↓         (d_model)
+                 sparsity                      reconstruction
+                 penalty                          loss
+</code></pre></div>
+
+<p><strong>损失函数</strong>：<code>MSE(original, reconstructed) + L1_coefficient × L1(features)</code></p>
+<h3 id="关键验证anthropic-研究">关键验证（Anthropic 研究）</h3>
+<p>在《Towards Monosemanticity》中，人工评估者发现 <strong>70% 的 SAE 特征具有真正的可解释性</strong>。发现的特征包括：
+- DNA 序列、法律语言、HTTP 请求
+- 希伯来文本、营养声明、代码语法
+- 情感、命名实体、语法结构</p>
+<h2 id="工作流-1加载和分析预训练-sae">工作流 1：加载和分析预训练 SAE</h2>
+<h3 id="步骤说明">步骤说明</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">transformer_lens</span><span class="w"> </span><span class="kn">import</span> <span class="n">HookedTransformer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">sae_lens</span><span class="w"> </span><span class="kn">import</span> <span class="n">SAE</span>
+
+<span class="c1"># 1. 加载模型和预训练 SAE</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">HookedTransformer</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;gpt2-small&quot;</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s2">&quot;cuda&quot;</span><span class="p">)</span>
+<span class="n">sae</span><span class="p">,</span> <span class="n">cfg_dict</span><span class="p">,</span> <span class="n">sparsity</span> <span class="o">=</span> <span class="n">SAE</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+    <span class="n">release</span><span class="o">=</span><span class="s2">&quot;gpt2-small-res-jb&quot;</span><span class="p">,</span>
+    <span class="n">sae_id</span><span class="o">=</span><span class="s2">&quot;blocks.8.hook_resid_pre&quot;</span><span class="p">,</span>
+    <span class="n">device</span><span class="o">=</span><span class="s2">&quot;cuda&quot;</span>
+<span class="p">)</span>
+
+<span class="c1"># 2. 获取模型激活</span>
+<span class="n">tokens</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">to_tokens</span><span class="p">(</span><span class="s2">&quot;The capital of France is Paris&quot;</span><span class="p">)</span>
+<span class="n">_</span><span class="p">,</span> <span class="n">cache</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">run_with_cache</span><span class="p">(</span><span class="n">tokens</span><span class="p">)</span>
+<span class="n">activations</span> <span class="o">=</span> <span class="n">cache</span><span class="p">[</span><span class="s2">&quot;resid_pre&quot;</span><span class="p">,</span> <span class="mi">8</span><span class="p">]</span>  <span class="c1"># [batch, pos, d_model]</span>
+
+<span class="c1"># 3. 编码为 SAE 特征</span>
+<span class="n">sae_features</span> <span class="o">=</span> <span class="n">sae</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">activations</span><span class="p">)</span>  <span class="c1"># [batch, pos, d_sae]</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Active features: </span><span class="si">{</span><span class="p">(</span><span class="n">sae_features</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="c1"># 4. 找出每个位置的顶部特征</span>
+<span class="k">for</span> <span class="n">pos</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">tokens</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]):</span>
+    <span class="n">top_features</span> <span class="o">=</span> <span class="n">sae_features</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="n">pos</span><span class="p">]</span><span class="o">.</span><span class="n">topk</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span>
+    <span class="n">token</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">to_str_tokens</span><span class="p">(</span><span class="n">tokens</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="n">pos</span><span class="p">:</span><span class="n">pos</span><span class="o">+</span><span class="mi">1</span><span class="p">])[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Token &#39;</span><span class="si">{</span><span class="n">token</span><span class="si">}</span><span class="s2">&#39;: features </span><span class="si">{</span><span class="n">top_features</span><span class="o">.</span><span class="n">indices</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="c1"># 5. 重建激活</span>
+<span class="n">reconstructed</span> <span class="o">=</span> <span class="n">sae</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="n">sae_features</span><span class="p">)</span>
+<span class="n">reconstruction_error</span> <span class="o">=</span> <span class="p">(</span><span class="n">activations</span> <span class="o">-</span> <span class="n">reconstructed</span><span class="p">)</span><span class="o">.</span><span class="n">norm</span><span class="p">()</span>
+</code></pre></div>
+
+<h3 id="可用预训练-sae">可用预训练 SAE</h3>
+<table>
+<thead>
+<tr>
+<th>Release</th>
+<th>模型</th>
+<th>层</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gpt2-small-res-jb</code></td>
+<td>GPT-2 Small</td>
+<td>多个残差流</td>
+</tr>
+<tr>
+<td><code>gemma-2b-res</code></td>
+<td>Gemma 2B</td>
+<td>残差流</td>
+</tr>
+<tr>
+<td>HuggingFace 上的各类 SAE</td>
+<td>搜索标签 <code>saelens</code></td>
+<td>各种</td>
+</tr>
+</tbody>
+</table>
+<h3 id="检查清单">检查清单</h3>
+<ul>
+<li>[ ] 使用 TransformerLens 加载模型</li>
+<li>[ ] 为目标层加载匹配的 SAE</li>
+<li>[ ] 将激活编码为稀疏特征</li>
+<li>[ ] 识别每个 token 的顶部激活特征</li>
+<li>[ ] 验证重建质量</li>
+</ul>
+<h2 id="工作流-2训练自定义-sae">工作流 2：训练自定义 SAE</h2>
+<h3 id="步骤说明_1">步骤说明</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">sae_lens</span><span class="w"> </span><span class="kn">import</span> <span class="n">SAE</span><span class="p">,</span> <span class="n">LanguageModelSAERunnerConfig</span><span class="p">,</span> <span class="n">SAETrainingRunner</span>
+
+<span class="c1"># 1. 配置训练</span>
+<span class="n">cfg</span> <span class="o">=</span> <span class="n">LanguageModelSAERunnerConfig</span><span class="p">(</span>
+    <span class="c1"># 模型</span>
+    <span class="n">model_name</span><span class="o">=</span><span class="s2">&quot;gpt2-small&quot;</span><span class="p">,</span>
+    <span class="n">hook_name</span><span class="o">=</span><span class="s2">&quot;blocks.8.hook_resid_pre&quot;</span><span class="p">,</span>
+    <span class="n">hook_layer</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span>
+    <span class="n">d_in</span><span class="o">=</span><span class="mi">768</span><span class="p">,</span>  <span class="c1"># 模型维度</span>
+
+    <span class="c1"># SAE 架构</span>
+    <span class="n">architecture</span><span class="o">=</span><span class="s2">&quot;standard&quot;</span><span class="p">,</span>  <span class="c1"># 或 &quot;gated&quot;、&quot;topk&quot;</span>
+    <span class="n">d_sae</span><span class="o">=</span><span class="mi">768</span> <span class="o">*</span> <span class="mi">8</span><span class="p">,</span>  <span class="c1"># 扩展因子为 8</span>
+    <span class="n">activation_fn</span><span class="o">=</span><span class="s2">&quot;relu&quot;</span><span class="p">,</span>
+
+    <span class="c1"># 训练</span>
+    <span class="n">lr</span><span class="o">=</span><span class="mf">4e-4</span><span class="p">,</span>
+    <span class="n">l1_coefficient</span><span class="o">=</span><span class="mf">8e-5</span><span class="p">,</span>  <span class="c1"># 稀疏性惩罚</span>
+    <span class="n">l1_warm_up_steps</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span>
+    <span class="n">train_batch_size_tokens</span><span class="o">=</span><span class="mi">4096</span><span class="p">,</span>
+    <span class="n">training_tokens</span><span class="o">=</span><span class="mi">100_000_000</span><span class="p">,</span>
+
+    <span class="c1"># 数据</span>
+    <span class="n">dataset_path</span><span class="o">=</span><span class="s2">&quot;monology/pile-uncopyrighted&quot;</span><span class="p">,</span>
+    <span class="n">context_size</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span>
+
+    <span class="c1"># 日志</span>
+    <span class="n">log_to_wandb</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">wandb_project</span><span class="o">=</span><span class="s2">&quot;sae-training&quot;</span><span class="p">,</span>
+
+    <span class="c1"># 检查点</span>
+    <span class="n">checkpoint_path</span><span class="o">=</span><span class="s2">&quot;checkpoints&quot;</span><span class="p">,</span>
+    <span class="n">n_checkpoints</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># 2. 训练</span>
+<span class="n">trainer</span> <span class="o">=</span> <span class="n">SAETrainingRunner</span><span class="p">(</span><span class="n">cfg</span><span class="p">)</span>
+<span class="n">sae</span> <span class="o">=</span> <span class="n">trainer</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+
+<span class="c1"># 3. 评估</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;L0 (avg active features): </span><span class="si">{</span><span class="n">trainer</span><span class="o">.</span><span class="n">metrics</span><span class="p">[</span><span class="s1">&#39;l0&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;CE Loss Recovered: </span><span class="si">{</span><span class="n">trainer</span><span class="o">.</span><span class="n">metrics</span><span class="p">[</span><span class="s1">&#39;ce_loss_score&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="关键超参数">关键超参数</h3>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>典型值</th>
+<th>效果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>d_sae</code></td>
+<td>4–16× d_model</td>
+<td>特征更多，容量更大</td>
+</tr>
+<tr>
+<td><code>l1_coefficient</code></td>
+<td>5e-5 到 1e-4</td>
+<td>越高 = 越稀疏，精度越低</td>
+</tr>
+<tr>
+<td><code>lr</code></td>
+<td>1e-4 到 1e-3</td>
+<td>标准优化器学习率</td>
+</tr>
+<tr>
+<td><code>l1_warm_up_steps</code></td>
+<td>500–2000</td>
+<td>防止特征早期死亡</td>
+</tr>
+</tbody>
+</table>
+<h3 id="评估指标">评估指标</h3>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>目标值</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>L0</strong></td>
+<td>50–200</td>
+<td>每个 token 的平均激活特征数</td>
+</tr>
+<tr>
+<td><strong>CE Loss Score</strong></td>
+<td>80–95%</td>
+<td>相对原始模型恢复的交叉熵</td>
+</tr>
+<tr>
+<td><strong>Dead Features</strong></td>
+<td>&lt;5%</td>
+<td>从不激活的特征比例</td>
+</tr>
+<tr>
+<td><strong>Explained Variance</strong></td>
+<td>&gt;90%</td>
+<td>重建质量</td>
+</tr>
+</tbody>
+</table>
+<h3 id="检查清单_1">检查清单</h3>
+<ul>
+<li>[ ] 选择目标层和 hook 点</li>
+<li>[ ] 设置扩展因子（d_sae = 4–16× d_model）</li>
+<li>[ ] 调整 L1 系数以获得期望的稀疏度</li>
+<li>[ ] 启用 L1 预热以防止特征死亡</li>
+<li>[ ] 训练期间监控指标（W&amp;B）</li>
+<li>[ ] 验证 L0 和 CE loss 恢复情况</li>
+<li>[ ] 检查死亡特征比例</li>
+</ul>
+<h2 id="工作流-3特征分析与引导">工作流 3：特征分析与引导</h2>
+<h3 id="分析单个特征">分析单个特征</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">transformer_lens</span><span class="w"> </span><span class="kn">import</span> <span class="n">HookedTransformer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">sae_lens</span><span class="w"> </span><span class="kn">import</span> <span class="n">SAE</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">HookedTransformer</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;gpt2-small&quot;</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s2">&quot;cuda&quot;</span><span class="p">)</span>
+<span class="n">sae</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">SAE</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+    <span class="n">release</span><span class="o">=</span><span class="s2">&quot;gpt2-small-res-jb&quot;</span><span class="p">,</span>
+    <span class="n">sae_id</span><span class="o">=</span><span class="s2">&quot;blocks.8.hook_resid_pre&quot;</span><span class="p">,</span>
+    <span class="n">device</span><span class="o">=</span><span class="s2">&quot;cuda&quot;</span>
+<span class="p">)</span>
+
+<span class="c1"># 找出激活特定特征的内容</span>
+<span class="n">feature_idx</span> <span class="o">=</span> <span class="mi">1234</span>
+<span class="n">test_texts</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="s2">&quot;The scientist conducted an experiment&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;I love chocolate cake&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;The code compiles successfully&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;Paris is beautiful in spring&quot;</span><span class="p">,</span>
+<span class="p">]</span>
+
+<span class="k">for</span> <span class="n">text</span> <span class="ow">in</span> <span class="n">test_texts</span><span class="p">:</span>
+    <span class="n">tokens</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">to_tokens</span><span class="p">(</span><span class="n">text</span><span class="p">)</span>
+    <span class="n">_</span><span class="p">,</span> <span class="n">cache</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">run_with_cache</span><span class="p">(</span><span class="n">tokens</span><span class="p">)</span>
+    <span class="n">features</span> <span class="o">=</span> <span class="n">sae</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">cache</span><span class="p">[</span><span class="s2">&quot;resid_pre&quot;</span><span class="p">,</span> <span class="mi">8</span><span class="p">])</span>
+    <span class="n">activation</span> <span class="o">=</span> <span class="n">features</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="p">:,</span> <span class="n">feature_idx</span><span class="p">]</span><span class="o">.</span><span class="n">max</span><span class="p">()</span><span class="o">.</span><span class="n">item</span><span class="p">()</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">activation</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">text</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="特征引导feature-steering">特征引导（Feature Steering）</h3>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">steer_with_feature</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">sae</span><span class="p">,</span> <span class="n">prompt</span><span class="p">,</span> <span class="n">feature_idx</span><span class="p">,</span> <span class="n">strength</span><span class="o">=</span><span class="mf">5.0</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;将 SAE 特征方向添加到残差流。&quot;&quot;&quot;</span>
+    <span class="n">tokens</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">to_tokens</span><span class="p">(</span><span class="n">prompt</span><span class="p">)</span>
+
+    <span class="c1"># 从解码器获取特征方向</span>
+    <span class="n">feature_direction</span> <span class="o">=</span> <span class="n">sae</span><span class="o">.</span><span class="n">W_dec</span><span class="p">[</span><span class="n">feature_idx</span><span class="p">]</span>  <span class="c1"># [d_model]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">steering_hook</span><span class="p">(</span><span class="n">activation</span><span class="p">,</span> <span class="n">hook</span><span class="p">):</span>
+        <span class="c1"># 在所有位置添加缩放后的特征方向</span>
+        <span class="n">activation</span> <span class="o">+=</span> <span class="n">strength</span> <span class="o">*</span> <span class="n">feature_direction</span>
+        <span class="k">return</span> <span class="n">activation</span>
+
+    <span class="c1"># 带引导的生成</span>
+    <span class="n">output</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span>
+        <span class="n">tokens</span><span class="p">,</span>
+        <span class="n">max_new_tokens</span><span class="o">=</span><span class="mi">50</span><span class="p">,</span>
+        <span class="n">fwd_hooks</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;blocks.8.hook_resid_pre&quot;</span><span class="p">,</span> <span class="n">steering_hook</span><span class="p">)]</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">model</span><span class="o">.</span><span class="n">to_string</span><span class="p">(</span><span class="n">output</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+</code></pre></div>
+
+<h3 id="特征归因feature-attribution">特征归因（Feature Attribution）</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 哪些特征对特定输出影响最大？</span>
+<span class="n">tokens</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">to_tokens</span><span class="p">(</span><span class="s2">&quot;The capital of France is&quot;</span><span class="p">)</span>
+<span class="n">_</span><span class="p">,</span> <span class="n">cache</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">run_with_cache</span><span class="p">(</span><span class="n">tokens</span><span class="p">)</span>
+
+<span class="c1"># 获取最后位置的特征</span>
+<span class="n">features</span> <span class="o">=</span> <span class="n">sae</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">cache</span><span class="p">[</span><span class="s2">&quot;resid_pre&quot;</span><span class="p">,</span> <span class="mi">8</span><span class="p">])[</span><span class="mi">0</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">]</span>  <span class="c1"># [d_sae]</span>
+
+<span class="c1"># 计算每个特征的 logit 归因</span>
+<span class="c1"># 特征贡献 = 特征激活 × 解码器权重 × 反嵌入</span>
+<span class="n">W_dec</span> <span class="o">=</span> <span class="n">sae</span><span class="o">.</span><span class="n">W_dec</span>  <span class="c1"># [d_sae, d_model]</span>
+<span class="n">W_U</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">W_U</span>    <span class="c1"># [d_model, vocab]</span>
+
+<span class="c1"># 对 &quot;Paris&quot; logit 的贡献</span>
+<span class="n">paris_token</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">to_single_token</span><span class="p">(</span><span class="s2">&quot; Paris&quot;</span><span class="p">)</span>
+<span class="n">feature_contributions</span> <span class="o">=</span> <span class="n">features</span> <span class="o">*</span> <span class="p">(</span><span class="n">W_dec</span> <span class="o">@</span> <span class="n">W_U</span><span class="p">[:,</span> <span class="n">paris_token</span><span class="p">])</span>
+
+<span class="n">top_features</span> <span class="o">=</span> <span class="n">feature_contributions</span><span class="o">.</span><span class="n">topk</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Top features for &#39;Paris&#39; prediction:&quot;</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">idx</span><span class="p">,</span> <span class="n">val</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">top_features</span><span class="o">.</span><span class="n">indices</span><span class="p">,</span> <span class="n">top_features</span><span class="o">.</span><span class="n">values</span><span class="p">):</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Feature </span><span class="si">{</span><span class="n">idx</span><span class="o">.</span><span class="n">item</span><span class="p">()</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">val</span><span class="o">.</span><span class="n">item</span><span class="p">()</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="常见问题与解决方案">常见问题与解决方案</h2>
+<h3 id="问题死亡特征比例过高">问题：死亡特征比例过高</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 错误：无预热，特征早期死亡</span>
+<span class="n">cfg</span> <span class="o">=</span> <span class="n">LanguageModelSAERunnerConfig</span><span class="p">(</span>
+    <span class="n">l1_coefficient</span><span class="o">=</span><span class="mf">1e-4</span><span class="p">,</span>
+    <span class="n">l1_warm_up_steps</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span>  <span class="c1"># 不推荐！</span>
+<span class="p">)</span>
+
+<span class="c1"># 正确：预热 L1 惩罚</span>
+<span class="n">cfg</span> <span class="o">=</span> <span class="n">LanguageModelSAERunnerConfig</span><span class="p">(</span>
+    <span class="n">l1_coefficient</span><span class="o">=</span><span class="mf">8e-5</span><span class="p">,</span>
+    <span class="n">l1_warm_up_steps</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span>  <span class="c1"># 逐步增加</span>
+    <span class="n">use_ghost_grads</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>   <span class="c1"># 复活死亡特征</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="问题重建效果差ce-恢复率低">问题：重建效果差（CE 恢复率低）</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 降低稀疏性惩罚</span>
+<span class="n">cfg</span> <span class="o">=</span> <span class="n">LanguageModelSAERunnerConfig</span><span class="p">(</span>
+    <span class="n">l1_coefficient</span><span class="o">=</span><span class="mf">5e-5</span><span class="p">,</span>  <span class="c1"># 越低 = 重建越好</span>
+    <span class="n">d_sae</span><span class="o">=</span><span class="mi">768</span> <span class="o">*</span> <span class="mi">16</span><span class="p">,</span>       <span class="c1"># 更大容量</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="问题特征不可解释">问题：特征不可解释</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 提高稀疏性（更高的 L1）</span>
+<span class="n">cfg</span> <span class="o">=</span> <span class="n">LanguageModelSAERunnerConfig</span><span class="p">(</span>
+    <span class="n">l1_coefficient</span><span class="o">=</span><span class="mf">1e-4</span><span class="p">,</span>  <span class="c1"># 越高 = 越稀疏，可解释性越强</span>
+<span class="p">)</span>
+<span class="c1"># 或使用 TopK 架构</span>
+<span class="n">cfg</span> <span class="o">=</span> <span class="n">LanguageModelSAERunnerConfig</span><span class="p">(</span>
+    <span class="n">architecture</span><span class="o">=</span><span class="s2">&quot;topk&quot;</span><span class="p">,</span>
+    <span class="n">activation_fn_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;k&quot;</span><span class="p">:</span> <span class="mi">50</span><span class="p">},</span>  <span class="c1"># 恰好 50 个激活特征</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="问题训练时内存错误">问题：训练时内存错误</h3>
+<div class="highlight"><pre><span></span><code><span class="n">cfg</span> <span class="o">=</span> <span class="n">LanguageModelSAERunnerConfig</span><span class="p">(</span>
+    <span class="n">train_batch_size_tokens</span><span class="o">=</span><span class="mi">2048</span><span class="p">,</span>  <span class="c1"># 减小批次大小</span>
+    <span class="n">store_batch_size_prompts</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>    <span class="c1"># 缓冲区中更少的 prompt</span>
+    <span class="n">n_batches_in_buffer</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span>         <span class="c1"># 更小的激活缓冲区</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h2 id="与-neuronpedia-集成">与 Neuronpedia 集成</h2>
+<p>在 <a href="https://neuronpedia.org" class="ext" target="_blank" rel="noopener">neuronpedia.org</a> 浏览预训练 SAE 特征：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 特征通过 SAE ID 索引</span>
+<span class="c1"># 示例：gpt2-small 第 8 层特征 1234</span>
+<span class="c1"># → neuronpedia.org/gpt2-small/8-res-jb/1234</span>
+</code></pre></div>
+
+<h2 id="关键类参考">关键类参考</h2>
+<table>
+<thead>
+<tr>
+<th>类</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SAE</code></td>
+<td>稀疏自编码器模型</td>
+</tr>
+<tr>
+<td><code>LanguageModelSAERunnerConfig</code></td>
+<td>训练配置</td>
+</tr>
+<tr>
+<td><code>SAETrainingRunner</code></td>
+<td>训练循环管理器</td>
+</tr>
+<tr>
+<td><code>ActivationsStore</code></td>
+<td>激活收集与批处理</td>
+</tr>
+<tr>
+<td><code>HookedSAETransformer</code></td>
+<td>TransformerLens + SAE 集成</td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考文档">参考文档</h2>
+<p>详细的 API 文档、教程和高级用法，请参阅 <code>references/</code> 文件夹：</p>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/saelens/references/README.md" class="ext" target="_blank" rel="noopener">references/README.md</a></td>
+<td>概述与快速入门指南</td>
+</tr>
+<tr>
+<td><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/saelens/references/api.md" class="ext" target="_blank" rel="noopener">references/api.md</a></td>
+<td>SAE、TrainingSAE、配置的完整 API 参考</td>
+</tr>
+<tr>
+<td><a href="https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/mlops/saelens/references/tutorials.md" class="ext" target="_blank" rel="noopener">references/tutorials.md</a></td>
+<td>训练、分析、引导的分步教程</td>
+</tr>
+</tbody>
+</table>
+<h2 id="外部资源">外部资源</h2>
+<h3 id="教程">教程</h3>
+<ul>
+<li><a href="https://github.com/jbloomAus/SAELens/blob/main/tutorials/basic_loading_and_analysing.ipynb" class="ext" target="_blank" rel="noopener">基础加载与分析</a></li>
+<li><a href="https://github.com/jbloomAus/SAELens/blob/main/tutorials/training_a_sparse_autoencoder.ipynb" class="ext" target="_blank" rel="noopener">训练稀疏自编码器</a></li>
+<li><a href="https://www.lesswrong.com/posts/LnHowHgmrMbWtpkxx/intro-to-superposition-and-sparse-autoencoders-colab" class="ext" target="_blank" rel="noopener">ARENA SAE 课程</a></li>
+</ul>
+<h3 id="论文">论文</h3>
+<ul>
+<li><a href="https://transformer-circuits.pub/2023/monosemantic-features" class="ext" target="_blank" rel="noopener">Towards Monosemanticity</a> — Anthropic（2023）</li>
+<li><a href="https://transformer-circuits.pub/2024/scaling-monosemanticity/" class="ext" target="_blank" rel="noopener">Scaling Monosemanticity</a> — Anthropic（2024）</li>
+<li><a href="https://arxiv.org/abs/2309.08600" class="ext" target="_blank" rel="noopener">Sparse Autoencoders Find Highly Interpretable Features</a> — Cunningham et al.（ICLR 2024）</li>
+</ul>
+<h3 id="官方文档">官方文档</h3>
+<ul>
+<li><a href="https://jbloomaus.github.io/SAELens/" class="ext" target="_blank" rel="noopener">SAELens 文档</a></li>
+<li><a href="https://neuronpedia.org" class="ext" target="_blank" rel="noopener">Neuronpedia</a> — 特征浏览器</li>
+</ul>
+<h2 id="sae-架构">SAE 架构</h2>
+<table>
+<thead>
+<tr>
+<th>架构</th>
+<th>描述</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Standard</strong></td>
+<td>ReLU + L1 惩罚</td>
+<td>通用</td>
+</tr>
+<tr>
+<td><strong>Gated</strong></td>
+<td>学习门控机制</td>
+<td>更好的稀疏性控制</td>
+</tr>
+<tr>
+<td><strong>TopK</strong></td>
+<td>恰好 K 个激活特征</td>
+<td>一致的稀疏性</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="c1"># TopK SAE（恰好 50 个特征激活）</span>
+<span class="n">cfg</span> <span class="o">=</span> <span class="n">LanguageModelSAERunnerConfig</span><span class="p">(</span>
+    <span class="n">architecture</span><span class="o">=</span><span class="s2">&quot;topk&quot;</span><span class="p">,</span>
+    <span class="n">activation_fn</span><span class="o">=</span><span class="s2">&quot;topk&quot;</span><span class="p">,</span>
+    <span class="n">activation_fn_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;k&quot;</span><span class="p">:</span> <span class="mi">50</span><span class="p">},</span>
+<span class="p">)</span>
+</code></pre></div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/optional/mlops/mlops-saelens</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#问题背景多义性与叠加superposition">问题背景：多义性与叠加（Superposition）</a></li>
+<li class="lvl2"><a href="#何时使用-saelens">何时使用 SAELens</a></li>
+<li class="lvl2"><a href="#安装">安装</a></li>
+<li class="lvl2"><a href="#核心概念">核心概念</a></li>
+<li class="lvl3"><a href="#sae-学到了什么">SAE 学到了什么</a></li>
+<li class="lvl3"><a href="#关键验证anthropic-研究">关键验证（Anthropic 研究）</a></li>
+<li class="lvl2"><a href="#工作流-1加载和分析预训练-sae">工作流 1：加载和分析预训练 SAE</a></li>
+<li class="lvl3"><a href="#步骤说明">步骤说明</a></li>
+<li class="lvl3"><a href="#可用预训练-sae">可用预训练 SAE</a></li>
+<li class="lvl3"><a href="#检查清单">检查清单</a></li>
+<li class="lvl2"><a href="#工作流-2训练自定义-sae">工作流 2：训练自定义 SAE</a></li>
+<li class="lvl3"><a href="#步骤说明_1">步骤说明</a></li>
+<li class="lvl3"><a href="#关键超参数">关键超参数</a></li>
+<li class="lvl3"><a href="#评估指标">评估指标</a></li>
+<li class="lvl3"><a href="#检查清单_1">检查清单</a></li>
+<li class="lvl2"><a href="#工作流-3特征分析与引导">工作流 3：特征分析与引导</a></li>
+<li class="lvl3"><a href="#分析单个特征">分析单个特征</a></li>
+<li class="lvl3"><a href="#特征引导feature-steering">特征引导（Feature Steering）</a></li>
+<li class="lvl3"><a href="#特征归因feature-attribution">特征归因（Feature Attribution）</a></li>
+<li class="lvl2"><a href="#常见问题与解决方案">常见问题与解决方案</a></li>
+<li class="lvl3"><a href="#问题死亡特征比例过高">问题：死亡特征比例过高</a></li>
+<li class="lvl3"><a href="#问题重建效果差ce-恢复率低">问题：重建效果差（CE 恢复率低）</a></li>
+<li class="lvl3"><a href="#问题特征不可解释">问题：特征不可解释</a></li>
+<li class="lvl3"><a href="#问题训练时内存错误">问题：训练时内存错误</a></li>
+<li class="lvl2"><a href="#与-neuronpedia-集成">与 Neuronpedia 集成</a></li>
+<li class="lvl2"><a href="#关键类参考">关键类参考</a></li>
+<li class="lvl2"><a href="#参考文档">参考文档</a></li>
+<li class="lvl2"><a href="#外部资源">外部资源</a></li>
+<li class="lvl3"><a href="#教程">教程</a></li>
+<li class="lvl3"><a href="#论文">论文</a></li>
+<li class="lvl3"><a href="#官方文档">官方文档</a></li>
+<li class="lvl2"><a href="#sae-架构">SAE 架构</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

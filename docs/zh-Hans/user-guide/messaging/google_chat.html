@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Google Chat · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/messaging/google_chat</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="google-chat-设置">Google Chat 设置</h1>
+<p>将 Hermes Agent 作为机器人接入 Google Chat。该集成使用 Cloud Pub/Sub 拉取订阅接收入站事件，使用 Chat REST API 发送出站消息。与 Slack Socket Mode 或 Telegram 长轮询的使用体验相当：Hermes 进程无需公网 URL、隧道或 TLS 证书。它直接连接、认证并监听订阅——就像 Telegram 机器人通过 token 监听一样。</p>
+<div class="admonition adm-note"><p class="adm-title">Workspace 版本</p>
+<p>Google Chat 是 Google Workspace 的一部分。你可以在个人 Workspace（通过 Google 注册的 <code>@yourdomain.com</code>）或拥有管理员权限可发布应用的企业 Workspace 中使用此集成。仅有 Gmail 账号的用户无法托管 Chat 应用。</p>
+</div>
+<h2 id="概览">概览</h2>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>依赖库</strong></td>
+<td><code>google-cloud-pubsub</code>、<code>google-api-python-client</code>、<code>google-auth</code></td>
+</tr>
+<tr>
+<td><strong>入站传输</strong></td>
+<td>Cloud Pub/Sub 拉取订阅（无需公网端点）</td>
+</tr>
+<tr>
+<td><strong>出站传输</strong></td>
+<td>Chat REST API（<code>chat.googleapis.com</code>）</td>
+</tr>
+<tr>
+<td><strong>认证</strong></td>
+<td>在订阅上具有 <code>roles/pubsub.subscriber</code> 的 Service Account JSON</td>
+</tr>
+<tr>
+<td><strong>用户标识</strong></td>
+<td>Chat 资源名称（<code>users/{id}</code>）+ 邮箱</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="第一步创建或选择-gcp-项目">第一步：创建或选择 GCP 项目</h2>
+<p>你需要一个 Google Cloud 项目来托管 Pub/Sub topic（主题）。如果还没有，请在 <a href="https://console.cloud.google.com" class="ext" target="_blank" rel="noopener">console.cloud.google.com</a> 创建——个人账号有免费额度，足以覆盖机器人流量。</p>
+<p>记下项目 ID（例如 <code>my-chat-bot-123</code>），后续每一步都会用到。</p>
+<hr />
+<h2 id="第二步启用两个-api">第二步：启用两个 API</h2>
+<p>在控制台中，进入 <strong>APIs &amp; Services → Library</strong>，启用：</p>
+<ul>
+<li><strong>Google Chat API</strong></li>
+<li><strong>Cloud Pub/Sub API</strong></li>
+</ul>
+<p>个人机器人产生的流量完全在免费额度内。</p>
+<hr />
+<h2 id="第三步创建-service-account">第三步：创建 Service Account</h2>
+<p><strong>IAM &amp; Admin → Service Accounts → Create Service Account。</strong></p>
+<ul>
+<li>名称：<code>hermes-chat-bot</code></li>
+<li>跳过"Grant this service account access to project"步骤。你只需要在特定订阅上配置 IAM，<strong>不要</strong>授予项目级别的 Pub/Sub 角色。</li>
+</ul>
+<p>创建完成后，打开该 SA，进入 <strong>Keys → Add Key → Create new key → JSON</strong>，下载文件。将其保存到只有 Hermes 可读的位置（例如 <code>~/.hermes/google-chat-sa.json</code>，<code>chmod 600</code>）。</p>
+<div class="admonition adm-caution"><p class="adm-title">不存在&quot;Chat Bot Caller&quot;角色</p>
+<p>一个常见错误是搜索 Chat 专属 IAM 角色并在项目级别授予。该角色并不存在。Chat 机器人的权限来自被安装到某个 space（空间），而非 IAM。你的 SA 只需要在下一步创建的订阅上具有 Pub/Sub subscriber 权限。</p>
+</div>
+<hr />
+<h2 id="第四步创建-pubsub-topic-和订阅">第四步：创建 Pub/Sub topic 和订阅</h2>
+<p><strong>Pub/Sub → Topics → Create topic。</strong></p>
+<ul>
+<li>Topic ID：<code>hermes-chat-events</code></li>
+<li>其余选项保持默认。</li>
+</ul>
+<p>创建完成后，topic 详情页有 <strong>Subscriptions</strong> 标签页。在此创建一个订阅：</p>
+<ul>
+<li>Subscription ID：<code>hermes-chat-events-sub</code></li>
+<li>投递类型：<strong>Pull</strong></li>
+<li>消息保留：<strong>7 天</strong>（这样 Hermes 重启后积压消息不会丢失）</li>
+<li>其余保持默认。</li>
+</ul>
+<hr />
+<h2 id="第五步在-topic-上配置-iam-绑定关键">第五步：在 topic 上配置 IAM 绑定（关键）</h2>
+<p>在 <strong>topic</strong>（不是订阅）上添加一个 IAM 主体：</p>
+<ul>
+<li>主体：<code>chat-api-push@system.gserviceaccount.com</code></li>
+<li>角色：<code>Pub/Sub Publisher</code></li>
+</ul>
+<p>若不配置此项，Google Chat 将无法向你的 topic 发布事件，机器人将永远收不到任何消息。</p>
+<hr />
+<h2 id="第六步在订阅上配置-iam-绑定">第六步：在订阅上配置 IAM 绑定</h2>
+<p>在 <strong>订阅</strong> 上，将你自己的 Service Account 添加为主体：</p>
+<ul>
+<li>主体：<code>hermes-chat-bot@&lt;your-project&gt;.iam.gserviceaccount.com</code></li>
+<li>角色：<code>Pub/Sub Subscriber</code></li>
+</ul>
+<p>同时在同一订阅上授予 <code>Pub/Sub Viewer</code>——Hermes 在启动时会调用 <code>subscription.get()</code> 进行可达性检查。</p>
+<hr />
+<h2 id="第七步配置-chat-应用">第七步：配置 Chat 应用</h2>
+<p>进入 <strong>APIs &amp; Services → Google Chat API → Configuration</strong>。</p>
+<ul>
+<li><strong>App name</strong>：用户看到的名称（"Hermes"即可）。</li>
+<li><strong>Avatar URL</strong>：任意公开 PNG 图片（Google 提供了一些默认选项）。</li>
+<li><strong>Description</strong>：显示在应用目录中的简短说明。</li>
+<li><strong>Functionality</strong>：启用 <strong>Receive 1:1 messages</strong> 和 <strong>Join spaces and group conversations</strong>。</li>
+<li><strong>Connection settings</strong>：选择 <strong>Cloud Pub/Sub</strong>，输入 topic 名称 <code>projects/&lt;your-project&gt;/topics/hermes-chat-events</code>。</li>
+<li><strong>Visibility</strong>：限制为你的 Workspace（或特定用户）——测试期间不要向所有人开放。</li>
+</ul>
+<p>保存。</p>
+<hr />
+<h2 id="第八步在测试-space-中安装机器人">第八步：在测试 space 中安装机器人</h2>
+<p>在浏览器中打开 Google Chat。在 <strong>+ New Chat</strong> 菜单中搜索应用名称，向其发起私信。第一次发消息时，Google 会发送一个 <code>ADDED_TO_SPACE</code> 事件，Hermes 用它来缓存机器人自身的 <code>users/{id}</code>，以便过滤自发消息。</p>
+<hr />
+<h2 id="第九步配置-hermes">第九步：配置 Hermes</h2>
+<p>在 <code>~/.hermes/.env</code> 中添加 Google Chat 配置段：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 必填</span>
+<span class="nv">GOOGLE_CHAT_PROJECT_ID</span><span class="o">=</span>my-chat-bot-123
+<span class="nv">GOOGLE_CHAT_SUBSCRIPTION_NAME</span><span class="o">=</span>projects/my-chat-bot-123/subscriptions/hermes-chat-events-sub
+<span class="nv">GOOGLE_CHAT_SERVICE_ACCOUNT_JSON</span><span class="o">=</span>/home/you/.hermes/google-chat-sa.json
+
+<span class="c1"># 授权 — 粘贴允许与机器人对话的用户邮箱</span>
+<span class="nv">GOOGLE_CHAT_ALLOWED_USERS</span><span class="o">=</span>you@yourdomain.com,coworker@yourdomain.com
+
+<span class="c1"># 可选</span>
+<span class="nv">GOOGLE_CHAT_HOME_CHANNEL</span><span class="o">=</span>spaces/AAAA...<span class="w">         </span><span class="c1"># cron 任务的默认投递目标</span>
+<span class="nv">GOOGLE_CHAT_MAX_MESSAGES</span><span class="o">=</span><span class="m">1</span><span class="w">                      </span><span class="c1"># Pub/Sub FlowControl；1 表示每个会话串行执行命令</span>
+<span class="nv">GOOGLE_CHAT_MAX_BYTES</span><span class="o">=</span><span class="m">16777216</span><span class="w">                  </span><span class="c1"># 16 MiB — 在途消息字节上限</span>
+</code></pre></div>
+
+<p>项目 ID 也可回退到 <code>GOOGLE_CLOUD_PROJECT</code>，SA 路径可回退到 <code>GOOGLE_APPLICATION_CREDENTIALS</code>——使用你偏好的约定即可。</p>
+<p>通过适配器维护的安装程序安装 Google Chat 依赖。该程序会应用与运行时检查相同的固定安全版本：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>plugins.platforms.google_chat.oauth<span class="w"> </span>--install-deps
+</code></pre></div>
+
+<p>在 Docker / hosted 镜像中 <code>/opt/hermes/.venv</code> 只读。该安装程序通过 <code>tools.lazy_deps</code> 写入 <code>HERMES_LAZY_INSTALL_TARGET</code>（官方镜像为 <code>/opt/data/lazy-packages</code>），而不是 site-packages。完成后重启 gateway。发布镜像也会预装 <code>[google-chat]</code> extra，新容器不必在首次启动时再装。</p>
+<p>启动 gateway（网关）：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>你应该会看到如下日志：</p>
+<div class="highlight"><pre><span></span><code>[GoogleChat] Connected; project=my-chat-bot-123, subscription=&lt;redacted&gt;,
+             bot_user_id=users/XXXX, flow_control(msgs=1, bytes=16777216)
+</code></pre></div>
+
+<p>在测试私信中发送"hola"。机器人会先发送一条"Hermes is thinking…"占位消息，然后原地编辑该消息为真实回复——不会留下"消息已删除"的墓碑。</p>
+<hr />
+<h2 id="格式化与功能">格式化与功能</h2>
+<p>Google Chat 支持有限的 Markdown 子集：</p>
+<table>
+<thead>
+<tr>
+<th>支持</th>
+<th>不支持</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>*粗体*</code>、<code>_斜体_</code>、<code>~删除线~</code>、<code>`代码`</code></td>
+<td>标题、列表</td>
+</tr>
+<tr>
+<td>通过 URL 内联图片</td>
+<td>交互式 Card v2 按钮（此 gateway 为 v1）</td>
+</tr>
+<tr>
+<td>原生文件附件（执行 <code>/setup-files</code> 后——见第十步）</td>
+<td>原生语音消息 / 圆形视频消息</td>
+</tr>
+</tbody>
+</table>
+<p>Agent 的系统 prompt（提示词）包含 Google Chat 专属提示，使其了解这些限制，避免使用无法渲染的格式。</p>
+<p>消息大小限制：每条消息 4000 个字符。较长的 agent 回复会自动拆分为多条消息。</p>
+<p>Thread（线程）支持：当用户在 thread 中回复时，Hermes 会检测 <code>thread.name</code> 并在同一 thread 中发送回复，每个 thread 对应独立的 Hermes 会话。</p>
+<hr />
+<h2 id="第十步原生附件投递可选">第十步：原生附件投递（可选）</h2>
+<p>默认情况下，机器人可以发送文本、通过 URL 内联图片，以及音频/视频/文档的下载卡片。若要投递<strong>原生</strong> Chat 附件——即人工拖放文件时出现的文件 widget——每位用户需通过一次性 OAuth 流程授权机器人。</p>
+<h3 id="为何需要单独的流程">为何需要单独的流程</h3>
+<p>Google Chat 的 <code>media.upload</code> 端点会硬拒绝 service account 认证：</p>
+<blockquote>
+<p>This method doesn't support app authentication with a service account.
+Authenticate with a user account.</p>
+</blockquote>
+<p>没有任何 IAM 角色或 scope 能解决这个问题。该端点只接受用户凭据。因此，机器人在上传文件时必须<em>以用户身份</em>操作——具体来说，是以请求文件的用户身份。</p>
+<h3 id="一次性宿主机设置">一次性宿主机设置</h3>
+<ol>
+<li>在同一 GCP 项目中，进入 <strong>APIs &amp; Services → Credentials</strong>。</li>
+<li><strong>Create credentials → OAuth client ID → Desktop app</strong>。</li>
+<li>下载 JSON 文件，移动到运行 Hermes 的宿主机上。</li>
+<li>在宿主机上，向 Hermes 注册该客户端：</li>
+</ol>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>gateway.platforms.google_chat_user_oauth<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--client-secret<span class="w"> </span>/path/to/client_secret.json
+</code></pre></div>
+
+<p>该命令会写入 <code>~/.hermes/google_chat_user_client_secret.json</code>。这是共享基础设施——它标识 OAuth <em>应用</em>，而非某个具体用户。无论后续有多少用户授权，每台宿主机只需一个文件。</p>
+<h3 id="每用户授权在-chat-中操作">每用户授权（在 Chat 中操作）</h3>
+<p>每位用户在与机器人的私信中执行一次流程：</p>
+<ol>
+<li>向机器人发送 <code>/setup-files</code>，机器人回复当前状态和下一步操作。</li>
+<li>发送 <code>/setup-files start</code>，机器人回复一个 OAuth URL。</li>
+<li>打开该 URL，点击 <strong>Allow</strong>，浏览器会尝试加载 <code>http://localhost:1/?...&amp;code=...</code> 并失败。这是预期行为——auth code 在地址栏的 URL 中。</li>
+<li>复制失败的 URL（或仅复制 <code>code=...</code> 的值），粘贴回 Chat 中作为 <code>/setup-files &lt;PASTED_URL&gt;</code>。机器人将其换取 refresh token。</li>
+</ol>
+<p>token 保存在 <code>~/.hermes/google_chat_user_tokens/&lt;sanitized_email&gt;.json</code>。该用户私信中后续的文件请求将使用<em>其</em>token，机器人以其身份上传，消息投递到其 space。</p>
+<p>如需撤销：<code>/setup-files revoke</code> 仅删除该用户的 token，其他用户的 token 不受影响。</p>
+<h3 id="scope">Scope</h3>
+<p>该流程仅请求一个 scope：<code>chat.messages.create</code>。它同时覆盖 <code>media.upload</code> 和引用已上传 <code>attachmentDataRef</code> 的 <code>messages.create</code>。没有 Drive，没有更广泛的 Chat scope——这是有意为之的最小权限原则。</p>
+<h3 id="多用户行为">多用户行为</h3>
+<p>当请求者尚无每用户 token 时，机器人会回退到 <code>~/.hermes/google_chat_user_token.json</code> 中的旧版单用户 token（如果存在于多用户支持之前的安装中）。两者均不可用时，机器人会发送清晰的文字提示，告知请求者运行 <code>/setup-files</code>。</p>
+<p>用户撤销只清除自己的槽位。某用户 token 产生的 401/403 只驱逐该用户的缓存，不影响其他用户。</p>
+<hr />
+<h2 id="故障排查">故障排查</h2>
+<p><strong>发送"hola"后机器人没有任何响应。</strong></p>
+<ol>
+<li>在控制台检查 Pub/Sub 订阅是否有未投递消息。如果有，说明 Hermes 未通过认证——验证 <code>GOOGLE_CHAT_SERVICE_ACCOUNT_JSON</code>，并确认 SA 在订阅上具有 <code>Pub/Sub Subscriber</code> 角色。</li>
+<li>如果订阅中消息数为零，说明 Google Chat 没有发布消息。再次检查 <strong>topic</strong> 上的 IAM 绑定：<code>chat-api-push@system.gserviceaccount.com</code> 必须具有 <code>Pub/Sub Publisher</code> 角色。</li>
+<li>检查 <code>hermes gateway</code> 日志中是否有 <code>[GoogleChat] Connected</code>。如果看到 <code>[GoogleChat] Config validation failed</code>，错误信息会告诉你需要修复哪个环境变量。</li>
+</ol>
+<p><strong>机器人有回复，但显示的是错误信息而非 agent 的答案。</strong></p>
+<p>检查日志中是否有 <code>[GoogleChat] Pub/Sub stream died</code>——如果反复出现，可能是 SA 凭据已轮换或订阅已被删除。重试 10 次后，适配器会将自身标记为致命错误。</p>
+<p><strong>每条出站消息都返回"403 Forbidden"。</strong></p>
+<p>机器人已被从 space 中移除，或你在 Chat API 控制台中撤销了它。在 space 中重新安装（下一个 <code>ADDED_TO_SPACE</code> 事件会自动恢复消息发送功能）。</p>
+<p><strong>出现过多"Rate limit hit"警告。</strong></p>
+<p>Chat API 默认配额为每个 space 每分钟 60 条消息。如果 agent 产生的长流式回复超过该限制，适配器会以指数退避重试——但用户仍会感受到延迟。建议使用简洁回复，或在 GCP 控制台中提升配额。</p>
+<p><strong>机器人持续发送"/setup-files"提示而非文件。</strong></p>
+<p>请求者没有每用户 OAuth token，也没有旧版回退。在其私信中运行 <code>/setup-files</code> 并按照第十步操作。交换完成后，下次文件请求将原生上传，无需重启 gateway。</p>
+<p><strong><code>/setup-files start</code> 提示"No client credentials stored on the host."</strong></p>
+<p>一次性宿主机设置未完成。在运行 Hermes 的宿主机终端中执行：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>gateway.platforms.google_chat_user_oauth<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--client-secret<span class="w"> </span>/path/to/client_secret.json
+</code></pre></div>
+
+<p>然后再次发送 <code>/setup-files start</code>。</p>
+<p><strong><code>/setup-files &lt;PASTED_URL&gt;</code> 提示"Token exchange failed."</strong></p>
+<p>auth code 是一次性的且有效期很短（通常几分钟）。发送 <code>/setup-files start</code> 获取新 URL 后重试。</p>
+<hr />
+<h2 id="安全说明">安全说明</h2>
+<ul>
+<li><strong>Service Account scope</strong>：适配器请求 <code>chat.bot</code> 和 <code>pubsub</code> scope。IAM 应作为实际执行层——仅授予 SA 最小权限（订阅上的 <code>roles/pubsub.subscriber</code> + <code>roles/pubsub.viewer</code>），不要授予项目级或组织级 Pub/Sub 角色。</li>
+<li><strong>附件下载保护</strong>：Hermes 只会将 SA bearer token 附加到主机名匹配 Google 自有域名短名单的 URL（<code>googleapis.com</code>、<code>drive.google.com</code>、<code>lh[3-6].googleusercontent.com</code> 等）。其他主机在发起 HTTP 请求前即被拒绝，以防范 SSRF 场景——即精心构造的事件将 bearer token 重定向到 GCE 元数据服务。</li>
+<li><strong>脱敏处理</strong>：Service Account 邮箱、订阅路径和 topic 路径会被 <code>agent/redact.py</code> 从日志输出中剥离。调试信封转储（<code>GOOGLE_CHAT_DEBUG_RAW=1</code>）经过同一脱敏过滤器，以 DEBUG 级别记录。</li>
+<li><strong>合规性</strong>：如果你计划将此机器人接入受监管的 Workspace（任何有数据驻留或 AI 治理政策的环境），请在首次安装前获得相应审批。</li>
+<li><strong>用户 OAuth scope</strong>：每用户附件流程<em>仅</em>请求 <code>chat.messages.create</code>——覆盖 <code>media.upload</code> 及后续 <code>messages.create</code> 所需的最小权限。token 以明文 JSON 形式持久化在 <code>~/.hermes/google_chat_user_tokens/&lt;sanitized_email&gt;.json</code>（文件系统权限是保护手段——与 SA 密钥文件采用相同模型）。每个 token 归属于唯一一位用户；撤销操作仅限于该用户。</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/messaging/google_chat</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#概览">概览</a></li>
+<li class="lvl2"><a href="#第一步创建或选择-gcp-项目">第一步：创建或选择 GCP 项目</a></li>
+<li class="lvl2"><a href="#第二步启用两个-api">第二步：启用两个 API</a></li>
+<li class="lvl2"><a href="#第三步创建-service-account">第三步：创建 Service Account</a></li>
+<li class="lvl2"><a href="#第四步创建-pubsub-topic-和订阅">第四步：创建 Pub/Sub topic 和订阅</a></li>
+<li class="lvl2"><a href="#第五步在-topic-上配置-iam-绑定关键">第五步：在 topic 上配置 IAM 绑定（关键）</a></li>
+<li class="lvl2"><a href="#第六步在订阅上配置-iam-绑定">第六步：在订阅上配置 IAM 绑定</a></li>
+<li class="lvl2"><a href="#第七步配置-chat-应用">第七步：配置 Chat 应用</a></li>
+<li class="lvl2"><a href="#第八步在测试-space-中安装机器人">第八步：在测试 space 中安装机器人</a></li>
+<li class="lvl2"><a href="#第九步配置-hermes">第九步：配置 Hermes</a></li>
+<li class="lvl2"><a href="#格式化与功能">格式化与功能</a></li>
+<li class="lvl2"><a href="#第十步原生附件投递可选">第十步：原生附件投递（可选）</a></li>
+<li class="lvl3"><a href="#为何需要单独的流程">为何需要单独的流程</a></li>
+<li class="lvl3"><a href="#一次性宿主机设置">一次性宿主机设置</a></li>
+<li class="lvl3"><a href="#每用户授权在-chat-中操作">每用户授权（在 Chat 中操作）</a></li>
+<li class="lvl3"><a href="#scope">Scope</a></li>
+<li class="lvl3"><a href="#多用户行为">多用户行为</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl2"><a href="#安全说明">安全说明</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Profiles: Running Multiple Agents · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/profiles</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="profiles-running-multiple-agents">Profiles: Running Multiple Agents</h1>
+<p>Run multiple independent Hermes agents on the same machine — each with its own config, API keys, memory, sessions, skills, and gateway state.</p>
+<h2 id="what-are-profiles">What are profiles?</h2>
+<p>A profile is a separate Hermes home directory. Each profile gets its own directory containing its own <code>config.yaml</code>, <code>.env</code>, <code>SOUL.md</code>, memories, sessions, skills, cron jobs, and state database. Hermes recognises a directory under <code>~/.hermes/profiles/</code> as a profile only when it carries one of those identity files (<code>config.yaml</code>, <code>.env</code>, <code>SOUL.md</code>, <code>profile.yaml</code>, <code>auth.json</code>, <code>state.db</code>); a bare directory left behind by logging or cron is ignored by <code>profile list</code>, gateways and <code>-p</code>. Profiles let you run separate agents for different purposes — a coding assistant, a personal bot, a research agent — without mixing up Hermes state.</p>
+<div class="admonition adm-caution"><p class="adm-title">Give every agent its own profile</p>
+<p>Never point two agent processes at the same profile (the same Hermes home). Both write memory automatically, and each loads the other's writes into its system prompt at session start — so two writers on one home compound each other's state until it stops being anything you configured. Profiles exist exactly to prevent this; agents that need shared memory should use an <a href="features/memory-providers.html">external memory provider</a> instead.</p>
+</div>
+<p>When you create a profile, it automatically becomes its own command. Create a profile called <code>coder</code> and you immediately have <code>coder chat</code>, <code>coder setup</code>, <code>coder gateway start</code>, etc.</p>
+<h3 id="profiles-agents-and-bots">Profiles, agents, and bots</h3>
+<p>These terms describe different parts of Hermes:</p>
+<ul>
+<li>
+<p><strong>Profile</strong> is the persistent home for an assistant's configuration and data.
+  It keeps the same state across conversations and restarts.</p>
+</li>
+<li>
+<p><strong>Agent</strong> is the running Hermes assistant that uses that configuration and
+  state. "Hermes Agent" also names the product.</p>
+</li>
+<li>
+<p><strong>Bot Mode bot</strong> is a profile presented as a named entry in the desktop's
+  <a href="bot-mode.html">Bot Mode</a> roster, with an avatar and a persistent Bot Chat.
+  The same profile remains accessible from the CLI. Every Bot is a profile, but
+  not every profile is a Bot: a profile becomes a Bot when Bot Mode stores its
+  roster presentation (title, avatar, section, hidden state) in the profile's
+  metadata and pins its canonical Bot Chat. A profile you only ever drive from
+  the CLI, Docker, or a gateway and never add to the roster stays a plain profile.</p>
+</li>
+<li>
+<p><strong>Messaging bot</strong> is an account on a platform such as Telegram, Discord, or
+  Slack, connected to Hermes through the gateway. Its
+  <a href="#different-bot-tokens">bot token</a> identifies that platform account.</p>
+</li>
+<li>
+<p><strong>Subagent</strong> is a child assistant spawned by
+  <a href="features/delegation.html"><code>delegate_task</code></a> for a task, with a fresh
+  conversation. A separate conversation is different from a separate profile.</p>
+</li>
+</ul>
+<h2 id="quick-start">Quick start</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>coder<span class="w">       </span><span class="c1"># creates profile + &quot;coder&quot; command alias</span>
+coder<span class="w"> </span>setup<span class="w">                       </span><span class="c1"># configure API keys and model</span>
+coder<span class="w"> </span>chat<span class="w">                        </span><span class="c1"># start chatting</span>
+</code></pre></div>
+
+<p>That's it. <code>coder</code> is now its own Hermes profile with its own config, memory, and state.</p>
+<h2 id="creating-a-profile">Creating a profile</h2>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Quickest setup: run <code>hermes setup --portal</code> inside the new profile to wire up models + tools at once. See <a href="../integrations/nous-portal.html">Nous Portal</a>.</p>
+</div>
+<h3 id="blank-profile">Blank profile</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>mybot
+</code></pre></div>
+
+<p>Creates a fresh profile with bundled skills seeded. Run <code>mybot setup</code> to configure API keys, model, and gateway tokens.</p>
+<p>If you plan to use this profile as a kanban worker (or want the kanban orchestrator to route work to it), pass <code>--description "&lt;role&gt;"</code> at create time so the orchestrator knows what it's good at:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>researcher<span class="w"> </span>--description<span class="w"> </span><span class="s2">&quot;Reads source code and external docs, writes findings.&quot;</span>
+</code></pre></div>
+
+<p>You can also set or auto-generate the description later with <code>hermes profile describe</code> — see the <a href="features/kanban.html#auto-vs-manual-orchestration">Kanban guide</a> for the full routing model.</p>
+<h3 id="clone-config-only---clone">Clone config only (<code>--clone</code>)</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>work<span class="w"> </span>--clone
+</code></pre></div>
+
+<p>Copies your current profile's <code>config.yaml</code>, <code>.env</code>, <code>SOUL.md</code>, skills, and the curated memory files <code>memories/MEMORY.md</code> and <code>memories/USER.md</code> into the new profile — memory is treated as part of the agent's identity, like <code>SOUL.md</code>. Sessions, <code>state.db</code>, cron jobs and everything else start empty. For a blank memory as well, create the profile without <code>--clone</code> or delete the two files afterwards; the agent never falls back to another profile's memory when they are absent. Edit <code>~/.hermes/profiles/work/.env</code> for different API keys, or <code>~/.hermes/profiles/work/SOUL.md</code> for a different personality.</p>
+<h4 id="keep-a-clones-imported-agent-setups-synced---sync-imports">Keep a clone's imported agent setups synced (<code>--sync-imports</code>)</h4>
+<p>If the source profile has run <a href="import-from-other-agents.html"><code>hermes import-agent</code></a>, its <code>import-sync.json</code> records which external Claude Code / Codex trees it imported. <code>--clone</code> leaves that manifest behind, so the clone gets a one-off copy of those skills and memories and stops there. Add <code>--sync-imports</code> to carry the manifest over:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>work<span class="w"> </span>--clone<span class="w"> </span>--sync-imports
+hermes<span class="w"> </span>-p<span class="w"> </span>work<span class="w"> </span>import-agent<span class="w"> </span>--sync<span class="w">        </span><span class="c1"># pulls changes from the same ~/.claude / ~/.codex</span>
+</code></pre></div>
+
+<p>This is explicit, opt-in and one-directional, and it links the clone to the <strong>external agent trees only</strong> — never to the source profile. Both profiles stay independent islands: editing the source's <code>config.yaml</code>, <code>SOUL.md</code> or skills afterwards never reaches the clone. <code>--clone-all</code> copies the manifest as part of the full copy.</p>
+<h3 id="clone-everything---clone-all">Clone everything (<code>--clone-all</code>)</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>backup<span class="w"> </span>--clone-all
+</code></pre></div>
+
+<p>Copies <strong>everything</strong> — config, API keys, personality, all memories, skills, plugins. A complete working snapshot. Per-profile history is excluded (session history, <code>state.db</code>, <code>backups/</code>, <code>state-snapshots/</code>, <code>checkpoints/</code>) — these belong to the source profile and can reach tens of GB. When cloning from the default profile, the local-model runtime trees (<code>models/</code>, <code>runtimes/</code>, <code>node/</code> — downloaded weights and managed binaries, re-fetched on demand) are skipped too, as <code>hermes backup</code> already does. <strong>Cron jobs are not cloned</strong> either: they are scheduled work bound to the source profile and its delivery channel, and a clone that inherited them would run every job twice (two gateways, same job ids). The new profile starts with an empty <code>cron/</code>. For a full backup including history and cron jobs, use <code>hermes profile export</code> or <code>hermes backup</code> instead.</p>
+<div class="admonition adm-note"><p class="adm-title">OAuth logins are never copied</p>
+<p>Anthropic (Claude Pro/Max), OpenAI Codex, and xAI OAuth logins use <strong>single-use refresh tokens</strong> — a copy of one is not a second credential, it is the same credential with two owners, and the first profile to refresh it revokes it for every other copy. <code>--clone-all</code> (and the dashboard's credential mirroring) therefore drops those OAuth rows from the clone. Static API keys are copied as usual. Sign the new profile into the OAuth provider itself: <code>hermes -p &lt;name&gt; auth add &lt;provider&gt;</code> (or <code>hermes -p &lt;name&gt; model</code>).</p>
+</div>
+<h3 id="every-profile-owns-its-credentials">Every profile owns its credentials</h3>
+<p>A named profile resolves providers from <strong>its own</strong> <code>auth.json</code> and <code>.env</code> only. It never inherits the root profile's logins or API keys, and a token refresh inside a profile never writes to the root store. A profile with no provider of its own is asked to set one up (<code>hermes -p &lt;name&gt; model</code>, or <code>hermes -p &lt;name&gt; auth add &lt;provider&gt;</code>) — it does not silently act as the owner. <code>hermes update</code> lists every profile that has no provider of its own so a bot never goes quiet unannounced.</p>
+<h3 id="clone-from-a-specific-profile">Clone from a specific profile</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>work<span class="w"> </span>--clone-from<span class="w"> </span>coder
+</code></pre></div>
+
+<p><code>--clone-from &lt;source&gt;</code> selects the source profile directly and implies a config/skills/SOUL clone. Combine it with <code>--clone-all</code> when you want a full copy of that source profile:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>work-backup<span class="w"> </span>--clone-from<span class="w"> </span>coder<span class="w"> </span>--clone-all
+</code></pre></div>
+
+<h3 id="messaging-channels-are-never-cloned---clone-channels-to-opt-in">Messaging channels are never cloned (<code>--clone-channels</code> to opt in)</h3>
+<p>Every clone — <code>--clone</code>, <code>--clone-from</code>, <code>--clone-all</code>, and the dashboard / Desktop / TUI
+"clone from profile" option — copies the source <strong>without its messaging channels</strong>: bot tokens
+and allowlists (<code>TELEGRAM_BOT_TOKEN</code>, <code>DISCORD_ALLOWED_USERS</code>, <code>WHATSAPP_ENABLED</code>,
+<code>API_SERVER_KEY</code>, <code>WEBHOOK_SECRET</code>, …), the <code>platforms:</code> / <code>telegram:</code> / <code>discord:</code> sections of
+<code>config.yaml</code>, <code>gateway.multiplex_profiles</code> / <code>profile_routes</code>, and (for <code>--clone-all</code>) the
+pairing store, WhatsApp session and other per-bot state. Provider and tool API keys, the model
+block, memory settings, skills and <code>SOUL.md</code> are copied as before. The command prints which
+platforms were left behind.</p>
+<p>The reason is that a bot can only belong to one profile: two standalone gateways holding the
+same token fight over its long-poll, and a <a href="multi-profile-gateways.html">multiplexed gateway</a>
+parks the duplicate adapter (and <code>hermes gateway migrate --multiplex</code> refuses with one
+duplicate-credential blocker per platform). Configure the new profile's own bots with
+<code>hermes -p &lt;name&gt; setup</code> or the dashboard Messaging page.</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>twin<span class="w"> </span>--clone<span class="w"> </span>--clone-channels<span class="w">   </span><span class="c1"># keep the source&#39;s bots anyway</span>
+</code></pre></div>
+
+<p><code>--clone-channels</code> is refused when a running multiplexed gateway already serves the source
+(the copy would be parked immediately) — from the CLI, the dashboard and the TUI alike — and
+otherwise prints a warning naming the platforms now shared with the source. It is an error
+without a clone flag. <code>hermes profile list</code> prints the same warning for any existing
+profile whose bot credential is byte-identical to the default's, so older clones surface
+before they bite.</p>
+<p><strong>What counts as a channel setting</strong> — the inventory is ownership-based and is judged in the
+<em>source</em> profile's plugin scope (its private <code>plugins/</code> adapters included):</p>
+<ul>
+<li>every key an adapter declares (tokens, app/client ids, allowlists, allow-all switches, home
+  channels) and every key under its <code>&lt;PLATFORM&gt;_</code> prefix, including historical aliases
+  (<code>WECOM_*</code>, <code>SMS_*</code>/<code>TWILIO_*</code>, <code>QQ_*</code>, <code>HASS_*</code>, <code>EMAIL_*</code>);</li>
+<li>gateway-wide channel policy <code>GATEWAY_ALLOW_ALL_USERS</code> / <code>GATEWAY_ALLOWED_USERS</code> and the
+  relay enrollment identity <code>GATEWAY_RELAY_ID</code> / <code>GATEWAY_RELAY_SECRET</code> / <code>GATEWAY_RELAY_DELIVERY_KEY</code>;</li>
+<li>for <code>--clone-all</code>, per-bot state files <strong>and directories</strong> (<code>platforms/</code>, pairing ledgers,
+  <code>google_chat_user_tokens/</code>, <code>&lt;platform&gt;_*</code>).</li>
+</ul>
+<p>Credentials that a messaging adapter shares with a non-channel capability — <code>HASS_TOKEN</code>/<code>HASS_URL</code>
+(also the Home Assistant tool), <code>TWILIO_*</code> (also the telephony skill), <code>EMAIL_*</code> (also
+mail-sending scripts) — are stripped <strong>only when the source's gateway would run that adapter</strong>
+(the platform is enabled in its <code>config.yaml</code>, or its credential set is complete and not
+explicitly disabled). A source with <code>platforms.homeassistant.enabled: false</code> uses <code>HASS_TOKEN</code>
+as a tool key, so the clone keeps it. Allowlists and ports under those prefixes are always
+channel-only and always stripped.</p>
+<p>Clones are built in a hidden staging directory beside <code>profiles/</code> and published with one
+rename after the strip, so a running multiplexer (which rescans <code>profiles/</code> on create) can
+never start adapters on a half-copied tree. A symlinked source <code>.env</code>/<code>config.yaml</code> is
+materialized as a private copy first — the clone never writes through to the source.</p>
+<div class="admonition adm-tip"><p class="adm-title">Honcho memory + profiles</p>
+<p>When Honcho is enabled, clone operations automatically create a dedicated AI peer for the new profile while sharing the same user workspace. Each profile builds its own observations and identity. See <a href="features/memory-providers.html#honcho">Honcho -- Multi-agent / Profiles</a> for details.</p>
+</div>
+<h2 id="using-profiles">Using profiles</h2>
+<h3 id="command-aliases">Command aliases</h3>
+<p>Every profile automatically gets a command alias at <code>~/.local/bin/&lt;name&gt;</code>:</p>
+<div class="highlight"><pre><span></span><code>coder<span class="w"> </span>chat<span class="w">                    </span><span class="c1"># chat with the coder agent</span>
+coder<span class="w"> </span>setup<span class="w">                   </span><span class="c1"># configure coder&#39;s settings</span>
+coder<span class="w"> </span>gateway<span class="w"> </span>start<span class="w">           </span><span class="c1"># start coder&#39;s gateway</span>
+coder<span class="w"> </span>doctor<span class="w">                  </span><span class="c1"># check coder&#39;s health</span>
+coder<span class="w"> </span>skills<span class="w"> </span>list<span class="w">             </span><span class="c1"># list coder&#39;s skills</span>
+coder<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>model.default<span class="w"> </span>anthropic/claude-sonnet-4
+</code></pre></div>
+
+<p>The alias works with every hermes subcommand — it's just <code>hermes -p &lt;name&gt;</code> under the hood.</p>
+<h3 id="the--p-flag">The <code>-p</code> flag</h3>
+<p>You can also target a profile explicitly with any command:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>-p<span class="w"> </span>coder<span class="w"> </span>chat
+hermes<span class="w"> </span>--profile<span class="o">=</span>coder<span class="w"> </span>doctor
+hermes<span class="w"> </span>chat<span class="w"> </span>-p<span class="w"> </span>coder<span class="w"> </span>-q<span class="w"> </span><span class="s2">&quot;hello&quot;</span><span class="w">    </span><span class="c1"># works in any position</span>
+</code></pre></div>
+
+<h3 id="sticky-default-hermes-profile-use">Sticky default (<code>hermes profile use</code>)</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>use<span class="w"> </span>coder
+hermes<span class="w"> </span>chat<span class="w">                   </span><span class="c1"># now targets coder</span>
+hermes<span class="w"> </span>tools<span class="w">                  </span><span class="c1"># configures coder&#39;s tools</span>
+hermes<span class="w"> </span>profile<span class="w"> </span>use<span class="w"> </span>default<span class="w">    </span><span class="c1"># switch back</span>
+</code></pre></div>
+
+<p>Sets a default so plain <code>hermes</code> commands target that profile. Like <code>kubectl config use-context</code>.</p>
+<h3 id="knowing-where-you-are">Knowing where you are</h3>
+<p>The CLI always shows which profile is active:</p>
+<ul>
+<li><strong>Prompt</strong>: <code>coder ❯</code> instead of <code>❯</code></li>
+<li><strong>Banner</strong>: Shows <code>Profile: coder</code> on startup</li>
+<li><strong><code>hermes profile</code></strong>: Shows current profile name, path, model, gateway status</li>
+</ul>
+<h2 id="profiles-vs-workspaces-vs-sandboxing">Profiles vs workspaces vs sandboxing</h2>
+<p>Profiles are often confused with workspaces or sandboxes, but they are different things:</p>
+<ul>
+<li>A <strong>profile</strong> gives Hermes its own state directory: <code>config.yaml</code>, <code>.env</code>, <code>SOUL.md</code>, sessions, memory, logs, cron jobs, and gateway state.</li>
+<li>A <strong>workspace</strong> or <strong>working directory</strong> is where terminal commands start. That is controlled separately by <code>terminal.cwd</code>.</li>
+<li>A <strong>sandbox</strong> is what limits filesystem access. Profiles do <strong>not</strong> sandbox the agent.</li>
+</ul>
+<p>On the default <code>local</code> terminal backend, the agent still has the same filesystem access as your user account. A profile does not stop it from accessing folders outside the profile directory.</p>
+<p>If you want a profile to start in a specific project folder, set an explicit absolute <code>terminal.cwd</code> in that profile's <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">terminal</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">local</span>
+<span class="w">  </span><span class="nt">cwd</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/absolute/path/to/project</span>
+</code></pre></div>
+
+<p>Using <code>cwd: "."</code> on the local backend means "the directory Hermes was launched from", not "the profile directory".</p>
+<p>Also note:</p>
+<ul>
+<li><code>SOUL.md</code> can guide the model, but it does not enforce a workspace boundary.</li>
+<li>Changes to <code>SOUL.md</code> take effect cleanly on a new session. Existing sessions may still be using the old prompt state.</li>
+<li>Asking the model "what directory are you in?" is not a reliable isolation test. If you need a predictable starting directory for tools, set <code>terminal.cwd</code> explicitly.</li>
+</ul>
+<h2 id="running-gateways">Running gateways</h2>
+<p>Each profile runs its own gateway as a separate process with its own bot token:</p>
+<div class="highlight"><pre><span></span><code>coder<span class="w"> </span>gateway<span class="w"> </span>start<span class="w">           </span><span class="c1"># starts coder&#39;s gateway</span>
+assistant<span class="w"> </span>gateway<span class="w"> </span>start<span class="w">       </span><span class="c1"># starts assistant&#39;s gateway (separate process)</span>
+</code></pre></div>
+
+<h3 id="different-bot-tokens">Different bot tokens</h3>
+<p>Each profile has its own <code>.env</code> file. Configure a different Telegram/Discord/Slack bot token in each:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Edit coder&#39;s tokens</span>
+nano<span class="w"> </span>~/.hermes/profiles/coder/.env
+
+<span class="c1"># Edit assistant&#39;s tokens</span>
+nano<span class="w"> </span>~/.hermes/profiles/assistant/.env
+</code></pre></div>
+
+<h3 id="safety-token-locks">Safety: token locks</h3>
+<p>If two profiles accidentally use the same bot token, the second gateway will be blocked with a clear error naming the conflicting profile. Supported for Telegram, Discord, Slack, WhatsApp, and Signal.</p>
+<h3 id="persistent-services">Persistent services</h3>
+<div class="highlight"><pre><span></span><code>coder<span class="w"> </span>gateway<span class="w"> </span>install<span class="w">         </span><span class="c1"># creates hermes-gateway-coder systemd/launchd service</span>
+assistant<span class="w"> </span>gateway<span class="w"> </span>install<span class="w">     </span><span class="c1"># creates hermes-gateway-assistant service</span>
+</code></pre></div>
+
+<p>Each profile gets its own service name. They run independently.</p>
+<div class="admonition adm-note"><p class="adm-title">Inside the official Docker image</p>
+<p>Per-profile gateways are supervised by <a href="https://github.com/just-containers/s6-overlay" class="ext" target="_blank" rel="noopener">s6-overlay</a> (PID 1 in the container), so <code>hermes profile create &lt;name&gt;</code> automatically registers an s6 service slot at <code>/run/service/gateway-&lt;name&gt;/</code>. <code>hermes -p &lt;name&gt; gateway start/stop/restart</code> dispatches to <code>s6-svc</code> instead of spawning a bare process — crashes are auto-restarted and <code>docker restart</code> preserves the previously-running set of gateways. See <a href="docker.html#per-profile-gateway-supervision">Per-profile gateway supervision</a> for details.</p>
+</div>
+<h2 id="configuring-profiles">Configuring profiles</h2>
+<p>Each profile has its own:</p>
+<ul>
+<li><strong><code>config.yaml</code></strong> — model, provider, toolsets, all settings</li>
+<li><strong><code>.env</code></strong> — API keys, bot tokens</li>
+<li><strong><code>SOUL.md</code></strong> — personality and instructions</li>
+</ul>
+<div class="highlight"><pre><span></span><code>coder<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>model.default<span class="w"> </span>anthropic/claude-sonnet-4
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;You are a focused coding assistant.&quot;</span><span class="w"> </span>&gt;<span class="w"> </span>~/.hermes/profiles/coder/SOUL.md
+</code></pre></div>
+
+<p>If you want this profile to work in a specific project by default, also set its own <code>terminal.cwd</code>:</p>
+<div class="highlight"><pre><span></span><code>coder<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>terminal.cwd<span class="w"> </span>/absolute/path/to/project
+</code></pre></div>
+
+<h3 id="from-the-dashboard">From the dashboard</h3>
+<p>The <a href="features/web-dashboard.html#managing-multiple-profiles">web dashboard</a>
+is a machine-level surface that can manage <strong>any</strong> profile's config, API
+keys, skills, MCPs, and model via the profile switcher in its sidebar — no
+per-profile dashboard needed. <code>coder dashboard</code> routes to the machine
+dashboard with the <code>coder</code> profile preselected. The dashboard's Chat tab
+also follows the switcher, spawning a conversation under the selected
+profile's home.</p>
+<p>Note: "Set as active" on the dashboard's Profiles page is the sticky
+default for <strong>future CLI/gateway runs</strong> (same as <code>hermes profile use</code>) —
+to edit a profile from the dashboard, use the switcher instead.</p>
+<h2 id="updating">Updating</h2>
+<p><code>hermes update</code> pulls code once (shared) and syncs new bundled skills to <strong>all</strong> profiles automatically:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>update
+<span class="c1"># → Code updated (12 commits)</span>
+<span class="c1"># → Skills synced: default (up to date), coder (+2 new), assistant (+2 new)</span>
+</code></pre></div>
+
+<p>User-modified skills are never overwritten.</p>
+<h2 id="managing-profiles">Managing profiles</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>list<span class="w">           </span><span class="c1"># show all profiles with status</span>
+hermes<span class="w"> </span>profile<span class="w"> </span>show<span class="w"> </span>coder<span class="w">     </span><span class="c1"># detailed info for one profile</span>
+hermes<span class="w"> </span>profile<span class="w"> </span>rename<span class="w"> </span>coder<span class="w"> </span>dev-bot<span class="w">   </span><span class="c1"># rename (updates alias + service)</span>
+hermes<span class="w"> </span>profile<span class="w"> </span>migrate-identity<span class="w"> </span>coder<span class="w"> </span>dev-bot<span class="w">   </span><span class="c1"># retry a rename&#39;s identity migration</span>
+hermes<span class="w"> </span>profile<span class="w"> </span>purge-identity<span class="w"> </span>dev-bot<span class="w">   </span><span class="c1"># retry a delete&#39;s identity purge</span>
+hermes<span class="w"> </span>profile<span class="w"> </span><span class="nb">export</span><span class="w"> </span>coder<span class="w">   </span><span class="c1"># pack into coder.tar.gz (shareable; keys stripped)</span>
+hermes<span class="w"> </span>profile<span class="w"> </span>import<span class="w"> </span>coder.tar.gz<span class="w">   </span><span class="c1"># install an archive as a new profile</span>
+</code></pre></div>
+
+<p>In chat, the same two live as <code>/export</code> and <code>/import</code> — and in the desktop app as <strong>⌘K → Export/Import profile…</strong>. See <a href="#sharing-a-profile">Sharing a profile</a>.</p>
+<h3 id="naming-the-default-profile">Naming the default profile</h3>
+<p>The default profile's internal ID is always <code>default</code> — it can't be truly
+renamed because <code>~/.hermes</code> is the installation root. Renaming it instead
+sets a <strong>display name</strong>, which UI surfaces show in place of the bare ID:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>rename<span class="w"> </span>default<span class="w"> </span>Harumesu<span class="w">   </span><span class="c1"># Unicode fine: 小助手</span>
+</code></pre></div>
+
+<p>The display name appears in <code>hermes profile list</code>/<code>show</code>, the <code>/profile</code>
+chat command, the dashboard, and the desktop app (including the Bot Mode
+roster). It is presentation-only: <code>-p default</code>, service names, cron jobs,
+and every other reference keep using the canonical <code>default</code> ID. It is
+stored as <code>display_name</code> in <code>~/.hermes/profile.yaml</code>; remove that line to
+revert. Named profiles can carry a <code>display_name</code> too (it survives a real
+rename), but <code>rename</code> for them still renames the profile itself.</p>
+<h2 id="deleting-a-profile">Deleting a profile</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>profile<span class="w"> </span>delete<span class="w"> </span>coder
+</code></pre></div>
+
+<p>This stops the gateway, removes the systemd/launchd service, removes the command alias, and deletes all profile data. You'll be asked to type the profile name to confirm.</p>
+<p>Use <code>--yes</code> to skip confirmation: <code>hermes profile delete coder --yes</code></p>
+<div class="admonition adm-note"><p class="adm-title">Note</p>
+<p>You cannot delete the default profile (<code>~/.hermes</code>). To remove everything, use <code>hermes uninstall</code>.</p>
+</div>
+<h2 id="tab-completion">Tab completion</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># Bash</span>
+<span class="nb">eval</span><span class="w"> </span><span class="s2">&quot;</span><span class="k">$(</span>hermes<span class="w"> </span>completion<span class="w"> </span>bash<span class="k">)</span><span class="s2">&quot;</span>
+
+<span class="c1"># Zsh</span>
+<span class="nb">eval</span><span class="w"> </span><span class="s2">&quot;</span><span class="k">$(</span>hermes<span class="w"> </span>completion<span class="w"> </span>zsh<span class="k">)</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>Add the line to your <code>~/.bashrc</code> or <code>~/.zshrc</code> for persistent completion. Completes profile names after <code>-p</code>, profile subcommands, and top-level commands.</p>
+<h2 id="how-it-works">How it works</h2>
+<p>Profiles use the <code>HERMES_HOME</code> environment variable. When you run <code>coder chat</code>, the wrapper script sets <code>HERMES_HOME=~/.hermes/profiles/coder</code> before launching hermes. Since 119+ files in the codebase resolve paths via <code>get_hermes_home()</code>, Hermes state automatically scopes to the profile's directory — config, sessions, memory, skills, state database, gateway PID, logs, and cron jobs.</p>
+<p>This is separate from terminal working directory. Tool execution starts from <code>terminal.cwd</code> (or the launch directory when <code>cwd: "."</code> on the local backend), not automatically from <code>HERMES_HOME</code>.</p>
+<p>On host installs, tool subprocesses keep your real OS-user <code>HOME</code> by default so
+existing CLI credentials under <code>~</code> keep working across profiles. Profile data is
+isolated by <code>HERMES_HOME</code>, not by changing <code>HOME</code>. Container backends still use
+<code>{HERMES_HOME}/home</code> for persistent tool state, and host users who need strict
+per-profile tool config can opt in with <code>terminal.home_mode: profile</code>.</p>
+<p>This means two things that are easy to mix up:</p>
+<ul>
+<li><code>HERMES_HOME</code> is the profile boundary. It controls Hermes config, <code>.env</code>,
+  memory, sessions, skills, logs, cron jobs, gateway state, and other Hermes
+  data.</li>
+<li><code>HOME</code> is the operating-system/user home that external CLIs expect. On host
+  installs, Hermes keeps it as the real user home by default so tools like
+  <code>git</code>, <code>ssh</code>, <code>gh</code>, <code>az</code>, <code>npm</code>, Claude Code, and Codex find the same
+  credentials they use in your normal shell.</li>
+</ul>
+<p>The tradeoff is that host profiles share normal user-level CLI state by default.
+If you need separate CLI identities per profile, set <code>terminal.home_mode:
+profile</code> in that profile's <code>config.yaml</code>. In that mode Hermes launches tool
+subprocesses with <code>HOME={HERMES_HOME}/home</code>; you then need to initialize or link
+the profile-specific <code>~/.ssh</code>, <code>~/.gitconfig</code>, <code>~/.config/gh</code>, cloud CLI auth,
+Claude/Codex auth, npm state, and similar files inside that profile home.</p>
+<p>Hermes also exposes <code>HERMES_REAL_HOME</code> to subprocesses so scripts can still find
+the actual account home when <code>home_mode: profile</code> is active.</p>
+<p>The default profile is simply <code>~/.hermes</code> itself. No migration needed — existing installs work identically.</p>
+<h2 id="sharing-a-profile">Sharing a profile</h2>
+<p>A profile you built on one machine can go to another — your own workstation, a teammate's laptop, or the community. Two paths:</p>
+<p><strong>Send a file.</strong> <code>/export</code> packs the profile into one <code>.tar.gz</code> — skills, memory, persona, crons, plugins, settings, and (from the desktop) your theme and layout. API keys are stripped. The recipient runs <code>/import</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># In chat, run /export, hand over the file, and they run /import on it</span>
+hermes<span class="w"> </span>profile<span class="w"> </span><span class="nb">export</span><span class="w"> </span>coder
+hermes<span class="w"> </span>profile<span class="w"> </span>import<span class="w"> </span>./coder.tar.gz<span class="w"> </span>--name<span class="w"> </span>coder
+</code></pre></div>
+
+<p><strong>Publish a distribution.</strong> Package the profile as a <strong>git repository</strong> so recipients install it with one command and pull versioned updates later. Carries the SOUL, config, skills, cron jobs, and MCP connections; credentials, memories, and sessions stay per-machine.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Install a whole agent from a git repo</span>
+hermes<span class="w"> </span>profile<span class="w"> </span>install<span class="w"> </span>github.com/you/research-bot<span class="w"> </span>--alias
+
+<span class="c1"># Update later when the author ships a new version (keeps your memories + .env)</span>
+hermes<span class="w"> </span>profile<span class="w"> </span>update<span class="w"> </span>research-bot
+</code></pre></div>
+
+<p>Use an export file for a one-time handoff or a move; use a distribution for an agent you'll keep shipping. See <strong><a href="profile-distributions.html">Profile Distributions: Share a Whole Agent</a></strong> for both — the comparison table, authoring, publishing, update semantics, and the security model.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/profiles</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#what-are-profiles">What are profiles?</a></li>
+<li class="lvl3"><a href="#profiles-agents-and-bots">Profiles, agents, and bots</a></li>
+<li class="lvl2"><a href="#quick-start">Quick start</a></li>
+<li class="lvl2"><a href="#creating-a-profile">Creating a profile</a></li>
+<li class="lvl3"><a href="#blank-profile">Blank profile</a></li>
+<li class="lvl3"><a href="#clone-config-only---clone">Clone config only (--clone)</a></li>
+<li class="lvl3"><a href="#clone-everything---clone-all">Clone everything (--clone-all)</a></li>
+<li class="lvl3"><a href="#every-profile-owns-its-credentials">Every profile owns its credentials</a></li>
+<li class="lvl3"><a href="#clone-from-a-specific-profile">Clone from a specific profile</a></li>
+<li class="lvl3"><a href="#messaging-channels-are-never-cloned---clone-channels-to-opt-in">Messaging channels are never cloned (--clone-channels to opt in)</a></li>
+<li class="lvl2"><a href="#using-profiles">Using profiles</a></li>
+<li class="lvl3"><a href="#command-aliases">Command aliases</a></li>
+<li class="lvl3"><a href="#the--p-flag">The -p flag</a></li>
+<li class="lvl3"><a href="#sticky-default-hermes-profile-use">Sticky default (hermes profile use)</a></li>
+<li class="lvl3"><a href="#knowing-where-you-are">Knowing where you are</a></li>
+<li class="lvl2"><a href="#profiles-vs-workspaces-vs-sandboxing">Profiles vs workspaces vs sandboxing</a></li>
+<li class="lvl2"><a href="#running-gateways">Running gateways</a></li>
+<li class="lvl3"><a href="#different-bot-tokens">Different bot tokens</a></li>
+<li class="lvl3"><a href="#safety-token-locks">Safety: token locks</a></li>
+<li class="lvl3"><a href="#persistent-services">Persistent services</a></li>
+<li class="lvl2"><a href="#configuring-profiles">Configuring profiles</a></li>
+<li class="lvl3"><a href="#from-the-dashboard">From the dashboard</a></li>
+<li class="lvl2"><a href="#updating">Updating</a></li>
+<li class="lvl2"><a href="#managing-profiles">Managing profiles</a></li>
+<li class="lvl3"><a href="#naming-the-default-profile">Naming the default profile</a></li>
+<li class="lvl2"><a href="#deleting-a-profile">Deleting a profile</a></li>
+<li class="lvl2"><a href="#tab-completion">Tab completion</a></li>
+<li class="lvl2"><a href="#how-it-works">How it works</a></li>
+<li class="lvl2"><a href="#sharing-a-profile">Sharing a profile</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

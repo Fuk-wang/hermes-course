@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Python Debugpy — 调试 Python：pdb REPL + debugpy 远程（DAP） · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/skills/bundled/software-development/software-development-python-debugpy</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="python-debugpy">Python Debugpy</h1>
+<p>调试 Python：pdb REPL + debugpy 远程（DAP）。</p>
+<h2 id="skill-元数据">Skill 元数据</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源</td>
+<td>内置（默认安装）</td>
+</tr>
+<tr>
+<td>路径</td>
+<td><code>skills/software-development/python-debugpy</code></td>
+</tr>
+<tr>
+<td>版本</td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td>作者</td>
+<td>Hermes Agent</td>
+</tr>
+<tr>
+<td>许可证</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>平台</td>
+<td>linux, macos</td>
+</tr>
+<tr>
+<td>标签</td>
+<td><code>debugging</code>, <code>python</code>, <code>pdb</code>, <code>debugpy</code>, <code>breakpoints</code>, <code>dap</code>, <code>post-mortem</code></td>
+</tr>
+<tr>
+<td>相关 skill</td>
+<td><a href="../../../../../user-guide/skills/bundled/software-development/software-development-systematic-debugging.html"><code>systematic-debugging</code></a>, <a href="../../../../../user-guide/skills/bundled/software-development/software-development-node-inspect-debugger.html"><code>node-inspect-debugger</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="参考完整-skillmd">参考：完整 SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">说明</p>
+<p>以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。</p>
+</div>
+<h1 id="python-调试器pdb--debugpy">Python 调试器（pdb + debugpy）</h1>
+<h2 id="概述">概述</h2>
+<p>三种工具，按场景选择：</p>
+<table>
+<thead>
+<tr>
+<th>工具</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>breakpoint()</code> + pdb</strong></td>
+<td>本地、交互式、最简单。在源码中添加 <code>breakpoint()</code>，正常运行，在该行进入 REPL。</td>
+</tr>
+<tr>
+<td><strong><code>python -m pdb</code></strong></td>
+<td>无需修改源码，直接在 pdb 下启动已有脚本。适合快速探查。</td>
+</tr>
+<tr>
+<td><strong><code>debugpy</code></strong></td>
+<td>远程 / 无头 / "附加到已运行进程"。使用 DAP 协议，可从终端脚本化操作，适用于长期运行的进程（gateway、daemon、PTY 子进程）。</td>
+</tr>
+</tbody>
+</table>
+<p><strong>从 <code>breakpoint()</code> 开始。</strong> 这是最低成本的可行方案。</p>
+<h2 id="使用时机">使用时机</h2>
+<ul>
+<li>测试失败，但 traceback 无法说明某个值为何出错</li>
+<li>需要逐步执行某个函数并观察集合的变化</li>
+<li>长期运行的进程（hermes gateway、tui_gateway）出现异常且无法重启</li>
+<li>事后分析（post-mortem）：异常在类生产代码中触发，需要检查崩溃现场的局部变量</li>
+<li>子进程 / 子进程（Python <code>_SlashWorker</code>、PTY bridge worker）才是实际的 bug 所在</li>
+</ul>
+<p><strong>不适用于：</strong> <code>print()</code> / <code>logging.debug</code> 一分钟内能解决的问题，或 <code>pytest -vv --tb=long --showlocals</code> 已经能揭示的问题。</p>
+<h2 id="pdb-快速参考">pdb 快速参考</h2>
+<p>在任意 pdb 提示符（<code>(Pdb)</code>）下：</p>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>操作</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>h</code> / <code>h cmd</code></td>
+<td>帮助</td>
+</tr>
+<tr>
+<td><code>n</code></td>
+<td>下一行（步过）</td>
+</tr>
+<tr>
+<td><code>s</code></td>
+<td>步入</td>
+</tr>
+<tr>
+<td><code>r</code></td>
+<td>从当前函数返回</td>
+</tr>
+<tr>
+<td><code>c</code></td>
+<td>继续执行</td>
+</tr>
+<tr>
+<td><code>unt N</code></td>
+<td>继续执行直到第 N 行</td>
+</tr>
+<tr>
+<td><code>j N</code></td>
+<td>跳转到第 N 行（仅限同一函数）</td>
+</tr>
+<tr>
+<td><code>l</code> / <code>ll</code></td>
+<td>列出当前行附近的源码 / 完整函数</td>
+</tr>
+<tr>
+<td><code>w</code></td>
+<td>当前位置（调用栈跟踪）</td>
+</tr>
+<tr>
+<td><code>u</code> / <code>d</code></td>
+<td>在调用栈中上移 / 下移</td>
+</tr>
+<tr>
+<td><code>a</code></td>
+<td>打印当前函数的参数</td>
+</tr>
+<tr>
+<td><code>p expr</code> / <code>pp expr</code></td>
+<td>打印 / 格式化打印表达式</td>
+</tr>
+<tr>
+<td><code>display expr</code></td>
+<td>每次停止时自动打印 expr</td>
+</tr>
+<tr>
+<td><code>b file:line</code></td>
+<td>设置断点</td>
+</tr>
+<tr>
+<td><code>b func</code></td>
+<td>在函数入口处断点</td>
+</tr>
+<tr>
+<td><code>b file:line, cond</code></td>
+<td>条件断点</td>
+</tr>
+<tr>
+<td><code>cl N</code></td>
+<td>清除断点 N</td>
+</tr>
+<tr>
+<td><code>tbreak file:line</code></td>
+<td>一次性断点</td>
+</tr>
+<tr>
+<td><code>!stmt</code></td>
+<td>执行任意 Python 语句（包括赋值）</td>
+</tr>
+<tr>
+<td><code>interact</code></td>
+<td>在当前作用域中进入完整 Python REPL（Ctrl+D 退出）</td>
+</tr>
+<tr>
+<td><code>q</code></td>
+<td>退出</td>
+</tr>
+</tbody>
+</table>
+<p><code>interact</code> 命令最为强大——可以导入任何模块、检查复杂对象，甚至调用会改变状态的方法。局部变量默认只读；在 <code>(Pdb)</code> 提示符下使用 <code>!x = 42</code> 进行修改。</p>
+<h2 id="方案-1本地断点">方案 1：本地断点</h2>
+<p>最简单。编辑文件：</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">compute</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">some_helper</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+    <span class="nb">breakpoint</span><span class="p">()</span>           <span class="c1"># &lt;-- 在此处进入 pdb</span>
+    <span class="k">return</span> <span class="n">result</span> <span class="o">+</span> <span class="n">y</span>
+</code></pre></div>
+
+<p>正常运行代码。你将在 <code>breakpoint()</code> 所在行停下，可完整访问局部变量。</p>
+<p><strong>提交前务必删除 <code>breakpoint()</code>。</strong> 使用 <code>git diff</code> 或 pre-commit grep：</p>
+<div class="highlight"><pre><span></span><code>rg<span class="w"> </span>-n<span class="w"> </span><span class="s1">&#39;breakpoint\(\)&#39;</span><span class="w"> </span>--type<span class="w"> </span>py
+</code></pre></div>
+
+<h2 id="方案-2在-pdb-下启动脚本无需修改源码">方案 2：在 pdb 下启动脚本（无需修改源码）</h2>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>pdb<span class="w"> </span>path/to/script.py<span class="w"> </span>arg1<span class="w"> </span>arg2
+<span class="c1"># 停在脚本第一行</span>
+<span class="o">(</span>Pdb<span class="o">)</span><span class="w"> </span>b<span class="w"> </span>path/to/script.py:42
+<span class="o">(</span>Pdb<span class="o">)</span><span class="w"> </span>c
+</code></pre></div>
+
+<h2 id="方案-3调试-pytest-测试">方案 3：调试 pytest 测试</h2>
+<p>hermes 测试运行器和 pytest 均支持以下方式：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 在失败时（或任何异常抛出时）进入 pdb：</span>
+scripts/run_tests.sh<span class="w"> </span>tests/path/to/test_file.py::test_name<span class="w"> </span>--pdb
+
+<span class="c1"># 在测试开始时进入 pdb：</span>
+scripts/run_tests.sh<span class="w"> </span>tests/path/to/test_file.py::test_name<span class="w"> </span>--trace
+
+<span class="c1"># 在 traceback 中显示局部变量，不使用 pdb：</span>
+scripts/run_tests.sh<span class="w"> </span>tests/path/to/test_file.py<span class="w"> </span>--showlocals<span class="w"> </span>--tb<span class="o">=</span>long
+</code></pre></div>
+
+<p>注意：<code>scripts/run_tests.sh</code> 通过 <code>run_tests_parallel.py</code> 将每个测试文件放在捕获输出的子进程中运行（不使用 xdist），因此交互式 pdb 在 wrapper 下<strong>无法正常工作</strong>。请直接运行 pytest 使用 <code>--pdb</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/foo_test.py::test_bar<span class="w"> </span>--pdb
+</code></pre></div>
+
+<p>这会绕过封闭环境保证——调试时可以接受，但推送前请在 wrapper 下重新运行以确认。</p>
+<h2 id="方案-4对任意异常进行事后分析">方案 4：对任意异常进行事后分析</h2>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="p">:</span>
+    <span class="n">run_the_thing</span><span class="p">()</span>
+<span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+    <span class="n">pdb</span><span class="o">.</span><span class="n">post_mortem</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">exc_info</span><span class="p">()[</span><span class="mi">2</span><span class="p">])</span>
+</code></pre></div>
+
+<p>或对整个脚本进行包装：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>pdb<span class="w"> </span>-c<span class="w"> </span><span class="k">continue</span><span class="w"> </span>script.py
+<span class="c1"># 崩溃时，pdb 捕获异常并停在异常所在帧</span>
+</code></pre></div>
+
+<p>或在 repl/jupyter 中设置全局 hook：</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">excepthook</span><span class="p">(</span><span class="n">etype</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="n">tb</span><span class="p">):</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">pdb</span><span class="p">;</span> <span class="n">pdb</span><span class="o">.</span><span class="n">post_mortem</span><span class="p">(</span><span class="n">tb</span><span class="p">)</span>
+<span class="n">sys</span><span class="o">.</span><span class="n">excepthook</span> <span class="o">=</span> <span class="n">excepthook</span>
+</code></pre></div>
+
+<h2 id="方案-5使用-debugpy-进行远程调试附加到运行中的进程">方案 5：使用 debugpy 进行远程调试（附加到运行中的进程）</h2>
+<p>适用于长期运行的进程：Hermes gateway、tui_gateway、daemon，或已出现异常且无法干净重启的进程。</p>
+<h3 id="安装">安装</h3>
+<div class="highlight"><pre><span></span><code><span class="nb">source</span><span class="w"> </span>/home/bb/hermes-agent/.venv/bin/activate
+pip<span class="w"> </span>install<span class="w"> </span>debugpy
+</code></pre></div>
+
+<h3 id="模式-a修改源码进程在启动时等待调试器">模式 A：修改源码——进程在启动时等待调试器</h3>
+<p>在入口点顶部附近（或要调试的函数内部）添加：</p>
+<div class="highlight"><pre><span></span><code><span class="n">debugpy</span><span class="o">.</span><span class="n">listen</span><span class="p">((</span><span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span> <span class="mi">5678</span><span class="p">))</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">&quot;debugpy listening on 5678, waiting for client...&quot;</span><span class="p">,</span> <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">debugpy</span><span class="o">.</span><span class="n">wait_for_client</span><span class="p">()</span>
+<span class="n">debugpy</span><span class="o">.</span><span class="n">breakpoint</span><span class="p">()</span>       <span class="c1"># 可选：附加后立即暂停</span>
+</code></pre></div>
+
+<p>启动进程；它将阻塞在 <code>wait_for_client()</code>。</p>
+<h3 id="模式-b无需修改源码使用--m-debugpy-启动">模式 B：无需修改源码——使用 <code>-m debugpy</code> 启动</h3>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>debugpy<span class="w"> </span>--listen<span class="w"> </span><span class="m">127</span>.0.0.1:5678<span class="w"> </span>--wait-for-client<span class="w"> </span>your_script.py<span class="w"> </span>arg1
+</code></pre></div>
+
+<p>模块入口的等效写法：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>debugpy<span class="w"> </span>--listen<span class="w"> </span><span class="m">127</span>.0.0.1:5678<span class="w"> </span>--wait-for-client<span class="w"> </span>-m<span class="w"> </span>your.module
+</code></pre></div>
+
+<h3 id="模式-c附加到已运行的进程">模式 C：附加到已运行的进程</h3>
+<p>需要 PID 以及在目标环境中预装 debugpy：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>debugpy<span class="w"> </span>--listen<span class="w"> </span><span class="m">127</span>.0.0.1:5678<span class="w"> </span>--pid<span class="w"> </span>&lt;pid&gt;
+<span class="c1"># debugpy 注入到目标进程中，然后按以下方式连接客户端。</span>
+</code></pre></div>
+
+<p>某些内核 / 安全配置会阻止基于 ptrace 的注入（<code>/proc/sys/kernel/yama/ptrace_scope</code>）。修复方法：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">echo</span><span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sudo<span class="w"> </span>tee<span class="w"> </span>/proc/sys/kernel/yama/ptrace_scope
+</code></pre></div>
+
+<h3 id="从终端连接客户端">从终端连接客户端</h3>
+<p>最简便的终端侧 DAP 客户端是 VS Code CLI 或一个小脚本。在 Hermes 内部有两个实用选项：</p>
+<p><strong>选项 1：<code>debugpy</code> 自带 CLI REPL</strong> — 并非官方功能，而是一个小型 DAP 客户端脚本：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># /tmp/dap_client.py</span>
+
+<span class="n">HOST</span><span class="p">,</span> <span class="n">PORT</span> <span class="o">=</span> <span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span> <span class="mi">5678</span>
+<span class="n">s</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">create_connection</span><span class="p">((</span><span class="n">HOST</span><span class="p">,</span> <span class="n">PORT</span><span class="p">))</span>
+<span class="n">seq</span> <span class="o">=</span> <span class="n">itertools</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">send</span><span class="p">(</span><span class="n">msg</span><span class="p">):</span>
+    <span class="n">msg</span><span class="p">[</span><span class="s2">&quot;seq&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span><span class="n">seq</span><span class="p">)</span>
+    <span class="n">body</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">msg</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span>
+    <span class="n">s</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Content-Length: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">body</span><span class="p">)</span><span class="si">}</span><span class="se">\r\n\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span> <span class="o">+</span> <span class="n">body</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">recv</span><span class="p">():</span>
+    <span class="n">header</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">&quot;&quot;</span>
+    <span class="k">while</span> <span class="sa">b</span><span class="s2">&quot;</span><span class="se">\r\n\r\n</span><span class="s2">&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">header</span><span class="p">:</span>
+        <span class="n">header</span> <span class="o">+=</span> <span class="n">s</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">length</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">header</span><span class="o">.</span><span class="n">decode</span><span class="p">()</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;Content-Length:&quot;</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">())</span>
+    <span class="n">body</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">&quot;&quot;</span>
+    <span class="k">while</span> <span class="nb">len</span><span class="p">(</span><span class="n">body</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">length</span><span class="p">:</span>
+        <span class="n">body</span> <span class="o">+=</span> <span class="n">s</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">length</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="n">body</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">body</span><span class="p">)</span>
+
+<span class="n">send</span><span class="p">({</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;request&quot;</span><span class="p">,</span> <span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="s2">&quot;initialize&quot;</span><span class="p">,</span> <span class="s2">&quot;arguments&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;adapterID&quot;</span><span class="p">:</span> <span class="s2">&quot;python&quot;</span><span class="p">}})</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">recv</span><span class="p">())</span>
+<span class="n">send</span><span class="p">({</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;request&quot;</span><span class="p">,</span> <span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="s2">&quot;attach&quot;</span><span class="p">,</span> <span class="s2">&quot;arguments&quot;</span><span class="p">:</span> <span class="p">{}})</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">recv</span><span class="p">())</span>
+<span class="n">send</span><span class="p">({</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;request&quot;</span><span class="p">,</span> <span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="s2">&quot;setBreakpoints&quot;</span><span class="p">,</span>
+      <span class="s2">&quot;arguments&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;source&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;path&quot;</span><span class="p">:</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]},</span>
+                    <span class="s2">&quot;breakpoints&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;line&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">2</span><span class="p">])}]}})</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">recv</span><span class="p">())</span>
+<span class="n">send</span><span class="p">({</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;request&quot;</span><span class="p">,</span> <span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="s2">&quot;configurationDone&quot;</span><span class="p">})</span>
+<span class="c1"># ... 循环读取事件并发送 continue/stepIn 等命令</span>
+</code></pre></div>
+
+<p>用于一次性自动化尚可，但作为交互式 UX 体验较差。</p>
+<p><strong>选项 2：从 VS Code / Cursor / Zed 附加</strong> — 如果用户已打开其中一个，可添加 <code>launch.json</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Attach to Hermes&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;debugpy&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;request&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;attach&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;connect&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;host&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;port&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5678</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;justMyCode&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;pathMappings&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;localRoot&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;${workspaceFolder}&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;remoteRoot&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/home/bb/hermes-agent&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>选项 3：放弃 DAP，使用 <code>remote-pdb</code></strong> — 通常这才是终端 agent 真正需要的：</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>remote-pdb
+</code></pre></div>
+
+<p>在代码中：</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">remote_pdb</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_trace</span>
+<span class="n">set_trace</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">4444</span><span class="p">)</span>   <span class="c1"># 阻塞直到连接</span>
+</code></pre></div>
+
+<p>然后在终端中：</p>
+<div class="highlight"><pre><span></span><code>nc<span class="w"> </span><span class="m">127</span>.0.0.1<span class="w"> </span><span class="m">4444</span>
+<span class="c1"># 获得一个 (Pdb) 提示符，与本地调试完全一致。</span>
+</code></pre></div>
+
+<p>当 <code>debugpy</code> 的 DAP 协议过于繁重时，<code>remote-pdb</code> 是最适合 agent 的选择。仅在确实需要 IDE 集成时才使用 <code>debugpy</code>。</p>
+<h2 id="调试-hermes-特定进程">调试 Hermes 特定进程</h2>
+<h3 id="测试">测试</h3>
+<p>参见方案 3。wrapper 会捕获子进程输出，交互式 pdb 请直接运行 pytest。</p>
+<h3 id="run_agentpy--cli--一次性运行"><code>run_agent.py</code> / CLI — 一次性运行</h3>
+<p>最简单：在可疑行附近添加 <code>breakpoint()</code>，然后正常运行 <code>hermes</code>。控制权将在暂停点返回到你的终端。</p>
+<h3 id="tui_gateway-子进程由-hermes---tui-启动"><code>tui_gateway</code> 子进程（由 <code>hermes --tui</code> 启动）</h3>
+<p>gateway 作为 Node TUI 的子进程运行。可选方案：</p>
+<p><strong>A. 修改 gateway 源码：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># tui_gateway/server.py，在 serve() 顶部附近</span>
+
+<span class="n">debugpy</span><span class="o">.</span><span class="n">listen</span><span class="p">((</span><span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span> <span class="mi">5678</span><span class="p">))</span>
+<span class="n">debugpy</span><span class="o">.</span><span class="n">wait_for_client</span><span class="p">()</span>
+</code></pre></div>
+
+<p>启动 <code>hermes --tui</code>。TUI 将显示为冻结状态（其后端正在等待）。附加客户端后，执行在你 <code>continue</code> 时恢复。</p>
+<p><strong>B. 在特定处理器中使用 <code>remote-pdb</code>：</strong></p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">remote_pdb</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_trace</span>
+<span class="n">set_trace</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s2">&quot;127.0.0.1&quot;</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">4444</span><span class="p">)</span>   <span class="c1"># 在你想捕获的 RPC 处理器中</span>
+</code></pre></div>
+
+<p>从 TUI 触发对应的 slash 命令，然后在另一个终端中执行 <code>nc 127.0.0.1 4444</code>。</p>
+<h3 id="_slashworker-子进程"><code>_SlashWorker</code> 子进程</h3>
+<p>相同模式——在 worker 的 <code>exec</code> 路径中使用 <code>remote-pdb</code> 的 <code>set_trace()</code>。该 worker 在多次 slash 命令间持续存在，因此第一次触发会阻塞直到你连接；后续 slash 命令正常通过，除非你重新设置断点。</p>
+<h3 id="gatewaygatewayrunpy">Gateway（<code>gateway/run.py</code>）</h3>
+<p>长期运行。在处理器中使用 <code>remote-pdb</code>，或者如果你本来就要重启 gateway，则使用带 <code>--wait-for-client</code> 的 <code>debugpy</code>。</p>
+<h2 id="常见陷阱">常见陷阱</h2>
+<ol>
+<li>
+<p><strong>pdb 在并行/捕获输出的 runner 下静默失效。</strong> 你不会看到提示符，测试只会挂起（pytest-xdist 与 <code>scripts/run_tests.sh</code> 的按文件捕获子进程均如此）。交互式调试请直接对单个文件运行 pytest。</p>
+</li>
+<li>
+<p><strong><code>breakpoint()</code> 在 CI / 非 TTY 环境中会挂起进程。</strong> 本地使用没问题；永远不要提交它。添加 pre-commit grep 作为安全网。</p>
+</li>
+<li>
+<p><strong><code>PYTHONBREAKPOINT=0</code></strong> 会禁用所有 <code>breakpoint()</code> 调用。如果断点未触发，请检查环境变量：
+   <code>bash
+   echo $PYTHONBREAKPOINT</code></p>
+</li>
+<li>
+<p><strong><code>debugpy.listen</code> 仅在同时调用 <code>wait_for_client()</code> 时才会阻塞。</strong> 不调用的话，执行会继续，你的第一个断点可能在客户端附加之前就已触发。</p>
+</li>
+<li>
+<p><strong>在加固内核上附加到 PID 会失败。</strong> <code>ptrace_scope=1</code>（Ubuntu 默认值）仅允许对同用户的子进程进行 ptrace。解决方法：<code>echo 0 &gt; /proc/sys/kernel/yama/ptrace_scope</code>（需要 root 权限），或从一开始就在 <code>debugpy</code> 下启动。</p>
+</li>
+<li>
+<p><strong>线程。</strong> <code>pdb</code> 只调试当前线程。对于多线程代码，使用 <code>debugpy</code>（支持线程感知的 DAP）或为每个线程设置 <code>threading.settrace()</code>。</p>
+</li>
+<li>
+<p><strong>asyncio。</strong> <code>pdb</code> 可在协程中工作，但在 pdb 内部使用 <code>await</code> 需要 Python 3.13+ 或在旧版本的 <code>interact</code> 模式下使用 <code>await</code>。对于 3.11/3.12，使用 <code>asyncio.run_coroutine_threadsafe</code> 技巧，或通过 <code>asyncio.ensure_future</code> 配合 <code>!stmt</code> 方式进行 await。</p>
+</li>
+<li>
+<p><strong><code>scripts/run_tests.sh</code> 会剥离凭据并设置 <code>HOME=&lt;tmpdir&gt;</code>。</strong> 如果你的 bug 依赖用户配置或真实 API 密钥，在 wrapper 下将无法复现。先用原始 <code>pytest</code> 复现，再在 wrapper 下确认。</p>
+</li>
+<li>
+<p><strong>fork / 多进程。</strong> pdb 不会跟随 fork。每个子进程需要自己的 <code>breakpoint()</code> 或 <code>set_trace()</code>。对于 Hermes 子 agent，每次只调试一个进程。</p>
+</li>
+</ol>
+<h2 id="验证清单">验证清单</h2>
+<ul>
+<li>[ ] <code>pip install debugpy</code> 后确认：<code>python -c "import debugpy; print(debugpy.__version__)"</code></li>
+<li>[ ] 对于远程调试，确认端口确实在监听：<code>ss -tlnp | grep 5678</code></li>
+<li>[ ] 第一个断点确实触发（如果没有，可能是 <code>PYTHONBREAKPOINT=0</code>、在并行/捕获输出的 runner 下运行，或执行在附加前已结束）</li>
+<li>[ ] <code>where</code> / <code>w</code> 显示预期的调用栈</li>
+<li>[ ] 调试后清理：已提交代码中无残留的 <code>breakpoint()</code> / <code>set_trace()</code> / <code>debugpy.listen</code>
+  <code>bash
+  rg -n 'breakpoint\(\)|set_trace\(|debugpy\.listen' --type py</code></li>
+</ul>
+<h2 id="一次性速查方案">一次性速查方案</h2>
+<p><strong>"为什么这个 dict 缺少某个键？"</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 在 KeyError 发生处上方添加</span>
+<span class="nb">breakpoint</span><span class="p">()</span>
+<span class="c1"># 然后在 pdb 中：</span>
+<span class="p">(</span><span class="n">Pdb</span><span class="p">)</span> <span class="n">pp</span> <span class="n">d</span>
+<span class="p">(</span><span class="n">Pdb</span><span class="p">)</span> <span class="n">pp</span> <span class="nb">list</span><span class="p">(</span><span class="n">d</span><span class="o">.</span><span class="n">keys</span><span class="p">())</span>
+<span class="p">(</span><span class="n">Pdb</span><span class="p">)</span> <span class="n">w</span>                <span class="c1"># 我们是怎么到这里的</span>
+</code></pre></div>
+
+<p><strong>"这个测试单独运行通过，但在测试套件中失败。"</strong></p>
+<div class="highlight"><pre><span></span><code>scripts/run_tests.sh<span class="w"> </span>tests/the_test.py<span class="w">   </span><span class="c1"># 先确认它在隔离 runner 下失败</span>
+<span class="c1"># 交互式调试，或只有与其他测试一起运行才失败时：</span>
+<span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/<span class="w"> </span>-x<span class="w"> </span>--pdb
+<span class="c1"># 现在它会在状态积累后的确切失败测试处触发 pdb。</span>
+</code></pre></div>
+
+<p><strong>"我的异步处理器发生死锁。"</strong></p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 在处理器入口处添加</span>
+</code></pre></div>
+
+<p>触发处理器。执行 <code>nc 127.0.0.1 4444</code>，然后用 <code>w</code> 查看挂起的帧，用 <code>!import asyncio; asyncio.all_tasks()</code> 查看其他待处理任务。</p>
+<p><strong>"对 Ink 子进程 / subprocess 中的崩溃进行事后分析。"</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nv">PYTHONFAULTHANDLER</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>pdb<span class="w"> </span>-c<span class="w"> </span><span class="k">continue</span><span class="w"> </span>path/to/entrypoint.py
+<span class="c1"># 崩溃时，pdb 停在异常所在帧，可访问完整局部变量</span>
+</code></pre></div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/skills/bundled/software-development/software-development-python-debugpy</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-元数据">Skill 元数据</a></li>
+<li class="lvl2"><a href="#参考完整-skillmd">参考：完整 SKILL.md</a></li>
+<li class="lvl2"><a href="#概述">概述</a></li>
+<li class="lvl2"><a href="#使用时机">使用时机</a></li>
+<li class="lvl2"><a href="#pdb-快速参考">pdb 快速参考</a></li>
+<li class="lvl2"><a href="#方案-1本地断点">方案 1：本地断点</a></li>
+<li class="lvl2"><a href="#方案-2在-pdb-下启动脚本无需修改源码">方案 2：在 pdb 下启动脚本（无需修改源码）</a></li>
+<li class="lvl2"><a href="#方案-3调试-pytest-测试">方案 3：调试 pytest 测试</a></li>
+<li class="lvl2"><a href="#方案-4对任意异常进行事后分析">方案 4：对任意异常进行事后分析</a></li>
+<li class="lvl2"><a href="#方案-5使用-debugpy-进行远程调试附加到运行中的进程">方案 5：使用 debugpy 进行远程调试（附加到运行中的进程）</a></li>
+<li class="lvl3"><a href="#安装">安装</a></li>
+<li class="lvl3"><a href="#模式-a修改源码进程在启动时等待调试器">模式 A：修改源码——进程在启动时等待调试器</a></li>
+<li class="lvl3"><a href="#模式-b无需修改源码使用--m-debugpy-启动">模式 B：无需修改源码——使用 -m debugpy 启动</a></li>
+<li class="lvl3"><a href="#模式-c附加到已运行的进程">模式 C：附加到已运行的进程</a></li>
+<li class="lvl3"><a href="#从终端连接客户端">从终端连接客户端</a></li>
+<li class="lvl2"><a href="#调试-hermes-特定进程">调试 Hermes 特定进程</a></li>
+<li class="lvl3"><a href="#测试">测试</a></li>
+<li class="lvl3"><a href="#run_agentpy--cli--一次性运行">run_agent.py / CLI — 一次性运行</a></li>
+<li class="lvl3"><a href="#tui_gateway-子进程由-hermes---tui-启动">tui_gateway 子进程（由 hermes --tui 启动）</a></li>
+<li class="lvl3"><a href="#_slashworker-子进程">_SlashWorker 子进程</a></li>
+<li class="lvl3"><a href="#gatewaygatewayrunpy">Gateway（gateway/run.py）</a></li>
+<li class="lvl2"><a href="#常见陷阱">常见陷阱</a></li>
+<li class="lvl2"><a href="#验证清单">验证清单</a></li>
+<li class="lvl2"><a href="#一次性速查方案">一次性速查方案</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

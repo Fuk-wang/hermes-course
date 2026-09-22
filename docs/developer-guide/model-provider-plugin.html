@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model Provider Plugins · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/model-provider-plugin</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="building-a-model-provider-plugin">Building a Model Provider Plugin</h1>
+<p>Model provider plugins declare an inference backend — an OpenAI-compatible endpoint, an Anthropic Messages server, a Codex-style Responses API, or a Bedrock-native surface — that Hermes can route <code>AIAgent</code> calls through. Every built-in provider (OpenRouter, Anthropic, GMI, DeepSeek, Nvidia, …) ships as one of these plugins. Third parties can add their own by dropping a directory under <code>$HERMES_HOME/plugins/model-providers/</code> with zero changes to the repo.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Model provider plugins are the third kind of <strong>provider plugin</strong>. The others are <a href="memory-provider-plugin.html">Memory Provider Plugins</a> (cross-session knowledge) and <a href="context-engine-plugin.html">Context Engine Plugins</a> (context compression strategies). All three follow the same "drop a directory, declare a profile, no repo edits" pattern.</p>
+</div>
+<h2 id="how-discovery-works">How discovery works</h2>
+<p><code>providers/__init__.py._discover_providers()</code> runs lazily the first time any code calls <code>get_provider_profile()</code> or <code>list_providers()</code>. Discovery order:</p>
+<ol>
+<li><strong>Bundled plugins</strong> — <code>&lt;repo&gt;/plugins/model-providers/&lt;name&gt;/</code> — ship with Hermes</li>
+<li><strong>User plugins</strong> — <code>$HERMES_HOME/plugins/model-providers/&lt;name&gt;/</code> — drop in a directory; restart an already-running Hermes process to discover it</li>
+<li><strong>Installed plugins</strong> — <code>$HERMES_HOME/plugins/&lt;name&gt;/</code> (where <code>hermes plugins install owner/repo</code> clones) — imported only when <code>plugin.yaml</code> declares <code>kind: model-provider</code>; every other kind there belongs to the general PluginManager</li>
+<li><strong>Legacy single-file</strong> — <code>&lt;repo&gt;/providers/&lt;name&gt;.py</code> — back-compat for out-of-tree editable installs</li>
+</ol>
+<p><strong>User plugins override bundled plugins of the same name</strong> because <code>register_provider()</code> is last-writer-wins. Drop a <code>$HERMES_HOME/plugins/model-providers/gmi/</code> directory to replace the built-in GMI profile without touching the repo.</p>
+<h2 id="directory-structure">Directory structure</h2>
+<div class="highlight"><pre><span></span><code>plugins/model-providers/my-provider/
+├── __init__.py       # Calls register_provider(profile) at module-level
+├── plugin.yaml       # kind: model-provider + metadata (optional but recommended)
+└── README.md         # Setup instructions (optional)
+</code></pre></div>
+
+<p>The only required file is <code>__init__.py</code>. <code>plugin.yaml</code> is used by <code>hermes plugins</code> for introspection and by the general PluginManager to route the plugin to the right loader; without it, the general loader falls back to a source-text heuristic.</p>
+<h2 id="minimal-example--a-simple-api-key-provider">Minimal example — a simple API-key provider</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/model-providers/acme-inference/__init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers</span><span class="w"> </span><span class="kn">import</span> <span class="n">register_provider</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ProviderProfile</span>
+
+<span class="n">acme</span> <span class="o">=</span> <span class="n">ProviderProfile</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;acme-inference&quot;</span><span class="p">,</span>
+    <span class="n">aliases</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;acme&quot;</span><span class="p">,),</span>
+    <span class="n">display_name</span><span class="o">=</span><span class="s2">&quot;Acme Inference&quot;</span><span class="p">,</span>
+    <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Acme — OpenAI-compatible direct API&quot;</span><span class="p">,</span>
+    <span class="n">signup_url</span><span class="o">=</span><span class="s2">&quot;https://acme.example.com/keys&quot;</span><span class="p">,</span>
+    <span class="n">env_vars</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;ACME_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;ACME_BASE_URL&quot;</span><span class="p">),</span>
+    <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;https://api.acme.example.com/v1&quot;</span><span class="p">,</span>
+    <span class="n">auth_type</span><span class="o">=</span><span class="s2">&quot;api_key&quot;</span><span class="p">,</span>
+    <span class="n">default_aux_model</span><span class="o">=</span><span class="s2">&quot;acme-small-fast&quot;</span><span class="p">,</span>
+    <span class="n">fallback_models</span><span class="o">=</span><span class="p">(</span>
+        <span class="s2">&quot;acme-large-v3&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;acme-medium-v3&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;acme-small-fast&quot;</span><span class="p">,</span>
+    <span class="p">),</span>
+<span class="p">)</span>
+
+<span class="n">register_provider</span><span class="p">(</span><span class="n">acme</span><span class="p">)</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/model-providers/acme-inference/plugin.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">acme-inference</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">model-provider</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Acme Inference — OpenAI-compatible direct API</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+</code></pre></div>
+
+<p>That's it. After dropping these two files, the following <strong>auto-wire</strong> with no other edits:</p>
+<table>
+<thead>
+<tr>
+<th>Integration</th>
+<th>Where</th>
+<th>What it gets</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Credential resolution</td>
+<td><code>hermes_cli/auth.py</code></td>
+<td><code>PROVIDER_REGISTRY["acme-inference"]</code> populated from profile</td>
+</tr>
+<tr>
+<td><code>--provider</code> CLI flag</td>
+<td><code>hermes_cli/main.py</code></td>
+<td>Accepts <code>acme-inference</code></td>
+</tr>
+<tr>
+<td><code>hermes model</code> picker</td>
+<td><code>hermes_cli/models.py</code></td>
+<td>Appears in <code>CANONICAL_PROVIDERS</code>, model list fetched from <code>{base_url}/models</code></td>
+</tr>
+<tr>
+<td><code>hermes doctor</code></td>
+<td><code>hermes_cli/doctor.py</code></td>
+<td>Health check for <code>ACME_API_KEY</code> + <code>{base_url}/models</code> probe</td>
+</tr>
+<tr>
+<td><code>hermes setup</code></td>
+<td><code>hermes_cli/config.py</code></td>
+<td><code>ACME_API_KEY</code> appears in <code>OPTIONAL_ENV_VARS</code> and the setup wizard</td>
+</tr>
+<tr>
+<td>URL reverse-mapping</td>
+<td><code>agent/model_metadata.py</code></td>
+<td>Hostname → provider name for auto-detection</td>
+</tr>
+<tr>
+<td>Auxiliary model</td>
+<td><code>agent/auxiliary_client.py</code></td>
+<td>Uses <code>default_aux_model</code> for compression / summarization</td>
+</tr>
+<tr>
+<td>Runtime resolution</td>
+<td><code>hermes_cli/runtime_provider.py</code></td>
+<td>Returns correct <code>base_url</code>, <code>api_key</code>, <code>api_mode</code></td>
+</tr>
+<tr>
+<td>Transport</td>
+<td><code>agent/transports/chat_completions.py</code></td>
+<td>Profile path generates kwargs via <code>prepare_messages</code> / <code>build_extra_body</code> / <code>build_api_kwargs_extras</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="providerprofile-fields">ProviderProfile fields</h2>
+<p>Full definition in <code>providers/base.py</code>. The most useful ones:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>str</td>
+<td>Canonical id — matches <code>model.provider</code> in <code>config.yaml</code> and the <code>--provider</code> flag</td>
+</tr>
+<tr>
+<td><code>aliases</code></td>
+<td><code>tuple[str, ...]</code></td>
+<td>Alternative names resolved by <code>get_provider_profile()</code> (e.g. <code>grok</code> → <code>xai</code>)</td>
+</tr>
+<tr>
+<td><code>api_mode</code></td>
+<td>str</td>
+<td><code>chat_completions</code> | <code>codex_responses</code> | <code>anthropic_messages</code> | <code>bedrock_converse</code></td>
+</tr>
+<tr>
+<td><code>display_name</code></td>
+<td>str</td>
+<td>Human label shown in <code>hermes model</code> picker</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>str</td>
+<td>Picker subtitle</td>
+</tr>
+<tr>
+<td><code>signup_url</code></td>
+<td>str</td>
+<td>Shown during first-run setup ("get an API key here")</td>
+</tr>
+<tr>
+<td><code>env_vars</code></td>
+<td><code>tuple[str, ...]</code></td>
+<td>API-key env vars in priority order; a final <code>*_BASE_URL</code> entry is used as the user base-URL override</td>
+</tr>
+<tr>
+<td><code>base_url</code></td>
+<td>str</td>
+<td>Default inference endpoint</td>
+</tr>
+<tr>
+<td><code>models_url</code></td>
+<td>str</td>
+<td>Explicit catalog URL (falls back to <code>{base_url}/models</code>)</td>
+</tr>
+<tr>
+<td><code>auth_type</code></td>
+<td>str</td>
+<td><code>api_key</code> | <code>oauth_device_code</code> | <code>oauth_external</code> | <code>copilot</code> | <code>aws_sdk</code> | <code>external_process</code></td>
+</tr>
+<tr>
+<td><code>auth_handler</code></td>
+<td><code>Callable \| None</code></td>
+<td>Provider-owned <code>hermes auth add/status/logout/refresh &lt;name&gt;</code> — see <a href="#provider-owned-auth-auth_handler-refresh_credential">Provider-owned auth</a></td>
+</tr>
+<tr>
+<td><code>refresh_credential</code></td>
+<td><code>Callable \| None</code></td>
+<td>Provider-owned rotation of a pooled OAuth row — same section</td>
+</tr>
+<tr>
+<td><code>classify_api_error</code></td>
+<td><code>Callable \| None</code></td>
+<td>Provider-scoped error-classification override — see <a href="#recovery-and-error-classification">Recovery and error classification</a></td>
+</tr>
+<tr>
+<td><code>fallback_models</code></td>
+<td><code>tuple[str, ...]</code></td>
+<td>Curated list shown when live catalog fetch fails — in the <code>/model</code> picker AND the first-time <code>hermes setup</code> / <code>hermes model</code> API-key flow, which resolve the catalog the same way (<code>fetch_models()</code> merged curated-first with <code>fallback_models</code>; <code>fallback_models</code> alone when the fetch returns <code>None</code> or raises)</td>
+</tr>
+<tr>
+<td><code>supports_vision</code></td>
+<td>bool</td>
+<td>Declares the provider's API accepts image content inside <strong>tool-result</strong> messages (a provider-wide wire capability). Per-model user-image routing comes from <code>model_capabilities</code> / models.dev, not from this flag</td>
+</tr>
+<tr>
+<td><code>model_capabilities</code></td>
+<td><code>dict[str, dict[str, Any]]</code></td>
+<td>Per-model capability declarations in the <code>model_overrides</code> schema — see <a href="#declaring-model-capabilities">Declaring model capabilities</a></td>
+</tr>
+<tr>
+<td><code>default_headers</code></td>
+<td><code>dict[str, str]</code></td>
+<td>Sent on every request (e.g. Copilot's <code>Editor-Version</code>); also forwarded by the default <code>fetch_models()</code> catalog request</td>
+</tr>
+<tr>
+<td><code>fixed_temperature</code></td>
+<td>Any</td>
+<td><code>None</code> = use caller's value; <code>OMIT_TEMPERATURE</code> sentinel = don't send temperature at all (Kimi)</td>
+</tr>
+<tr>
+<td><code>default_max_tokens</code></td>
+<td><code>int \| None</code></td>
+<td>Provider-level max_tokens cap (Nvidia: 16384)</td>
+</tr>
+<tr>
+<td><code>unsupported_response_formats</code></td>
+<td><code>tuple</code></td>
+<td><code>response_format</code> types the API rejects outright; auxiliary requests omit them instead of paying a guaranteed 400 (DeepSeek: <code>("json_schema",)</code>)</td>
+</tr>
+<tr>
+<td><code>default_aux_model</code></td>
+<td>str</td>
+<td>Cheap model for auxiliary tasks (compression, vision, summarization)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="declaring-model-capabilities">Declaring model capabilities</h2>
+<p>Hermes resolves per-model capabilities (<code>supports_reasoning</code>, <code>supports_vision</code>,
+<code>supports_tools</code>, <code>context_window</code>) from the models.dev catalog, which does not
+know an out-of-tree provider's models. Declare them once on the profile:</p>
+<div class="highlight"><pre><span></span><code><span class="n">register_provider</span><span class="p">(</span><span class="n">ProviderProfile</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;acme&quot;</span><span class="p">,</span>
+    <span class="n">auth_type</span><span class="o">=</span><span class="s2">&quot;api_key&quot;</span><span class="p">,</span>
+    <span class="n">env_vars</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;ACME_API_KEY&quot;</span><span class="p">,),</span>
+    <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;https://api.acme.example/v1&quot;</span><span class="p">,</span>
+    <span class="n">fallback_models</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;acme-large-high&quot;</span><span class="p">,</span> <span class="s2">&quot;acme-small&quot;</span><span class="p">),</span>
+    <span class="n">model_capabilities</span><span class="o">=</span><span class="p">{</span>
+        <span class="s2">&quot;acme-large-high&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">&quot;supports_reasoning&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span>   <span class="c1"># reasoning tier is fixed by the model id</span>
+            <span class="s2">&quot;supports_vision&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+            <span class="s2">&quot;supports_tools&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+            <span class="s2">&quot;context_window&quot;</span><span class="p">:</span> <span class="mi">64000</span><span class="p">,</span>
+            <span class="s2">&quot;model_family&quot;</span><span class="p">:</span> <span class="s2">&quot;acme&quot;</span><span class="p">,</span>
+        <span class="p">},</span>
+    <span class="p">},</span>
+<span class="p">))</span>
+</code></pre></div>
+
+<p>Keys are exact model IDs. Values use the <code>model_overrides</code> schema from
+<code>config.yaml</code> — the three capability booleans, a positive <code>context_window</code>, an
+optional <code>model_family</code> — and omitted fields stay unknown (not <code>False</code>), so a
+partial entry patches catalog metadata without erasing it.</p>
+<p>One declaration feeds every consumer that reads the catalog through
+<code>agent.models_dev</code>: the <code>/model</code> picker's <code>reasoning</code> badge, image routing
+(<code>decide_image_input_mode</code> goes <code>native</code> for a <code>supports_vision: True</code> model
+even when the profile-wide <code>supports_vision</code> is unset), context-window lookup,
+and the dashboard's <code>/api/model/info</code>. Precedence: explicit user
+<code>model_overrides.&lt;provider&gt;.&lt;model&gt;</code> → plugin declaration → catalog → fill-gap
+<code>_default</code>. Models the plugin does not declare keep the catalog/heuristic path.</p>
+<p>Not covered: the picker's <code>fast</code> badge (a model-name heuristic in
+<code>hermes_cli/models.py::model_supports_fast_mode</code>), reasoning-effort vocabulary
+(<code>agent/reasoning_effort.py</code>), and transport request fields. Declarations do not
+add models to a picker — use <code>fallback_models</code> / <code>fetch_models</code> for that. The
+registry is discovered once per process: restart Hermes after editing them.</p>
+<h2 id="overridable-hooks">Overridable hooks</h2>
+<p>Subclass <code>ProviderProfile</code> for non-trivial quirks:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ProviderProfile</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">AcmeProfile</span><span class="p">(</span><span class="n">ProviderProfile</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">prepare_messages</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">messages</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Provider-specific message preprocessing. Runs after codex</span>
+<span class="sd">        sanitization, before developer-role swap. Default: pass-through.&quot;&quot;&quot;</span>
+        <span class="c1"># Example: Qwen normalizes plain-text content to a list-of-parts</span>
+        <span class="c1"># array and injects cache_control; Kimi rewrites tool-call JSON</span>
+        <span class="k">return</span> <span class="n">messages</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">build_extra_body</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">session_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">context</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Provider-specific extra_body fields merged into the API call.</span>
+<span class="sd">        Context includes: session_id, provider_preferences, model, base_url,</span>
+<span class="sd">        reasoning_config. Default: empty dict.&quot;&quot;&quot;</span>
+        <span class="c1"># Example: OpenRouter&#39;s provider-preferences block,</span>
+        <span class="c1"># Gemini&#39;s thinking_config translation.</span>
+        <span class="k">return</span> <span class="p">{}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">build_api_kwargs_extras</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">reasoning_config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">context</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Returns (extra_body_additions, top_level_kwargs). Needed when some</span>
+<span class="sd">        fields go top-level (Kimi&#39;s reasoning_effort, OpenRouter&#39;s verbosity for</span>
+<span class="sd">        adaptive Anthropic models) and some go in extra_body (OpenRouter&#39;s</span>
+<span class="sd">        reasoning dict). Default: ({}, {}).&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="p">{},</span> <span class="p">{}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">fetch_models</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">api_key</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">base_url</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mf">8.0</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Live catalog fetch. Default hits {models_url or base_url}/models with</span>
+<span class="sd">        Bearer auth. Override for: custom auth (Anthropic), no REST endpoint</span>
+<span class="sd">        (Bedrock → None), or public/unauthenticated catalogs (OpenRouter).&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">fetch_models</span><span class="p">(</span><span class="n">api_key</span><span class="o">=</span><span class="n">api_key</span><span class="p">,</span> <span class="n">base_url</span><span class="o">=</span><span class="n">base_url</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">fetch_account_usage</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">api_key</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">base_url</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return AccountUsageSnapshot for /usage, or None when unavailable.</span>
+
+<span class="sd">        The hook runs only when the provider has no built-in usage fetcher.</span>
+<span class="sd">        It may raise: core catches failures and keeps /usage empty for that turn.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="kc">None</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">create_client</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">client_kwargs</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Supply your own client object instead of the shared openai.OpenAI.</span>
+<span class="sd">        Default returns None (= use the standard client). Override when the</span>
+<span class="sd">        wire protocol is not OpenAI-over-HTTP — e.g. an ACP subprocess shim.</span>
+<span class="sd">        client_kwargs is what the core would have passed to openai.OpenAI</span>
+<span class="sd">        (api_key, base_url, command, args, timeouts, headers…); accept **kwargs</span>
+<span class="sd">        and pick what you need. A raise is logged and falls back to the</span>
+<span class="sd">        standard client.&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="kc">None</span>
+</code></pre></div>
+
+<h2 id="account-usage">Account usage</h2>
+<p>Model-provider plugins can provide account or plan usage to <code>/usage</code> by
+overriding <code>ProviderProfile.fetch_account_usage</code>. Import and return the shared
+<code>agent.account_usage.AccountUsageSnapshot</code> (with any <code>AccountUsageWindow</code>
+entries); do not format output in the plugin. Returning <code>None</code>, or raising an
+exception, leaves <code>/usage</code> empty just as it does for providers without usage
+data. Built-in usage fetchers always take precedence, so this hook cannot
+replace the account-usage behavior for a built-in provider. The hook runs under a shared
+10 s deadline (<code>agent.account_usage.PLUGIN_USAGE_HOOK_DEADLINE_S</code>) on every surface; overrunning it
+renders nothing for that turn rather than stalling <code>/usage</code>, so give your own HTTP calls a shorter
+timeout.</p>
+<p>The bundled <code>plugins/model-providers/opencode-zen/</code> profile implements this hook for the
+OpenCode Go plan windows; every <code>/usage</code> surface (CLI <code>hermes usage</code> and <code>/usage</code>, the messaging
+gateway, the TUI/Desktop usage feed) renders the snapshot through the same core formatter.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">datetime</span><span class="p">,</span> <span class="n">timezone</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.account_usage</span><span class="w"> </span><span class="kn">import</span> <span class="n">AccountUsageSnapshot</span><span class="p">,</span> <span class="n">AccountUsageWindow</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">fetch_account_usage</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">api_key</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">base_url</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">AccountUsageSnapshot</span><span class="p">(</span>
+        <span class="n">provider</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+        <span class="n">source</span><span class="o">=</span><span class="s2">&quot;my_provider_api&quot;</span><span class="p">,</span>
+        <span class="n">fetched_at</span><span class="o">=</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">(</span><span class="n">timezone</span><span class="o">.</span><span class="n">utc</span><span class="p">),</span>
+        <span class="n">windows</span><span class="o">=</span><span class="p">(</span><span class="n">AccountUsageWindow</span><span class="p">(</span><span class="n">label</span><span class="o">=</span><span class="s2">&quot;Monthly&quot;</span><span class="p">,</span> <span class="n">used_percent</span><span class="o">=</span><span class="mi">25</span><span class="p">),),</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h2 id="external-process-acp-providers">External-process (ACP) providers</h2>
+<p>An agent CLI driven over stdio is not an HTTP endpoint. Set <code>auth_type="external_process"</code>, describe how to launch the binary, and supply the client with <code>create_client</code>. No core edits are needed — <code>hermes -m &lt;name&gt;</code>, <code>/model</code>, credential resolution, runtime resolution and the auxiliary client (compression, vision) all key on <code>auth_type</code>, not on the provider name. <code>plugins/model-providers/copilot-acp/</code> is the in-tree example.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>process_command</code></td>
+<td>Default binary, e.g. <code>"copilot"</code></td>
+</tr>
+<tr>
+<td><code>process_args</code></td>
+<td>Default argv tail, e.g. <code>("--acp", "--stdio")</code></td>
+</tr>
+<tr>
+<td><code>process_command_env_vars</code></td>
+<td>Env vars that override the binary, checked in order</td>
+</tr>
+<tr>
+<td><code>process_args_env_var</code></td>
+<td>Env var that overrides argv (shlex-split)</td>
+</tr>
+</tbody>
+</table>
+<p>The client your <code>create_client</code> returns receives <code>command</code> and <code>args</code> in <code>client_kwargs</code>. If it is already complete and async-safe, declare <code>HERMES_SKIP_TRANSPORT_WRAP = True</code> / <code>HERMES_SKIP_ASYNC_WRAP = True</code> as class attributes so the auxiliary client does not re-dispatch it through an HTTP wire adapter.</p>
+<h3 id="picker-rows-for-non-api-key-plugins">Picker rows for non-api-key plugins</h3>
+<p>Every registered profile joins <code>CANONICAL_PROVIDERS</code> by slug (a plugin re-declaring a built-in slug such as <code>bedrock</code> is deduped, never doubled), so external-process and OAuth plugins appear in <code>hermes model</code>, <code>/model</code> and the Desktop model selector alongside <code>copilot-acp</code>. Visibility is gated by credentials, not by <code>auth_type</code>:</p>
+<table>
+<thead>
+<tr>
+<th><code>auth_type</code></th>
+<th>Row is listed / <code>authenticated</code> when</th>
+<th>Model list</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>external_process</code></td>
+<td>the binary resolves (<code>process_command</code> or one of <code>process_command_env_vars</code> is on <code>PATH</code>), or <code>base_url</code> is <code>acp+tcp://…</code> — the same structural gate <code>hermes auth status</code> reports. A resolving binary is also the sign-in evidence (<code>auth_verified</code>) the Desktop model selector's explicit-only filter uses, so the row shows there like the bundled ACP provider does</td>
+<td><code>fetch_models()</code> (your subprocess probe), else <code>fallback_models</code></td>
+</tr>
+<tr>
+<td><code>oauth_external</code> / <code>oauth_device_code</code></td>
+<td>the credential pool holds a row for the slug with a live (non-expired) token — <code>hermes auth status &lt;name&gt;</code> and <code>list_available_providers().authenticated</code> both read the pool; an expired row with <code>refresh_token</code> and a <code>refresh_credential</code> hook reports <code>needs_refresh</code></td>
+<td><code>fetch_models()</code> with the pooled token, else <code>fallback_models</code> (declare at least one)</td>
+</tr>
+</tbody>
+</table>
+<p>The catalog cache is keyed on the profile's <code>process_command_env_vars</code> / <code>process_args_env_var</code> values, so pointing <code>HERMES_&lt;X&gt;_COMMAND</code> at a different binary re-discovers models. Executable discovery is not a login check: an unauthenticated CLI still lists, and the subprocess reports the failure at first use.</p>
+<p>Selecting the row in <code>hermes model</code> (and the setup wizard) runs one generic flow keyed by the profile's <code>auth_type</code>: external-process profiles are launch-checked (<code>resolve_external_process_provider_credentials</code>), OAuth profiles need a live pool row (otherwise the flow prints <code>hermes auth add &lt;name&gt;</code> and stops), then the merged catalog is offered and <code>config.model</code> is persisted with the profile's <code>base_url</code>/<code>api_mode</code>. No <code>_model_flow_*</code> entry in core is needed.</p>
+<h2 id="hook-reference-examples">Hook reference examples</h2>
+<p>Look at these bundled plugins for idioms:</p>
+<table>
+<thead>
+<tr>
+<th>Plugin</th>
+<th>Why look</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>plugins/model-providers/openrouter/</code></td>
+<td>Aggregator with provider preferences, public model catalog</td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/gemini/</code></td>
+<td><code>thinking_config</code> translation (native + OpenAI-compat nested forms)</td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/kimi-coding/</code></td>
+<td><code>OMIT_TEMPERATURE</code>, <code>extra_body.thinking</code>, top-level <code>reasoning_effort</code></td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/qwen-oauth/</code></td>
+<td>Message normalization, <code>cache_control</code> injection, VL high-res</td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/nous/</code></td>
+<td>Attribution tags, "omit reasoning when disabled"</td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/custom/</code></td>
+<td>Ollama <code>num_ctx</code> + <code>think: false</code> quirks</td>
+</tr>
+<tr>
+<td><code>plugins/model-providers/bedrock/</code></td>
+<td><code>api_mode="bedrock_converse"</code>, <code>fetch_models</code> returns None (no REST endpoint)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="user-overrides--replace-a-built-in-without-editing-the-repo">User overrides — replace a built-in without editing the repo</h2>
+<p>Say you want to point <code>gmi</code> at your private staging endpoint for testing. Create <code>~/.hermes/plugins/model-providers/gmi/__init__.py</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">providers</span><span class="w"> </span><span class="kn">import</span> <span class="n">register_provider</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ProviderProfile</span>
+
+<span class="n">register_provider</span><span class="p">(</span><span class="n">ProviderProfile</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;gmi&quot;</span><span class="p">,</span>
+    <span class="n">aliases</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;gmi-cloud&quot;</span><span class="p">,</span> <span class="s2">&quot;gmicloud&quot;</span><span class="p">),</span>
+    <span class="n">env_vars</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;GMI_API_KEY&quot;</span><span class="p">,),</span>
+    <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;https://gmi-staging.internal.example.com/v1&quot;</span><span class="p">,</span>
+    <span class="n">auth_type</span><span class="o">=</span><span class="s2">&quot;api_key&quot;</span><span class="p">,</span>
+    <span class="n">default_aux_model</span><span class="o">=</span><span class="s2">&quot;google/gemini-3.1-flash-lite-preview&quot;</span><span class="p">,</span>
+<span class="p">))</span>
+</code></pre></div>
+
+<p>In a fresh Hermes process, <code>get_provider_profile("gmi").base_url</code> returns the staging URL. No repo patch, no rebuild. Because user plugins are discovered after bundled ones, the user <code>register_provider()</code> call wins.</p>
+<h2 id="api_mode-selection">api_mode selection</h2>
+<p>Four values are recognized. Hermes picks one based on:</p>
+<ol>
+<li>User explicit override (<code>config.yaml</code> <code>model.api_mode</code> when set)</li>
+<li>OpenCode's per-model dispatch (<code>opencode_model_api_mode</code> for Zen and Go)</li>
+<li>URL auto-detection — <code>/anthropic</code> suffix → <code>anthropic_messages</code>, <code>api.openai.com</code> → <code>codex_responses</code>, <code>api.x.ai</code> → <code>codex_responses</code>, <code>/coding</code> on Kimi domains → <code>chat_completions</code></li>
+<li><strong>Profile <code>api_mode</code></strong> as a fallback when URL detection finds nothing</li>
+<li>Default <code>chat_completions</code></li>
+</ol>
+<p>Set <code>profile.api_mode</code> to match the default your provider ships — it acts as a hint. User URL overrides still win.</p>
+<h2 id="auth-types">Auth types</h2>
+<table>
+<thead>
+<tr>
+<th><code>auth_type</code></th>
+<th>Meaning</th>
+<th>Who uses it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>api_key</code></td>
+<td>Single env var carries a static API key</td>
+<td>Most providers</td>
+</tr>
+<tr>
+<td><code>oauth_device_code</code></td>
+<td>Device-code OAuth flow</td>
+<td>Nous Portal; out-of-tree plugins via <code>auth_handler</code></td>
+</tr>
+<tr>
+<td><code>oauth_external</code></td>
+<td>User signs in elsewhere, tokens land in <code>auth.json</code></td>
+<td>Anthropic OAuth, MiniMax OAuth, Qwen Portal, Nous Portal</td>
+</tr>
+<tr>
+<td><code>copilot</code></td>
+<td>GitHub Copilot token refresh cycle</td>
+<td><code>copilot</code> plugin only</td>
+</tr>
+<tr>
+<td><code>aws_sdk</code></td>
+<td>AWS SDK credential chain (IAM role, profile, env)</td>
+<td><code>bedrock</code> plugin only</td>
+</tr>
+<tr>
+<td><code>external_process</code></td>
+<td>Auth handled by a subprocess the agent spawns (see <a href="#external-process-acp-providers">External-process providers</a>)</td>
+<td><code>copilot-acp</code> plugin, out-of-tree ACP plugins</td>
+</tr>
+</tbody>
+</table>
+<p>Every profile is mirrored into Hermes' auth registry under the <code>auth_type</code> it declares (two exclusions: an <code>api_key</code> profile with empty <code>env_vars</code>, and the aggregator/user-supplied slugs <code>openrouter</code>/<code>custom</code> plus the bespoke-refresh built-ins <code>copilot</code>/<code>kimi-coding</code>/<code>zai</code>), so <code>hermes auth</code>,
+<code>--provider &lt;name&gt;</code> and runtime resolution accept it whatever its shape. What differs is who performs the
+login: <code>api_key</code> profiles get the built-in key prompt / env-var resolution; every other <code>auth_type</code> is
+<strong>provider-owned</strong> — the plugin ships the two hooks below, and a non-api-key profile without an
+<code>auth_handler</code> makes <code>hermes auth add &lt;name&gt;</code> fail with a clear "ships no auth_handler" error instead of
+silently doing nothing.</p>
+<h2 id="provider-owned-auth-auth_handler-refresh_credential">Provider-owned auth (<code>auth_handler</code>, <code>refresh_credential</code>)</h2>
+<p><code>auth_type</code> describes <em>what kind</em> of credential a provider needs; <code>auth_handler</code> is how the plugin
+<strong>acquires</strong> it — its own device-code / OIDC / IdC flow inside the existing <code>hermes auth</code> command family
+(model-provider manifests are skipped by the generic command-plugin loader, so <code>register(ctx)</code> is not the
+way to add commands). <code>refresh_credential</code> is how the credential pool <strong>rotates</strong> a pooled token the plugin
+stored.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">providers</span><span class="w"> </span><span class="kn">import</span> <span class="n">register_provider</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ProviderProfile</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">example_auth</span><span class="p">(</span><span class="n">action</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">args</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;action: &quot;add&quot; | &quot;status&quot; | &quot;logout&quot; | &quot;refresh&quot;; args: parsed CLI namespace.&quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">action</span> <span class="o">==</span> <span class="s2">&quot;add&quot;</span><span class="p">:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">agent.credential_pool</span><span class="w"> </span><span class="kn">import</span> <span class="n">AUTH_TYPE_OAUTH</span><span class="p">,</span> <span class="n">PooledCredential</span><span class="p">,</span> <span class="n">load_pool</span>
+        <span class="n">tokens</span> <span class="o">=</span> <span class="n">run_device_code_flow</span><span class="p">()</span>                      <span class="c1"># provider-specific</span>
+        <span class="n">load_pool</span><span class="p">(</span><span class="s2">&quot;example-oauth&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">add_entry</span><span class="p">(</span><span class="n">PooledCredential</span><span class="p">(</span>
+            <span class="n">provider</span><span class="o">=</span><span class="s2">&quot;example-oauth&quot;</span><span class="p">,</span> <span class="nb">id</span><span class="o">=</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">()</span><span class="o">.</span><span class="n">hex</span><span class="p">[:</span><span class="mi">6</span><span class="p">],</span> <span class="n">label</span><span class="o">=</span><span class="n">tokens</span><span class="p">[</span><span class="s2">&quot;account&quot;</span><span class="p">],</span>
+            <span class="n">auth_type</span><span class="o">=</span><span class="n">AUTH_TYPE_OAUTH</span><span class="p">,</span> <span class="n">priority</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">source</span><span class="o">=</span><span class="s2">&quot;manual:example_device&quot;</span><span class="p">,</span>
+            <span class="n">access_token</span><span class="o">=</span><span class="n">tokens</span><span class="p">[</span><span class="s2">&quot;access_token&quot;</span><span class="p">],</span> <span class="n">refresh_token</span><span class="o">=</span><span class="n">tokens</span><span class="p">[</span><span class="s2">&quot;refresh_token&quot;</span><span class="p">],</span>
+            <span class="n">extra</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;tenant&quot;</span><span class="p">:</span> <span class="n">tokens</span><span class="p">[</span><span class="s2">&quot;tenant&quot;</span><span class="p">]}))</span>             <span class="c1"># any extra keys round-trip through auth.json</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Signed in to Example.&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">True</span>
+    <span class="k">if</span> <span class="n">action</span> <span class="o">==</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;example-oauth: &quot;</span> <span class="o">+</span> <span class="p">(</span><span class="s2">&quot;logged in&quot;</span> <span class="k">if</span> <span class="n">load_pool</span><span class="p">(</span><span class="s2">&quot;example-oauth&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">entries</span><span class="p">()</span> <span class="k">else</span> <span class="s2">&quot;logged out&quot;</span><span class="p">))</span>
+        <span class="k">return</span> <span class="kc">True</span>
+    <span class="k">return</span> <span class="kc">False</span>   <span class="c1"># decline → this action stays with the built-in credential-pool handling</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">example_refresh</span><span class="p">(</span><span class="n">entry</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Called by the credential pool with the pooled row; return the rotated values, None, or raise.&quot;&quot;&quot;</span>
+    <span class="n">tokens</span> <span class="o">=</span> <span class="n">post_refresh</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">refresh_token</span><span class="p">)</span>          <span class="c1"># the raw token-endpoint response is fine as-is</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;access_token&quot;</span><span class="p">:</span> <span class="n">tokens</span><span class="p">[</span><span class="s2">&quot;access_token&quot;</span><span class="p">],</span> <span class="s2">&quot;refresh_token&quot;</span><span class="p">:</span> <span class="n">tokens</span><span class="p">[</span><span class="s2">&quot;refresh_token&quot;</span><span class="p">],</span>
+            <span class="s2">&quot;expires_at_ms&quot;</span><span class="p">:</span> <span class="n">tokens</span><span class="p">[</span><span class="s2">&quot;expires_at_ms&quot;</span><span class="p">],</span> <span class="s2">&quot;expires_in&quot;</span><span class="p">:</span> <span class="n">tokens</span><span class="p">[</span><span class="s2">&quot;expires_in&quot;</span><span class="p">]}</span>
+
+
+<span class="n">register_provider</span><span class="p">(</span><span class="n">ProviderProfile</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;example-oauth&quot;</span><span class="p">,</span> <span class="n">auth_type</span><span class="o">=</span><span class="s2">&quot;oauth_external&quot;</span><span class="p">,</span> <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;https://api.example.com/v1&quot;</span><span class="p">,</span>
+    <span class="n">auth_handler</span><span class="o">=</span><span class="n">example_auth</span><span class="p">,</span> <span class="n">refresh_credential</span><span class="o">=</span><span class="n">example_refresh</span><span class="p">))</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Contract</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>auth_handler(action, args)</code></td>
+<td><code>args</code> is the parsed <code>hermes auth</code> namespace for CLI actions; the interactive setup picker passes a minimal namespace carrying only <code>provider</code>, so read options with <code>getattr(args, name, None)</code>. Truthy = handled (Hermes prints nothing more, exit 0); falsy = fall back to the built-in path <strong>for that action</strong>. An exception becomes <code>SystemExit("&lt;provider&gt; auth handler failed for</code>&lt;action&gt;<code>: …")</code>.</td>
+</tr>
+<tr>
+<td><code>refresh_credential(entry)</code></td>
+<td>Receives the <code>PooledCredential</code>; returns a mapping of rotated values or <code>None</code>. Keys that are <code>PooledCredential</code> fields (<code>access_token</code>, <code>refresh_token</code>, <code>expires_at_ms</code>, …) replace the row's fields; every other key (<code>expires_in</code>, <code>token_type</code>, <code>scope</code> — the raw token-endpoint shape) lands in <code>entry.extra</code> and round-trips through <code>auth.json</code>. Returning <code>None</code>/an empty mapping means the plugin could not rotate: the row is benched exactly like a failed refresh request (never reported as refreshed, so a dead bearer is not replayed). Its presence is what makes the provider <em>refreshable</em> — <code>hermes auth refresh &lt;name&gt;</code> and the main-loop 401 recovery call it through the pool with no core name list involved; the auxiliary client's 401 recovery reaches it only for pooled rows it already treats as recoverable (api-key rows and the built-in OAuth routes).</td>
+</tr>
+<tr>
+<td>Refresh failures</td>
+<td>Raise <code>hermes_cli.auth_constants.AuthError(..., relogin_required=True)</code> (or with <code>code</code> <code>invalid_grant</code> / <code>invalid_token</code> / <code>refresh_token_reused</code>) when the grant is dead: the row goes <strong>DEAD</strong>, leaves rotation and Hermes logs a WARNING naming <code>hermes auth add &lt;name&gt;</code>. Any other exception (network, 429, 5xx) is transient — the row is benched for one cooldown and retried.</td>
+</tr>
+<tr>
+<td>Concurrency</td>
+<td>The hook runs under the shared <code>auth.json</code> lock. Before calling it the pool re-reads the row; if another Hermes process (gateway + CLI, two profiles) already rotated the pair, that pair is adopted and your hook is <strong>not</strong> called — safe for single-use refresh tokens. After the hook returns, the rotated row is written through to <code>auth.json</code>.</td>
+</tr>
+<tr>
+<td>No hooks</td>
+<td><code>api_key</code> profiles behave exactly as before. Any other <code>auth_type</code> without <code>auth_handler</code> fails loud on <code>hermes auth add</code>.</td>
+</tr>
+</tbody>
+</table>
+<p><code>hermes auth add|status|logout|refresh &lt;provider&gt;</code> consults the handler <strong>first</strong> — before the built-in
+credential-pool flow. Registering the same name twice is last-writer-wins, so a user plugin can replace a
+bundled provider's flow.</p>
+<p>Hermes passes the parsed namespace, not provider-declared flags: ask for provider-specific values
+interactively (or read your own config/env). Rows the plugin stores in the pool are its own — extra keys
+survive <code>load → save → load</code>, and Hermes passes no secrets beyond that pooled row to <code>refresh_credential</code>.</p>
+<h3 id="declarative-oauth-pkce-for-plugins">Declarative OAuth (PKCE) for plugins</h3>
+<p>A provider whose IdP speaks standard OAuth 2.0 Authorization Code + PKCE does not need to write the
+hooks above by hand: declare the endpoints in <code>OAuthPKCEConfig</code> and let the two factories build them.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">hermes_cli.auth_oauth_pkce_plugin</span><span class="w"> </span><span class="kn">import</span> <span class="n">OAuthPKCEConfig</span><span class="p">,</span> <span class="n">pkce_auth_handler</span><span class="p">,</span> <span class="n">pkce_refresh_credential</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers</span><span class="w"> </span><span class="kn">import</span> <span class="n">register_provider</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">providers.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ProviderProfile</span>
+
+<span class="n">cfg</span> <span class="o">=</span> <span class="n">OAuthPKCEConfig</span><span class="p">(</span>
+    <span class="n">client_id</span><span class="o">=</span><span class="s2">&quot;hermes-public-client&quot;</span><span class="p">,</span>                       <span class="c1"># public client — no secret, PKCE is the proof</span>
+    <span class="n">authorize_url</span><span class="o">=</span><span class="s2">&quot;https://auth.example.com/oauth/authorize&quot;</span><span class="p">,</span>
+    <span class="n">token_url</span><span class="o">=</span><span class="s2">&quot;https://auth.example.com/oauth/token&quot;</span><span class="p">,</span>
+    <span class="n">scopes</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;inference&quot;</span><span class="p">,</span> <span class="s2">&quot;offline_access&quot;</span><span class="p">),</span>
+    <span class="n">redirect_port</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span>                                        <span class="c1"># 0 = OS-assigned; pin it if the IdP allowlists the URI</span>
+<span class="p">)</span>
+
+<span class="n">register_provider</span><span class="p">(</span><span class="n">ProviderProfile</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;example-pkce&quot;</span><span class="p">,</span> <span class="n">auth_type</span><span class="o">=</span><span class="s2">&quot;oauth_external&quot;</span><span class="p">,</span> <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;https://api.example.com/v1&quot;</span><span class="p">,</span>
+    <span class="n">auth_handler</span><span class="o">=</span><span class="n">pkce_auth_handler</span><span class="p">(</span><span class="n">cfg</span><span class="p">),</span> <span class="n">refresh_credential</span><span class="o">=</span><span class="n">pkce_refresh_credential</span><span class="p">(</span><span class="n">cfg</span><span class="p">)))</span>
+</code></pre></div>
+
+<p>Hermes then owns the whole lifecycle: <code>hermes auth add example-pkce [--no-browser]</code> opens the browser (or
+prints the URL, with the SSH-tunnel hint on a remote box), listens on <code>http://127.0.0.1:&lt;port&gt;/callback</code>,
+checks the CSRF <code>state</code>, exchanges the code with S256 PKCE and stores the grant as a pooled <code>oauth</code>
+credential (<code>source: manual:loopback_pkce</code>, <code>expires_at_ms</code>, <code>refresh_token</code>); <code>auth status</code> reports
+logged in / expired; <code>auth logout</code> removes the rows; <code>auth refresh</code> and the 401 recovery paths rotate via
+the <code>refresh_token</code> grant, re-reading <code>auth.json</code> under the auth lock first so a peer's rotation is adopted
+instead of spending a single-use refresh token twice.</p>
+<p>Security boundary (enforced before any request, on login and refresh alike): both endpoints must be
+<code>https://</code> (plain <code>http://</code> is accepted only for a loopback-literal host — a local development IdP);
+the <code>token_url</code> host must be the <code>authorize_url</code> host or a subdomain of it (or listed in <code>allowed_hosts</code>);
+the listener binds the literal <code>127.0.0.1</code>; tokens, <code>state</code> and the PKCE verifier are never logged.
+Optional fields: <code>audience</code>, <code>extra_authorize_params</code>, <code>extra_token_params</code>, <code>redirect_path</code>,
+<code>timeout_seconds</code>, <code>label</code>.</p>
+<h2 id="recovery-and-error-classification">Recovery and error classification</h2>
+<p>A <code>kind: model-provider</code> plugin is loaded by provider discovery, <strong>not</strong> by the generic plugin manager, so
+the <code>transform_api_error_classification</code> plugin hook is not reachable from it without shipping a second
+plugin component. The profile carries the equivalent seam instead:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">classify</span><span class="p">(</span><span class="n">error</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">status_code</span><span class="p">,</span> <span class="n">error_code</span><span class="p">,</span> <span class="n">message</span><span class="p">,</span> <span class="n">body</span><span class="p">,</span> <span class="n">model</span><span class="p">):</span>
+    <span class="c1"># A vendor-specific 403 that is a spent plan, not a bad credential.</span>
+    <span class="k">if</span> <span class="n">status_code</span> <span class="o">==</span> <span class="mi">403</span> <span class="ow">and</span> <span class="n">error_code</span> <span class="o">==</span> <span class="s2">&quot;quota_exhausted&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;reason&quot;</span><span class="p">:</span> <span class="s2">&quot;billing&quot;</span><span class="p">,</span> <span class="s2">&quot;retryable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span> <span class="s2">&quot;should_rotate_credential&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;should_fallback&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">}</span>
+    <span class="k">return</span> <span class="kc">None</span>  <span class="c1"># decline → built-in classification</span>
+
+
+<span class="n">register_provider</span><span class="p">(</span><span class="n">ProviderProfile</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;example-oauth&quot;</span><span class="p">,</span> <span class="n">auth_type</span><span class="o">=</span><span class="s2">&quot;oauth_external&quot;</span><span class="p">,</span>
+                                  <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;https://api.example.com/v1&quot;</span><span class="p">,</span>
+                                  <span class="n">refresh_credential</span><span class="o">=</span><span class="n">example_refresh</span><span class="p">,</span> <span class="n">classify_api_error</span><span class="o">=</span><span class="n">classify</span><span class="p">))</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Contract</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>classify_api_error(error, *, status_code, error_code, message, body, model)</code></td>
+<td>Consulted by <code>agent.error_classifier.classify_api_error</code> for failures of <strong>this provider only</strong>, after any generic <code>transform_api_error_classification</code> hooks and before the built-in pipeline. <code>message</code> is the lower-cased error text, <code>body</code> the parsed JSON body (may be empty). Return <code>{"reason": &lt;FailoverReason name&gt;}</code> plus optional <code>retryable</code> / <code>should_compress</code> / <code>should_rotate_credential</code> / <code>should_fallback</code> / <code>error_context</code> to override (for terminal reasons — billing, auth, model_not_found … — <code>should_fallback: True</code> implies <code>retryable: False</code> unless you set it, because the fallback chain only runs for non-retryable verdicts; rate-limit reasons keep the built-in retry-then-fallback shape); <code>None</code> (or an unknown reason) leaves the built-in verdict. Exceptions are swallowed and logged at DEBUG. The verdict drives the same recovery as for built-ins — e.g. <code>billing</code> benches the credential for the billing TTL instead of the transient 403 cooldown.</td>
+</tr>
+<tr>
+<td>401 on a plugin credential</td>
+<td>Handled by the credential pool, no core edit: the failing pooled row is refreshed through <code>refresh_credential</code> once per attempt (capped at two refreshes per row per session), the client is rebuilt with the rotated token and the request retried. A <code>None</code>/empty return or an exception benches the row — the request then rotates or falls to the generic "sign in again: <code>hermes auth add &lt;name&gt;</code>" copy, never to a built-in provider's guidance.</td>
+</tr>
+<tr>
+<td>Auxiliary calls</td>
+<td>Auxiliary-client 401s take the same pool refresh (<code>try_refresh_current</code> → <code>refresh_credential</code>).</td>
+</tr>
+</tbody>
+</table>
+<p>Recovery that remains name-keyed in core is behaviour with no safe generic shape (a provider-specific
+token store to re-sync, a plan-tier entitlement wall, a single-use refresh-token quarantine). A plugin
+that needs one of those owns it inside <code>refresh_credential</code> / <code>classify_api_error</code>.</p>
+<h2 id="discovery-timing">Discovery timing</h2>
+<p>Provider discovery is <strong>lazy</strong> — triggered by the first <code>get_provider_profile()</code> or <code>list_providers()</code> call in the process. In practice this happens early at startup (<code>auth.py</code> module load extends <code>PROVIDER_REGISTRY</code> eagerly). If you need to verify your plugin loaded, run:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>doctor
+</code></pre></div>
+
+<p>— a successful <code>auth_type="api_key"</code> profile appears under the Provider Connectivity section with a <code>/models</code> probe.</p>
+<p>For programmatic inspection:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">providers</span><span class="w"> </span><span class="kn">import</span> <span class="n">list_providers</span>
+<span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">list_providers</span><span class="p">():</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">base_url</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">api_mode</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="testing-your-plugin">Testing your plugin</h2>
+<p>Point <code>HERMES_HOME</code> at a temp directory so you don't pollute your real config:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_HOME</span><span class="o">=</span><span class="nv">$HOME</span>/.hermes/cache/scratch/hermes-plugin-test
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="nv">$HERMES_HOME</span>/plugins/model-providers/my-provider
+cat<span class="w"> </span>&gt;<span class="w"> </span><span class="nv">$HERMES_HOME</span>/plugins/model-providers/my-provider/__init__.py<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<span class="s">from providers import register_provider</span>
+<span class="s">from providers.base import ProviderProfile</span>
+<span class="s">register_provider(ProviderProfile(</span>
+<span class="s">    name=&quot;my-provider&quot;,</span>
+<span class="s">    env_vars=(&quot;MY_API_KEY&quot;,),</span>
+<span class="s">    base_url=&quot;https://api.my-provider.example.com/v1&quot;,</span>
+<span class="s">    auth_type=&quot;api_key&quot;,</span>
+<span class="s">))</span>
+<span class="s">EOF</span>
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">MY_API_KEY</span><span class="o">=</span>your-test-key
+hermes<span class="w"> </span>-z<span class="w"> </span><span class="s2">&quot;hello&quot;</span><span class="w"> </span>--provider<span class="w"> </span>my-provider<span class="w"> </span>-m<span class="w"> </span>some-model
+</code></pre></div>
+
+<h2 id="general-pluginmanager-integration">General PluginManager integration</h2>
+<p>The general <code>PluginManager</code> (the thing <code>hermes plugins</code> operates on) <strong>sees</strong> model-provider plugins but does not import them — <code>providers/__init__.py</code> owns their lifecycle. The manager records the manifest for introspection and categorizes by <code>kind: model-provider</code>. When you drop an unlabeled user plugin into <code>$HERMES_HOME/plugins/</code> that happens to call <code>register_provider</code> with a <code>ProviderProfile</code>, the manager auto-coerces it to <code>kind: model-provider</code> via a source-text heuristic — so the plugin still routes correctly even without <code>plugin.yaml</code>.</p>
+<h2 id="distribute-via-pip">Distribute via pip</h2>
+<p>Model providers can ship as a pip package. Expose an entry point in the
+<code>hermes_agent.plugins</code> group in your <code>pyproject.toml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">[project.entry-points.</span><span class="s2">&quot;hermes_agent.plugins&quot;</span><span class="k">]</span>
+<span class="n">acme-inference</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;acme_hermes_plugin:register&quot;</span>
+</code></pre></div>
+
+<p>The target may be either:</p>
+<ul>
+<li>a <strong>callable</strong> (<code>module:func</code>) — invoked with no arguments; it should call
+  <code>register_provider(profile)</code>, or</li>
+<li>a <strong>bare module</strong> (<code>module</code>) — imported for its module-level
+  <code>register_provider(...)</code> side effect, mirroring the directory-plugin
+  <code>__init__.py</code> contract.</li>
+</ul>
+<p><code>providers/__init__.py</code> discovers these entry points itself — the general
+<code>PluginManager</code> never invokes provider registration for pip packages (its
+entry-point path targets <code>register(ctx)</code>-style general plugins, gated by
+<code>plugins.enabled</code>), so the provider registry does its own scan. Two rules
+apply:</p>
+<ul>
+<li><strong>Opt-in required.</strong> The same <code>plugins.enabled</code> allow-list (and
+  <code>plugins.disabled</code> deny-list) from <code>config.yaml</code> governs this scan. A pip
+  package is never imported just because it is installed — users must add the
+  entry-point name to <code>plugins.enabled</code>:</li>
+</ul>
+<p><code>yaml
+  plugins:
+    enabled:
+      - acme-inference</code></p>
+<ul>
+<li><strong>Lowest precedence.</strong> Entry-point plugins are discovered <strong>before</strong>
+  filesystem plugins: because <code>register_provider()</code> is last-writer-wins, a
+  bundled or <code>$HERMES_HOME</code> profile of the same name always overrides a
+  pip-installed one. A pip package can add a genuinely new provider, but
+  cannot silently hijack a first-party provider name.</li>
+</ul>
+<p>Targets that require arguments (a general plugin's <code>register(ctx)</code>) are
+skipped by the provider scan — they belong to the <code>PluginManager</code>. A broken
+entry point is isolated — it is logged at warning level and skipped, and never
+blocks discovery of the other providers.</p>
+<p>See <a href="plugins.html#distribute-via-pip">Building a Hermes Plugin</a> for the full entry-points setup.</p>
+<h2 id="related-pages">Related pages</h2>
+<ul>
+<li><a href="provider-runtime.html">Provider Runtime</a> — resolution precedence + where each layer reads the profile</li>
+<li><a href="adding-providers.html">Adding Providers</a> — end-to-end checklist for new inference backends (covers both the fast plugin path and the full CLI/auth integration)</li>
+<li><a href="memory-provider-plugin.html">Memory Provider Plugins</a></li>
+<li><a href="context-engine-plugin.html">Context Engine Plugins</a></li>
+<li><a href="plugins.html">Building a Hermes Plugin</a> — general plugin authoring</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/model-provider-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#how-discovery-works">How discovery works</a></li>
+<li class="lvl2"><a href="#directory-structure">Directory structure</a></li>
+<li class="lvl2"><a href="#minimal-example--a-simple-api-key-provider">Minimal example — a simple API-key provider</a></li>
+<li class="lvl2"><a href="#providerprofile-fields">ProviderProfile fields</a></li>
+<li class="lvl2"><a href="#declaring-model-capabilities">Declaring model capabilities</a></li>
+<li class="lvl2"><a href="#overridable-hooks">Overridable hooks</a></li>
+<li class="lvl2"><a href="#account-usage">Account usage</a></li>
+<li class="lvl2"><a href="#external-process-acp-providers">External-process (ACP) providers</a></li>
+<li class="lvl3"><a href="#picker-rows-for-non-api-key-plugins">Picker rows for non-api-key plugins</a></li>
+<li class="lvl2"><a href="#hook-reference-examples">Hook reference examples</a></li>
+<li class="lvl2"><a href="#user-overrides--replace-a-built-in-without-editing-the-repo">User overrides — replace a built-in without editing the repo</a></li>
+<li class="lvl2"><a href="#api_mode-selection">api_mode selection</a></li>
+<li class="lvl2"><a href="#auth-types">Auth types</a></li>
+<li class="lvl2"><a href="#provider-owned-auth-auth_handler-refresh_credential">Provider-owned auth (auth_handler, refresh_credential)</a></li>
+<li class="lvl3"><a href="#declarative-oauth-pkce-for-plugins">Declarative OAuth (PKCE) for plugins</a></li>
+<li class="lvl2"><a href="#recovery-and-error-classification">Recovery and error classification</a></li>
+<li class="lvl2"><a href="#discovery-timing">Discovery timing</a></li>
+<li class="lvl2"><a href="#testing-your-plugin">Testing your plugin</a></li>
+<li class="lvl2"><a href="#general-pluginmanager-integration">General PluginManager integration</a></li>
+<li class="lvl2"><a href="#distribute-via-pip">Distribute via pip</a></li>
+<li class="lvl2"><a href="#related-pages">Related pages</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

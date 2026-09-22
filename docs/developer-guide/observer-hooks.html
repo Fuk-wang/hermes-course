@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Observer Hooks · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/observer-hooks</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="hermes-observer-hooks">Hermes Observer Hooks</h1>
+<p>Hermes observer hooks are the read-only telemetry contract for plugins that
+need to reconstruct agent execution without changing runtime behavior. This
+contract supports trace, metrics, audit, replay, and export integrations such
+as Langfuse, OpenTelemetry-style collectors, and NeMo Relay.</p>
+<p>Observer hooks are intentionally backend-neutral. They expose stable lifecycle
+events, correlation IDs, sanitized payloads, timing, status, and error fields.
+They do not replace Hermes' planner, model providers, memory, tool registry,
+approval UX, CLI, gateway behavior, or execution semantics.</p>
+<p>Behavior-changing request or execution wrappers are outside this observer
+contract. Observer hooks should report what happened; they should not replace
+provider requests, tool arguments, or execution callbacks.</p>
+<p>Hermes also has a first-party NeMo Relay shared-metrics path. It uses these
+lifecycle boundaries directly and does not require enabling an observability
+plugin. See <a href="relay-shared-metrics.html">Relay shared metrics</a>.</p>
+<h2 id="contract">Contract</h2>
+<p>Plugins register observer callbacks from <code>register(ctx)</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;pre_api_request&quot;</span><span class="p">,</span> <span class="n">on_pre_api_request</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;post_api_request&quot;</span><span class="p">,</span> <span class="n">on_post_api_request</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;pre_tool_call&quot;</span><span class="p">,</span> <span class="n">on_pre_tool_call</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;post_tool_call&quot;</span><span class="p">,</span> <span class="n">on_post_tool_call</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Every hook callback receives keyword arguments. Plugins should accept
+<code>**kwargs</code> so additive fields remain backward-compatible:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">on_post_tool_call</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">tool_name</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;tool_name&quot;</span><span class="p">)</span>
+    <span class="n">status</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;status&quot;</span><span class="p">)</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;result&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>The plugin manager injects this field into every hook payload:</p>
+<div class="highlight"><pre><span></span><code>telemetry_schema_version = &quot;hermes.observer.v1&quot;
+</code></pre></div>
+
+<p>Hook callbacks are fail-open. Hermes catches callback exceptions, logs a
+warning, and keeps the agent loop running.</p>
+<p>Most observer hook return values are ignored. The exceptions are older
+behavior-affecting hooks:</p>
+<table>
+<thead>
+<tr>
+<th>Hook</th>
+<th>Return behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pre_llm_call</code></td>
+<td>May return a string or <code>{"context": "..."}</code> to inject ephemeral context into the current user message.</td>
+</tr>
+<tr>
+<td><code>pre_tool_call</code></td>
+<td>May return <code>{"action": "block", "message": "..."}</code> to block a tool before execution, or <code>{"action": "modify", "args": {...}}</code> to transform the tool's input arguments.</td>
+</tr>
+<tr>
+<td><code>transform_tool_result</code></td>
+<td>May return a replacement tool result string after <code>post_tool_call</code>.</td>
+</tr>
+<tr>
+<td><code>transform_llm_output</code></td>
+<td>May return a replacement final assistant text string.</td>
+</tr>
+</tbody>
+</table>
+<p>Telemetry plugins should treat these behavior-affecting returns as optional
+compatibility features, not as observability requirements.</p>
+<h2 id="correlation-ids">Correlation IDs</h2>
+<p>Observer payloads use stable IDs so plugins can join events without relying on
+callback order alone.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>session_id</code></td>
+<td>Conversation/session identity.</td>
+</tr>
+<tr>
+<td><code>task_id</code></td>
+<td>Task identity, especially useful for subagents and isolated execution.</td>
+</tr>
+<tr>
+<td><code>turn_id</code></td>
+<td>User-turn identity shared by API attempts and tool calls in a turn.</td>
+</tr>
+<tr>
+<td><code>api_request_id</code></td>
+<td>Opaque provider-attempt identity. Do not parse its string format.</td>
+</tr>
+<tr>
+<td><code>api_call_count</code></td>
+<td>Numeric API attempt count within the agent loop.</td>
+</tr>
+<tr>
+<td><code>tool_call_id</code></td>
+<td>Provider-supplied tool call ID when available.</td>
+</tr>
+<tr>
+<td><code>parent_session_id</code> / <code>child_session_id</code></td>
+<td>Session link for delegated subagents.</td>
+</tr>
+<tr>
+<td><code>parent_subagent_id</code> / <code>child_subagent_id</code></td>
+<td>Subagent link when available.</td>
+</tr>
+<tr>
+<td><code>parent_turn_id</code></td>
+<td>Parent turn that spawned delegated work.</td>
+</tr>
+</tbody>
+</table>
+<p>Consumers should prefer explicit fields over parsing compound IDs. In
+particular, <code>api_request_id</code> is an opaque correlation value.</p>
+<h2 id="event-families">Event Families</h2>
+<h3 id="session-lifecycle">Session Lifecycle</h3>
+<p>Session hooks describe conversation boundaries and resets:</p>
+<table>
+<thead>
+<tr>
+<th>Hook</th>
+<th>When it fires</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>on_session_start</code></td>
+<td>A brand-new session starts after the system prompt is built.</td>
+</tr>
+<tr>
+<td><code>on_session_end</code></td>
+<td>A <code>run_conversation</code> call ends, including interrupted or incomplete turns.</td>
+</tr>
+<tr>
+<td><code>on_session_finalize</code></td>
+<td>CLI or gateway tears down an active session identity.</td>
+</tr>
+<tr>
+<td><code>on_session_reset</code></td>
+<td>CLI or gateway moves from an old session identity to a new one.</td>
+</tr>
+</tbody>
+</table>
+<p>Common fields include <code>session_id</code>, <code>completed</code>, <code>interrupted</code>, <code>reason</code>,
+<code>old_session_id</code>, and <code>new_session_id</code> where available.</p>
+<p><code>on_session_end</code> is turn/run scoped. It is not necessarily the final lifetime
+boundary for a chat identity. Use <code>on_session_finalize</code> and <code>on_session_reset</code>
+for lifecycle cleanup that must happen once per session identity.</p>
+<h3 id="turn-scoped-llm-hooks">Turn-Scoped LLM Hooks</h3>
+<p>These hooks frame the user turn, not individual provider API attempts:</p>
+<table>
+<thead>
+<tr>
+<th>Hook</th>
+<th>When it fires</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pre_llm_call</code></td>
+<td>Before the tool loop begins for a user turn.</td>
+</tr>
+<tr>
+<td><code>post_llm_call</code></td>
+<td>After the turn completes with final assistant output.</td>
+</tr>
+</tbody>
+</table>
+<p>Common <code>pre_llm_call</code> fields include <code>session_id</code>, <code>turn_id</code>,
+<code>user_message</code>, <code>conversation_history</code>, <code>is_first_turn</code>, <code>model</code>, <code>platform</code>,
+and <code>sender_id</code>.</p>
+<p>Common <code>post_llm_call</code> fields include <code>session_id</code>, <code>turn_id</code>,
+<code>user_message</code>, <code>assistant_response</code>, <code>conversation_history</code>, <code>model</code>, and
+<code>platform</code>.</p>
+<p>Use request-scoped API hooks for LLM span telemetry. Use <code>pre_llm_call</code> and
+<code>post_llm_call</code> for turn-level context, compatibility, and final turn summary.</p>
+<h3 id="request-scoped-api-hooks">Request-Scoped API Hooks</h3>
+<p>API hooks describe provider attempts inside the agent loop:</p>
+<table>
+<thead>
+<tr>
+<th>Hook</th>
+<th>When it fires</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pre_api_request</code></td>
+<td>Immediately before a provider API request.</td>
+</tr>
+<tr>
+<td><code>post_api_request</code></td>
+<td>After a successful provider response.</td>
+</tr>
+<tr>
+<td><code>api_request_error</code></td>
+<td>After a failed provider request or retryable error path.</td>
+</tr>
+</tbody>
+</table>
+<p><code>pre_api_request</code> includes:</p>
+<ul>
+<li>identity: <code>session_id</code>, <code>task_id</code>, <code>turn_id</code>, <code>api_request_id</code></li>
+<li>runtime: <code>platform</code>, <code>model</code>, <code>provider</code>, <code>base_url</code>, <code>api_mode</code></li>
+<li>attempt metadata: <code>api_call_count</code>, <code>message_count</code>, <code>tool_count</code>,
+  <code>approx_input_tokens</code>, <code>request_char_count</code>, <code>max_tokens</code></li>
+<li>timing: <code>started_at</code></li>
+<li>sanitized request payload: <code>request</code></li>
+</ul>
+<p><code>post_api_request</code> includes the same identity/runtime fields plus:</p>
+<ul>
+<li><code>api_duration</code>, <code>started_at</code>, <code>ended_at</code></li>
+<li><code>finish_reason</code>, <code>message_count</code>, <code>response_model</code></li>
+<li><code>usage</code></li>
+<li><code>assistant_content_chars</code>, <code>assistant_tool_call_count</code></li>
+<li>sanitized response payload: <code>response</code></li>
+<li>compatibility object: <code>assistant_message</code></li>
+</ul>
+<p><code>api_request_error</code> includes the same identity/runtime fields plus:</p>
+<ul>
+<li><code>api_duration</code>, <code>started_at</code>, <code>ended_at</code></li>
+<li><code>status_code</code>, <code>retry_count</code>, <code>max_retries</code>, <code>retryable</code>, <code>reason</code></li>
+<li>structured <code>error = {"type": ..., "message": ...}</code></li>
+<li>sanitized failed request payload: <code>request</code></li>
+</ul>
+<p>The sanitized <code>request</code>, <code>response</code>, and <code>error</code> fields are the canonical
+observer inputs for new consumers.</p>
+<h3 id="tool-lifecycle">Tool Lifecycle</h3>
+<p>Tool hooks describe individual tool calls:</p>
+<table>
+<thead>
+<tr>
+<th>Hook</th>
+<th>When it fires</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pre_tool_call</code></td>
+<td>Before guardrail-approved tool dispatch.</td>
+</tr>
+<tr>
+<td><code>post_tool_call</code></td>
+<td>After tool dispatch, cancellation, block, or error completion.</td>
+</tr>
+<tr>
+<td><code>transform_tool_result</code></td>
+<td>After <code>post_tool_call</code>, before the result is appended to model context.</td>
+</tr>
+</tbody>
+</table>
+<p><code>pre_tool_call</code> includes <code>tool_name</code>, <code>args</code>, <code>task_id</code>, <code>session_id</code>,
+<code>tool_call_id</code>, <code>turn_id</code>, and <code>api_request_id</code>.</p>
+<p><code>post_tool_call</code> includes the same identity fields plus <code>result</code>,
+<code>duration_ms</code>, <code>status</code>, <code>error_type</code>, and <code>error_message</code>.</p>
+<p><code>status</code> is the observer-grade lifecycle outcome. Common values include:</p>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ok</code></td>
+<td>Tool completed normally.</td>
+</tr>
+<tr>
+<td><code>error</code></td>
+<td>Tool ran and returned or raised an error outcome.</td>
+</tr>
+<tr>
+<td><code>blocked</code></td>
+<td>A <code>pre_tool_call</code> hook blocked execution.</td>
+</tr>
+<tr>
+<td><code>cancelled</code></td>
+<td>Execution was cancelled before normal completion.</td>
+</tr>
+</tbody>
+</table>
+<p><code>post_tool_call</code> is emitted for blocked and cancelled paths so telemetry
+plugins can close spans cleanly.</p>
+<h3 id="approval-lifecycle">Approval Lifecycle</h3>
+<p>Approval hooks describe dangerous-command approval prompts:</p>
+<table>
+<thead>
+<tr>
+<th>Hook</th>
+<th>When it fires</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pre_approval_request</code></td>
+<td>Before the approval request is shown or sent.</td>
+</tr>
+<tr>
+<td><code>post_approval_response</code></td>
+<td>After the user responds or the request times out.</td>
+</tr>
+</tbody>
+</table>
+<p>Common fields include <code>command</code>, <code>description</code>, <code>pattern_key</code>,
+<code>pattern_keys</code>, <code>session_key</code>, and <code>surface</code>.</p>
+<p><code>post_approval_response</code> also includes <code>choice</code>, with values such as <code>once</code>,
+<code>session</code>, <code>always</code>, <code>deny</code>, <code>timeout</code>, and <code>cancelled</code> (nobody answered: the prompt
+was withdrawn — turn interrupted or ended — or never reached the user on the CLI).</p>
+<p>Approval hooks are observer-only. Plugins cannot pre-answer or veto approvals
+from these hooks. To prevent a tool from reaching approval, use
+<code>pre_tool_call</code> blocking.</p>
+<h3 id="subagent-lifecycle">Subagent Lifecycle</h3>
+<p>Subagent hooks describe delegated child-agent work:</p>
+<table>
+<thead>
+<tr>
+<th>Hook</th>
+<th>When it fires</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>subagent_start</code></td>
+<td>A delegated child agent is created.</td>
+</tr>
+<tr>
+<td><code>subagent_stop</code></td>
+<td>A delegated child agent returns or fails.</td>
+</tr>
+</tbody>
+</table>
+<p><code>subagent_start</code> fields include <code>parent_session_id</code>, <code>parent_turn_id</code>,
+<code>parent_subagent_id</code>, <code>child_session_id</code>, <code>child_subagent_id</code>, <code>child_role</code>,
+and <code>child_goal</code>.</p>
+<p><code>subagent_stop</code> fields include parent/child session IDs, role/status fields,
+<code>child_summary</code>, <code>duration_ms</code>, and a metadata-only <code>tool_call_history</code>. Each
+history entry contains the tool name, argument names, bounded side-effect
+targets, input/output byte counts, and outcome. URL query strings and fragments
+are removed; raw arguments, prompts, commands, contents, headers, and results
+are intentionally excluded.</p>
+<p>Observers can use these hooks to model nested trajectories while keeping child
+agent execution linked to the parent turn that spawned it.</p>
+<h2 id="payload-safety">Payload Safety</h2>
+<p>Observer payloads are designed for telemetry consumers, not raw object access.
+New consumers should use the sanitized API payloads:</p>
+<ul>
+<li><code>pre_api_request.request</code></li>
+<li><code>post_api_request.response</code></li>
+<li><code>api_request_error.request</code></li>
+<li><code>api_request_error.error</code></li>
+</ul>
+<p>Sanitization converts provider objects to JSON-compatible structures, bounds
+large payloads, redacts sensitive keys, and avoids exposing raw response
+objects in sanitized fields.</p>
+<p>Legacy compatibility fields such as <code>request_messages</code>, <code>conversation_history</code>,
+and <code>assistant_message</code> may still be present for existing plugins. New
+observability consumers should prefer the sanitized payloads.</p>
+<h2 id="performance">Performance</h2>
+<p>The default uninstrumented path should stay cheap. Expensive request/response
+payload construction is gated behind <code>has_hook(...)</code>, so Hermes only builds
+sanitized API telemetry payloads when at least one plugin registered the
+relevant hook.</p>
+<p>Plugin authors should preserve this property:</p>
+<ul>
+<li>Register only hooks the plugin actually consumes.</li>
+<li>Avoid deep-copying or re-sanitizing already sanitized payloads.</li>
+<li>Keep hook callbacks fast and fail-open.</li>
+<li>Offload network export or batch writes when practical.</li>
+</ul>
+<h2 id="writing-an-observer-plugin">Writing An Observer Plugin</h2>
+<p>Minimal observer plugin:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;pre_api_request&quot;</span><span class="p">,</span> <span class="n">on_pre_api_request</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;post_api_request&quot;</span><span class="p">,</span> <span class="n">on_post_api_request</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;pre_tool_call&quot;</span><span class="p">,</span> <span class="n">on_pre_tool_call</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_hook</span><span class="p">(</span><span class="s2">&quot;post_tool_call&quot;</span><span class="p">,</span> <span class="n">on_post_tool_call</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">on_pre_api_request</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">start_llm_span</span><span class="p">(</span>
+        <span class="n">request_id</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;api_request_id&quot;</span><span class="p">),</span>
+        <span class="n">turn_id</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;turn_id&quot;</span><span class="p">),</span>
+        <span class="n">request</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;request&quot;</span><span class="p">),</span>
+        <span class="n">model</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;model&quot;</span><span class="p">),</span>
+    <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">on_post_api_request</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">finish_llm_span</span><span class="p">(</span>
+        <span class="n">request_id</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;api_request_id&quot;</span><span class="p">),</span>
+        <span class="n">response</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;response&quot;</span><span class="p">),</span>
+        <span class="n">usage</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;usage&quot;</span><span class="p">),</span>
+        <span class="n">duration</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;api_duration&quot;</span><span class="p">),</span>
+    <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">on_pre_tool_call</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">start_tool_span</span><span class="p">(</span>
+        <span class="n">call_id</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;tool_call_id&quot;</span><span class="p">),</span>
+        <span class="n">name</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;tool_name&quot;</span><span class="p">),</span>
+        <span class="n">args</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;args&quot;</span><span class="p">),</span>
+    <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">on_post_tool_call</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">finish_tool_span</span><span class="p">(</span>
+        <span class="n">call_id</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;tool_call_id&quot;</span><span class="p">),</span>
+        <span class="n">result</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;result&quot;</span><span class="p">),</span>
+        <span class="n">status</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;status&quot;</span><span class="p">),</span>
+        <span class="n">duration_ms</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;duration_ms&quot;</span><span class="p">),</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p>Use <code>session_id</code>, <code>turn_id</code>, <code>api_request_id</code>, and <code>tool_call_id</code> for span
+correlation. Use subagent and approval hooks when the export format supports
+nested agent work or security lifecycle events.</p>
+<h2 id="existing-consumers">Existing Consumers</h2>
+<p>The bundled Langfuse plugin demonstrates direct hook-based observability for
+turns, provider requests, and tool calls.</p>
+<p>The native NeMo Relay SDK integration maps Hermes session, turn, LLM, and tool
+lifecycles to Relay. Explicit Relay plugin configuration can add
+<a href="https://docs.nvidia.com/nemo/relay/configure-plugins/observability/about" class="ext" target="_blank" rel="noopener">ATOF, ATIF, or OTEL</a>
+exporters and execution middleware; see
+<a href="relay-shared-metrics.html">Relay shared metrics</a>.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/observer-hooks</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#contract">Contract</a></li>
+<li class="lvl2"><a href="#correlation-ids">Correlation IDs</a></li>
+<li class="lvl2"><a href="#event-families">Event Families</a></li>
+<li class="lvl3"><a href="#session-lifecycle">Session Lifecycle</a></li>
+<li class="lvl3"><a href="#turn-scoped-llm-hooks">Turn-Scoped LLM Hooks</a></li>
+<li class="lvl3"><a href="#request-scoped-api-hooks">Request-Scoped API Hooks</a></li>
+<li class="lvl3"><a href="#tool-lifecycle">Tool Lifecycle</a></li>
+<li class="lvl3"><a href="#approval-lifecycle">Approval Lifecycle</a></li>
+<li class="lvl3"><a href="#subagent-lifecycle">Subagent Lifecycle</a></li>
+<li class="lvl2"><a href="#payload-safety">Payload Safety</a></li>
+<li class="lvl2"><a href="#performance">Performance</a></li>
+<li class="lvl2"><a href="#writing-an-observer-plugin">Writing An Observer Plugin</a></li>
+<li class="lvl2"><a href="#existing-consumers">Existing Consumers</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

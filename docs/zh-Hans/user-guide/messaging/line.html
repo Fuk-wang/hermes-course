@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LINE · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/messaging/line</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="line-配置">LINE 配置</h1>
+<p>通过官方 LINE Messaging API 将 Hermes Agent 作为 <a href="https://line.me/" class="ext" target="_blank" rel="noopener">LINE</a> 机器人运行。适配器以捆绑平台插件的形式存放于 <code>plugins/platforms/line/</code> — 无需修改核心代码，像其他平台一样启用即可。</p>
+<p>LINE 是日本、台湾和泰国的主流即时通讯应用。如果你的用户在这些地区，这就是他们与你沟通的方式。</p>
+<h2 id="机器人响应方式">机器人响应方式</h2>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>1:1 聊天</strong>（<code>U</code> 开头 ID）</td>
+<td>响应每条消息</td>
+</tr>
+<tr>
+<td><strong>群聊</strong>（<code>C</code> 开头 ID）</td>
+<td>仅当群组在白名单中时响应</td>
+</tr>
+<tr>
+<td><strong>多人房间</strong>（<code>R</code> 开头 ID）</td>
+<td>仅当房间在白名单中时响应</td>
+</tr>
+</tbody>
+</table>
+<p>入站的文本、图片、音频、视频、文件、贴纸和位置信息均可处理。出站文本优先使用<strong>免费 reply token</strong>（单次使用，有效期约 60 秒），token 过期后回退至计费的 Push API。</p>
+<hr />
+<h2 id="第一步创建-line-messaging-api-频道">第一步：创建 LINE Messaging API 频道</h2>
+<ol>
+<li>前往 <a href="https://developers.line.biz/console/" class="ext" target="_blank" rel="noopener">LINE Developers Console</a>。</li>
+<li>创建一个 Provider，然后在其下创建一个 <strong>Messaging API</strong> 频道。</li>
+<li>在频道的 <strong>Basic settings</strong> 标签页中，复制 <strong>Channel secret</strong>。</li>
+<li>在 <strong>Messaging API</strong> 标签页中，滚动至 <strong>Channel access token (long-lived)</strong> 并点击 <strong>Issue</strong>，复制该 token。</li>
+<li>在 <strong>Messaging API</strong> 标签页中，同时禁用 <strong>Auto-reply messages</strong> 和 <strong>Greeting messages</strong>，避免与机器人回复冲突。</li>
+</ol>
+<hr />
+<h2 id="第二步暴露-webhook-端口">第二步：暴露 webhook 端口</h2>
+<p>LINE 通过公网 HTTPS 推送 webhook。默认端口为 <code>8646</code> — 如需修改，可通过 <code>LINE_PORT</code> 覆盖。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Cloudflare Tunnel（推荐用于生产环境 — 固定主机名）</span>
+cloudflared<span class="w"> </span>tunnel<span class="w"> </span>--url<span class="w"> </span>http://localhost:8646
+
+<span class="c1"># ngrok（适合开发环境）</span>
+ngrok<span class="w"> </span>http<span class="w"> </span><span class="m">8646</span>
+
+<span class="c1"># devtunnel</span>
+devtunnel<span class="w"> </span>create<span class="w"> </span>hermes-line<span class="w"> </span>--allow-anonymous
+devtunnel<span class="w"> </span>port<span class="w"> </span>create<span class="w"> </span>hermes-line<span class="w"> </span>-p<span class="w"> </span><span class="m">8646</span><span class="w"> </span>--protocol<span class="w"> </span>https
+devtunnel<span class="w"> </span>host<span class="w"> </span>hermes-line
+</code></pre></div>
+
+<p>复制 <code>https://...</code> URL — 稍后将其设置为 webhook URL。<strong>保持隧道运行</strong>以便测试。生产环境请配置固定的 Cloudflare 命名隧道，避免重启后 webhook URL 变更。</p>
+<hr />
+<h2 id="第三步配置-hermes">第三步：配置 Hermes</h2>
+<p>在 <code>~/.hermes/.env</code> 中添加：</p>
+<div class="highlight"><pre><span></span><code>LINE_CHANNEL_ACCESS_TOKEN=YOUR_LONG_LIVED_TOKEN
+LINE_CHANNEL_SECRET=YOUR_CHANNEL_SECRET
+
+# 白名单 — 至少填写其中一项（开发环境可使用 LINE_ALLOW_ALL_USERS=true）
+LINE_ALLOWED_USERS=U1234567890abcdef...           # 逗号分隔的 U 开头 ID
+LINE_ALLOWED_GROUPS=C1234567890abcdef...          # 可选的群组 ID
+LINE_ALLOWED_ROOMS=R1234567890abcdef...           # 可选的房间 ID
+
+# 发送图片 / 音频 / 视频时必填 — 隧道解析到的公网 HTTPS 基础 URL
+# 未设置时，send_image/voice/video 将拒绝执行
+LINE_PUBLIC_URL=https://my-tunnel.example.com
+</code></pre></div>
+
+<p>然后在 <code>~/.hermes/config.yaml</code> 中：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">gateway</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">line</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<p>这就够了 — <code>gateway/config.py</code> 中的捆绑插件扫描会自动识别 <code>plugins/platforms/line/</code>。无需编辑 <code>Platform.LINE</code> 枚举，无需注册 <code>_create_adapter</code>。</p>
+<hr />
+<h2 id="第四步设置-webhook-url">第四步：设置 webhook URL</h2>
+<p>回到 LINE 控制台：</p>
+<ol>
+<li>打开你的频道 → <strong>Messaging API</strong> 标签页。</li>
+<li>在 <strong>Webhook settings</strong> → <strong>Webhook URL</strong> 下，粘贴 <code>https://&lt;your-tunnel&gt;/line/webhook</code>（注意 <code>/line/webhook</code> 路径 — 适配器在此监听）。</li>
+<li>点击 <strong>Verify</strong>。LINE 会 ping 该 URL，你应看到 200 响应。</li>
+<li>将 <strong>Use webhook</strong> 切换为 <strong>On</strong>。</li>
+</ol>
+<hr />
+<h2 id="第五步运行-gateway">第五步：运行 gateway</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway
+</code></pre></div>
+
+<p>Agent 日志显示：</p>
+<div class="highlight"><pre><span></span><code>LINE: webhook listening on 0.0.0.0:8646/line/webhook (public: https://my-tunnel.example.com)
+</code></pre></div>
+
+<p>从 LINE 应用将机器人添加为好友（扫描频道 <strong>Messaging API</strong> 标签页中的二维码），然后发送一条消息。</p>
+<hr />
+<h2 id="llm-响应缓慢">LLM 响应缓慢</h2>
+<p>LINE 的 reply token 为单次使用，在入站事件发生后约 60 秒过期。LLM 响应过慢时将无法及时回复，通常会被迫调用付费的 Push API。</p>
+<p>当 LLM 运行时间超过 <code>LINE_SLOW_RESPONSE_THRESHOLD</code> 秒（默认 <code>45</code>）时，适配器会消耗原始 reply token，发送一个 <strong>Template Buttons</strong> 气泡：</p>
+<blockquote>
+<p>🤔 Still thinking. Tap below to fetch the answer when it's ready.</p>
+<p>[ Get answer ]</p>
+</blockquote>
+<p>用户在方便时点击 <strong>Get answer</strong> — 该 postback 会带来一个<em>新的</em> reply token，适配器用它发送缓存的答案（仍然免费）。</p>
+<p>状态机：<code>PENDING → READY → DELIVERED</code>，以及 <code>ERROR</code>（用于已取消的运行 — 执行 <code>/stop</code> 后，孤立的 PENDING 状态会解析为"Run was interrupted before completion."，避免持久按钮循环触发）。</p>
+<p>如需禁用 postback 按钮并始终回退至 Push API：</p>
+<div class="highlight"><pre><span></span><code>LINE_SLOW_RESPONSE_THRESHOLD=0
+</code></pre></div>
+
+<p>为使 postback 流程可靠触发，请抑制可能在阈值前消耗 reply token 的冗余输出：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/config.yaml</span>
+<span class="nt">display</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">interim_assistant_messages</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">line</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">tool_progress</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">off</span>
+</code></pre></div>
+
+<hr />
+<h2 id="cron--通知推送">Cron / 通知推送</h2>
+<div class="highlight"><pre><span></span><code>LINE_HOME_CHANNEL=Uxxxxxxxxxxxxxxxxxxxx     # 默认推送目标
+</code></pre></div>
+
+<p>设置了 <code>deliver: line</code> 的 Cron 任务会路由至 <code>LINE_HOME_CHANNEL</code>。适配器内置独立的仅 Push 发送器，因此即使 cron 在独立进程中运行，也能正常工作。</p>
+<hr />
+<h2 id="环境变量参考">环境变量参考</h2>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>是否必填</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>LINE_CHANNEL_ACCESS_TOKEN</code></td>
+<td>是</td>
+<td>—</td>
+<td>长期有效的频道访问 token</td>
+</tr>
+<tr>
+<td><code>LINE_CHANNEL_SECRET</code></td>
+<td>是</td>
+<td>—</td>
+<td>Channel secret（用于 HMAC-SHA256 webhook 验证）</td>
+</tr>
+<tr>
+<td><code>LINE_HOST</code></td>
+<td>否</td>
+<td><code>0.0.0.0</code></td>
+<td>Webhook 绑定主机</td>
+</tr>
+<tr>
+<td><code>LINE_PORT</code></td>
+<td>否</td>
+<td><code>8646</code></td>
+<td>Webhook 绑定端口</td>
+</tr>
+<tr>
+<td><code>LINE_PUBLIC_URL</code></td>
+<td>媒体发送时必填</td>
+<td>—</td>
+<td>公网 HTTPS 基础 URL；发送图片/音频/视频时必须设置</td>
+</tr>
+<tr>
+<td><code>LINE_ALLOWED_USERS</code></td>
+<td>三选一</td>
+<td>—</td>
+<td>逗号分隔的用户 ID（U 开头）</td>
+</tr>
+<tr>
+<td><code>LINE_ALLOWED_GROUPS</code></td>
+<td>三选一</td>
+<td>—</td>
+<td>逗号分隔的群组 ID（C 开头）</td>
+</tr>
+<tr>
+<td><code>LINE_ALLOWED_ROOMS</code></td>
+<td>三选一</td>
+<td>—</td>
+<td>逗号分隔的房间 ID（R 开头）</td>
+</tr>
+<tr>
+<td><code>LINE_ALLOW_ALL_USERS</code></td>
+<td>仅开发环境</td>
+<td><code>false</code></td>
+<td>完全跳过白名单验证</td>
+</tr>
+<tr>
+<td><code>LINE_HOME_CHANNEL</code></td>
+<td>否</td>
+<td>—</td>
+<td>默认 cron / 通知推送目标</td>
+</tr>
+<tr>
+<td><code>LINE_SLOW_RESPONSE_THRESHOLD</code></td>
+<td>否</td>
+<td><code>45</code></td>
+<td>触发 postback 按钮的等待秒数（<code>0</code> = 禁用）</td>
+</tr>
+<tr>
+<td><code>LINE_PENDING_TEXT</code></td>
+<td>否</td>
+<td>"🤔 Still thinking…"</td>
+<td>postback 按钮旁显示的气泡文本</td>
+</tr>
+<tr>
+<td><code>LINE_BUTTON_LABEL</code></td>
+<td>否</td>
+<td>"Get answer"</td>
+<td>按钮标签</td>
+</tr>
+<tr>
+<td><code>LINE_DELIVERED_TEXT</code></td>
+<td>否</td>
+<td>"Already replied ✅"</td>
+<td>再次点击已送达按钮时的回复</td>
+</tr>
+<tr>
+<td><code>LINE_INTERRUPTED_TEXT</code></td>
+<td>否</td>
+<td>"Run was interrupted before completion."</td>
+<td>点击 <code>/stop</code> 孤立按钮时的回复</td>
+</tr>
+<tr>
+<td><code>LINE_EXPIRED_TEXT</code></td>
+<td>否</td>
+<td>"That request has expired — send your message again."</td>
+<td>点击缓存答案已失效的按钮时的回复</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="故障排查">故障排查</h2>
+<p><strong>webhook 验证时提示"invalid signature"。</strong> <code>Channel secret</code> 复制有误，或隧道重写了请求体。请先用 <code>curl -i https://&lt;tunnel&gt;/line/webhook/health</code> 验证 — 应返回 <code>{"status":"ok","platform":"line"}</code>。</p>
+<p><strong>机器人在群组中收不到消息。</strong> 检查 <code>LINE_ALLOWED_GROUPS</code> 是否包含对应的 <code>C...</code> 群组 ID。如需查找群组 ID，发送一条测试消息后在 <code>~/.hermes/logs/gateway.log</code> 中搜索 <code>LINE: rejecting unauthorized source</code> — 被拒绝的 source 字典中包含相关 ID。</p>
+<p><strong><code>send_image</code> 报错"LINE_PUBLIC_URL must be set"。</strong> LINE Messaging API 不接受二进制上传 — 图片、音频和视频必须是可访问的 HTTPS URL。将 <code>LINE_PUBLIC_URL</code> 设置为隧道的公网主机名，适配器会自动从 <code>/line/media/&lt;token&gt;/&lt;filename&gt;</code> 提供文件服务。</p>
+<p><strong>postback 按钮始终不出现。</strong> 要么 LLM 的响应速度快于 <code>LINE_SLOW_RESPONSE_THRESHOLD</code>，要么其他气泡（工具进度、流式输出）已提前消耗了 reply token。参见"LLM 响应缓慢"中的抑制配置。</p>
+<p><strong>"already in use by another profile"。</strong> 同一个频道访问 token 已被另一个运行中的 Hermes profile 占用。请停止另一个 gateway，或使用独立的频道。</p>
+<hr />
+<h2 id="限制">限制</h2>
+<ul>
+<li><strong>气泡与长度上限。</strong> 每个 LINE 文本气泡最多 5000 个字符。超长响应会在每次 Reply/Push 调用中按约 4500 个字符智能分块（最多 5 个气泡），并尽可能在自然边界处切分。</li>
+<li><strong>不支持原生消息编辑。</strong> LINE 没有编辑消息的 API — 流式响应始终发送新气泡，不会编辑已有气泡。</li>
+<li><strong>不支持 Markdown 渲染。</strong> 粗体（<code>**</code>）、斜体（<code>*</code>）、代码块和标题均以字面字符显示。适配器在发送前会将其剥离；URL 会被保留（<code>[label](url)</code> 转换为 <code>label (url)</code>）。</li>
+<li><strong>加载指示器仅限私聊。</strong> LINE 对群组和房间拒绝 chat/loading API，因此输入指示器仅在 1:1 聊天中显示。</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/messaging/line</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#机器人响应方式">机器人响应方式</a></li>
+<li class="lvl2"><a href="#第一步创建-line-messaging-api-频道">第一步：创建 LINE Messaging API 频道</a></li>
+<li class="lvl2"><a href="#第二步暴露-webhook-端口">第二步：暴露 webhook 端口</a></li>
+<li class="lvl2"><a href="#第三步配置-hermes">第三步：配置 Hermes</a></li>
+<li class="lvl2"><a href="#第四步设置-webhook-url">第四步：设置 webhook URL</a></li>
+<li class="lvl2"><a href="#第五步运行-gateway">第五步：运行 gateway</a></li>
+<li class="lvl2"><a href="#llm-响应缓慢">LLM 响应缓慢</a></li>
+<li class="lvl2"><a href="#cron--通知推送">Cron / 通知推送</a></li>
+<li class="lvl2"><a href="#环境变量参考">环境变量参考</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl2"><a href="#限制">限制</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

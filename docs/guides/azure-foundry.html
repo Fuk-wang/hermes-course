@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Microsoft Foundry · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/azure-foundry</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="microsoft-foundry">Microsoft Foundry</h1>
+<p>Hermes Agent's <code>azure-foundry</code> provider supports Microsoft Foundry (formerly Azure AI Foundry) and Azure OpenAI. A single Foundry resource can host models with two different wire formats:</p>
+<ul>
+<li><strong>OpenAI-style</strong> — <code>POST /v1/chat/completions</code> on endpoints like <code>https://&lt;resource&gt;.openai.azure.com/openai/v1</code>. Used for GPT-4.x, GPT-5.x, Llama, Mistral, and most open-weight models.</li>
+<li><strong>Anthropic-style</strong> — <code>POST /v1/messages</code> on endpoints like <code>https://&lt;resource&gt;.services.ai.azure.com/anthropic</code>. Used when Microsoft Foundry serves Claude models via the Anthropic Messages API format.</li>
+</ul>
+<p>The setup wizard probes your endpoint and auto-detects which transport it uses, which deployments are available, and each model's context length.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>A Microsoft Foundry or Azure OpenAI resource with at least one deployment</li>
+<li>The deployment's endpoint URL</li>
+<li><strong>Either</strong> an API key (from the Azure Portal under "Keys and Endpoint") <strong>or</strong> the <strong>Azure AI User</strong> RBAC role on the Foundry resource if you plan to use Microsoft Entra ID (the keyless path Microsoft recommends). Some tenants may show the role as <strong>Foundry User</strong> during Microsoft's rename rollout.</li>
+</ul>
+<h2 id="quick-start">Quick Start</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>model
+<span class="c1"># → Select &quot;Azure Foundry&quot;</span>
+<span class="c1"># → Enter your endpoint URL</span>
+<span class="c1"># → Choose Authentication:</span>
+<span class="c1">#     1. API key</span>
+<span class="c1">#     2. Microsoft Entra ID  (managed identity / workload identity / az login)</span>
+<span class="c1"># → (Entra) Hermes probes DefaultAzureCredential; on success it never asks for a key</span>
+<span class="c1"># → (API key) Enter your API key</span>
+<span class="c1"># Hermes probes the endpoint and auto-detects transport + models</span>
+<span class="c1"># → Pick a model from the list (or type a deployment name manually)</span>
+</code></pre></div>
+
+<p>The wizard will:</p>
+<ol>
+<li><strong>Sniff the URL path</strong> — URLs ending in <code>/anthropic</code> are recognised as Microsoft Foundry Claude routes.</li>
+<li><strong>Probe <code>GET &lt;base&gt;/models</code></strong> — if the endpoint returns an OpenAI-shaped model list, Hermes switches to <code>chat_completions</code> and prefills a picker with the returned deployment IDs.</li>
+<li><strong>Probe Anthropic Messages shape</strong> — fallback for endpoints that do not expose <code>/models</code> but do accept the Anthropic Messages format.</li>
+<li><strong>Fall back to manual entry</strong> — private/gated endpoints that reject every probe still work; you pick the API mode and type a deployment name by hand.</li>
+</ol>
+<p>Context length for the chosen model is resolved via Hermes' standard metadata chain (<code>models.dev</code>, provider metadata, and hardcoded family fallbacks) and stored in <code>config.yaml</code> so the model can size its own context window correctly.</p>
+<h2 id="microsoft-entra-id-keyless-rbac--recommended">Microsoft Entra ID (keyless, RBAC) — recommended</h2>
+<p>Microsoft recommends <a href="https://learn.microsoft.com/azure/ai-foundry/foundry-models/how-to/configure-entra-id" class="ext" target="_blank" rel="noopener">keyless authentication with Microsoft Entra ID</a> for production Foundry workloads. Hermes supports Entra ID for <strong>both</strong> API surfaces:</p>
+<ul>
+<li><strong>OpenAI-style</strong> (<code>api_mode: chat_completions</code> / <code>codex_responses</code>) — GPT-4/5, Llama, Mistral, DeepSeek, etc.</li>
+<li><strong>Anthropic-style</strong> (<code>api_mode: anthropic_messages</code>) — Claude models on Microsoft Foundry.</li>
+</ul>
+<p>Foundry's RBAC is per-resource (<code>Azure AI User</code> grants both surfaces; some tenants may display <code>Foundry User</code>) and Microsoft documents the same inference scope (<code>https://ai.azure.com/.default</code>) for both. Under the hood:</p>
+<ul>
+<li>OpenAI-style uses the OpenAI Python SDK's native callable <code>api_key=</code> contract — the SDK mints a fresh JWT per request automatically.</li>
+<li>Anthropic-style uses an <code>httpx.Client</code> with a request event hook installed by <code>agent.azure_identity_adapter.build_bearer_http_client</code>, because the Anthropic SDK does not accept callable <code>auth_token</code> natively. The hook rewrites <code>Authorization: Bearer &lt;fresh-jwt&gt;</code> per outbound request. Same Microsoft RBAC, same Foundry scope — the SDK contract is the only difference.</li>
+</ul>
+<h3 id="why-use-entra-id">Why use Entra ID?</h3>
+<ul>
+<li>No long-lived API keys to rotate or revoke.</li>
+<li>RBAC-driven access — grant or remove <code>Azure AI User</code> on the Foundry resource, no config rewrite needed.</li>
+<li>Access and audit logs are segmented by assignee instead of all callers sharing one static key.</li>
+<li>Single auth surface for Azure VMs, AKS pods, App Service, Functions, Container Apps, and Foundry Agent Service via managed identity.</li>
+<li>Workload identity and service-principal flows for CI/CD pipelines.</li>
+</ul>
+<h3 id="one-time-setup-azure-side">One-time setup (Azure side)</h3>
+<ol>
+<li>In the Azure Portal, open your Foundry resource → <strong>Access control (IAM)</strong> → <strong>Add → Add role assignment</strong>.</li>
+<li>Pick the <strong>Azure AI User</strong> role (or <strong>Foundry User</strong> if your tenant has the renamed role).</li>
+<li>Assign it to:</li>
+<li><strong>Your user account</strong> for local development with <code>az login</code>.</li>
+<li><strong>A managed identity or workload identity</strong> for Azure-hosted compute (recommended for production).</li>
+<li><strong>A Foundry Agent Service hosted agent's agent identity</strong> when Hermes runs inside a hosted agent.</li>
+<li><strong>A service principal</strong> for CI/CD pipelines when workload identity is not available.</li>
+<li>Wait ~5 minutes for the role to propagate.</li>
+</ol>
+<p>Azure CLI equivalent:</p>
+<div class="highlight"><pre><span></span><code>az<span class="w"> </span>role<span class="w"> </span>assignment<span class="w"> </span>create<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--assignee<span class="w"> </span>&lt;principal-or-agent-identity-client-id&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--role<span class="w"> </span><span class="s2">&quot;Azure AI User&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--scope<span class="w"> </span>&lt;foundry-resource-id&gt;
+</code></pre></div>
+
+<h3 id="one-time-setup-hermes-side">One-time setup (Hermes side)</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>model
+<span class="c1"># → Select &quot;Azure Foundry&quot;</span>
+<span class="c1"># → Enter your endpoint URL</span>
+<span class="c1"># → Authentication: 2 (Microsoft Entra ID)</span>
+<span class="c1"># → (optional) user-assigned managed identity client ID</span>
+<span class="c1"># → (optional) Azure tenant ID</span>
+<span class="c1"># → Hermes probes DefaultAzureCredential() and reports which inner</span>
+<span class="c1">#    credential succeeded (e.g. AzureCliCredential, ManagedIdentityCredential)</span>
+</code></pre></div>
+
+<p>The wizard runs a bounded preflight probe (10 s timeout). On failure it offers to "save anyway, validate later" — useful when configuring on a machine that doesn't yet have credentials but will at runtime (e.g. preparing config for a managed-identity deployment).</p>
+<p><code>azure-identity</code> is installed automatically on first use via Hermes' lazy-install path. To pre-install:</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>azure-identity
+</code></pre></div>
+
+<h3 id="configuration-written-to-configyaml">Configuration written to <code>config.yaml</code></h3>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">azure-foundry</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://my-resource.openai.azure.com/openai/v1</span>
+<span class="w">  </span><span class="nt">api_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">chat_completions</span>
+<span class="w">  </span><span class="nt">auth_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">entra_id</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gpt-4o</span>
+<span class="w">  </span><span class="nt">context_length</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">128000</span>
+<span class="w">  </span><span class="nt">entra</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">scope</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://ai.azure.com/.default</span><span class="w">        </span><span class="c1"># only when overriding the default</span>
+</code></pre></div>
+
+<p>Hermes only manages one Entra-specific knob in <code>config.yaml</code>:</p>
+<ul>
+<li><strong><code>scope</code></strong> — the OAuth resource scope. Defaults to Microsoft's documented inference scope (<code>https://ai.azure.com/.default</code>). Override only if your resource was provisioned against a non-standard audience.</li>
+</ul>
+<p>Everything else (tenant, service principal secret, federated token file, sovereign cloud authority, broker preferences) is read by <code>azure-identity</code> directly from the standard <code>AZURE_*</code> environment variables — see the <a href="#credential-resolution-order">credential resolution order</a> below. Set those in <code>~/.hermes/.env</code> or your deployment environment, exactly as Microsoft's SDK reference describes.</p>
+<p>No secrets land in <code>~/.hermes/.env</code> for Entra mode — <code>azure-identity</code> caches tokens in-process (and where available, in your OS keychain / <code>~/.IdentityService</code>).</p>
+<h3 id="credential-resolution-order">Credential resolution order</h3>
+<p><code>azure-identity</code>'s <code>DefaultAzureCredential</code> walks this chain on each token request, stopping at the first credential that returns a token:</p>
+<ol>
+<li><strong>Environment credential</strong> — <code>AZURE_TENANT_ID</code> + <code>AZURE_CLIENT_ID</code> + <code>AZURE_CLIENT_SECRET</code> (or <code>AZURE_CLIENT_CERTIFICATE_PATH</code> / <code>AZURE_FEDERATED_TOKEN_FILE</code>).</li>
+<li><strong>Workload Identity</strong> — <code>AZURE_FEDERATED_TOKEN_FILE</code> (AKS federated tokens / OIDC).</li>
+<li><strong>Managed Identity</strong> — IMDS endpoint (<code>169.254.169.254</code>) for virtual machines; <code>IDENTITY_ENDPOINT</code> for App Service / Functions / Container Apps. Foundry Agent Service hosted agents use the hosted agent's agent identity.</li>
+<li><strong>Visual Studio Code</strong> — Azure account extension.</li>
+<li><strong>Azure CLI</strong> — <code>az login</code> session.</li>
+<li><strong>Azure Developer CLI</strong> — <code>azd auth login</code>.</li>
+<li><strong>Azure PowerShell</strong> — <code>Connect-AzAccount</code>.</li>
+<li><strong>Broker</strong> (Windows / WSL only) — Web Account Manager.</li>
+</ol>
+<p>Interactive browser credential is excluded by default for unattended Hermes runs; use Azure CLI, Azure Developer CLI, managed identity, workload identity, or service principal credentials instead.</p>
+<h3 id="deployment-patterns">Deployment patterns</h3>
+<p><strong>Local development:</strong></p>
+<div class="highlight"><pre><span></span><code>az<span class="w"> </span>login
+hermes<span class="w"> </span>model<span class="w">   </span><span class="c1"># pick Azure Foundry → Entra ID</span>
+hermes<span class="w">         </span><span class="c1"># uses your az login token</span>
+</code></pre></div>
+
+<p><strong>Azure VM / Functions / App Service / Container Apps (system-assigned managed identity):</strong>
+1. Enable system-assigned identity on the compute resource.
+2. Grant the identity <code>Azure AI User</code> (or <code>Foundry User</code>) on the Foundry resource.
+3. Set <code>model.auth_mode: entra_id</code> in config.yaml — no env vars needed.</p>
+<p><strong>Azure VM / Functions / App Service / Container Apps (user-assigned managed identity):</strong>
+- Set <code>AZURE_CLIENT_ID</code> to the user-assigned identity's client ID so <code>DefaultAzureCredential</code> picks the right one.</p>
+<p><strong>Foundry Agent Service hosted agent:</strong>
+- Create the hosted agent and grant that agent's identity <code>Azure AI User</code> (or <code>Foundry User</code>) on the Foundry resource. Hermes uses <code>ManagedIdentityCredential</code> from inside the hosted agent; role assignment belongs on the agent identity, not just the parent project or your user.</p>
+<p><strong>AKS Workload Identity (replaces AAD Pod Identity):</strong>
+- Annotate the pod's service account with the workload identity client ID.
+- The pod's federated token file is auto-detected via <code>AZURE_FEDERATED_TOKEN_FILE</code>.
+- <code>model.auth_mode: entra_id</code> works without further config changes.</p>
+<p><strong>Service principal in CI:</strong>
+- Set <code>AZURE_TENANT_ID</code>, <code>AZURE_CLIENT_ID</code>, <code>AZURE_CLIENT_SECRET</code> in the runner env.</p>
+<h4 id="sovereign-clouds-government-china">Sovereign clouds (Government, China)</h4>
+<p>Export <code>AZURE_AUTHORITY_HOST</code> (e.g. <code>https://login.microsoftonline.us</code> for Azure Government, <code>https://login.partner.microsoftonline.cn</code> for Azure China). <code>azure-identity</code> reads it directly.</p>
+<h3 id="health-checks">Health checks</h3>
+<p><code>hermes doctor</code> runs a 10 s probe against <code>DefaultAzureCredential</code> when <code>model.auth_mode: entra_id</code>, reporting which inner credential won (env vars present, managed identity endpoint reachable, etc.).</p>
+<p><code>hermes auth</code> shows a structured status block:</p>
+<div class="highlight"><pre><span></span><code>azure-foundry (Microsoft Entra ID):
+  Endpoint: https://my-resource.openai.azure.com/openai/v1
+  Scope: https://ai.azure.com/.default
+  Status: configured; live token probe is skipped here
+</code></pre></div>
+
+<p>Auxiliary tasks that follow the main model (<code>provider: auto</code> — session titles, context compression, smart approval) reuse the main session's Entra token provider instead of re-authenticating; a <code>--api-key</code> string on the CLI still overrides it for one-off testing.</p>
+<h3 id="limitations">Limitations</h3>
+<ul>
+<li><strong>Anthropic-style endpoints use an httpx event hook.</strong> The Anthropic Python SDK does not accept a callable <code>auth_token</code> natively (≤ 0.86.0). Hermes installs a request event hook on a custom <code>httpx.Client</code> that mints a fresh JWT per outbound request and rewrites <code>Authorization: Bearer &lt;jwt&gt;</code>. This is functionally equivalent to the OpenAI SDK's native <code>Callable[[], str]</code> contract but adds one indirection layer. If the Anthropic SDK adds first-class callable-auth support in a future release, Hermes will switch to it transparently.</li>
+<li><strong>Batch jobs and <code>multiprocessing.Pool</code>.</strong> The Entra token provider is a closure that cannot be pickled across process boundaries. <code>batch_runner.py</code> automatically drops the callable from the worker config and lets each worker process rebuild its own provider from <code>config.yaml</code> — no user action required, but each worker pays one chain walk at startup.</li>
+<li><strong>No bearer JWT persistence in <code>auth.json</code>.</strong> Hermes does not duplicate <code>azure-identity</code>'s internal token cache; cold starts walk the credential chain on first inference.</li>
+</ul>
+<h2 id="configuration-written-to-configyaml_1">Configuration (written to <code>config.yaml</code>)</h2>
+<p>After running the wizard you'll see something like this:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">azure-foundry</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://my-resource.openai.azure.com/openai/v1</span>
+<span class="w">  </span><span class="nt">api_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">chat_completions</span><span class="w">         </span><span class="c1"># or &quot;anthropic_messages&quot;</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gpt-5.4-mini</span><span class="w">              </span><span class="c1"># your deployment / model name</span>
+<span class="w">  </span><span class="nt">context_length</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">400000</span><span class="w">             </span><span class="c1"># auto-detected</span>
+</code></pre></div>
+
+<p>And in <code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code>AZURE_FOUNDRY_API_KEY=&lt;your-azure-key&gt;
+</code></pre></div>
+
+<h2 id="openai-style-endpoints-gpt-llama-etc">OpenAI-style endpoints (GPT, Llama, etc.)</h2>
+<p>Azure OpenAI's v1 GA endpoint accepts the standard <code>openai</code> Python client with minimal changes:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">azure-foundry</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://my-resource.openai.azure.com/openai/v1</span>
+<span class="w">  </span><span class="nt">api_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">chat_completions</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gpt-5.4</span>
+</code></pre></div>
+
+<p>Important behaviour:</p>
+<ul>
+<li><strong>GPT-5.x, codex, and o-series auto-route to the Responses API.</strong> Microsoft Foundry deploys GPT-5 / codex / o1 / o3 / o4 models as Responses-API-only — calling <code>/chat/completions</code> against them returns <code>400 "The requested operation is unsupported."</code>. Hermes detects these model families by name and upgrades <code>api_mode</code> to <code>codex_responses</code> transparently, even when <code>config.yaml</code> still reads <code>api_mode: chat_completions</code>. GPT-4, GPT-4o, Llama, Mistral, and other deployments stay on <code>/chat/completions</code>.</li>
+<li><strong><code>api_mode: responses</code> is accepted as a spelling of <code>codex_responses</code>.</strong> The alias works on <code>model.api_mode</code>, on <code>fallback_providers</code> entries and on per-task <code>auxiliary.&lt;task&gt;.api_mode</code> (e.g. an <code>auxiliary.vision</code> route to a GPT-5.x deployment), and selects the same Responses adapter.</li>
+<li><strong><code>max_completion_tokens</code> is used automatically.</strong> Azure OpenAI (like direct OpenAI) requires <code>max_completion_tokens</code> for gpt-4o, o-series, and gpt-5.x models. Hermes sends the right parameter based on the endpoint.</li>
+<li><strong>Pre-v1 endpoints that require <code>api-version</code>.</strong> If you have a legacy base URL like <code>https://&lt;resource&gt;.openai.azure.com/openai?api-version=2025-04-01-preview</code>, Hermes extracts the query string and forwards it via <code>default_query</code> on every request (the OpenAI SDK otherwise drops it when joining paths).</li>
+</ul>
+<h2 id="anthropic-style-endpoints-claude-via-microsoft-foundry">Anthropic-style endpoints (Claude via Microsoft Foundry)</h2>
+<p>For Claude deployments, use the Anthropic-style route:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">azure-foundry</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://my-resource.services.ai.azure.com/anthropic</span>
+<span class="w">  </span><span class="nt">api_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">anthropic_messages</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">claude-sonnet-4-6</span>
+</code></pre></div>
+
+<p>Important behaviour:</p>
+<ul>
+<li><strong><code>/v1</code> is stripped from the base URL.</strong> The Anthropic SDK appends <code>/v1/messages</code> to every request URL — Hermes removes any trailing <code>/v1</code> before handing the URL to the SDK to avoid double-<code>/v1</code> paths.</li>
+<li><strong><code>api-version</code> is sent via <code>default_query</code>, not appended to the URL.</strong> Azure Anthropic requires an <code>api-version</code> query string. Baking it into the base URL produces malformed paths like <code>/anthropic?api-version=.../v1/messages</code> and returns 404. Hermes passes <code>api-version=2025-04-15</code> via the Anthropic SDK's <code>default_query</code> instead.</li>
+<li><strong>Bearer auth is used instead of <code>x-api-key</code>.</strong> Azure's Anthropic-compatible route requires <code>Authorization: Bearer &lt;key&gt;</code> rather than Anthropic's native <code>x-api-key</code> header. Hermes detects <code>azure.com</code> in the base URL and routes the API key through the SDK's <code>auth_token</code> field so the right header reaches the upstream.</li>
+<li><strong>1M context window beta header is kept.</strong> Azure still gates the 1M-token Claude context (Opus 4.6/4.7, Sonnet 4.6) behind the <code>anthropic-beta: context-1m-2025-08-07</code> header. Hermes keeps that beta header on Azure paths (it's stripped from native Anthropic OAuth requests because some subscriptions reject it, but Azure requires it).</li>
+<li><strong>OAuth token refresh is disabled.</strong> Azure deployments use static API keys. The <code>~/.claude/.credentials.json</code> OAuth token refresh loop that applies to Anthropic Console is explicitly skipped for Azure endpoints to prevent the Claude Code OAuth token from overwriting your Azure key mid-session.</li>
+<li><strong><code>hermes doctor</code> probes the same route.</strong> The <code>/anthropic</code> route has no <code>GET /models</code>, so the connectivity check sends a one-token <code>POST /v1/messages</code> with the same Bearer auth and <code>api-version</code> query the runtime uses; a 200 (or a 400 from the Messages API) reports the endpoint as healthy, 401/403 as an auth problem.</li>
+</ul>
+<h2 id="alternative-provider-anthropic--azure-base-url">Alternative: <code>provider: anthropic</code> + Azure base URL</h2>
+<p>If you already have <code>provider: anthropic</code> configured and just want to point it at Microsoft Foundry for Claude, you can skip the <code>azure-foundry</code> provider entirely:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">anthropic</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://my-resource.services.ai.azure.com/anthropic</span>
+<span class="w">  </span><span class="nt">key_env</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">AZURE_ANTHROPIC_KEY</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">claude-sonnet-4-6</span>
+</code></pre></div>
+
+<p>With <code>AZURE_ANTHROPIC_KEY</code> set in <code>~/.hermes/.env</code>. Hermes detects <code>azure.com</code> in the base URL and short-circuits around the Claude Code OAuth token chain so the Azure key is used directly with <code>x-api-key</code> auth.</p>
+<p><code>key_env</code> is the canonical snake_case field name; <code>api_key_env</code> (and the camelCase <code>keyEnv</code> / <code>apiKeyEnv</code>) are accepted as aliases. If both <code>key_env</code> and <code>AZURE_ANTHROPIC_KEY</code>/<code>ANTHROPIC_API_KEY</code> are set, the <code>key_env</code>-named env var wins.</p>
+<h2 id="model-discovery">Model discovery</h2>
+<p>Azure does <strong>not</strong> expose a pure-API-key endpoint to list your <em>deployed</em> model deployments. Deployment enumeration requires Azure Resource Manager authentication (<code>az cognitiveservices account deployment list</code>) with an Azure AD principal, not the inference API key.</p>
+<p>What Hermes can do:</p>
+<ul>
+<li>Azure OpenAI v1 endpoints (<code>&lt;resource&gt;.openai.azure.com/openai/v1</code>) expose <code>GET /models</code> with the resource's <strong>available</strong> model catalog. Hermes uses this list to prefill the setup wizard's model picker <strong>and</strong> the in-session <code>/model azure-foundry</code> picker (CLI, TUI, Desktop, gateway), so you can switch deployments without re-running <code>hermes setup</code>.</li>
+<li>Microsoft Foundry <code>/anthropic</code> routes: detected via URL path, model name entered manually (no <code>/models</code> there — the <code>/model</code> picker shows only the current selection and any <code>providers.azure-foundry.models</code> you declare).</li>
+<li>Private / firewalled endpoints: manual entry with a friendly "couldn't probe" message.</li>
+<li>Entra ID (<code>model.auth_mode: entra_id</code>, no <code>AZURE_FOUNDRY_API_KEY</code>): the <code>/model</code> picker lists the provider as soon as <code>model.base_url</code> (or <code>AZURE_FOUNDRY_BASE_URL</code>) is set — no token is minted just to show the row.</li>
+</ul>
+<p>You can always type a deployment name directly — Hermes does not validate against the returned list.</p>
+<p>To pin the picker to the deployments you actually use (the catalog can be long), or to list them for an endpoint without <code>/models</code>, declare them in <code>config.yaml</code>; they are listed first, ahead of the live catalog:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">providers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">azure-foundry</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">models</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gpt-5.4</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">kimi-k2.6</span>
+</code></pre></div>
+
+<p>The runtime picker resolves the endpoint from <code>model.base_url</code> while Azure Foundry is the active provider; set <code>AZURE_FOUNDRY_BASE_URL</code> as well if you want the row to stay populated after switching to another provider.</p>
+<h2 id="environment-variables">Environment variables</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AZURE_FOUNDRY_API_KEY</code></td>
+<td>Primary API key for Microsoft Foundry / Azure OpenAI (api_key mode)</td>
+</tr>
+<tr>
+<td><code>AZURE_FOUNDRY_BASE_URL</code></td>
+<td>Endpoint URL (set via <code>hermes model</code>; env var is used as a fallback)</td>
+</tr>
+<tr>
+<td><code>AZURE_ANTHROPIC_KEY</code></td>
+<td>Used by <code>provider: anthropic</code> + Azure base URL (alternative to <code>ANTHROPIC_API_KEY</code>)</td>
+</tr>
+<tr>
+<td><code>AZURE_TENANT_ID</code></td>
+<td>Entra ID tenant for service-principal flows</td>
+</tr>
+<tr>
+<td><code>AZURE_CLIENT_ID</code></td>
+<td>Entra ID client ID (service principal, workload identity, or user-assigned managed identity)</td>
+</tr>
+<tr>
+<td><code>AZURE_CLIENT_SECRET</code></td>
+<td>Service principal secret</td>
+</tr>
+<tr>
+<td><code>AZURE_CLIENT_CERTIFICATE_PATH</code></td>
+<td>Service principal cert (alternative to secret)</td>
+</tr>
+<tr>
+<td><code>AZURE_FEDERATED_TOKEN_FILE</code></td>
+<td>Workload Identity federated token path (AKS)</td>
+</tr>
+<tr>
+<td><code>AZURE_AUTHORITY_HOST</code></td>
+<td>Sovereign cloud authority host override</td>
+</tr>
+<tr>
+<td><code>IDENTITY_ENDPOINT</code> / <code>MSI_ENDPOINT</code></td>
+<td>Managed Identity endpoint for App Service, Functions, and Container Apps; VMs usually use IMDS instead</td>
+</tr>
+</tbody>
+</table>
+<p>The Azure SDK reads the <code>AZURE_*</code> env vars directly. Hermes never inspects them other than to report which sources are present in <code>hermes doctor</code> output.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p><strong>401 Unauthorized on gpt-5.x deployments.</strong>
+Azure serves gpt-5.x on <code>/chat/completions</code>, not <code>/responses</code>. Hermes handles this automatically when the URL contains <code>openai.azure.com</code>, but if you see a 401 with an <code>Invalid API key</code> body, check that <code>api_mode</code> in your <code>config.yaml</code> is <code>chat_completions</code>.</p>
+<p><strong>404 on <code>/v1/messages?api-version=.../v1/messages</code>.</strong>
+This is the malformed-URL bug from pre-fix Azure Anthropic setups. Upgrade Hermes — the <code>api-version</code> parameter is now passed via <code>default_query</code> rather than baked into the base URL, so the SDK can't corrupt it during URL joining.</p>
+<p><strong>Wizard says "Auto-detection incomplete."</strong>
+The endpoint rejected both the <code>/models</code> probe and the Anthropic Messages probe. This is normal for private endpoints behind a firewall or with an IP allow-list. Fall back to manual API mode selection and type your deployment name — everything still works, Hermes just can't prefill the picker.</p>
+<p><strong>Wrong transport picked.</strong>
+Run <code>hermes model</code> again and the wizard will re-probe. If the probe still picks the wrong mode, you can edit <code>config.yaml</code> directly:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">azure-foundry</span>
+<span class="w">  </span><span class="nt">api_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">anthropic_messages</span><span class="w">   </span><span class="c1"># or chat_completions</span>
+</code></pre></div>
+
+<p><strong>Entra ID: "credential chain exhausted" or 401 Unauthorized after switching to <code>auth_mode: entra_id</code>.</strong>
+- Run <code>az login</code> to refresh your developer session (the cached token may have expired).
+- Verify the <code>Azure AI User</code> (or <code>Foundry User</code>) role assignment took effect: <code>az role assignment list --assignee &lt;user-or-identity-id&gt;</code> should list it on your Foundry resource. Role propagation can take up to 5 minutes.
+- For user-assigned managed identities, double-check <code>AZURE_CLIENT_ID</code> matches the identity attached to the compute resource.
+- Run <code>hermes doctor</code> — the Azure Entra probe reports whether token acquisition succeeded and includes a remediation hint.</p>
+<p><strong>Entra ID: wizard preflight hangs or times out.</strong>
+The 10 s preflight is a soft check. Choose "Save anyway and validate later" and run <code>hermes doctor</code> after deploying to the target environment. Common causes include an unreachable token service or stale local login state — prefer workload identity in CI, set <code>AZURE_TENANT_ID</code>+<code>AZURE_CLIENT_ID</code>+<code>AZURE_CLIENT_SECRET</code> when using a service principal, or run <code>az login</code> for local development.</p>
+<p><strong>401 on Anthropic-style endpoint with Entra ID.</strong>
+Verify the same <code>Azure AI User</code> (or <code>Foundry User</code>) role is assigned on the Foundry resource (it covers both <code>/openai/v1</code> and <code>/anthropic</code> paths). If the OpenAI-style probe works during the wizard but <code>claude-*</code> requests fail at runtime, the most common cause is a stale <code>model.entra.scope</code> left over from an earlier wizard run — delete the <code>entra.scope</code> line from <code>config.yaml</code> so the runtime falls back to the default <code>https://ai.azure.com/.default</code> scope.</p>
+<h2 id="related">Related</h2>
+<ul>
+<li><a href="../reference/environment-variables.html">Environment variables</a></li>
+<li><a href="../user-guide/configuration.html">Configuration</a></li>
+<li><a href="aws-bedrock.html">AWS Bedrock</a> — the other major cloud provider integration</li>
+<li><a href="https://learn.microsoft.com/azure/ai-foundry/foundry-models/how-to/configure-entra-id" class="ext" target="_blank" rel="noopener">Microsoft: Configure Entra ID for Foundry</a> — upstream documentation for the keyless path</li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/azure-foundry</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#quick-start">Quick Start</a></li>
+<li class="lvl2"><a href="#microsoft-entra-id-keyless-rbac--recommended">Microsoft Entra ID (keyless, RBAC) — recommended</a></li>
+<li class="lvl3"><a href="#why-use-entra-id">Why use Entra ID?</a></li>
+<li class="lvl3"><a href="#one-time-setup-azure-side">One-time setup (Azure side)</a></li>
+<li class="lvl3"><a href="#one-time-setup-hermes-side">One-time setup (Hermes side)</a></li>
+<li class="lvl3"><a href="#configuration-written-to-configyaml">Configuration written to config.yaml</a></li>
+<li class="lvl3"><a href="#credential-resolution-order">Credential resolution order</a></li>
+<li class="lvl3"><a href="#deployment-patterns">Deployment patterns</a></li>
+<li class="lvl3"><a href="#health-checks">Health checks</a></li>
+<li class="lvl3"><a href="#limitations">Limitations</a></li>
+<li class="lvl2"><a href="#configuration-written-to-configyaml_1">Configuration (written to config.yaml)</a></li>
+<li class="lvl2"><a href="#openai-style-endpoints-gpt-llama-etc">OpenAI-style endpoints (GPT, Llama, etc.)</a></li>
+<li class="lvl2"><a href="#anthropic-style-endpoints-claude-via-microsoft-foundry">Anthropic-style endpoints (Claude via Microsoft Foundry)</a></li>
+<li class="lvl2"><a href="#alternative-provider-anthropic--azure-base-url">Alternative: provider: anthropic + Azure base URL</a></li>
+<li class="lvl2"><a href="#model-discovery">Model discovery</a></li>
+<li class="lvl2"><a href="#environment-variables">Environment variables</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl2"><a href="#related">Related</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

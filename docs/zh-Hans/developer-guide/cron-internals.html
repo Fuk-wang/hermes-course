@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cron 内部机制 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/cron-internals</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="cron-内部机制">Cron 内部机制</h1>
+<p>cron 子系统提供定时任务执行能力——从简单的单次延迟到带技能注入和跨平台投递的周期性 cron 表达式任务。</p>
+<h2 id="关键文件">关键文件</h2>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cron/jobs.py</code></td>
+<td>任务模型、存储、对 <code>jobs.json</code> 的原子读写</td>
+</tr>
+<tr>
+<td><code>cron/scheduler.py</code></td>
+<td>调度器循环——到期任务检测、执行、重复计数跟踪</td>
+</tr>
+<tr>
+<td><code>tools/cronjob_tools.py</code></td>
+<td>面向模型的 <code>cronjob</code> 工具注册与处理器</td>
+</tr>
+<tr>
+<td><code>gateway/run.py</code></td>
+<td>Gateway 集成——在长运行循环中触发 cron tick</td>
+</tr>
+<tr>
+<td><code>hermes_cli/cron.py</code></td>
+<td>CLI <code>hermes cron</code> 子命令</td>
+</tr>
+</tbody>
+</table>
+<h2 id="调度模型">调度模型</h2>
+<p>支持四种调度格式：</p>
+<table>
+<thead>
+<tr>
+<th>格式</th>
+<th>示例</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>相对延迟</strong></td>
+<td><code>30m</code>、<code>2h</code>、<code>1d</code></td>
+<td>单次触发，在指定时长后执行</td>
+</tr>
+<tr>
+<td><strong>间隔</strong></td>
+<td><code>every 2h</code>、<code>every 30m</code></td>
+<td>周期触发，按固定间隔执行</td>
+</tr>
+<tr>
+<td><strong>Cron 表达式</strong></td>
+<td><code>0 9 * * *</code></td>
+<td>标准 5 字段 cron 语法（分钟、小时、日、月、星期）</td>
+</tr>
+<tr>
+<td><strong>ISO 时间戳</strong></td>
+<td><code>2025-01-15T09:00:00</code></td>
+<td>单次触发，在精确时间点执行</td>
+</tr>
+</tbody>
+</table>
+<p>面向模型的接口是单个 <code>cronjob</code> 工具，支持以下操作：<code>create</code>、<code>list</code>、<code>update</code>、<code>pause</code>、<code>resume</code>、<code>run</code>、<code>remove</code>。</p>
+<h2 id="任务存储">任务存储</h2>
+<p>任务存储在 <code>~/.hermes/cron/jobs.json</code> 中，采用原子写入语义（先写入临时文件，再重命名）。每条任务记录包含：</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;a1b2c3d4e5f6&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Daily briefing&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;prompt&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Summarize today&#39;s AI news and funding rounds&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;schedule&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cron&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;expr&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0 9 * * *&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;display&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0 9 * * *&quot;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;skills&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;ai-funding-daily-report&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;deliver&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;telegram:-1001234567890&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;repeat&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;times&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;completed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;state&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scheduled&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;next_run_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2025-01-16T09:00:00Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;last_run_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2025-01-15T09:00:00Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;last_status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ok&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;created_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2025-01-01T00:00:00Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;script&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="任务生命周期状态">任务生命周期状态</h3>
+<table>
+<thead>
+<tr>
+<th>状态</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>scheduled</code></td>
+<td>活跃，将在下次计划时间触发</td>
+</tr>
+<tr>
+<td><code>paused</code></td>
+<td>已暂停——恢复前不会触发</td>
+</tr>
+<tr>
+<td><code>completed</code></td>
+<td>重复次数已耗尽，或单次任务已执行</td>
+</tr>
+<tr>
+<td><code>running</code></td>
+<td>正在执行（瞬态状态）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="向后兼容性">向后兼容性</h3>
+<p>旧版任务可能使用单个 <code>skill</code> 字段而非 <code>skills</code> 数组。调度器在加载时会对此进行规范化——单个 <code>skill</code> 会被提升为 <code>skills: [skill]</code>。</p>
+<h2 id="调度器运行时">调度器运行时</h2>
+<h3 id="tick-周期">Tick 周期</h3>
+<p>调度器按周期性 tick 运行（默认：每 60 秒）：</p>
+<div class="highlight"><pre><span></span><code>tick()
+  1. 获取调度器锁（防止 tick 重叠）
+  2. 从 jobs.json 加载所有任务
+  3. 筛选到期任务（next_run &lt;= now 且 state == &quot;scheduled&quot;）
+  4. 对每个到期任务：
+     a. 将状态设为 &quot;running&quot;
+     b. 创建全新的 AIAgent 会话（无对话历史）
+     c. 按顺序加载附加技能（以用户消息形式注入）
+     d. 通过 agent 执行任务 prompt（提示词）
+     e. 将响应投递到配置的目标
+     f. 更新 run_count，计算下次运行时间
+     g. 若重复次数耗尽 → state = &quot;completed&quot;
+     h. 否则 → state = &quot;scheduled&quot;
+  5. 将更新后的任务写回 jobs.json
+  6. 释放调度器锁
+</code></pre></div>
+
+<h3 id="gateway-集成">Gateway 集成</h3>
+<p>在 gateway 模式下，调度器运行在专用后台线程中（<code>gateway/run.py</code> 中的 <code>_start_cron_ticker</code>），每 60 秒调用一次 <code>scheduler.tick()</code>，与消息处理并行运行。</p>
+<p>在 CLI 模式下，cron 任务仅在运行 <code>hermes cron</code> 命令或活跃 CLI 会话期间触发。</p>
+<h3 id="全新会话隔离">全新会话隔离</h3>
+<p>每个 cron 任务在完全全新的 agent 会话中运行：</p>
+<ul>
+<li>无前次运行的对话历史</li>
+<li>无前次 cron 执行的记忆（除非已持久化到内存/文件）</li>
+<li>prompt 必须自包含——cron 任务无法提出澄清性问题</li>
+<li><code>cronjob</code> 工具集已禁用（递归防护）</li>
+</ul>
+<h2 id="技能支持的任务">技能支持的任务</h2>
+<p>cron 任务可通过 <code>skills</code> 字段附加一个或多个技能。执行时：</p>
+<ol>
+<li>按指定顺序加载技能</li>
+<li>每个技能的 SKILL.md 内容作为上下文注入</li>
+<li>任务的 prompt 作为任务指令追加</li>
+<li>Agent 处理技能上下文与 prompt 的组合内容</li>
+</ol>
+<p>这使得可复用、经过测试的工作流无需将完整指令粘贴到 cron prompt 中。例如：</p>
+<div class="highlight"><pre><span></span><code>创建每日融资报告 → 附加 &quot;ai-funding-daily-report&quot; 技能
+</code></pre></div>
+
+<h3 id="脚本支持的任务">脚本支持的任务</h3>
+<p>任务还可通过 <code>script</code> 字段附加 Python 脚本。该脚本在每次 agent 轮次<em>之前</em>运行，其 stdout 作为上下文注入到 prompt 中。这支持数据采集和变更检测模式：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># ~/.hermes/scripts/check_competitors.py</span>
+
+<span class="c1"># 获取竞争对手发布说明，与上次运行结果进行差异比对</span>
+<span class="c1"># 将摘要打印到 stdout——agent 进行分析并报告</span>
+</code></pre></div>
+
+<p>脚本超时默认为 120 秒。<code>_get_script_timeout()</code> 通过三层链路解析限制：</p>
+<ol>
+<li><strong>模块级覆盖</strong> — <code>_SCRIPT_TIMEOUT</code>（用于测试/monkeypatching）。仅在与默认值不同时使用。</li>
+<li><strong>环境变量</strong> — <code>HERMES_CRON_SCRIPT_TIMEOUT</code></li>
+<li><strong>配置</strong> — <code>config.yaml</code> 中的 <code>cron.script_timeout_seconds</code>（通过 <code>load_config()</code> 读取）</li>
+<li><strong>默认值</strong> — 120 秒</li>
+</ol>
+<h3 id="provider-恢复">Provider 恢复</h3>
+<p><code>run_job()</code> 将用户配置的备用 provider 和凭证池传入 <code>AIAgent</code> 实例：</p>
+<ul>
+<li><strong>备用 provider</strong> — 从 <code>config.yaml</code> 读取 <code>fallback_providers</code>（列表）或 <code>fallback_model</code>（旧版字典），与 gateway 的 <code>_load_fallback_model()</code> 模式一致。以 <code>fallback_model=</code> 形式传入 <code>AIAgent.__init__</code>，后者将两种格式规范化为备用链。</li>
+<li><strong>凭证池</strong> — 通过 <code>agent.credential_pool</code> 中的 <code>load_pool(provider)</code> 使用解析后的运行时 provider 名称加载。仅在池中有凭证时传入（<code>pool.has_credentials()</code>）。在遭遇 429/限速错误时启用同 provider 的密钥轮换。</li>
+</ul>
+<p>这与 gateway 的行为保持一致——否则 cron agent 在遭遇限速时将直接失败而不尝试恢复。</p>
+<h2 id="投递模型">投递模型</h2>
+<p>Cron 任务结果可投递到任何受支持的平台。</p>
+<p>裸平台名（<code>slack</code>、<code>telegram</code> 等）会投递到该平台配置的<strong>主频道</strong>。若要投递到<strong>特定</strong>目标，请在冒号后追加目标：<code>platform:&lt;target&gt;</code>。目标在任务触发时解析（而非创建时），因此任务可以指定一个尚未连接的平台目标，待其上线后即开始投递。</p>
+<p>大多数平台还支持以第三段指定可选的话题/线程：<code>platform:&lt;chat_id&gt;:&lt;thread_id&gt;</code>。</p>
+<table>
+<thead>
+<tr>
+<th>目标</th>
+<th>语法</th>
+<th>示例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>来源聊天</td>
+<td><code>origin</code></td>
+<td>投递到创建该任务的聊天</td>
+</tr>
+<tr>
+<td>本地文件</td>
+<td><code>local</code></td>
+<td>保存到 <code>~/.hermes/cron/output/</code></td>
+</tr>
+<tr>
+<td>Telegram</td>
+<td><code>telegram</code>、<code>telegram:&lt;chat_id&gt;</code>、<code>telegram:&lt;chat_id&gt;:&lt;thread_id&gt;</code>、<code>telegram:@username</code></td>
+<td><code>telegram:-1001234567890:17585</code></td>
+</tr>
+<tr>
+<td>Discord</td>
+<td><code>discord</code>、<code>discord:#channel</code>、<code>discord:&lt;channel_id&gt;</code>、<code>discord:&lt;channel_id&gt;:&lt;thread_id&gt;</code></td>
+<td><code>discord:#engineering</code></td>
+</tr>
+<tr>
+<td>Slack</td>
+<td><code>slack</code>、<code>slack:#channel</code>、<code>slack:&lt;channel_id&gt;</code>、<code>slack:&lt;channel_id&gt;:&lt;thread_ts&gt;</code></td>
+<td><code>slack:#engineering</code></td>
+</tr>
+<tr>
+<td>Matrix</td>
+<td><code>matrix</code>、<code>matrix:&lt;!room_id:server&gt;</code>、<code>matrix:&lt;@user:server&gt;</code></td>
+<td><code>matrix:!abc123:example.org</code></td>
+</tr>
+<tr>
+<td>Feishu</td>
+<td><code>feishu</code>、<code>feishu:&lt;chat_id&gt;</code>、<code>feishu:&lt;chat_id&gt;:&lt;thread_id&gt;</code></td>
+<td><code>feishu:oc_abc123def</code></td>
+</tr>
+<tr>
+<td>WhatsApp</td>
+<td><code>whatsapp</code>、<code>whatsapp:&lt;jid&gt;</code>、<code>whatsapp:+&lt;E.164&gt;</code></td>
+<td><code>whatsapp:123456@g.us</code></td>
+</tr>
+<tr>
+<td>Signal</td>
+<td><code>signal</code>、<code>signal:group:&lt;id&gt;</code>、<code>signal:+&lt;E.164&gt;</code></td>
+<td><code>signal:group:aBcD==</code></td>
+</tr>
+<tr>
+<td>SMS</td>
+<td><code>sms</code>、<code>sms:+&lt;E.164&gt;</code></td>
+<td><code>sms:+&lt;E.164 号码&gt;</code></td>
+</tr>
+<tr>
+<td>Email</td>
+<td><code>email</code>、<code>email:&lt;address&gt;</code></td>
+<td><code>email:alerts@example.com</code></td>
+</tr>
+<tr>
+<td>Weixin</td>
+<td><code>weixin</code>、<code>weixin:&lt;wxid&gt;</code></td>
+<td><code>weixin:wxid_abc123</code></td>
+</tr>
+<tr>
+<td>Mattermost</td>
+<td><code>mattermost</code> 或 <code>mattermost:&lt;channel_id&gt;</code></td>
+<td>裸名投递到 Mattermost 主频道</td>
+</tr>
+<tr>
+<td>Home Assistant</td>
+<td><code>homeassistant</code> 或 <code>homeassistant:&lt;conversation&gt;</code></td>
+<td>裸名投递到 HA 对话</td>
+</tr>
+<tr>
+<td>DingTalk</td>
+<td><code>dingtalk</code> 或 <code>dingtalk:&lt;chat_id&gt;</code></td>
+<td>裸名投递到钉钉</td>
+</tr>
+<tr>
+<td>WeCom</td>
+<td><code>wecom</code> 或 <code>wecom:&lt;chat_id&gt;</code></td>
+<td>裸名投递到企业微信</td>
+</tr>
+<tr>
+<td>BlueBubbles</td>
+<td><code>bluebubbles</code> 或 <code>bluebubbles:&lt;chat_guid&gt;</code></td>
+<td>裸名通过 BlueBubbles 投递到 iMessage</td>
+</tr>
+<tr>
+<td>QQ Bot</td>
+<td><code>qqbot</code> 或 <code>qqbot:&lt;chat_id&gt;</code></td>
+<td>裸名通过官方 API v2 投递到 QQ（腾讯）</td>
+</tr>
+</tbody>
+</table>
+<p>第一组平台具有显式、经校验的目标语法——具名频道（<code>#channel</code>）、话题/线程、房间/用户 ID、群组 ID 或电话号码。其余平台接受通用的 <code>platform:&lt;chat_id&gt;</code> 形式（冒号后的值原样用作目标 ID）；裸平台名始终投递到主频道。</p>
+<p><strong>具名频道</strong>（<code>slack:#engineering</code>、<code>discord:#engineering</code>，或像 <code>slack:engineering</code> 这样的友好名称）会根据 gateway 从已连接适配器构建的频道目录进行解析，因此 gateway 必须已发现该频道，名称解析才能成功；原始 ID（<code>slack:C0123ABCD45</code>）则始终可用。</p>
+<p>对于 <strong>Telegram 话题</strong>，使用 <code>telegram:&lt;chat_id&gt;:&lt;thread_id&gt;</code>（例如 <code>telegram:-1001234567890:17585</code>）。对于 <strong>Slack 线程</strong>，第三段是父消息的 <code>thread_ts</code>（例如 <code>slack:C0123ABCD45:1700000000.000100</code>），因此仅在回复某条已有消息下方时适用。</p>
+<h3 id="响应包装">响应包装</h3>
+<p>默认情况下（<code>cron.wrap_response: true</code>），cron 投递内容会被包装：
+- 头部标识 cron 任务名称和任务内容
+- 尾部说明 agent 无法在对话中看到已投递的消息</p>
+<p>cron 响应中的 <code>[SILENT]</code> 前缀会完全抑制投递——适用于只需写入文件或执行副作用的任务。</p>
+<h3 id="会话隔离">会话隔离</h3>
+<p>Cron 投递<strong>不会</strong>镜像到 gateway 会话的对话历史中。它们仅存在于 cron 任务自身的会话中。这可防止目标聊天对话中出现消息交替违规。</p>
+<h2 id="递归防护">递归防护</h2>
+<p>Cron 运行的会话已禁用 <code>cronjob</code> 工具集。这可防止：
+- 定时任务创建新的 cron 任务
+- 可能导致 token 用量爆炸的递归调度
+- 在任务内部意外修改任务调度</p>
+<h2 id="锁机制">锁机制</h2>
+<p>调度器使用跨进程文件锁（Unix 上的 <code>fcntl.flock</code>，Windows 上的 <code>msvcrt.locking</code>）防止重叠的 tick 对同一批到期任务执行两次——即使在 gateway 的进程内 ticker 与独立的 <code>hermes cron</code> / 手动 <code>tick()</code> 调用之间也如此。若无法获取锁，<code>tick()</code> 立即返回 0。</p>
+<h2 id="cli-接口">CLI 接口</h2>
+<p><code>hermes cron</code> CLI 提供直接的任务管理功能：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>cron<span class="w"> </span>list<span class="w">                    </span><span class="c1"># 显示所有任务</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>create<span class="w">                  </span><span class="c1"># 交互式创建任务（别名：add）</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>edit<span class="w"> </span>&lt;job_id&gt;<span class="w">           </span><span class="c1"># 编辑任务配置</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>pause<span class="w"> </span>&lt;job_id&gt;<span class="w">          </span><span class="c1"># 暂停运行中的任务</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>resume<span class="w"> </span>&lt;job_id&gt;<span class="w">         </span><span class="c1"># 恢复已暂停的任务</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>run<span class="w"> </span>&lt;job_id&gt;<span class="w">            </span><span class="c1"># 触发立即执行</span>
+hermes<span class="w"> </span>cron<span class="w"> </span>remove<span class="w"> </span>&lt;job_id&gt;<span class="w">         </span><span class="c1"># 删除任务</span>
+</code></pre></div>
+
+<h2 id="相关文档">相关文档</h2>
+<ul>
+<li><a href="../user-guide/features/cron.html">Cron 功能指南</a></li>
+<li><a href="gateway-internals.html">Gateway 内部机制</a></li>
+<li><a href="agent-loop.html">Agent 循环内部机制</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/cron-internals</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#关键文件">关键文件</a></li>
+<li class="lvl2"><a href="#调度模型">调度模型</a></li>
+<li class="lvl2"><a href="#任务存储">任务存储</a></li>
+<li class="lvl3"><a href="#任务生命周期状态">任务生命周期状态</a></li>
+<li class="lvl3"><a href="#向后兼容性">向后兼容性</a></li>
+<li class="lvl2"><a href="#调度器运行时">调度器运行时</a></li>
+<li class="lvl3"><a href="#tick-周期">Tick 周期</a></li>
+<li class="lvl3"><a href="#gateway-集成">Gateway 集成</a></li>
+<li class="lvl3"><a href="#全新会话隔离">全新会话隔离</a></li>
+<li class="lvl2"><a href="#技能支持的任务">技能支持的任务</a></li>
+<li class="lvl3"><a href="#脚本支持的任务">脚本支持的任务</a></li>
+<li class="lvl3"><a href="#provider-恢复">Provider 恢复</a></li>
+<li class="lvl2"><a href="#投递模型">投递模型</a></li>
+<li class="lvl3"><a href="#响应包装">响应包装</a></li>
+<li class="lvl3"><a href="#会话隔离">会话隔离</a></li>
+<li class="lvl2"><a href="#递归防护">递归防护</a></li>
+<li class="lvl2"><a href="#锁机制">锁机制</a></li>
+<li class="lvl2"><a href="#cli-接口">CLI 接口</a></li>
+<li class="lvl2"><a href="#相关文档">相关文档</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

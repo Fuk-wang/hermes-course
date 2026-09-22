@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Loop 内部机制 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / developer-guide/agent-loop</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="agent-loop-内部机制">Agent Loop 内部机制</h1>
+<p>核心编排引擎是 <code>run_agent.py</code> 中的 <code>AIAgent</code> 类——这是一个大型文件（15k+ 行），负责处理从 prompt（提示词）组装到工具分发再到 provider 故障转移的所有逻辑。</p>
+<h2 id="核心职责">核心职责</h2>
+<p><code>AIAgent</code> 负责：</p>
+<ul>
+<li>通过 <code>prompt_builder.py</code> 组装有效的系统 prompt 和工具 schema</li>
+<li>选择正确的 provider/API 模式（<code>chat_completions</code>、<code>codex_responses</code>、<code>anthropic_messages</code>）</li>
+<li>发起支持取消操作的可中断模型调用</li>
+<li>执行工具调用（顺序执行或通过线程池并发执行）</li>
+<li>以 OpenAI 消息格式维护对话历史</li>
+<li>处理压缩、重试和回退模型切换</li>
+<li>跨父 agent 和子 agent 追踪迭代预算</li>
+<li>在上下文丢失前将持久化内存刷写到磁盘</li>
+</ul>
+<h2 id="两个入口点">两个入口点</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># 简单接口——返回最终响应字符串</span>
+<span class="n">response</span> <span class="o">=</span> <span class="n">agent</span><span class="o">.</span><span class="n">chat</span><span class="p">(</span><span class="s2">&quot;Fix the bug in main.py&quot;</span><span class="p">)</span>
+
+<span class="c1"># 完整接口——返回包含消息、元数据、用量统计的 dict</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">agent</span><span class="o">.</span><span class="n">run_conversation</span><span class="p">(</span>
+    <span class="n">user_message</span><span class="o">=</span><span class="s2">&quot;Fix the bug in main.py&quot;</span><span class="p">,</span>
+    <span class="n">system_message</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>           <span class="c1"># 省略时自动构建</span>
+    <span class="n">conversation_history</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>      <span class="c1"># 省略时自动从 session 加载</span>
+    <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;task_abc123&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><code>chat()</code> 是对 <code>run_conversation()</code> 的轻量封装，从结果 dict 中提取 <code>final_response</code> 字段。</p>
+<h2 id="api-模式">API 模式</h2>
+<p>Hermes 支持三种 API 执行模式，通过 provider 选择、显式参数和 base URL 启发式规则来确定：</p>
+<table>
+<thead>
+<tr>
+<th>API 模式</th>
+<th>用途</th>
+<th>客户端类型</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>chat_completions</code></td>
+<td>兼容 OpenAI 的端点（OpenRouter、自定义及大多数 provider）</td>
+<td><code>openai.OpenAI</code></td>
+</tr>
+<tr>
+<td><code>codex_responses</code></td>
+<td>OpenAI Codex / Responses API</td>
+<td><code>openai.OpenAI</code>（使用 Responses 格式）</td>
+</tr>
+<tr>
+<td><code>anthropic_messages</code></td>
+<td>原生 Anthropic Messages API</td>
+<td>通过适配器使用 <code>anthropic.Anthropic</code></td>
+</tr>
+</tbody>
+</table>
+<p>模式决定了消息的格式化方式、工具调用的结构、响应的解析方式，以及缓存/流式传输的工作方式。三种模式在 API 调用前后均收敛到相同的内部消息格式（OpenAI 风格的 <code>role</code>/<code>content</code>/<code>tool_calls</code> dict）。</p>
+<p><strong>模式解析顺序：</strong>
+1. 显式 <code>api_mode</code> 构造函数参数（最高优先级）
+2. Provider 特定检测（例如 <code>anthropic</code> provider → <code>anthropic_messages</code>）
+3. Base URL 启发式规则（例如 <code>api.anthropic.com</code> → <code>anthropic_messages</code>）
+4. 默认：<code>chat_completions</code></p>
+<h2 id="单轮生命周期">单轮生命周期</h2>
+<p>agent loop 的每次迭代按以下顺序执行：</p>
+<div class="highlight"><pre><span></span><code>run_conversation()
+  1. 若未提供则生成 task_id
+  2. 将用户消息追加到对话历史
+  3. 构建或复用已缓存的系统 prompt（prompt_builder.py）
+  4. 检查是否需要预检压缩（上下文超过 50%）
+  5. 从对话历史构建 API 消息
+     - chat_completions：直接使用 OpenAI 格式
+     - codex_responses：转换为 Responses API 输入项
+     - anthropic_messages：通过 anthropic_adapter.py 转换
+  6. 注入临时 prompt 层（预算警告、上下文压力提示）
+  7. 若使用 Anthropic，应用 prompt 缓存标记
+  8. 发起可中断的 API 调用（_interruptible_api_call）
+  9. 解析响应：
+     - 若有 tool_calls：执行工具，追加结果，回到步骤 5
+     - 若为文本响应：持久化 session，按需刷写内存，返回
+</code></pre></div>
+
+<h3 id="消息格式">消息格式</h3>
+<p>所有消息在内部均使用兼容 OpenAI 的格式：</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;system&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">}</span>
+<span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">}</span>
+<span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;assistant&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="s2">&quot;tool_calls&quot;</span><span class="p">:</span> <span class="p">[</span><span class="o">...</span><span class="p">]}</span>
+<span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;tool&quot;</span><span class="p">,</span> <span class="s2">&quot;tool_call_id&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;...&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>推理内容（来自支持扩展思考的模型）存储在 <code>assistant_msg["reasoning"]</code> 中，并可选择通过 <code>reasoning_callback</code> 展示。</p>
+<h3 id="消息交替规则">消息交替规则</h3>
+<p>agent loop 强制执行严格的消息角色交替规则：</p>
+<ul>
+<li>系统消息之后：<code>User → Assistant → User → Assistant → ...</code></li>
+<li>工具调用期间：<code>Assistant（含 tool_calls）→ Tool → Tool → ... → Assistant</code></li>
+<li><strong>不允许</strong>连续出现两条 assistant 消息</li>
+<li><strong>不允许</strong>连续出现两条 user 消息</li>
+<li><strong>只有</strong> <code>tool</code> 角色可以连续出现（并行工具结果）</li>
+</ul>
+<p>Provider 会验证这些序列，并拒绝格式错误的历史记录。</p>
+<h2 id="可中断的-api-调用">可中断的 API 调用</h2>
+<p>API 请求被封装在 <code>_interruptible_api_call()</code> 中，该方法在后台线程中执行实际的 HTTP 调用，同时监听中断事件：</p>
+<div class="highlight"><pre><span></span><code>┌────────────────────────────────────────────────────┐
+│  主线程                        API 线程             │
+│                                                    │
+│   等待：                        HTTP POST           │
+│    - 响应就绪          ───▶    发送至 provider       │
+│    - 中断事件                                       │
+│    - 超时                                          │
+└────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<p>当发生中断（用户发送新消息、<code>/stop</code> 命令或信号）时：
+- API 线程被放弃（响应被丢弃）
+- agent 可以处理新输入或干净地关闭
+- 不会将部分响应注入对话历史</p>
+<h2 id="工具执行">工具执行</h2>
+<h3 id="顺序执行与并发执行">顺序执行与并发执行</h3>
+<p>当模型返回工具调用时：</p>
+<ul>
+<li><strong>单个工具调用</strong> → 直接在主线程中执行</li>
+<li><strong>多个工具调用</strong> → 通过 <code>ThreadPoolExecutor</code> 并发执行</li>
+<li>例外：标记为交互式的工具（如 <code>clarify</code>）强制顺序执行</li>
+<li>无论完成顺序如何，结果均按原始工具调用顺序重新插入</li>
+</ul>
+<h3 id="执行流程">执行流程</h3>
+<div class="highlight"><pre><span></span><code>for each tool_call in response.tool_calls:
+    1. 从 tools/registry.py 解析处理器
+    2. 触发 pre_tool_call 插件 hook
+    3. 检查是否为危险命令（tools/approval.py）
+       - 若危险：调用 approval_callback，等待用户确认
+    4. 使用参数 + task_id 执行处理器
+    5. 触发 post_tool_call 插件 hook
+    6. 将 {&quot;role&quot;: &quot;tool&quot;, &quot;content&quot;: result} 追加到历史
+</code></pre></div>
+
+<h3 id="agent-级工具">Agent 级工具</h3>
+<p>部分工具在到达 <code>handle_function_call()</code> 之前，由 <code>run_agent.py</code> <em>提前</em>拦截：</p>
+<table>
+<thead>
+<tr>
+<th>工具</th>
+<th>拦截原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>todo</code></td>
+<td>读写 agent 本地任务状态</td>
+</tr>
+<tr>
+<td><code>memory</code></td>
+<td>向持久化内存文件写入内容（有字符限制）</td>
+</tr>
+<tr>
+<td><code>session_search</code></td>
+<td>通过 agent 的 session DB 查询 session 历史</td>
+</tr>
+<tr>
+<td><code>delegate_task</code></td>
+<td>以隔离上下文生成子 agent</td>
+</tr>
+</tbody>
+</table>
+<p>这些工具直接修改 agent 状态，并返回合成的工具结果，不经过注册表。</p>
+<h2 id="回调接口">回调接口</h2>
+<p><code>AIAgent</code> 支持平台特定的回调，用于在 CLI、gateway 和 ACP 集成中实现实时进度展示：</p>
+<table>
+<thead>
+<tr>
+<th>回调</th>
+<th>触发时机</th>
+<th>使用方</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tool_progress_callback</code></td>
+<td>每次工具执行前后</td>
+<td>CLI spinner、gateway 进度消息</td>
+</tr>
+<tr>
+<td><code>thinking_callback</code></td>
+<td>模型开始/停止思考时</td>
+<td>CLI "thinking..." 指示器</td>
+</tr>
+<tr>
+<td><code>reasoning_callback</code></td>
+<td>模型返回推理内容时</td>
+<td>CLI 推理展示、gateway 推理块</td>
+</tr>
+<tr>
+<td><code>clarify_callback</code></td>
+<td>调用 <code>clarify</code> 工具时</td>
+<td>CLI 输入提示、gateway 交互消息</td>
+</tr>
+<tr>
+<td><code>step_callback</code></td>
+<td>每次完整 agent 轮次结束后</td>
+<td>Gateway 步骤追踪、ACP 进度</td>
+</tr>
+<tr>
+<td><code>stream_delta_callback</code></td>
+<td>每个流式 token（启用时）</td>
+<td>CLI 流式展示</td>
+</tr>
+<tr>
+<td><code>tool_gen_callback</code></td>
+<td>从流中解析出工具调用时</td>
+<td>CLI spinner 中的工具预览</td>
+</tr>
+<tr>
+<td><code>status_callback</code></td>
+<td>状态变更时（思考、执行等）</td>
+<td>ACP 状态更新</td>
+</tr>
+</tbody>
+</table>
+<h2 id="预算与回退行为">预算与回退行为</h2>
+<h3 id="迭代预算">迭代预算</h3>
+<p>agent 通过 <code>IterationBudget</code> 追踪迭代次数：</p>
+<ul>
+<li>默认：500 次迭代（可通过 <code>agent.max_turns</code> 配置）</li>
+<li>每个 agent 拥有独立预算。子 agent 获得独立预算，上限为 <code>delegation.max_iterations</code>（默认 50）——父 agent 与子 agent 的总迭代次数可超过父 agent 的上限</li>
+<li>达到 100% 时，agent 停止并返回已完成工作的摘要</li>
+</ul>
+<h3 id="回退模型">回退模型</h3>
+<p>当主模型失败时（429 限流、5xx 服务器错误、401/403 鉴权错误）：</p>
+<ol>
+<li>检查配置中的 <code>fallback_providers</code> 列表</li>
+<li>按顺序尝试每个回退 provider</li>
+<li>成功后，使用新 provider 继续对话</li>
+<li>遇到 401/403 时，在故障转移前尝试刷新凭据</li>
+</ol>
+<p>回退系统也独立覆盖辅助任务——视觉、压缩和网页提取各自拥有独立的回退链，可通过 <code>auxiliary.*</code> 配置节进行配置。</p>
+<h2 id="压缩与持久化">压缩与持久化</h2>
+<h3 id="压缩触发时机">压缩触发时机</h3>
+<ul>
+<li><strong>预检</strong>（API 调用前）：对话超过模型上下文窗口的 50%</li>
+<li><strong>Gateway 自动压缩</strong>：对话超过 85%（更激进，在轮次之间运行）</li>
+</ul>
+<h3 id="压缩过程">压缩过程</h3>
+<ol>
+<li>首先将内存刷写到磁盘（防止数据丢失）</li>
+<li>将中间对话轮次摘要为紧凑的摘要内容</li>
+<li>保留最后 N 条消息完整不变（<code>compression.protect_last_n</code>，默认：20）</li>
+<li>工具调用/结果消息对保持完整（不拆分）</li>
+<li>生成新的 session 血缘 ID（压缩会创建一个"子" session）</li>
+</ol>
+<h3 id="session-持久化">Session 持久化</h3>
+<p>每轮结束后：
+- 消息保存到 session 存储（通过 <code>hermes_state.py</code> 使用 SQLite）
+- 内存变更刷写到 <code>MEMORY.md</code> / <code>USER.md</code>
+- 可通过 <code>/resume</code> 或 <code>hermes chat --resume</code> 恢复 session</p>
+<h2 id="关键源文件">关键源文件</h2>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>run_agent.py</code></td>
+<td>AIAgent 类——完整的 agent loop</td>
+</tr>
+<tr>
+<td><code>agent/prompt_builder.py</code></td>
+<td>从内存、技能、上下文文件和个性组装系统 prompt</td>
+</tr>
+<tr>
+<td><code>agent/context_engine.py</code></td>
+<td>ContextEngine ABC——可插拔的上下文管理</td>
+</tr>
+<tr>
+<td><code>agent/context_compressor.py</code></td>
+<td>默认引擎——有损摘要算法</td>
+</tr>
+<tr>
+<td><code>agent/prompt_caching.py</code></td>
+<td>Anthropic prompt 缓存标记和缓存指标</td>
+</tr>
+<tr>
+<td><code>agent/auxiliary_client.py</code></td>
+<td>用于辅助任务的辅助 LLM 客户端（视觉、摘要）</td>
+</tr>
+<tr>
+<td><code>model_tools.py</code></td>
+<td>工具 schema 集合，<code>handle_function_call()</code> 分发</td>
+</tr>
+</tbody>
+</table>
+<h2 id="相关文档">相关文档</h2>
+<ul>
+<li><a href="provider-runtime.html">Provider 运行时解析</a></li>
+<li><a href="prompt-assembly.html">Prompt 组装</a></li>
+<li><a href="context-compression-and-caching.html">上下文压缩与 Prompt 缓存</a></li>
+<li><a href="tools-runtime.html">工具运行时</a></li>
+<li><a href="architecture.html">架构概览</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/developer-guide/agent-loop</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#核心职责">核心职责</a></li>
+<li class="lvl2"><a href="#两个入口点">两个入口点</a></li>
+<li class="lvl2"><a href="#api-模式">API 模式</a></li>
+<li class="lvl2"><a href="#单轮生命周期">单轮生命周期</a></li>
+<li class="lvl3"><a href="#消息格式">消息格式</a></li>
+<li class="lvl3"><a href="#消息交替规则">消息交替规则</a></li>
+<li class="lvl2"><a href="#可中断的-api-调用">可中断的 API 调用</a></li>
+<li class="lvl2"><a href="#工具执行">工具执行</a></li>
+<li class="lvl3"><a href="#顺序执行与并发执行">顺序执行与并发执行</a></li>
+<li class="lvl3"><a href="#执行流程">执行流程</a></li>
+<li class="lvl3"><a href="#agent-级工具">Agent 级工具</a></li>
+<li class="lvl2"><a href="#回调接口">回调接口</a></li>
+<li class="lvl2"><a href="#预算与回退行为">预算与回退行为</a></li>
+<li class="lvl3"><a href="#迭代预算">迭代预算</a></li>
+<li class="lvl3"><a href="#回退模型">回退模型</a></li>
+<li class="lvl2"><a href="#压缩与持久化">压缩与持久化</a></li>
+<li class="lvl3"><a href="#压缩触发时机">压缩触发时机</a></li>
+<li class="lvl3"><a href="#压缩过程">压缩过程</a></li>
+<li class="lvl3"><a href="#session-持久化">Session 持久化</a></li>
+<li class="lvl2"><a href="#关键源文件">关键源文件</a></li>
+<li class="lvl2"><a href="#相关文档">相关文档</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

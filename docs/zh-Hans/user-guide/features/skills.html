@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skills 系统 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/features/skills</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="skills-系统">Skills 系统</h1>
+<p>Skills 是 agent 在需要时可以加载的按需知识文档。它们遵循<strong>渐进式披露</strong>（progressive disclosure）模式以最小化 token 用量，并兼容 <a href="https://agentskills.io/specification" class="ext" target="_blank" rel="noopener">agentskills.io</a> 开放标准。</p>
+<p>所有 skills 存放在 <strong><code>~/.hermes/skills/</code></strong> 中——这是主目录和唯一可信来源。全新安装时，捆绑的 skills 会从仓库复制过来。通过 Hub 安装和 agent 创建的 skills 也存放在此处。agent 可以修改或删除任何 skill。</p>
+<p>你也可以让 Hermes 指向<strong>外部 skill 目录</strong>——与本地目录一起扫描的额外文件夹。参见下方的<a href="../../../user-guide/features/skills.html#external-skill-directories" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">外部 Skill 目录</a>。</p>
+<p>另请参阅：</p>
+<ul>
+<li><a href="../../reference/skills-catalog.html">捆绑 Skills 目录</a></li>
+<li><a href="../../reference/optional-skills-catalog.html">官方可选 Skills 目录</a></li>
+</ul>
+<h2 id="使用-skills">使用 Skills</h2>
+<p>每个已安装的 skill 都会自动作为斜杠命令可用：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 在 CLI 或任何消息平台中：</span>
+/gif-search<span class="w"> </span>funny<span class="w"> </span>cats
+/axolotl<span class="w"> </span><span class="nb">help</span><span class="w"> </span>me<span class="w"> </span>fine-tune<span class="w"> </span>Llama<span class="w"> </span><span class="m">3</span><span class="w"> </span>on<span class="w"> </span>my<span class="w"> </span>dataset
+/github-pr-workflow<span class="w"> </span>create<span class="w"> </span>a<span class="w"> </span>PR<span class="w"> </span><span class="k">for</span><span class="w"> </span>the<span class="w"> </span>auth<span class="w"> </span>refactor
+/songsee<span class="w"> </span>analyze<span class="w"> </span>the<span class="w"> </span>frequency<span class="w"> </span>spread<span class="w"> </span>of<span class="w"> </span>this<span class="w"> </span>mix
+
+<span class="c1"># 只输入 skill 名称即可加载它，并让 agent 询问你的需求：</span>
+/excalidraw
+</code></pre></div>
+
+<p>（计划模式的工作方式相同，但现在是内置命令：<code>/plan [request]</code> 告知 Hermes 在需要时检查上下文、编写 markdown 实现计划而非直接执行任务，并将结果保存在相对于当前工作区/后端工作目录的 <code>.hermes/plans/</code> 下。）</p>
+<p>你也可以通过自然对话与 skills 交互：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>chat<span class="w"> </span>--toolsets<span class="w"> </span>skills<span class="w"> </span>-q<span class="w"> </span><span class="s2">&quot;What skills do you have?&quot;</span>
+hermes<span class="w"> </span>chat<span class="w"> </span>--toolsets<span class="w"> </span>skills<span class="w"> </span>-q<span class="w"> </span><span class="s2">&quot;Show me the axolotl skill&quot;</span>
+</code></pre></div>
+
+<h2 id="渐进式披露">渐进式披露</h2>
+<p>Skills 使用一种节省 token 的加载模式：</p>
+<div class="highlight"><pre><span></span><code>Level 0: skills_list()           → [{name, description, category}, ...]   (~3k tokens)
+Level 1: skill_view(name)        → Full content + metadata       (varies)
+Level 2: skill_view(name, path)  → Specific reference file       (varies)
+</code></pre></div>
+
+<p>agent 只在真正需要时才加载完整的 skill 内容。</p>
+<h2 id="skillmd-格式">SKILL.md 格式</h2>
+<div class="highlight"><pre><span></span><code>---
+name: my-skill
+description: Brief description of what this skill does
+version: 1.0.0
+platforms: [macos, linux]     # Optional — restrict to specific OS platforms
+metadata:
+  hermes:
+    tags: [python, automation]
+    category: devops
+    fallback_for_toolsets: [web]    # Optional — conditional activation (see below)
+    requires_toolsets: [terminal]   # Optional — conditional activation (see below)
+    config:                          # Optional — config.yaml settings
+<span class="w">      </span><span class="k">-</span><span class="w"> </span>key: my.setting
+        description: &quot;What this controls&quot;
+        default: &quot;value&quot;
+<span class="gu">        prompt: &quot;Prompt for setup&quot;</span>
+<span class="gu">---</span>
+
+<span class="gh"># Skill Title</span>
+
+<span class="gu">## When to Use</span>
+Trigger conditions for this skill.
+
+<span class="gu">## Procedure</span>
+<span class="k">1.</span> Step one
+<span class="k">2.</span> Step two
+
+<span class="gu">## Pitfalls</span>
+<span class="k">-</span><span class="w"> </span>Known failure modes and fixes
+
+<span class="gu">## Verification</span>
+How to confirm it worked.
+</code></pre></div>
+
+<h3 id="平台特定-skills">平台特定 Skills</h3>
+<p>Skills 可以使用 <code>platforms</code> 字段将自身限制在特定操作系统上：</p>
+<table>
+<thead>
+<tr>
+<th>值</th>
+<th>匹配</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>macos</code></td>
+<td>macOS（Darwin）</td>
+</tr>
+<tr>
+<td><code>linux</code></td>
+<td>Linux</td>
+</tr>
+<tr>
+<td><code>windows</code></td>
+<td>Windows</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">macos</span><span class="p p-Indicator">]</span><span class="w">            </span><span class="c1"># macOS only (e.g., iMessage, Apple Reminders, FindMy)</span>
+<span class="nt">platforms</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">macos</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">linux</span><span class="p p-Indicator">]</span><span class="w">     </span><span class="c1"># macOS and Linux</span>
+</code></pre></div>
+
+<p>设置后，该 skill 会在不兼容的平台上自动从系统提示词、<code>skills_list()</code> 和斜杠命令中隐藏。若省略，则在所有平台上加载。</p>
+<h2 id="skill-输出与媒体传递">Skill 输出与媒体传递</h2>
+<p>当 skill 响应（或任何 agent 响应）包含指向媒体文件的裸绝对路径时——例如 <code>/home/user/screenshots/diagram.png</code>——gateway 会自动检测到它，将其从可见文本中剥离，并以原生方式将文件传递给用户的聊天界面（Telegram 图片、Discord 附件等），而不是在消息中留下原始路径。</p>
+<p>对于音频，<code>[[audio_as_voice]]</code> 指令会将音频文件提升为在支持该功能的平台（Telegram、WhatsApp）上的原生语音消息气泡。</p>
+<h3 id="强制文档式传递as_document">强制文档式传递：<code>[[as_document]]</code></h3>
+<p>有时你需要与内联预览<strong>相反</strong>的效果：你希望文件作为可下载附件传递，而不是经过重新压缩的图片气泡。典型示例是高分辨率截图或图表——Telegram 的 <code>sendPhoto</code> 会将其重新压缩至约 200 KB、1280 px，严重影响可读性。通过 <code>sendDocument</code> 发送的 1-2 MB PNG 则保留原始字节完整无损。</p>
+<p>如果响应（或其中任何文本——通常是最后一行）包含字面指令 <code>[[as_document]]</code>，则从该响应中提取的每个媒体路径都会作为文档/文件附件传递，而不是图片气泡：</p>
+<div class="highlight"><pre><span></span><code>Here is your rendered chart:
+
+/home/user/.hermes/cache/chart-q4-2025.png
+
+[[as_document]]
+</code></pre></div>
+
+<p>该指令在传递前会被剥离，用户不会看到它。粒度有意设计为每个响应全有或全无：发出一次 <code>[[as_document]]</code>，同一响应中的每个图片路径都会作为文档传递。这与 <code>[[audio_as_voice]]</code> 的作用范围一致。</p>
+<p>在以下情况下从 skill 中使用它：</p>
+<ul>
+<li>你生成了用户需要作为文件的截图或图表（用于在其他工具中编辑、存档、完整分享）。</li>
+<li>默认的有损预览会遮蔽细节（小字体、像素精确的图表、对颜色敏感的渲染）。</li>
+</ul>
+<p>没有单独文档路径的平台（如 SMS）会回退到其支持的任何附件机制。</p>
+<h3 id="条件激活fallback-skills">条件激活（Fallback Skills）</h3>
+<p>Skills 可以根据当前会话中可用的工具自动显示或隐藏自身。这对于<strong>fallback skills</strong>（回退 skills）最为有用——仅在高级工具不可用时才应出现的免费或本地替代方案。</p>
+<div class="highlight"><pre><span></span><code><span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">fallback_for_toolsets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">web</span><span class="p p-Indicator">]</span><span class="w">      </span><span class="c1"># Show ONLY when these toolsets are unavailable</span>
+<span class="w">    </span><span class="nt">requires_toolsets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">terminal</span><span class="p p-Indicator">]</span><span class="w">     </span><span class="c1"># Show ONLY when these toolsets are available</span>
+<span class="w">    </span><span class="nt">fallback_for_tools</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">web_search</span><span class="p p-Indicator">]</span><span class="w">  </span><span class="c1"># Show ONLY when these specific tools are unavailable</span>
+<span class="w">    </span><span class="nt">requires_tools</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">terminal</span><span class="p p-Indicator">]</span><span class="w">        </span><span class="c1"># Show ONLY when these specific tools are available</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fallback_for_toolsets</code></td>
+<td>当列出的 toolsets 可用时，skill <strong>隐藏</strong>。不可用时显示。</td>
+</tr>
+<tr>
+<td><code>fallback_for_tools</code></td>
+<td>同上，但检查单个工具而非 toolsets。</td>
+</tr>
+<tr>
+<td><code>requires_toolsets</code></td>
+<td>当列出的 toolsets 不可用时，skill <strong>隐藏</strong>。可用时显示。</td>
+</tr>
+<tr>
+<td><code>requires_tools</code></td>
+<td>同上，但检查单个工具。</td>
+</tr>
+</tbody>
+</table>
+<p><strong>示例：</strong> 内置的 <code>duckduckgo-search</code> skill 使用 <code>fallback_for_toolsets: [web]</code>。当你设置了 <code>FIRECRAWL_API_KEY</code> 时，web toolset 可用，agent 使用 <code>web_search</code>——DuckDuckGo skill 保持隐藏。如果 API key 缺失，web toolset 不可用，DuckDuckGo skill 会自动作为 fallback 出现。</p>
+<p>没有任何条件字段的 skills 行为与之前完全相同——始终显示。</p>
+<h2 id="加载时的安全设置">加载时的安全设置</h2>
+<p>Skills 可以声明所需的环境变量，而不会从发现列表中消失：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">required_environment_variables</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">TENOR_API_KEY</span>
+<span class="w">    </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Tenor API key</span>
+<span class="w">    </span><span class="nt">help</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Get a key from https://developers.google.com/tenor</span>
+<span class="w">    </span><span class="nt">required_for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">full functionality</span>
+</code></pre></div>
+
+<p>当遇到缺失的值时，Hermes 仅在本地 CLI 中实际加载 skill 时才会安全地请求输入。你可以跳过设置并继续使用该 skill。消息平台不会在聊天中请求密钥——它们会告诉你改用本地的 <code>hermes setup</code> 或 <code>~/.hermes/.env</code>。</p>
+<p>一旦设置，声明的环境变量会<strong>自动传递</strong>到 <code>execute_code</code> 和 <code>terminal</code> 沙箱——skill 的脚本可以直接使用 <code>$TENOR_API_KEY</code>。对于非 skill 的环境变量，使用 <code>terminal.env_passthrough</code> 配置选项。详情参见<a href="../security.html#environment-variable-passthrough">环境变量传递</a>。</p>
+<h3 id="skill-配置设置">Skill 配置设置</h3>
+<p>Skills 还可以声明存储在 <code>config.yaml</code> 中的非密钥配置设置（路径、偏好项）：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">config</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">myplugin.path</span>
+<span class="w">        </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Path to the plugin data directory</span>
+<span class="w">        </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;~/myplugin-data&quot;</span>
+<span class="w">        </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Plugin data directory path</span>
+</code></pre></div>
+
+<p>设置存储在 config.yaml 的 <code>skills.config</code> 下。<code>hermes config migrate</code> 会提示配置未设置的项，<code>hermes config show</code> 会显示它们。当 skill 加载时，其解析后的配置值会注入到上下文中，agent 会自动知晓已配置的值。</p>
+<p>详情参见 <a href="../../../user-guide/configuration.html#skill-settings" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">Skill 设置</a> 和<a href="../../../developer-guide/creating-skills.html#config-settings-configyaml" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">创建 Skills——配置设置</a>。</p>
+<h2 id="skill-目录结构">Skill 目录结构</h2>
+<div class="highlight"><pre><span></span><code>~/.hermes/skills/                  # Single source of truth
+├── mlops/                         # Category directory
+│   ├── axolotl/
+│   │   ├── SKILL.md               # Main instructions (required)
+│   │   ├── references/            # Additional docs
+│   │   ├── templates/             # Output formats
+│   │   ├── scripts/               # Helper scripts callable from the skill
+│   │   ├── examples/              # Referenced example outputs
+│   │   └── assets/                # Supplementary files
+│   └── vllm/
+│       └── SKILL.md
+├── devops/
+│   └── deploy-k8s/                # Agent-created skill
+│       ├── SKILL.md
+│       └── references/
+├── .hub/                          # Skills Hub state
+│   ├── lock.json
+│   ├── quarantine/
+│   └── audit.log
+└── .bundled_manifest              # Tracks seeded bundled skills
+</code></pre></div>
+
+<p>通过第三方 URL 或 GitHub 安装时，Hermes 会安装 <code>SKILL.md</code>，以及其中明确引用且位于 <code>references/</code>、<code>templates/</code>、<code>scripts/</code>、<code>assets/</code> 和 <code>examples/</code> 下的文件。未引用的仓库文件不会被复制。Hermes 会扫描完整的隔离捆绑包，并在 <code>skills/.hub/lock.json</code> 中记录来源 URL、精确内容哈希、扫描器版本、发现项、时间戳，以及本次结果是新扫描还是缓存复用。</p>
+<h2 id="外部-skill-目录">外部 Skill 目录</h2>
+<p>如果你在 Hermes 之外维护 skills——例如，供多个 AI 工具使用的共享 <code>~/.agents/skills/</code> 目录——你可以告诉 Hermes 也扫描这些目录。</p>
+<p>在 <code>~/.hermes/config.yaml</code> 的 <code>skills</code> 部分下添加 <code>external_dirs</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">skills</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">external_dirs</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.agents/skills</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/home/shared/team-skills</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${SKILLS_REPO}/skills</span>
+</code></pre></div>
+
+<p>路径支持 <code>~</code> 展开和 <code>${VAR}</code> 环境变量替换。</p>
+<h3 id="工作原理">工作原理</h3>
+<ul>
+<li><strong>本地创建，就地更新</strong>：新的 agent 创建的 skills 写入 <code>~/.hermes/skills/</code>。现有 skills 在找到的位置被修改，包括 <code>external_dirs</code> 下的 skills，当 agent 使用 <code>skill_manage</code> 操作（如 <code>patch</code>、<code>edit</code>、<code>write_file</code>、<code>remove_file</code> 或 <code>delete</code>）时。</li>
+<li><strong>外部目录不是写保护边界</strong>：如果外部 skill 目录对 Hermes 进程可写，agent 管理的 skill 更新可以修改该目录中的文件。如果共享的外部 skills 必须保持只读，请使用文件系统权限或单独的 profile/toolset 设置。</li>
+<li><strong>本地优先</strong>：如果同一 skill 名称同时存在于本地目录和外部目录中，本地版本优先。</li>
+<li><strong>完整集成</strong>：外部 skills 出现在系统提示词索引、<code>skills_list</code>、<code>skill_view</code> 以及 <code>/skill-name</code> 斜杠命令中——与本地 skills 无异。</li>
+<li><strong>不存在的路径会被静默跳过</strong>：如果配置的目录不存在，Hermes 会忽略它而不报错。适用于可能不在每台机器上都存在的可选共享目录。</li>
+</ul>
+<h3 id="示例">示例</h3>
+<div class="highlight"><pre><span></span><code>~/.hermes/skills/               # Local (primary, read-write)
+├── devops/deploy-k8s/
+│   └── SKILL.md
+└── mlops/axolotl/
+    └── SKILL.md
+
+~/.agents/skills/               # External (shared, mutable if writable)
+├── my-custom-workflow/
+│   └── SKILL.md
+└── team-conventions/
+    └── SKILL.md
+</code></pre></div>
+
+<p>所有四个 skills 都出现在你的 skill 索引中。如果你在本地创建一个名为 <code>my-custom-workflow</code> 的新 skill，它会遮蔽外部版本。</p>
+<h2 id="skill-捆绑包">Skill 捆绑包</h2>
+<p>Skill 捆绑包是将多个 skills 归组在单个斜杠命令下的小型 YAML 文件。当你运行 <code>/&lt;bundle-name&gt;</code> 时，捆绑包中列出的每个 skill 都会同时加载——当某个特定任务总是受益于同一组 skills 时非常有用。</p>
+<h3 id="快速示例">快速示例</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 为后端功能开发创建一个捆绑包</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>create<span class="w"> </span>backend-dev<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>github-code-review<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>test-driven-development<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--skill<span class="w"> </span>github-pr-workflow<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;Backend feature work — review, test, PR workflow&quot;</span>
+</code></pre></div>
+
+<p>然后在 CLI 或任何 gateway 平台中：</p>
+<div class="highlight"><pre><span></span><code>/backend-dev refactor the auth middleware
+</code></pre></div>
+
+<p>agent 接收到所有三个 skills 加载到一条用户消息中，斜杠命令后的任何文本都作为用户指令附加。</p>
+<h3 id="yaml-模式">YAML 模式</h3>
+<p>捆绑包存放在 <strong><code>~/.hermes/skill-bundles/&lt;slug&gt;.yaml</code></strong> 中，格式如下：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backend-dev</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Backend feature work — review, test, PR workflow.</span>
+<span class="nt">skills</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">github-code-review</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">test-driven-development</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">github-pr-workflow</span>
+<span class="nt">instruction</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">  </span><span class="no">Always start by writing failing tests, then implement.</span>
+<span class="w">  </span><span class="no">Open the PR through the standard workflow with co-author tags.</span>
+</code></pre></div>
+
+<p>字段说明：
+- <code>name</code>（可选——默认为文件名主干）——捆绑包的显示名称。规范化为连字符 slug 用于斜杠命令（<code>Backend Dev</code> → <code>/backend-dev</code>）。
+- <code>description</code>（可选）——在 <code>/bundles</code> 和 <code>hermes bundles list</code> 中显示的简短文本。
+- <code>skills</code>（必填，非空列表）——skill 名称或相对于你的 skills 目录的路径。使用与 <code>/&lt;skill-name&gt;</code> 相同的标识符。
+- <code>instruction</code>（可选）——附加在加载的 skill 内容前的额外指导。适用于固化"我们总是这样一起使用这些 skills"的方式。</p>
+<h3 id="管理捆绑包">管理捆绑包</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># 列出所有已安装的捆绑包</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>list
+
+<span class="c1"># 查看某个捆绑包</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>show<span class="w"> </span>backend-dev
+
+<span class="c1"># 交互式创建捆绑包（省略 --skill 标志以逐行输入）</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>create<span class="w"> </span>research
+
+<span class="c1"># 覆盖现有捆绑包</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>create<span class="w"> </span>backend-dev<span class="w"> </span>--skill<span class="w"> </span>...<span class="w"> </span>--force
+
+<span class="c1"># 删除捆绑包</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>delete<span class="w"> </span>backend-dev
+
+<span class="c1"># 重新扫描 ~/.hermes/skill-bundles/ 并报告变更</span>
+hermes<span class="w"> </span>bundles<span class="w"> </span>reload
+</code></pre></div>
+
+<p>在聊天会话中，<code>/bundles</code> 会列出每个已安装的捆绑包及其 skills。</p>
+<h3 id="行为">行为</h3>
+<ul>
+<li><strong>当 slug 冲突时，捆绑包优先于单个 skills。</strong> 如果你将捆绑包命名为 <code>research</code>，同时也有一个名为 <code>research</code> 的 skill，<code>/research</code> 会调用捆绑包。这是有意为之——你通过命名选择了捆绑包。</li>
+<li><strong>缺失的 skills 会被跳过，而不是致命错误。</strong> 如果捆绑包列出了 <code>skill-foo</code> 但你未安装它，捆绑包仍会加载能解析的 skills，agent 会收到一条列出跳过内容的说明。</li>
+<li><strong>捆绑包在每个界面都有效</strong>——交互式 CLI、TUI、仪表板聊天以及每个 gateway 平台（Telegram、Discord、Slack……）——因为调度与单个 skill 命令集中在同一位置。</li>
+<li><strong>捆绑包不会使 prompt 缓存失效。</strong> 它们在调用时生成一条新的用户消息，与 <code>/&lt;skill-name&gt;</code> 的方式相同——不修改系统提示词。</li>
+</ul>
+<h3 id="捆绑包优于逐个手动安装-skill-的场景">捆绑包优于逐个手动安装 skill 的场景</h3>
+<p>在以下情况下使用捆绑包：
+- 你总是为某个重复任务配对相同的 skills（<code>/backend-dev</code>、<code>/release-prep</code>、<code>/incident-response</code>）。
+- 你想要比依次输入多个 <code>/skill</code> 调用更简洁的心智模型。
+- 你想通过将捆绑包 YAML 提交到共享 dotfiles 仓库并符号链接到 <code>~/.hermes/skill-bundles/</code> 来发布团队范围的"任务配置文件"。</p>
+<p>捆绑包只是一个 YAML 别名——它不会为你安装 skills。Skills 本身必须已经存在（在 <code>~/.hermes/skills/</code> 或外部 skill 目录中）。否则捆绑包调用只会跳过缺失的 skills。</p>
+<h2 id="agent-管理的-skillsskill_manage-工具">Agent 管理的 Skills（skill_manage 工具）</h2>
+<p>agent 可以通过 <code>skill_manage</code> 工具创建、更新和删除自己的 skills。这是 agent 的<strong>程序性记忆</strong>——当它找到一个非平凡的工作流时，它会将该方法保存为 skill 以供将来复用。</p>
+<h3 id="agent-创建-skills-的时机">Agent 创建 Skills 的时机</h3>
+<ul>
+<li>成功完成复杂任务后（5+ 次工具调用）</li>
+<li>遇到错误或死路并找到可行路径时</li>
+<li>用户纠正了其方法时</li>
+<li>发现了非平凡的工作流时</li>
+</ul>
+<h3 id="操作">操作</h3>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>用途</th>
+<th>关键参数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>create</code></td>
+<td>从头创建新 skill</td>
+<td><code>name</code>、<code>content</code>（完整 SKILL.md）、可选 <code>category</code></td>
+</tr>
+<tr>
+<td><code>patch</code></td>
+<td>针对性修复（首选）</td>
+<td><code>name</code>、<code>old_string</code>、<code>new_string</code></td>
+</tr>
+<tr>
+<td><code>edit</code></td>
+<td>重大结构性重写</td>
+<td><code>name</code>、<code>content</code>（完整 SKILL.md 替换）</td>
+</tr>
+<tr>
+<td><code>delete</code></td>
+<td>完全删除一个 skill</td>
+<td><code>name</code></td>
+</tr>
+<tr>
+<td><code>write_file</code></td>
+<td>添加/更新支持文件</td>
+<td><code>name</code>、<code>file_path</code>、<code>file_content</code></td>
+</tr>
+<tr>
+<td><code>remove_file</code></td>
+<td>删除支持文件</td>
+<td><code>name</code>、<code>file_path</code></td>
+</tr>
+</tbody>
+</table>
+<div class="admonition adm-tip"><p class="adm-title">提示</p>
+<p><code>patch</code> 操作是更新的首选方式——它比 <code>edit</code> 更节省 token，因为工具调用中只出现变更的文本。</p>
+</div>
+<h2 id="skills-hub">Skills Hub</h2>
+<p>从在线注册表、<code>skills.sh</code>、直接的知名 skill 端点以及官方可选 skills 中浏览、搜索、安装和管理 skills。</p>
+<h3 id="常用命令">常用命令</h3>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>browse<span class="w">                              </span><span class="c1"># Browse all hub skills (official first)</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>browse<span class="w"> </span>--source<span class="w"> </span>official<span class="w">            </span><span class="c1"># Browse only official optional skills</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>kubernetes<span class="w">                   </span><span class="c1"># Search all sources</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>react<span class="w"> </span>--source<span class="w"> </span>skills-sh<span class="w">     </span><span class="c1"># Search the skills.sh directory</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>https://mintlify.com/docs<span class="w"> </span>--source<span class="w"> </span>well-known
+hermes<span class="w"> </span>skills<span class="w"> </span>inspect<span class="w"> </span>openai/skills/k8s<span class="w">           </span><span class="c1"># Preview before installing</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>openai/skills/k8s<span class="w">           </span><span class="c1"># Install with security scan</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>official/security/1password
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>skills-sh/vercel-labs/json-render/json-render-react<span class="w"> </span>--force
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>well-known:https://mintlify.com/docs/.well-known/skills/mintlify
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>https://sharethis.chat/SKILL.md<span class="w">              </span><span class="c1"># 直接 URL（含引用的支持文件）</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>https://example.com/SKILL.md<span class="w"> </span>--name<span class="w"> </span>my-skill<span class="w"> </span><span class="c1"># Override name when frontmatter has none</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>list<span class="w"> </span>--source<span class="w"> </span>hub<span class="w">                   </span><span class="c1"># List hub-installed skills</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>check<span class="w">                               </span><span class="c1"># Check installed hub skills for upstream updates</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>update<span class="w">                              </span><span class="c1"># Reinstall hub skills with upstream changes when needed</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>audit<span class="w">                               </span><span class="c1"># Re-scan all hub skills for security</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>uninstall<span class="w"> </span>k8s<span class="w">                       </span><span class="c1"># Remove a hub skill</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>reset<span class="w"> </span>google-workspace<span class="w">              </span><span class="c1"># Un-stick a bundled skill from &quot;user-modified&quot; (see below)</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>reset<span class="w"> </span>google-workspace<span class="w"> </span>--restore<span class="w">    </span><span class="c1"># Also restore the bundled version, deleting your local edits</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>publish<span class="w"> </span>skills/my-skill<span class="w"> </span>--to<span class="w"> </span>github<span class="w"> </span>--repo<span class="w"> </span>owner/repo
+hermes<span class="w"> </span>skills<span class="w"> </span>snapshot<span class="w"> </span><span class="nb">export</span><span class="w"> </span>setup.json<span class="w">          </span><span class="c1"># Export skill config</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>add<span class="w"> </span>myorg/skills-repo<span class="w">           </span><span class="c1"># Add a custom GitHub source</span>
+</code></pre></div>
+
+<h3 id="支持的-hub-来源">支持的 hub 来源</h3>
+<table>
+<thead>
+<tr>
+<th>来源</th>
+<th>示例</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>official</code></td>
+<td><code>official/security/1password</code></td>
+<td>Hermes 随附的可选 skills。</td>
+</tr>
+<tr>
+<td><code>skills-sh</code></td>
+<td><code>skills-sh/vercel-labs/agent-skills/vercel-react-best-practices</code></td>
+<td>可通过 <code>hermes skills search &lt;query&gt; --source skills-sh</code> 搜索。当 skills.sh slug 与仓库文件夹不同时，Hermes 会解析别名式 skills。</td>
+</tr>
+<tr>
+<td><code>well-known</code></td>
+<td><code>well-known:https://mintlify.com/docs/.well-known/skills/mintlify</code></td>
+<td>直接从网站的 <code>/.well-known/skills/index.json</code> 提供的 skills。使用站点或文档 URL 搜索。</td>
+</tr>
+<tr>
+<td><code>url</code></td>
+<td><code>https://sharethis.chat/SKILL.md</code></td>
+<td>指向 <code>SKILL.md</code> 及其明确引用的支持文件的直接 HTTP(S) URL。名称解析顺序：frontmatter → URL slug → 交互式提示 → <code>--name</code> 标志。</td>
+</tr>
+<tr>
+<td><code>github</code></td>
+<td><code>openai/skills/k8s</code></td>
+<td>直接从 GitHub 仓库/路径安装以及基于 GitHub 的自定义 tap。</td>
+</tr>
+<tr>
+<td><code>clawhub</code>、<code>lobehub</code>、<code>browse-sh</code></td>
+<td>来源特定标识符</td>
+<td>社区或市场集成。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="集成的-hub-和注册表">集成的 hub 和注册表</h3>
+<p>Hermes 目前与以下 skills 生态系统和发现来源集成：</p>
+<h4 id="1-官方可选-skillsofficial">1. 官方可选 skills（<code>official</code>）</h4>
+<p>这些 skills 在 Hermes 仓库中维护，以内置信任级别安装。</p>
+<ul>
+<li>目录：<a href="../../reference/optional-skills-catalog.html">官方可选 Skills 目录</a></li>
+<li>仓库中的来源：<code>optional-skills/</code></li>
+<li>示例：</li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>browse<span class="w"> </span>--source<span class="w"> </span>official
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>official/security/1password
+</code></pre></div>
+
+<h4 id="2-skillsshskills-sh">2. skills.sh（<code>skills-sh</code>）</h4>
+<p>这是 Vercel 的公共 skills 目录。Hermes 可以直接搜索它、查看 skill 详情页、解析别名式 slug，并从底层源仓库安装。</p>
+<ul>
+<li>目录：<a href="https://skills.sh/" class="ext" target="_blank" rel="noopener">skills.sh</a></li>
+<li>CLI/工具仓库：<a href="https://github.com/vercel-labs/skills" class="ext" target="_blank" rel="noopener">vercel-labs/skills</a></li>
+<li>Vercel 官方 skills 仓库：<a href="https://github.com/vercel-labs/agent-skills" class="ext" target="_blank" rel="noopener">vercel-labs/agent-skills</a></li>
+<li>示例：</li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>react<span class="w"> </span>--source<span class="w"> </span>skills-sh
+hermes<span class="w"> </span>skills<span class="w"> </span>inspect<span class="w"> </span>skills-sh/vercel-labs/json-render/json-render-react
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>skills-sh/vercel-labs/json-render/json-render-react<span class="w"> </span>--force
+</code></pre></div>
+
+<h4 id="3-well-known-skill-端点well-known">3. Well-known skill 端点（<code>well-known</code>）</h4>
+<p>这是基于 URL 的发现机制，来自发布 <code>/.well-known/skills/index.json</code> 的站点。它不是单一的集中式 hub——它是一种 Web 发现约定。</p>
+<ul>
+<li>示例实时端点：<a href="https://mintlify.com/docs/.well-known/skills/index.json" class="ext" target="_blank" rel="noopener">Mintlify docs skills index</a></li>
+<li>参考服务器实现：<a href="https://github.com/vercel-labs/skills-handler" class="ext" target="_blank" rel="noopener">vercel-labs/skills-handler</a></li>
+<li>示例：</li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>https://mintlify.com/docs<span class="w"> </span>--source<span class="w"> </span>well-known
+hermes<span class="w"> </span>skills<span class="w"> </span>inspect<span class="w"> </span>well-known:https://mintlify.com/docs/.well-known/skills/mintlify
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>well-known:https://mintlify.com/docs/.well-known/skills/mintlify
+</code></pre></div>
+
+<h4 id="4-直接-github-skillsgithub">4. 直接 GitHub skills（<code>github</code>）</h4>
+<p>Hermes 可以直接从 GitHub 仓库和基于 GitHub 的 tap 安装。当你已知仓库/路径或想添加自己的自定义源仓库时非常有用。</p>
+<p>默认 tap（无需任何设置即可浏览）：
+- <a href="https://github.com/openai/skills" class="ext" target="_blank" rel="noopener">openai/skills</a>
+- <a href="https://github.com/anthropics/skills" class="ext" target="_blank" rel="noopener">anthropics/skills</a>
+- <a href="https://github.com/huggingface/skills" class="ext" target="_blank" rel="noopener">huggingface/skills</a>
+- <a href="https://github.com/NVIDIA/skills" class="ext" target="_blank" rel="noopener">NVIDIA/skills</a> — NVIDIA 官方验证的技能（带签名 <code>skill.oms.sig</code> 与治理用 <code>skill-card.md</code>）
+- <a href="https://github.com/VoltAgent/awesome-agent-skills" class="ext" target="_blank" rel="noopener">VoltAgent/awesome-agent-skills</a>
+- <a href="https://github.com/garrytan/gstack" class="ext" target="_blank" rel="noopener">garrytan/gstack</a></p>
+<ul>
+<li>示例：</li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>openai/skills/k8s
+hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>add<span class="w"> </span>myorg/skills-repo
+</code></pre></div>
+
+<h4 id="5-clawhubclawhub">5. ClawHub（<code>clawhub</code>）</h4>
+<p>作为社区来源集成的第三方 skills 市场。</p>
+<ul>
+<li>站点：<a href="https://clawhub.ai/" class="ext" target="_blank" rel="noopener">clawhub.ai</a></li>
+<li>Hermes 来源 id：<code>clawhub</code></li>
+</ul>
+<h4 id="6-lobehublobehub">6. LobeHub（<code>lobehub</code>）</h4>
+<p>Hermes 可以从 LobeHub 的公共目录中搜索并将 agent 条目转换为可安装的 Hermes skills。</p>
+<ul>
+<li>站点：<a href="https://lobehub.com/" class="ext" target="_blank" rel="noopener">LobeHub</a></li>
+<li>公共 agents 索引：<a href="https://chat-agents.lobehub.com/" class="ext" target="_blank" rel="noopener">chat-agents.lobehub.com</a></li>
+<li>后端仓库：<a href="https://github.com/lobehub/lobe-chat-agents" class="ext" target="_blank" rel="noopener">lobehub/lobe-chat-agents</a></li>
+<li>Hermes 来源 id：<code>lobehub</code></li>
+</ul>
+<h4 id="7-browseshbrowse-sh">7. browse.sh（<code>browse-sh</code>）</h4>
+<p>Hermes 与 <a href="https://browse.sh" class="ext" target="_blank" rel="noopener">browse.sh</a> 集成，这是 Browserbase 的目录，包含 200+ 个针对特定站点的浏览器自动化 SKILL.md 文件（Airbnb、Amazon、arXiv、12306.cn、Etsy、Xero 等）。每个 skill 描述如何端到端驱动一个网站，适合与 Hermes 的浏览器工具以及你已安装的任何浏览器自动化 skills 配合使用。</p>
+<ul>
+<li>站点：<a href="https://browse.sh/" class="ext" target="_blank" rel="noopener">browse.sh</a></li>
+<li>目录 API：<code>https://browse.sh/api/skills</code></li>
+<li>Hermes 来源 id：<code>browse-sh</code></li>
+<li>信任级别：<code>community</code></li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>airbnb<span class="w"> </span>--source<span class="w"> </span>browse-sh
+hermes<span class="w"> </span>skills<span class="w"> </span>inspect<span class="w"> </span>browse-sh/airbnb.com/search-listings-ddgioa
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>browse-sh/airbnb.com/search-listings-ddgioa
+</code></pre></div>
+
+<p>标识符使用 <code>browse-sh/&lt;hostname&gt;/&lt;task-id&gt;</code> 的形式，与 browse.sh 目录公开的 slug 匹配。内容通过每个 skill 的详情端点（<code>/api/skills/&lt;slug&gt;</code> → <code>skillMdUrl</code>）解析，而不是通过目录的 GitHub <code>sourceUrl</code>。</p>
+<h4 id="8-直接-urlurl">8. 直接 URL（<code>url</code>）</h4>
+<p>直接从任何 HTTP(S) URL 安装 <code>SKILL.md</code>——当作者在自己的站点上托管 skill 时非常有用（无 hub 列表，无需输入 GitHub 路径）。Hermes 还会获取其中明确引用且位于 <code>references/</code>、<code>templates/</code>、<code>scripts/</code>、<code>assets/</code> 和 <code>examples/</code> 下的文件，然后扫描并安装完整捆绑包。</p>
+<ul>
+<li>Hermes 来源 id：<code>url</code></li>
+<li>标识符：URL 本身（无需前缀）</li>
+<li>范围：<code>SKILL.md</code> 加上允许目录中明确引用的支持文件。Hermes 不会枚举或复制托管站点上的其他文件。</li>
+</ul>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>https://sharethis.chat/SKILL.md
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>https://example.com/my-skill/SKILL.md<span class="w"> </span>--category<span class="w"> </span>productivity
+</code></pre></div>
+
+<p>名称解析顺序：
+1. SKILL.md YAML frontmatter 中的 <code>name:</code> 字段（推荐——每个格式良好的 skill 都有）。
+2. URL 路径中的父目录名称（例如 <code>.../my-skill/SKILL.md</code> → <code>my-skill</code>，或 <code>.../my-skill.md</code> → <code>my-skill</code>），当它是有效标识符（<code>^[a-z][a-z0-9_-]*$</code>）时。
+3. 在有 TTY 的终端上的交互式提示。
+4. 在非交互式界面（TUI 内的 <code>/skills install</code> 斜杠命令、gateway 平台、脚本）上，给出指向 <code>--name</code> 覆盖的清晰错误。</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Frontmatter 没有名称且 URL slug 无意义——手动提供：</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>https://example.com/SKILL.md<span class="w"> </span>--name<span class="w"> </span>sharethis-chat
+
+<span class="c1"># 或在聊天会话中：</span>
+/skills<span class="w"> </span>install<span class="w"> </span>https://example.com/SKILL.md<span class="w"> </span>--name<span class="w"> </span>sharethis-chat
+</code></pre></div>
+
+<p>信任级别始终为 <code>community</code>——与所有其他来源一样运行相同的安全扫描。URL 作为安装标识符存储，因此当你想刷新时，<code>hermes skills update</code> 会自动从同一 URL 重新获取。</p>
+<h3 id="安全扫描与---force">安全扫描与 <code>--force</code></h3>
+<p>所有通过 hub 安装的 skills 都经过<strong>安全扫描器</strong>检查，检测数据泄露、prompt 注入、破坏性命令、供应链信号及其他威胁。</p>
+<p><code>hermes skills inspect ...</code> 现在还会在可用时显示上游元数据：
+- 仓库 URL
+- skills.sh 详情页 URL
+- 安装命令
+- 每周安装量
+- 上游安全审计状态
+- well-known 索引/端点 URL</p>
+<p>当你已审查第三方 skill 并希望覆盖非危险性策略阻止时，使用 <code>--force</code>：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>skills-sh/anthropics/skills/pdf<span class="w"> </span>--force
+</code></pre></div>
+
+<p>重要行为：
+- <code>--force</code> 可以覆盖谨慎/警告类发现的策略阻止。
+- <code>--force</code> <strong>不能</strong>覆盖 <code>dangerous</code> 扫描结论。
+- 官方可选 skills（<code>official/...</code>）被视为内置信任，不显示第三方警告面板。</p>
+<h3 id="信任级别">信任级别</h3>
+<table>
+<thead>
+<tr>
+<th>级别</th>
+<th>来源</th>
+<th>策略</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>builtin</code></td>
+<td>随 Hermes 附带</td>
+<td>始终受信任</td>
+</tr>
+<tr>
+<td><code>official</code></td>
+<td>仓库中的 <code>optional-skills/</code></td>
+<td>内置信任，无第三方警告</td>
+</tr>
+<tr>
+<td><code>trusted</code></td>
+<td>受信任的注册表/仓库，如 <code>openai/skills</code>、<code>anthropics/skills</code>、<code>huggingface/skills</code>、<code>NVIDIA/skills</code></td>
+<td>比社区来源更宽松的策略</td>
+</tr>
+<tr>
+<td><code>community</code></td>
+<td>其他所有来源（<code>skills.sh</code>、well-known 端点、自定义 GitHub 仓库、大多数市场）</td>
+<td>非危险性发现可用 <code>--force</code> 覆盖；<code>dangerous</code> 结论保持阻止</td>
+</tr>
+</tbody>
+</table>
+<h3 id="更新生命周期">更新生命周期</h3>
+<p>hub 现在跟踪足够的来源信息以重新检查已安装 skills 的上游副本：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>check<span class="w">          </span><span class="c1"># Report which installed hub skills changed upstream</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>update<span class="w">         </span><span class="c1"># Reinstall only the skills with updates available</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>update<span class="w"> </span>react<span class="w">   </span><span class="c1"># Update one specific installed hub skill</span>
+</code></pre></div>
+
+<p>这使用存储的来源标识符加上当前上游捆绑包内容哈希来检测漂移。</p>
+<div class="admonition adm-tip"><p class="adm-title">GitHub 速率限制</p>
+<p>Skills hub 操作使用 GitHub API，未认证用户的速率限制为每小时 60 次请求。如果在安装或搜索时看到速率限制错误，请在 <code>.env</code> 文件中设置 <code>GITHUB_TOKEN</code> 以将限制提高到每小时 5,000 次请求。发生此情况时，错误消息会包含可操作的提示。</p>
+</div>
+<h3 id="发布自定义-skill-tap">发布自定义 skill tap</h3>
+<p>如果你想分享一组精选的 skills——为你的团队、组织或公开分享——你可以将它们发布为 <strong>tap</strong>：其他 Hermes 用户通过 <code>hermes skills tap add &lt;owner/repo&gt;</code> 添加的 GitHub 仓库。无需服务器，无需注册表注册，无需发布流水线。只需一个包含 <code>SKILL.md</code> 文件的目录。</p>
+<h4 id="仓库布局">仓库布局</h4>
+<p>tap 是任何 GitHub 仓库（公开或私有——私有仓库需要 <code>GITHUB_TOKEN</code>），布局如下：</p>
+<div class="highlight"><pre><span></span><code>owner/repo
+├── skills/                       # default path; configurable per-tap
+│   ├── my-workflow/
+│   │   ├── SKILL.md              # required
+│   │   ├── references/           # optional supporting files
+│   │   ├── templates/
+│   │   └── scripts/
+│   ├── another-skill/
+│   │   └── SKILL.md
+│   └── third-skill/
+│       └── SKILL.md
+└── README.md                     # optional but helpful
+</code></pre></div>
+
+<p>规则：
+- 每个 skill 存放在 tap 根路径（默认 <code>skills/</code>）下的独立目录中。
+- 目录名成为 skill 的安装 slug。
+- 每个 skill 目录必须包含一个带有标准 <a href="../../../user-guide/features/skills.html#skillmd-format" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">SKILL.md frontmatter</a> 的 <code>SKILL.md</code>（<code>name</code>、<code>description</code>，以及可选的 <code>metadata.hermes.tags</code>、<code>version</code>、<code>author</code>、<code>platforms</code>、<code>metadata.hermes.config</code>）。
+- <code>references/</code>、<code>templates/</code>、<code>scripts/</code>、<code>assets/</code> 等子目录在安装时与 <code>SKILL.md</code> 一起下载。
+- 目录名以 <code>.</code> 或 <code>_</code> 开头的 skills 会被忽略。</p>
+<p>Hermes 通过列出 tap 路径的每个子目录并探测每个目录中的 <code>SKILL.md</code> 来发现 skills。</p>
+<h4 id="最小-tap-示例">最小 tap 示例</h4>
+<div class="highlight"><pre><span></span><code>my-org/hermes-skills
+└── skills/
+    └── deploy-runbook/
+        └── SKILL.md
+</code></pre></div>
+
+<p><code>skills/deploy-runbook/SKILL.md</code>：</p>
+<div class="highlight"><pre><span></span><code>---
+name: deploy-runbook
+description: Our deployment runbook — services, rollback, Slack channels
+version: 1.0.0
+author: My Org Platform Team
+metadata:
+  hermes:
+<span class="gu">    tags: [deployment, runbook, internal]</span>
+<span class="gu">---</span>
+
+<span class="gh"># Deploy Runbook</span>
+
+Step 1: ...
+</code></pre></div>
+
+<p>将其推送到 GitHub 后，任何 Hermes 用户都可以订阅并安装：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>add<span class="w"> </span>my-org/hermes-skills
+hermes<span class="w"> </span>skills<span class="w"> </span>search<span class="w"> </span>deploy
+hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>my-org/hermes-skills/deploy-runbook
+</code></pre></div>
+
+<h4 id="非默认路径">非默认路径</h4>
+<p>如果你的 skills 不在 <code>skills/</code> 下（当你向现有项目添加 <code>skills/</code> 子树时很常见），请编辑 <code>~/.hermes/.hub/taps.json</code> 中的 tap 条目：</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;taps&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;repo&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-org/platform-docs&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;internal/skills/&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><code>hermes skills tap add</code> CLI 默认将新 tap 的 <code>path</code> 设为 <code>"skills/"</code>；如果需要不同路径，请直接编辑该文件。<code>hermes skills tap list</code> 显示每个 tap 的有效路径。</p>
+<h4 id="直接安装单个-skills无需添加-tap">直接安装单个 skills（无需添加 tap）</h4>
+<p>用户也可以从任何公开 GitHub 仓库安装单个 skill，而无需将整个仓库添加为 tap：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>install<span class="w"> </span>owner/repo/skills/my-workflow
+</code></pre></div>
+
+<p>当你想分享一个 skill 而不要求用户订阅你的整个注册表时非常有用。</p>
+<h4 id="tap-的信任级别">tap 的信任级别</h4>
+<p>新 tap 默认分配 <code>community</code> 信任级别。从中安装的 skills 经过标准安全扫描，首次安装时显示第三方警告面板。如果你的组织或广泛受信任的来源应获得更高信任，请将其仓库添加到 <code>tools/skills_hub.py</code> 中的 <code>TRUSTED_REPOS</code>（需要 Hermes 核心 PR）。</p>
+<h4 id="tap-管理">Tap 管理</h4>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>list<span class="w">                                </span><span class="c1"># show all configured taps</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>add<span class="w"> </span>myorg/skills-repo<span class="w">               </span><span class="c1"># add (default path: skills/)</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>tap<span class="w"> </span>remove<span class="w"> </span>myorg/skills-repo<span class="w">            </span><span class="c1"># remove</span>
+</code></pre></div>
+
+<p>在运行中的会话内：</p>
+<div class="highlight"><pre><span></span><code>/skills tap list
+/skills tap add myorg/skills-repo
+/skills tap remove myorg/skills-repo
+</code></pre></div>
+
+<p>Tap 存储在 <code>~/.hermes/.hub/taps.json</code> 中（按需创建）。</p>
+<h2 id="捆绑-skill-更新hermes-skills-reset">捆绑 skill 更新（<code>hermes skills reset</code>）</h2>
+<p>Hermes 在仓库的 <code>skills/</code> 中附带一组捆绑 skills。在安装时以及每次 <code>hermes update</code> 时，同步过程会将这些 skills 复制到 <code>~/.hermes/skills/</code> 中，并在 <code>~/.hermes/skills/.bundled_manifest</code> 记录一个清单，将每个 skill 名称映射到同步时的内容哈希（<strong>origin hash</strong>）。</p>
+<p>每次同步时，Hermes 重新计算本地副本的哈希并与 origin hash 比较：</p>
+<ul>
+<li><strong>未更改</strong> → 可以安全拉取上游变更，复制新的捆绑版本，记录新的 origin hash。</li>
+<li><strong>已更改</strong> → 视为<strong>用户修改</strong>并永久跳过，因此你的编辑不会被覆盖。</li>
+</ul>
+<p>这种保护机制很好，但有一个棘手的边缘情况。如果你编辑了一个捆绑 skill，后来想通过从 <code>~/.hermes/hermes-agent/skills/</code> 复制粘贴来放弃更改并回到捆绑版本，清单仍然保存着上次成功同步时的<em>旧</em> origin hash。你新复制粘贴的内容（当前捆绑哈希）与那个过时的 origin hash 不匹配，因此同步继续将其标记为用户修改。</p>
+<p><code>hermes skills reset</code> 是解决此问题的方法：</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 安全：清除此 skill 的清单条目。你当前的副本被保留，</span>
+<span class="c1"># 但下次同步会重新以其为基准，使未来的更新正常工作。</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>reset<span class="w"> </span>google-workspace
+
+<span class="c1"># 完全恢复：同时删除你的本地副本并重新复制当前捆绑版本。</span>
+<span class="c1"># 当你想要恢复原始上游 skill 时使用此选项。</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>reset<span class="w"> </span>google-workspace<span class="w"> </span>--restore
+
+<span class="c1"># 非交互式（例如在脚本或 TUI 模式中）——跳过 --restore 确认。</span>
+hermes<span class="w"> </span>skills<span class="w"> </span>reset<span class="w"> </span>google-workspace<span class="w"> </span>--restore<span class="w"> </span>--yes
+</code></pre></div>
+
+<p>同样的命令也可以作为斜杠命令在聊天中使用：</p>
+<div class="highlight"><pre><span></span><code>/skills reset google-workspace
+/skills reset google-workspace --restore
+</code></pre></div>
+
+<div class="admonition adm-note"><p class="adm-title">Profiles</p>
+<p>每个 profile 在其自己的 <code>HERMES_HOME</code> 下有自己的 <code>.bundled_manifest</code>，因此 <code>hermes -p coder skills reset &lt;name&gt;</code> 只影响该 profile。</p>
+</div>
+<h3 id="斜杠命令在聊天中">斜杠命令（在聊天中）</h3>
+<p>所有相同的命令都可以使用 <code>/skills</code> 执行：</p>
+<div class="highlight"><pre><span></span><code>/skills browse
+/skills search react --source skills-sh
+/skills search https://mintlify.com/docs --source well-known
+/skills inspect skills-sh/vercel-labs/json-render/json-render-react
+/skills install openai/skills/skill-creator --force
+/skills check
+/skills update
+/skills reset google-workspace
+/skills list
+</code></pre></div>
+
+<p>官方可选 skills 仍使用 <code>official/security/1password</code> 和 <code>official/migration/openclaw-migration</code> 等标识符。</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/features/skills</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#使用-skills">使用 Skills</a></li>
+<li class="lvl2"><a href="#渐进式披露">渐进式披露</a></li>
+<li class="lvl2"><a href="#skillmd-格式">SKILL.md 格式</a></li>
+<li class="lvl3"><a href="#平台特定-skills">平台特定 Skills</a></li>
+<li class="lvl2"><a href="#skill-输出与媒体传递">Skill 输出与媒体传递</a></li>
+<li class="lvl3"><a href="#强制文档式传递as_document">强制文档式传递：[[as_document]]</a></li>
+<li class="lvl3"><a href="#条件激活fallback-skills">条件激活（Fallback Skills）</a></li>
+<li class="lvl2"><a href="#加载时的安全设置">加载时的安全设置</a></li>
+<li class="lvl3"><a href="#skill-配置设置">Skill 配置设置</a></li>
+<li class="lvl2"><a href="#skill-目录结构">Skill 目录结构</a></li>
+<li class="lvl2"><a href="#外部-skill-目录">外部 Skill 目录</a></li>
+<li class="lvl3"><a href="#工作原理">工作原理</a></li>
+<li class="lvl3"><a href="#示例">示例</a></li>
+<li class="lvl2"><a href="#skill-捆绑包">Skill 捆绑包</a></li>
+<li class="lvl3"><a href="#快速示例">快速示例</a></li>
+<li class="lvl3"><a href="#yaml-模式">YAML 模式</a></li>
+<li class="lvl3"><a href="#管理捆绑包">管理捆绑包</a></li>
+<li class="lvl3"><a href="#行为">行为</a></li>
+<li class="lvl3"><a href="#捆绑包优于逐个手动安装-skill-的场景">捆绑包优于逐个手动安装 skill 的场景</a></li>
+<li class="lvl2"><a href="#agent-管理的-skillsskill_manage-工具">Agent 管理的 Skills（skill_manage 工具）</a></li>
+<li class="lvl3"><a href="#agent-创建-skills-的时机">Agent 创建 Skills 的时机</a></li>
+<li class="lvl3"><a href="#操作">操作</a></li>
+<li class="lvl2"><a href="#skills-hub">Skills Hub</a></li>
+<li class="lvl3"><a href="#常用命令">常用命令</a></li>
+<li class="lvl3"><a href="#支持的-hub-来源">支持的 hub 来源</a></li>
+<li class="lvl3"><a href="#集成的-hub-和注册表">集成的 hub 和注册表</a></li>
+<li class="lvl3"><a href="#安全扫描与---force">安全扫描与 --force</a></li>
+<li class="lvl3"><a href="#信任级别">信任级别</a></li>
+<li class="lvl3"><a href="#更新生命周期">更新生命周期</a></li>
+<li class="lvl3"><a href="#发布自定义-skill-tap">发布自定义 skill tap</a></li>
+<li class="lvl2"><a href="#捆绑-skill-更新hermes-skills-reset">捆绑 skill 更新（hermes skills reset）</a></li>
+<li class="lvl3"><a href="#斜杠命令在聊天中">斜杠命令（在聊天中）</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

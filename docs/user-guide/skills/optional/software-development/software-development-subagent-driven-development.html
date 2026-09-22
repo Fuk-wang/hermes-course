@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subagent Driven Development — Execute plans via delegate_task subagents (2-stage review) · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/skills/optional/software-development/software-development-subagent-driven-development</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="subagent-driven-development">Subagent Driven Development</h1>
+<p>Execute plans via delegate_task subagents (2-stage review).</p>
+<h2 id="skill-metadata">Skill metadata</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source</td>
+<td>Optional — install with <code>hermes skills install official/software-development/subagent-driven-development</code></td>
+</tr>
+<tr>
+<td>Path</td>
+<td><code>optional-skills/software-development\subagent-driven-development</code></td>
+</tr>
+<tr>
+<td>Version</td>
+<td><code>1.1.0</code></td>
+</tr>
+<tr>
+<td>Author</td>
+<td>Hermes Agent (adapted from obra/superpowers)</td>
+</tr>
+<tr>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>linux, macos, windows</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><code>delegation</code>, <code>subagent</code>, <code>implementation</code>, <code>workflow</code>, <code>parallel</code></td>
+</tr>
+<tr>
+<td>Related skills</td>
+<td><a href="../../bundled/software-development/software-development-requesting-code-review.html"><code>requesting-code-review</code></a>, <a href="../../bundled/software-development/software-development-test-driven-development.html"><code>test-driven-development</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-full-skillmd">Reference: full SKILL.md</h2>
+<div class="admonition adm-info"><p class="adm-title">Info</p>
+<p>The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.</p>
+</div>
+<h1 id="subagent-driven-development_1">Subagent-Driven Development</h1>
+<h2 id="overview">Overview</h2>
+<p>Execute implementation plans by dispatching fresh subagents per task with systematic two-stage review.</p>
+<p><strong>Core principle:</strong> Fresh subagent per task + two-stage review (spec then quality) = high quality, fast iteration.</p>
+<h2 id="when-to-use">When to Use</h2>
+<p>Use this skill when:
+- You have an implementation plan (from the <code>plan</code> skill or user requirements)
+- Tasks are mostly independent
+- Quality and spec compliance are important
+- You want automated review between tasks</p>
+<p><strong>vs. manual execution:</strong>
+- Fresh context per task (no confusion from accumulated state)
+- Automated review process catches issues early
+- Consistent quality checks across all tasks
+- Subagents can ask questions before starting work</p>
+<h2 id="the-process">The Process</h2>
+<h3 id="1-read-and-parse-plan">1. Read and Parse Plan</h3>
+<p>Read the plan file. Extract ALL tasks with their full text and context upfront. Create a todo list:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Read the plan</span>
+<span class="n">read_file</span><span class="p">(</span><span class="s2">&quot;docs/plans/feature-plan.md&quot;</span><span class="p">)</span>
+
+<span class="c1"># Create todo list with all tasks</span>
+<span class="n">todo</span><span class="p">([</span>
+    <span class="p">{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;task-1&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;Create User model with email field&quot;</span><span class="p">,</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;pending&quot;</span><span class="p">},</span>
+    <span class="p">{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;task-2&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;Add password hashing utility&quot;</span><span class="p">,</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;pending&quot;</span><span class="p">},</span>
+    <span class="p">{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;task-3&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;Create login endpoint&quot;</span><span class="p">,</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;pending&quot;</span><span class="p">},</span>
+<span class="p">])</span>
+</code></pre></div>
+
+<p><strong>Key:</strong> Read the plan ONCE. Extract everything. Don't make subagents read the plan file — provide the full task text directly in context.</p>
+<h3 id="2-per-task-workflow">2. Per-Task Workflow</h3>
+<p>For EACH task in the plan:</p>
+<h4 id="step-1-dispatch-implementer-subagent">Step 1: Dispatch Implementer Subagent</h4>
+<p>Use <code>delegate_task</code> with complete context:</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Implement Task 1: Create User model with email and password_hash fields&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;</span>
+<span class="s2">    TASK FROM PLAN:</span>
+<span class="s2">    - Create: src/models/user.py</span>
+<span class="s2">    - Add User class with email (str) and password_hash (str) fields</span>
+<span class="s2">    - Use bcrypt for password hashing</span>
+<span class="s2">    - Include __repr__ for debugging</span>
+
+<span class="s2">    FOLLOW TDD:</span>
+<span class="s2">    1. Write failing test in tests/models/test_user.py</span>
+<span class="s2">    2. Run: pytest tests/models/test_user.py -v (verify FAIL)</span>
+<span class="s2">    3. Write minimal implementation</span>
+<span class="s2">    4. Run: pytest tests/models/test_user.py -v (verify PASS)</span>
+<span class="s2">    5. Run: pytest tests/ -q (verify no regressions)</span>
+<span class="s2">    6. Commit: git add -A &amp;&amp; git commit -m &quot;feat: add User model with password hashing&quot;</span>
+
+<span class="s2">    PROJECT CONTEXT:</span>
+<span class="s2">    - Python 3.11, Flask app in src/app.py</span>
+<span class="s2">    - Existing models in src/models/</span>
+<span class="s2">    - Tests use pytest, run from project root</span>
+<span class="s2">    - bcrypt already in requirements.txt</span>
+<span class="s2">    &quot;&quot;&quot;</span><span class="p">,</span>
+    <span class="n">toolsets</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;terminal&#39;</span><span class="p">,</span> <span class="s1">&#39;file&#39;</span><span class="p">]</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h4 id="step-2-dispatch-spec-compliance-reviewer">Step 2: Dispatch Spec Compliance Reviewer</h4>
+<p>After the implementer completes, verify against the original spec:</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Review if implementation matches the spec from the plan&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;</span>
+<span class="s2">    ORIGINAL TASK SPEC:</span>
+<span class="s2">    - Create src/models/user.py with User class</span>
+<span class="s2">    - Fields: email (str), password_hash (str)</span>
+<span class="s2">    - Use bcrypt for password hashing</span>
+<span class="s2">    - Include __repr__</span>
+
+<span class="s2">    CHECK:</span>
+<span class="s2">    - [ ] All requirements from spec implemented?</span>
+<span class="s2">    - [ ] File paths match spec?</span>
+<span class="s2">    - [ ] Function signatures match spec?</span>
+<span class="s2">    - [ ] Behavior matches expected?</span>
+<span class="s2">    - [ ] Nothing extra added (no scope creep)?</span>
+
+<span class="s2">    OUTPUT: PASS or list of specific spec gaps to fix.</span>
+<span class="s2">    &quot;&quot;&quot;</span><span class="p">,</span>
+    <span class="n">toolsets</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;file&#39;</span><span class="p">]</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><strong>If spec issues found:</strong> Fix gaps, then re-run spec review. Continue only when spec-compliant.</p>
+<h4 id="step-3-dispatch-code-quality-reviewer">Step 3: Dispatch Code Quality Reviewer</h4>
+<p>After spec compliance passes:</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Review code quality for Task 1 implementation&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;</span>
+<span class="s2">    FILES TO REVIEW:</span>
+<span class="s2">    - src/models/user.py</span>
+<span class="s2">    - tests/models/test_user.py</span>
+
+<span class="s2">    CHECK:</span>
+<span class="s2">    - [ ] Follows project conventions and style?</span>
+<span class="s2">    - [ ] Proper error handling?</span>
+<span class="s2">    - [ ] Clear variable/function names?</span>
+<span class="s2">    - [ ] Adequate test coverage?</span>
+<span class="s2">    - [ ] No obvious bugs or missed edge cases?</span>
+<span class="s2">    - [ ] No security issues?</span>
+
+<span class="s2">    OUTPUT FORMAT:</span>
+<span class="s2">    - Critical Issues: [must fix before proceeding]</span>
+<span class="s2">    - Important Issues: [should fix]</span>
+<span class="s2">    - Minor Issues: [optional]</span>
+<span class="s2">    - Verdict: APPROVED or REQUEST_CHANGES</span>
+<span class="s2">    &quot;&quot;&quot;</span><span class="p">,</span>
+    <span class="n">toolsets</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;file&#39;</span><span class="p">]</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><strong>If quality issues found:</strong> Fix issues, re-review. Continue only when approved.</p>
+<h4 id="step-4-mark-complete">Step 4: Mark Complete</h4>
+<div class="highlight"><pre><span></span><code><span class="n">todo</span><span class="p">([{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;task-1&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;Create User model with email field&quot;</span><span class="p">,</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;completed&quot;</span><span class="p">}],</span> <span class="n">merge</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="3-final-review">3. Final Review</h3>
+<p>After ALL tasks are complete, dispatch a final integration reviewer:</p>
+<div class="highlight"><pre><span></span><code><span class="n">delegate_task</span><span class="p">(</span>
+    <span class="n">goal</span><span class="o">=</span><span class="s2">&quot;Review the entire implementation for consistency and integration issues&quot;</span><span class="p">,</span>
+    <span class="n">context</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;</span>
+<span class="s2">    All tasks from the plan are complete. Review the full implementation:</span>
+<span class="s2">    - Do all components work together?</span>
+<span class="s2">    - Any inconsistencies between tasks?</span>
+<span class="s2">    - All tests passing?</span>
+<span class="s2">    - Ready for merge?</span>
+<span class="s2">    &quot;&quot;&quot;</span><span class="p">,</span>
+    <span class="n">toolsets</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;terminal&#39;</span><span class="p">,</span> <span class="s1">&#39;file&#39;</span><span class="p">]</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="4-verify-and-commit">4. Verify and Commit</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Run full test suite</span>
+pytest<span class="w"> </span>tests/<span class="w"> </span>-q
+
+<span class="c1"># Review all changes</span>
+git<span class="w"> </span>diff<span class="w"> </span>--stat
+
+<span class="c1"># Final commit if needed</span>
+git<span class="w"> </span>add<span class="w"> </span>-A<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>git<span class="w"> </span>commit<span class="w"> </span>-m<span class="w"> </span><span class="s2">&quot;feat: complete [feature name] implementation&quot;</span>
+</code></pre></div>
+
+<h2 id="task-granularity">Task Granularity</h2>
+<p><strong>Each task = 2-5 minutes of focused work.</strong></p>
+<p><strong>Too big:</strong>
+- "Implement user authentication system"</p>
+<p><strong>Right size:</strong>
+- "Create User model with email and password fields"
+- "Add password hashing function"
+- "Create login endpoint"
+- "Add JWT token generation"
+- "Create registration endpoint"</p>
+<h2 id="red-flags--never-do-these">Red Flags — Never Do These</h2>
+<ul>
+<li>Start implementation without a plan</li>
+<li>Skip reviews (spec compliance OR code quality)</li>
+<li>Proceed with unfixed critical/important issues</li>
+<li>Dispatch multiple implementation subagents for tasks that touch the same files</li>
+<li>Make subagent read the plan file (provide full text in context instead)</li>
+<li>Skip scene-setting context (subagent needs to understand where the task fits)</li>
+<li>Ignore subagent questions (answer before letting them proceed)</li>
+<li>Accept "close enough" on spec compliance</li>
+<li>Skip review loops (reviewer found issues → implementer fixes → review again)</li>
+<li>Let implementer self-review replace actual review (both are needed)</li>
+<li><strong>Start code quality review before spec compliance is PASS</strong> (wrong order)</li>
+<li>Move to next task while either review has open issues</li>
+</ul>
+<h2 id="handling-issues">Handling Issues</h2>
+<h3 id="if-subagent-asks-questions">If Subagent Asks Questions</h3>
+<ul>
+<li>Answer clearly and completely</li>
+<li>Provide additional context if needed</li>
+<li>Don't rush them into implementation</li>
+</ul>
+<h3 id="if-reviewer-finds-issues">If Reviewer Finds Issues</h3>
+<ul>
+<li>Implementer subagent (or a new one) fixes them</li>
+<li>Reviewer reviews again</li>
+<li>Repeat until approved</li>
+<li>Don't skip the re-review</li>
+</ul>
+<h3 id="if-subagent-fails-a-task">If Subagent Fails a Task</h3>
+<ul>
+<li>Dispatch a new fix subagent with specific instructions about what went wrong</li>
+<li>Don't try to fix manually in the controller session (context pollution)</li>
+</ul>
+<h2 id="efficiency-notes">Efficiency Notes</h2>
+<p><strong>Why fresh subagent per task:</strong>
+- Prevents context pollution from accumulated state
+- Each subagent gets clean, focused context
+- No confusion from prior tasks' code or reasoning</p>
+<p><strong>Why two-stage review:</strong>
+- Spec review catches under/over-building early
+- Quality review ensures the implementation is well-built
+- Catches issues before they compound across tasks</p>
+<p><strong>Cost trade-off:</strong>
+- More subagent invocations (implementer + 2 reviewers per task)
+- But catches issues early (cheaper than debugging compounded problems later)</p>
+<h2 id="integration-with-other-skills">Integration with Other Skills</h2>
+<h3 id="with-plan">With plan</h3>
+<p>This skill EXECUTES plans created by the <code>plan</code> skill:
+1. User requirements → plan → implementation plan
+2. Implementation plan → subagent-driven-development → working code</p>
+<h3 id="with-test-driven-development">With test-driven-development</h3>
+<p>Implementer subagents should follow TDD:
+1. Write failing test first
+2. Implement minimal code
+3. Verify test passes
+4. Commit</p>
+<p>Include TDD instructions in every implementer context.</p>
+<h3 id="with-requesting-code-review">With requesting-code-review</h3>
+<p>The two-stage review process IS the code review. For final integration review, use the requesting-code-review skill's review dimensions.</p>
+<h3 id="with-systematic-debugging">With systematic-debugging</h3>
+<p>If a subagent encounters bugs during implementation:
+1. Follow systematic-debugging process
+2. Find root cause before fixing
+3. Write regression test
+4. Resume implementation</p>
+<h2 id="example-workflow">Example Workflow</h2>
+<div class="highlight"><pre><span></span><code>[Read plan: docs/plans/auth-feature.md]
+[Create todo list with 5 tasks]
+
+--- Task 1: Create User model ---
+[Dispatch implementer subagent]
+  Implementer: &quot;Should email be unique?&quot;
+  You: &quot;Yes, email must be unique&quot;
+  Implementer: Implemented, 3/3 tests passing, committed.
+
+[Dispatch spec reviewer]
+  Spec reviewer: ✅ PASS — all requirements met
+
+[Dispatch quality reviewer]
+  Quality reviewer: ✅ APPROVED — clean code, good tests
+
+[Mark Task 1 complete]
+
+--- Task 2: Password hashing ---
+[Dispatch implementer subagent]
+  Implementer: No questions, implemented, 5/5 tests passing.
+
+[Dispatch spec reviewer]
+  Spec reviewer: ❌ Missing: password strength validation (spec says &quot;min 8 chars&quot;)
+
+[Implementer fixes]
+  Implementer: Added validation, 7/7 tests passing.
+
+[Dispatch spec reviewer again]
+  Spec reviewer: ✅ PASS
+
+[Dispatch quality reviewer]
+  Quality reviewer: Important: Magic number 8, extract to constant
+  Implementer: Extracted MIN_PASSWORD_LENGTH constant
+  Quality reviewer: ✅ APPROVED
+
+[Mark Task 2 complete]
+
+... (continue for all tasks)
+
+[After all tasks: dispatch final integration reviewer]
+[Run full test suite: all passing]
+[Done!]
+</code></pre></div>
+
+<h2 id="remember">Remember</h2>
+<div class="highlight"><pre><span></span><code>Fresh subagent per task
+Two-stage review every time
+Spec compliance FIRST
+Code quality SECOND
+Never skip reviews
+Catch issues early
+</code></pre></div>
+
+<p><strong>Quality is not an accident. It's the result of systematic process.</strong></p>
+<h2 id="further-reading-load-when-relevant">Further reading (load when relevant)</h2>
+<p>When the orchestration involves significant context usage, long review loops, or complex validation checkpoints, load these references for the specific discipline:</p>
+<ul>
+<li><strong><code>references/context-budget-discipline.md</code></strong> — Four-tier context degradation model (PEAK / GOOD / DEGRADING / POOR), read-depth rules that scale with context window size, and early warning signs of silent degradation. Load when a run will clearly consume significant context (multi-phase plans, many subagents, large artifacts).</li>
+<li><strong><code>references/gates-taxonomy.md</code></strong> — The four canonical gate types (Pre-flight, Revision, Escalation, Abort) with behavior, recovery, and examples. Load when designing or reviewing any workflow that has validation checkpoints — use the vocabulary explicitly so each gate has defined entry, failure behavior, and resumption rules.</li>
+</ul>
+<p>Both references adapted from gsd-build/get-shit-done (MIT © 2025 Lex Christopherson).</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/skills/optional/software-development/software-development-subagent-driven-development</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#skill-metadata">Skill metadata</a></li>
+<li class="lvl2"><a href="#reference-full-skillmd">Reference: full SKILL.md</a></li>
+<li class="lvl2"><a href="#overview">Overview</a></li>
+<li class="lvl2"><a href="#when-to-use">When to Use</a></li>
+<li class="lvl2"><a href="#the-process">The Process</a></li>
+<li class="lvl3"><a href="#1-read-and-parse-plan">1. Read and Parse Plan</a></li>
+<li class="lvl3"><a href="#2-per-task-workflow">2. Per-Task Workflow</a></li>
+<li class="lvl3"><a href="#3-final-review">3. Final Review</a></li>
+<li class="lvl3"><a href="#4-verify-and-commit">4. Verify and Commit</a></li>
+<li class="lvl2"><a href="#task-granularity">Task Granularity</a></li>
+<li class="lvl2"><a href="#red-flags--never-do-these">Red Flags — Never Do These</a></li>
+<li class="lvl2"><a href="#handling-issues">Handling Issues</a></li>
+<li class="lvl3"><a href="#if-subagent-asks-questions">If Subagent Asks Questions</a></li>
+<li class="lvl3"><a href="#if-reviewer-finds-issues">If Reviewer Finds Issues</a></li>
+<li class="lvl3"><a href="#if-subagent-fails-a-task">If Subagent Fails a Task</a></li>
+<li class="lvl2"><a href="#efficiency-notes">Efficiency Notes</a></li>
+<li class="lvl2"><a href="#integration-with-other-skills">Integration with Other Skills</a></li>
+<li class="lvl3"><a href="#with-plan">With plan</a></li>
+<li class="lvl3"><a href="#with-test-driven-development">With test-driven-development</a></li>
+<li class="lvl3"><a href="#with-requesting-code-review">With requesting-code-review</a></li>
+<li class="lvl3"><a href="#with-systematic-debugging">With systematic-debugging</a></li>
+<li class="lvl2"><a href="#example-workflow">Example Workflow</a></li>
+<li class="lvl2"><a href="#remember">Remember</a></li>
+<li class="lvl2"><a href="#further-reading-load-when-relevant">Further reading (load when relevant)</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes Docker Setup · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/docker</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="hermes-docker-setup">Hermes Docker Setup</h1>
+<p>There are two distinct ways Docker intersects with Hermes Agent:</p>
+<ol>
+<li><strong>Running Hermes IN Docker</strong> — the agent itself runs inside a container (this page's primary focus)</li>
+<li><strong>Docker as a terminal backend</strong> — the agent runs on your host but executes every command inside a single, persistent Docker sandbox container that survives across tool calls, <code>/new</code>, and subagents for the life of the Hermes process (see <a href="configuration.html#docker-backend">Configuration → Docker Backend</a>)</li>
+</ol>
+<p>This page covers option 1. The container stores all user data (config, API keys, sessions, skills, memories) in a single directory mounted from the host at <code>/opt/data</code>. The image itself is stateless and can be upgraded by pulling a new version without losing any configuration.</p>
+<h2 id="quick-start">Quick start</h2>
+<p>If this is your first time running Hermes Agent, create a data directory on the host and start the container interactively to run the setup wizard:</p>
+<div class="admonition adm-caution"><p class="adm-title">Avoid browser-based VPS consoles for the install commands</p>
+<p>Some VPS providers (Hetzner Cloud, and several others) offer a browser-based
+console for managing hosts. These consoles transmit special characters
+incorrectly — <code>:</code> may arrive as <code>;</code>, <code>@</code> may be mis-rendered, and non-English
+keyboard layouts fare worse — which silently corrupts <code>docker run</code> arguments
+like <code>-v ~/.hermes:/opt/data</code>, <code>-e KEY=value</code>, and pasted API keys / tokens.</p>
+<p><strong>Connect over SSH instead</strong> (<code>ssh root@&lt;host&gt;</code>) for copy-paste-safe command
+entry. If you must use the browser console, type the commands manually
+instead of pasting, and double-check every <code>:</code>, <code>@</code>, <code>=</code>, and <code>/</code> in the
+result before hitting Enter.</p>
+</div>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.hermes
+docker<span class="w"> </span>run<span class="w"> </span>-it<span class="w"> </span>--rm<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent<span class="w"> </span>setup
+</code></pre></div>
+
+<p>This drops you into the setup wizard, which will prompt you for your API keys and write them to <code>~/.hermes/.env</code>. You only need to do this once. It is highly recommended to set up a chat system for the gateway to work with at this point.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Inside the container, run <code>hermes setup --portal</code> once — the refresh token persists in the mounted <code>~/.hermes</code> volume. See <a href="../integrations/nous-portal.html">Nous Portal</a>.</p>
+</div>
+<h2 id="running-in-gateway-mode">Running in gateway mode</h2>
+<p>Once configured, run the container in the background as a persistent gateway (Telegram, Discord, Slack, WhatsApp, etc.):</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hermes<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--restart<span class="w"> </span>unless-stopped<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-p<span class="w"> </span><span class="m">8642</span>:8642<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<p>Port 8642 exposes the gateway's <a href="features/api-server.html">OpenAI-compatible API server</a> and health endpoint. It's optional if you only use chat platforms (Telegram, Discord, etc.), but required if you want the dashboard or external tools to reach the gateway.</p>
+<div class="admonition adm-tip"><p class="adm-title">Gateway runs supervised</p>
+<p>Inside the official Docker image, <code>gateway run</code> is <strong>automatically supervised by s6-overlay</strong>: if the gateway process crashes it's restarted within a couple of seconds without losing the container, and the dashboard (when <code>HERMES_DASHBOARD=1</code> is set) is supervised alongside it. The <code>gateway run</code> CMD process itself is a <code>sleep infinity</code> heartbeat that keeps the container alive while s6 manages the actual gateway process — so <code>docker stop</code> still shuts everything down cleanly, but <code>docker logs</code> shows the supervised gateway's output.</p>
+<p>You'll see a one-line breadcrumb in <code>docker logs</code> confirming the upgrade. To opt out — and get the historical "gateway is the container's main process, container exit = gateway exit" semantics — pass <code>--no-supervise</code> or set <code>HERMES_GATEWAY_NO_SUPERVISE=1</code>. The opt-out is useful for CI smoke tests that want the container to exit with the gateway's status code; for production deployments the supervised default is strictly better.</p>
+<p>This behavior applies to the s6-based image only. Earlier (tini-based) images still run <code>gateway run</code> as the foreground main process.</p>
+</div>
+<div class="admonition adm-note"><p class="adm-title">Where gateway logs go</p>
+<p>See the <a href="#where-the-logs-go">Where the logs go</a> section below for the full routing map (per-profile gateways, dashboard, boot reconciler, container-wide <code>docker logs</code>).</p>
+</div>
+<div class="admonition adm-note"><p class="adm-title">Tool-loop hard stops for unattended gateways</p>
+<p>Unattended gateway and cron sessions enable tool-loop hard stops by default through <code>non_interactive_hard_stop_enabled</code>. Interactive CLI, TUI, Desktop, and ACP sessions remain warning-only. To opt an unattended deployment out in the profile's <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">tool_loop_guardrails</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">non_interactive_hard_stop_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+</div>
+<p>Note: the API server is gated on <code>API_SERVER_ENABLED=true</code>. To expose it beyond <code>127.0.0.1</code> inside the container, also set <code>API_SERVER_HOST=0.0.0.0</code> and an <code>API_SERVER_KEY</code> (minimum 8 characters — generate one with <code>openssl rand -hex 32</code>). Example:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hermes<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--restart<span class="w"> </span>unless-stopped<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-p<span class="w"> </span><span class="m">8642</span>:8642<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">API_SERVER_ENABLED</span><span class="o">=</span><span class="nb">true</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">API_SERVER_HOST</span><span class="o">=</span><span class="m">0</span>.0.0.0<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">API_SERVER_KEY</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="k">)</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">API_SERVER_CORS_ORIGINS</span><span class="o">=</span><span class="s1">&#39;*&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<p>Opening any port on an internet facing machine is a security risk. You should not do it unless you understand the risks.</p>
+<h2 id="running-the-dashboard">Running the dashboard</h2>
+<p>The built-in web dashboard runs as a supervised s6-rc service alongside the gateway in the same container. Set <code>HERMES_DASHBOARD=1</code> to bring it up:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hermes<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--restart<span class="w"> </span>unless-stopped<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-p<span class="w"> </span><span class="m">8642</span>:8642<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-p<span class="w"> </span><span class="m">9119</span>:9119<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">HERMES_DASHBOARD</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<p>The dashboard is supervised by s6 — if it crashes, <code>s6-supervise</code> restarts it automatically after a short backoff. Dashboard stdout/stderr is forwarded to <code>docker logs &lt;container&gt;</code> (no prefix; the gateway's own output now lives in a per-profile s6-log file — see <a href="#where-the-logs-go">Where the logs go</a> below — so the two streams don't clash).</p>
+<table>
+<thead>
+<tr>
+<th>Environment variable</th>
+<th>Description</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>HERMES_DASHBOARD</code></td>
+<td>Set to <code>1</code> (or <code>true</code> / <code>yes</code>) to enable the supervised dashboard service</td>
+<td><em>(unset — service is registered but stays down)</em></td>
+</tr>
+<tr>
+<td><code>HERMES_DASHBOARD_HOST</code></td>
+<td>Bind address for the dashboard HTTP server</td>
+<td><code>0.0.0.0</code></td>
+</tr>
+<tr>
+<td><code>HERMES_DASHBOARD_PORT</code></td>
+<td>Port for the dashboard HTTP server</td>
+<td><code>9119</code></td>
+</tr>
+<tr>
+<td><code>HERMES_DASHBOARD_INSECURE</code></td>
+<td><strong>Deprecated / no-op.</strong> Formerly bypassed the auth gate; as of the June 2026 hardening it no longer disables authentication. A non-loopback bind always requires an auth provider</td>
+<td><em>(ignored — configure a provider instead)</em></td>
+</tr>
+</tbody>
+</table>
+<p>The dashboard inside the container defaults to binding <code>0.0.0.0</code> — without it, the published <code>-p 9119:9119</code> port would not be reachable from the host. To restrict the bind to container loopback (for sidecar / reverse-proxy setups), set <code>HERMES_DASHBOARD_HOST=127.0.0.1</code>.</p>
+<p>The dashboard's auth gate engages automatically when both of the following are true:</p>
+<ol>
+<li>The bind host is non-loopback (e.g. the default <code>0.0.0.0</code> inside the container), <strong>and</strong></li>
+<li>A <code>DashboardAuthProvider</code> plugin is registered.</li>
+</ol>
+<p>There are three bundled ways to satisfy the second condition:</p>
+<ul>
+<li><strong>Username/password</strong> — the simplest for a self-hosted / on-prem / homelab container on a trusted network or behind a VPN: set <code>HERMES_DASHBOARD_BASIC_AUTH_USERNAME</code> + <code>HERMES_DASHBOARD_BASIC_AUTH_PASSWORD</code> (and <code>HERMES_DASHBOARD_BASIC_AUTH_SECRET</code> for restart-stable sessions). Not suitable for direct public-internet exposure.</li>
+<li><strong>OAuth (Nous Portal)</strong> — for hosted/public deploys: the <code>dashboard_auth/nous</code> provider activates whenever <code>HERMES_DASHBOARD_OAUTH_CLIENT_ID</code> is set.</li>
+<li><strong>Self-hosted OIDC</strong> — to authenticate against your own identity provider via standard OpenID Connect: the <code>dashboard_auth/self_hosted</code> provider activates when <code>HERMES_DASHBOARD_OIDC_ISSUER</code> + <code>HERMES_DASHBOARD_OIDC_CLIENT_ID</code> are set.</li>
+</ul>
+<p>Whichever you choose, the gate redirects callers to a login page before they can reach any protected route. See <a href="features/web-dashboard.html#authentication-gated-mode">Web Dashboard → Authentication</a> for all three providers.</p>
+<p>When a reverse proxy such as Traefik or nginx runs in another container, its
+bridge-network address is not trusted by default. Set the dashboard's public
+URL and trust only that proxy's exact IP, or a bounded CIDR for a dedicated
+proxy network, in the mounted <code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">dashboard</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">public_url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://dashboard.example.com&quot;</span>
+<span class="w">  </span><span class="nt">trusted_proxies</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;172.20.0.5&quot;</span>
+<span class="w">    </span><span class="c1"># Or, if the proxy address is dynamic on a dedicated network:</span>
+<span class="w">    </span><span class="c1"># - &quot;172.20.0.0/24&quot;</span>
+</code></pre></div>
+
+<p>This allows the proxy's <code>X-Forwarded-Proto: https</code> to control secure OAuth
+cookies while leaving forwarding headers from other peers untrusted. Do not
+use <code>*</code>, <code>0.0.0.0/0</code>, or <code>::/0</code>; Hermes rejects those unbounded entries.</p>
+<p>If no provider is registered and the bind is non-loopback, the dashboard <strong>fails closed at startup</strong> with a specific error pointing at the missing env var. There is no longer an escape hatch that serves the dashboard unauthenticated on a public bind: <code>HERMES_DASHBOARD_INSECURE=1</code> is now a deprecated no-op (it logs a warning and is ignored). Configure a provider, or bind <code>HERMES_DASHBOARD_HOST=127.0.0.1</code> and reach the dashboard over an SSH tunnel / Tailscale instead.</p>
+<div class="admonition adm-warning"><p class="adm-title">Why `--insecure` was removed</p>
+<p>An unauthenticated public dashboard was the entry point for the June 2026 MCP-config persistence campaign: internet scanners reached exposed dashboards (and OpenAI API servers) and drove the agent into planting an SSH-key backdoor. The auth gate is now mandatory on every non-loopback bind. For a trusted-LAN / homelab box, the bundled username/password provider (<code>HERMES_DASHBOARD_BASIC_AUTH_USERNAME</code> + <code>_PASSWORD</code>) is the zero-infra way to satisfy it.</p>
+</div>
+<p>Running the dashboard as a separate container <strong>is</strong> supported when that container shares the host PID and network namespace (e.g. <code>network_mode: host</code>, as the repo's own <code>docker-compose.yml</code> does — see its <code>dashboard</code> service). Its gateway-liveness detection requires a shared PID namespace with the gateway process, so the limitation only applies to dashboards run in isolated bridge-network containers without a shared PID namespace.</p>
+<h2 id="running-interactively-cli-chat">Running interactively (CLI chat)</h2>
+<p>To open an interactive chat session against a running data directory:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-it<span class="w"> </span>--rm<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent
+</code></pre></div>
+
+<p>Or if you have already opened a terminal in your running container (via Docker Desktop for instance), just run:</p>
+<div class="highlight"><pre><span></span><code>/opt/hermes/.venv/bin/hermes
+</code></pre></div>
+
+<h2 id="persistent-volumes">Persistent volumes</h2>
+<p>The <code>/opt/data</code> volume is the single source of truth for all Hermes state. It maps to your host's <code>~/.hermes/</code> directory and contains:</p>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.env</code></td>
+<td>API keys and secrets</td>
+</tr>
+<tr>
+<td><code>config.yaml</code></td>
+<td>All Hermes configuration</td>
+</tr>
+<tr>
+<td><code>SOUL.md</code></td>
+<td>Agent personality/identity</td>
+</tr>
+<tr>
+<td><code>sessions/</code></td>
+<td>Conversation history</td>
+</tr>
+<tr>
+<td><code>memories/</code></td>
+<td>Persistent memory store</td>
+</tr>
+<tr>
+<td><code>skills/</code></td>
+<td>Installed skills</td>
+</tr>
+<tr>
+<td><code>home/</code></td>
+<td>Per-profile HOME for Hermes tool subprocesses (<code>git</code>, <code>ssh</code>, <code>gh</code>, <code>npm</code>, and skill CLIs)</td>
+</tr>
+<tr>
+<td><code>cron/</code></td>
+<td>Scheduled job definitions</td>
+</tr>
+<tr>
+<td><code>hooks/</code></td>
+<td>Event hooks</td>
+</tr>
+<tr>
+<td><code>logs/</code></td>
+<td>Runtime logs</td>
+</tr>
+<tr>
+<td><code>skins/</code></td>
+<td>Custom CLI skins</td>
+</tr>
+</tbody>
+</table>
+<h3 id="filesystem-requirements-for-statedb-in-containers">Filesystem requirements for <code>state.db</code> in containers</h3>
+<p>Hermes keeps sessions in a SQLite database (<code>/opt/data/state.db</code>) that is opened in WAL journal mode by default. WAL relies on shared memory (<code>state.db-shm</code>) being coherent between every process that has the file open. Bind mounts that cross a VM boundary do not provide that: <strong>virtiofs</strong> (Docker Desktop and Podman on macOS, OrbStack) and <strong>9p / drvfs</strong> (Docker Desktop on Windows) both let concurrent writers silently corrupt a WAL database while the main file still passes <code>PRAGMA integrity_check</code>.</p>
+<p>What Hermes does about it (since v2026.9.14):</p>
+<ul>
+<li>A <strong>fresh</strong> database whose directory is on a virtiofs/9p mount is created in rollback (<code>DELETE</code>) journal mode and a one-time warning is logged. Nothing to do.</li>
+<li>An <strong>existing</strong> WAL database on such a mount is never live-downgraded — other Hermes processes may hold it open, and a live switch destroys their uncheckpointed commits. Instead, every process logs a one-time error at startup and <code>hermes doctor</code> flags the database. Fix it one of two ways:</li>
+<li>Stop every Hermes process that uses the database, then run a one-time offline conversion with the Python that ships in the image (it has no <code>sqlite3</code> shell): <code>docker exec hermes python3 -c "import sqlite3; print(sqlite3.connect('/opt/data/state.db').execute('PRAGMA journal_mode=DELETE').fetchone()[0])"</code>. Set <code>database.journal_mode: delete</code> in <code>config.yaml</code> so a later open does not switch it back to WAL.</li>
+<li>Move the data directory onto a native volume — a named Docker volume (<code>-v hermes-data:/opt/data</code>) lives on the VM's own ext4 filesystem and supports WAL normally.</li>
+</ul>
+<p>Detection reads <code>/proc/self/mountinfo</code> inside the container, so it works regardless of the host operating system. It does not classify NFS, SMB, or generic FUSE mounts; on those, set <code>database.journal_mode: delete</code> explicitly. Hermes does not offer SQLite's <code>locking_mode=EXCLUSIVE</code> as an alternative because the gateway, cron, and worker processes open the database concurrently.</p>
+<h3 id="immutable-install-tree">Immutable install tree</h3>
+<p>In hosted and published Docker images, <code>/opt/hermes</code> is the installed application tree. It is root-owned and read-only to the runtime <code>hermes</code> user, so agent turns, gateway sessions, dashboard actions, and normal <code>docker exec hermes hermes ...</code> commands cannot edit the core source, bundled <code>.venv</code>, <code>node_modules</code>, or TUI bundle in place.</p>
+<p>All mutable Hermes state belongs under <code>/opt/data</code>: config, <code>.env</code>, profiles, skills, memories, sessions, logs, dashboard uploads, plugins, and other user-managed files. The image also disables runtime <code>.pyc</code> writes and Hermes lazy dependency installs into <code>/opt/hermes</code>; optional platform dependencies needed by the published image should be baked into the image or installed through a new image build.</p>
+<p>On hosted/published images, agent self-improvement is scoped to skills, memory, plugins, and config under <code>/opt/data</code>. The installed core source under <code>/opt/hermes</code> is immutable; core changes are made via PRs to the repo and shipped by updating the image, not by live-editing the running install.</p>
+<p>If an operator needs to repair or inspect files outside <code>/opt/data</code>, use a root shell intentionally. The <code>hermes</code> shim normally drops <code>docker exec hermes hermes ...</code> back to the runtime user; set <code>HERMES_DOCKER_EXEC_AS_ROOT=1</code> for a one-off root invocation when you explicitly need root semantics.</p>
+<p>Skill CLIs that store credentials under <code>~</code> must be initialized against the subprocess HOME, not just the data-volume root. For example, the <a href="skills/bundled/social-media/social-media-xurl.html">xurl skill</a> stores OAuth state in <code>~/.xurl</code>; in the official Docker layout, Hermes tool calls read that as <code>/opt/data/home/.xurl</code>, so run manual xurl auth with <code>HOME=/opt/data/home</code> and verify with <code>HOME=/opt/data/home xurl auth status</code>.</p>
+<div class="admonition adm-warning"><p class="adm-title">Warning</p>
+<p>Never run two Hermes <strong>gateway</strong> containers against the same data directory simultaneously — session files and memory stores are not designed for concurrent write access.</p>
+</div>
+<h2 id="multi-profile-support">Multi-profile support</h2>
+<p>Hermes supports <a href="../reference/profile-commands.html">multiple profiles</a> — separate <code>~/.hermes/</code> subdirectories that let you run independent agents (different SOUL, skills, memory, sessions, credentials) from a single installation. <strong>Inside the official Docker image, the s6 supervision tree treats each profile as a first-class supervised service</strong>, so the recommended deployment is <strong>one container hosting all profiles</strong>.</p>
+<p>Each profile created with <code>hermes profile create &lt;name&gt;</code> gets:</p>
+<ul>
+<li>A dedicated s6 service slot at <code>/run/service/gateway-&lt;name&gt;/</code>, registered dynamically by the runtime — no container rebuild required.</li>
+<li>Auto-restart on crash, backoff-managed by <code>s6-supervise</code>.</li>
+<li>Per-profile rotated logs at <code>${HERMES_HOME}/logs/gateways/&lt;name&gt;/current</code> (10 archives × 1 MB each).</li>
+<li>State persistence across container restarts: the boot-time reconciler reads <code>gateway_state.json</code> from each profile directory and brings the slot back up only for profiles whose last recorded state was <code>running</code>. Only a gateway you explicitly stopped (<code>hermes gateway stop</code>) stays down across a restart — a container restart, image upgrade, or unexpected exit leaves the recorded state as <code>running</code>, so the gateway auto-starts on the next boot.</li>
+</ul>
+<p>A profile created from the <strong>host</strong> against a bind-mounted <code>~/.hermes</code> gets its directory but no slot (the host process cannot reach the container's <code>/run/service</code>). Inside the container, <code>hermes -p &lt;name&gt; gateway start</code> registers the missing slot on demand and starts it — no <code>docker restart</code> needed. Only <code>start</code> does this, and only for a real profile directory (one carrying <code>SOUL.md</code>); <code>stop</code>/<code>restart</code> on an unregistered profile and a mistyped <code>-p</code> name still fail with <code>✗ no such gateway</code>.</p>
+<p>The lifecycle commands you'd run on the host work the same way from inside the container:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Create a profile — registers the gateway-&lt;name&gt; s6 slot.</span>
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>hermes<span class="w"> </span>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>coder
+
+<span class="c1"># Start / stop / restart — dispatches s6-svc; the gateway lifecycle survives docker restart.</span>
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>hermes<span class="w"> </span>hermes<span class="w"> </span>-p<span class="w"> </span>coder<span class="w"> </span>gateway<span class="w"> </span>start
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>hermes<span class="w"> </span>hermes<span class="w"> </span>-p<span class="w"> </span>coder<span class="w"> </span>gateway<span class="w"> </span>stop
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>hermes<span class="w"> </span>hermes<span class="w"> </span>-p<span class="w"> </span>coder<span class="w"> </span>gateway<span class="w"> </span>restart
+
+<span class="c1"># Status — reports `Manager: s6 (container supervisor)` inside the container.</span>
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>hermes<span class="w"> </span>hermes<span class="w"> </span>-p<span class="w"> </span>coder<span class="w"> </span>gateway<span class="w"> </span>status
+
+<span class="c1"># Remove a profile — tears down the s6 slot too.</span>
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>hermes<span class="w"> </span>hermes<span class="w"> </span>profile<span class="w"> </span>delete<span class="w"> </span>coder
+</code></pre></div>
+
+<p>Under the hood, <code>hermes gateway start/stop/restart</code> inside the container is intercepted and routed to <code>s6-svc</code> against the right service directory; you don't need to learn the s6 commands directly. For raw supervisor state, use <code>/command/s6-svstat /run/service/gateway-&lt;name&gt;</code> (note <code>/command/</code> is on PATH only for processes spawned by the supervision tree — when calling from <code>docker exec</code>, pass the absolute path).</p>
+<h3 id="reaching-more-than-one-profile-from-outside-the-container">Reaching more than one profile from outside the container</h3>
+<p>Two different surfaces reach a profile's gateway from outside, and they behave differently — don't conflate them:</p>
+<p><strong>Hermes Desktop (and the web dashboard).</strong> The Desktop app's <strong>Remote Gateway</strong> connection talks to a <code>hermes dashboard</code> backend (default <strong>port 9119</strong>, enabled by <code>HERMES_DASHBOARD=1</code>) — <em>not</em> the OpenAI API server. One dashboard backend serves <strong>every</strong> co-located profile: the app's profile switcher sends the target profile with each request and the backend opens that profile's <code>HERMES_HOME</code> on disk. So you do <strong>not</strong> need a second port — or a second connection — per profile for Desktop; one <code>:9119</code> connection covers them all through the switcher.</p>
+<p><strong>OpenAI-compatible API clients (Open WebUI, LobeChat, <code>/v1/...</code>).</strong> These talk to each profile's <strong>API server</strong>, which binds <strong>port 8642 for every profile</strong> (resolved from <code>API_SERVER_PORT</code> / <code>platforms.api_server.extra.port</code> — there is no auto-allocation and no <code>config.yaml</code>/<code>gateway.port</code> key). If you want a client to reach a <em>specific</em> second profile, give that profile a distinct <code>API_SERVER_PORT</code> in <strong>its own</strong> <code>.env</code>, otherwise its gateway tries to bind 8642 too and conflicts with the default profile:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Create the profile (registers its gateway-&lt;name&gt; s6 slot)</span>
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>hermes<span class="w"> </span>hermes<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>work
+
+<span class="c1"># Point its API server at a free port (write to the profile&#39;s own .env)</span>
+cat<span class="w"> </span>&gt;&gt;<span class="w"> </span>/opt/data/profiles/work/.env<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<span class="s">API_SERVER_ENABLED=true</span>
+<span class="s">API_SERVER_PORT=8643</span>
+<span class="s">EOF</span>
+
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>hermes<span class="w"> </span>hermes<span class="w"> </span>-p<span class="w"> </span>work<span class="w"> </span>gateway<span class="w"> </span>restart
+</code></pre></div>
+
+<p>Keep <code>API_SERVER_PORT</code> in each profile's <strong>own</strong> <code>.env</code>, never in the container-wide <code>environment:</code> block — a global value would force every profile onto the same port and they would collide. With bridge networking, publish the extra port in <code>docker-compose.yml</code> (<code>- "8643:8643"</code>); with <code>network_mode: host</code> it is already reachable on the host. The default profile's 8642 connection is untouched.</p>
+<h3 id="why-one-container-with-many-profiles-not-many-containers">Why one container with many profiles, not many containers</h3>
+<p>Before the s6 migration, "one container per profile" was the recommended pattern because there was no in-container supervisor to manage multiple gateways. With s6 as PID 1, that's no longer necessary, and the single-container layout is simpler in almost every dimension:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>One container, many profiles</th>
+<th>One container per profile</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Disk overhead</td>
+<td>One image, one bundled venv, one Playwright cache</td>
+<td>N images / N caches</td>
+</tr>
+<tr>
+<td>Memory overhead</td>
+<td>Shared Python interpreter cache, shared node_modules</td>
+<td>Duplicated per container</td>
+</tr>
+<tr>
+<td>Profile creation</td>
+<td><code>docker exec ... hermes profile create &lt;name&gt;</code> (seconds)</td>
+<td>New <code>docker run</code> invocation + port allocation + bind-mount config</td>
+</tr>
+<tr>
+<td>Per-profile crash recovery</td>
+<td><code>s6-supervise</code> auto-restart</td>
+<td>Docker's <code>--restart unless-stopped</code> (slower, kills sibling work)</td>
+</tr>
+<tr>
+<td>Logs</td>
+<td>Per-profile rotated file via <code>s6-log</code>, plus container-boot audit log</td>
+<td><code>docker logs &lt;name&gt;</code> per container — no built-in rotation</td>
+</tr>
+<tr>
+<td>Backup</td>
+<td>One <code>~/.hermes</code> directory</td>
+<td>N directories to coordinate</td>
+</tr>
+</tbody>
+</table>
+<p>The default profile (<code>default</code>) is always registered on first boot, so a fresh container ships with one supervised gateway out of the box. Additional profiles are pure runtime adds.</p>
+<h3 id="when-you-do-want-a-separate-container">When you DO want a separate container</h3>
+<p>Profile-in-container is the default. Run a separate container per profile only when you have a specific reason:</p>
+<ul>
+<li><strong>Resource isolation per workload</strong> — e.g. a runaway browser-tool session in profile A shouldn't be able to OOM profile B. Containers give you <code>--memory</code> / <code>--cpus</code> per profile.</li>
+<li><strong>Independent image pinning</strong> — different upstream image tags per workload.</li>
+<li><strong>Network segmentation</strong> — distinct Docker networks per profile (e.g. one customer-facing, one internal).</li>
+<li><strong>Compliance / blast radius</strong> — distinct credentials never share an OS-level process tree.</li>
+</ul>
+<p>In those cases, declare one service per profile with distinct <code>container_name</code>, <code>volumes</code>, and <code>ports</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes-work</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nousresearch/hermes-agent:latest</span>
+<span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hermes-work</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gateway run</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8642:8642&quot;</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.hermes-work:/opt/data</span>
+
+<span class="w">  </span><span class="nt">hermes-personal</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nousresearch/hermes-agent:latest</span>
+<span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hermes-personal</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gateway run</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8643:8642&quot;</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.hermes-personal:/opt/data</span>
+</code></pre></div>
+
+<p>The warning from <a href="#persistent-volumes">Persistent volumes</a> still applies: never point two containers at the same <code>~/.hermes</code> directory simultaneously. The s6 supervisor inside each container manages its own profile set; cross-container sharing of a data volume corrupts session files and memory stores.</p>
+<h2 id="where-the-logs-go">Where the logs go</h2>
+<p>The s6 container has four distinct log surfaces, and "why isn't my gateway showing anything in <code>docker logs</code>" is a common surprise. Cheatsheet:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Where it lands</th>
+<th>How to read it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Per-profile gateway</strong> (<code>hermes gateway run</code> and per-profile gateways under s6)</td>
+<td>Tee'd to two places: <code>docker logs &lt;container&gt;</code> (real time, no extra prefix) <strong>and</strong> <code>${HERMES_HOME}/logs/gateways/&lt;profile&gt;/current</code> (rotated, ISO-8601 timestamped, 10 archives × 1 MB each)</td>
+<td><code>docker logs -f hermes</code> or <code>tail -F ~/.hermes/logs/gateways/default/current</code> on the host</td>
+</tr>
+<tr>
+<td><strong>Dashboard</strong> (when <code>HERMES_DASHBOARD=1</code>)</td>
+<td><code>docker logs &lt;container&gt;</code> (no prefix)</td>
+<td><code>docker logs -f hermes</code> — interleaved with gateway lines</td>
+</tr>
+<tr>
+<td><strong>Boot reconciler</strong> (records which profile gateways were restored on each container start)</td>
+<td><code>${HERMES_HOME}/logs/container-boot.log</code> (append-only audit log)</td>
+<td><code>tail -F ~/.hermes/logs/container-boot.log</code></td>
+</tr>
+<tr>
+<td><strong>Generic Hermes logs</strong> (<code>agent.log</code>, <code>errors.log</code>)</td>
+<td><code>${HERMES_HOME}/logs/</code> (profile-aware)</td>
+<td><code>docker exec hermes hermes logs --follow [--level WARNING] [--session &lt;id&gt;]</code></td>
+</tr>
+</tbody>
+</table>
+<p>Two practical consequences worth knowing:</p>
+<ul>
+<li>The file copy at <code>logs/gateways/&lt;profile&gt;/current</code> is what survives container restarts. <code>docker logs</code> only retains output from the current container's lifetime (and is wiped on <code>docker rm</code>); the rotated files persist on the bind-mounted volume.</li>
+<li>The boot reconciler's audit line shape is <code>&lt;iso-timestamp&gt; profile=&lt;name&gt; prior_state=&lt;state&gt; action=&lt;registered|started&gt;</code>, so a quick <code>grep profile=coder ~/.hermes/logs/container-boot.log</code> reveals when a given profile was last restored and whether s6 auto-started it.</li>
+</ul>
+<h2 id="environment-variable-forwarding">Environment variable forwarding</h2>
+<p>API keys are read from <code>/opt/data/.env</code> inside the container. You can also pass environment variables directly:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-it<span class="w"> </span>--rm<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">ANTHROPIC_API_KEY</span><span class="o">=</span><span class="s2">&quot;sk-ant-...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">OPENAI_API_KEY</span><span class="o">=</span><span class="s2">&quot;sk-...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent
+</code></pre></div>
+
+<p>Direct <code>-e</code> flags override values from <code>.env</code>. This is useful for CI/CD or secrets-manager integrations where you don't want keys on disk.</p>
+<div class="admonition adm-note"><p class="adm-title">Looking for Docker as the **terminal backend**?</p>
+<p>This page covers running Hermes itself inside Docker. If you want Hermes to execute the agent's <code>terminal</code> / <code>execute_code</code> calls inside a Docker sandbox container (one long-lived container shared across Hermes processes — see issue #20561), that's a separate config block — <code>terminal.backend: docker</code> plus <code>terminal.docker_image</code>, <code>terminal.docker_volumes</code>, <code>terminal.docker_forward_env</code>, <code>terminal.docker_env</code>, <code>terminal.docker_run_as_host_user</code>, <code>terminal.docker_extra_args</code>, <code>terminal.docker_persist_across_processes</code>, and <code>terminal.docker_orphan_reaper</code>. See <a href="configuration.html#docker-backend">Configuration → Docker Backend</a> for the full set including container-lifecycle rules.</p>
+</div>
+<h2 id="docker-compose-example">Docker Compose example</h2>
+<p>For persistent deployment with both the gateway and dashboard, a <code>docker-compose.yaml</code> is convenient:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nousresearch/hermes-agent:latest</span>
+<span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hermes</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gateway run</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8642:8642&quot;</span><span class="w">   </span><span class="c1"># gateway API</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;9119:9119&quot;</span><span class="w">   </span><span class="c1"># dashboard (only reached when HERMES_DASHBOARD=1)</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.hermes:/opt/data</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">HERMES_DASHBOARD=1</span>
+<span class="w">      </span><span class="c1"># Uncomment to forward specific env vars instead of using .env file:</span>
+<span class="w">      </span><span class="c1"># - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}</span>
+<span class="w">      </span><span class="c1"># - OPENAI_API_KEY=${OPENAI_API_KEY}</span>
+<span class="w">      </span><span class="c1"># - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}</span>
+<span class="w">    </span><span class="nt">deploy</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">resources</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">limits</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">memory</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4G</span>
+<span class="w">          </span><span class="nt">cpus</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;2.0&quot;</span>
+</code></pre></div>
+
+<p>Start with <code>docker compose up -d</code> and view logs with <code>docker compose logs -f</code>. The supervised gateway's stdout is also tee'd to <code>${HERMES_HOME}/logs/gateways/&lt;profile&gt;/current</code> on the volume — see <a href="#where-the-logs-go">Where the logs go</a> for the full routing map.</p>
+<h2 id="optional-linux-desktop-audio-bridge">Optional: Linux desktop audio bridge</h2>
+<p>Voice mode in Docker needs two separate things to work: Hermes must be allowed to probe audio devices inside the container, and the container must be able to reach your host audio server. The setup below covers the host audio plumbing for Linux desktops that expose a PulseAudio-compatible socket, including many PipeWire setups.</p>
+<div class="admonition adm-caution"><p class="adm-title">Caution</p>
+<p>This is a Linux desktop workaround, not a general Docker Desktop feature. It is useful when you already have host audio working and want CLI voice mode inside the Hermes container. If Hermes still reports <code>Running inside Docker container -- no audio devices</code>, use a build that includes Docker audio probing support for <code>PULSE_SERVER</code> / <code>PIPEWIRE_REMOTE</code>.</p>
+</div>
+<p>First, create an ALSA config next to your Compose file:</p>
+<div class="highlight"><pre><span></span><code>pcm.!default {
+    type pulse
+    hint {
+        show on
+        description &quot;Default ALSA Output (PulseAudio)&quot;
+    }
+}
+
+pcm.pulse {
+    type pulse
+}
+
+ctl.!default {
+    type pulse
+}
+</code></pre></div>
+
+<p>Then build a small derived image with the ALSA PulseAudio plugin installed:</p>
+<div class="highlight"><pre><span></span><code><span class="k">FROM</span><span class="w"> </span><span class="s">nousresearch/hermes-agent:latest</span>
+
+<span class="k">USER</span><span class="w"> </span><span class="s">root</span>
+<span class="k">RUN</span><span class="w"> </span>apt-get<span class="w"> </span>update<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="o">&amp;&amp;</span><span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>--no-install-recommends<span class="w"> </span>libasound2-plugins<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="o">&amp;&amp;</span><span class="w"> </span>rm<span class="w"> </span>-rf<span class="w"> </span>/var/lib/apt/lists/*
+</code></pre></div>
+
+<p>Use that image in Compose and pass through the host user's PulseAudio socket and cookie:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">build</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">context</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">.</span>
+<span class="w">      </span><span class="nt">dockerfile</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Dockerfile.audio</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hermes-agent-audio</span>
+<span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hermes</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gateway run</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.hermes:/opt/data</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/run/user/${HERMES_UID}/pulse:/run/user/${HERMES_UID}/pulse</span>
+<span class="w">      </span><span class="c1"># no-tmp: ok — path inside the container</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.config/pulse/cookie:/tmp/pulse-cookie:ro</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./asound.conf:/etc/asound.conf:ro</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">HERMES_UID=${HERMES_UID}</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">HERMES_GID=${HERMES_GID}</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">XDG_RUNTIME_DIR=/run/user/${HERMES_UID}</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PULSE_SERVER=unix:/run/user/${HERMES_UID}/pulse/native</span>
+<span class="w">      </span><span class="c1"># no-tmp: ok — path inside the container</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PULSE_COOKIE=/tmp/pulse-cookie</span>
+</code></pre></div>
+
+<p>Start it with your host UID/GID so the container process can access the per-user audio socket:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_UID</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>id<span class="w"> </span>-u<span class="k">)</span><span class="s2">&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">HERMES_GID</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>id<span class="w"> </span>-g<span class="k">)</span><span class="s2">&quot;</span>
+docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d<span class="w"> </span>--build
+</code></pre></div>
+
+<p>To verify what PortAudio sees inside the container:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>hermes<span class="w"> </span>/opt/hermes/.venv/bin/python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;import sounddevice as sd; print(sd.query_devices())&quot;</span>
+</code></pre></div>
+
+<h2 id="resource-limits">Resource limits</h2>
+<p>The Hermes container needs moderate resources. Recommended minimums:</p>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Minimum</th>
+<th>Recommended</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Memory</td>
+<td>1 GB</td>
+<td>2–4 GB</td>
+</tr>
+<tr>
+<td>CPU</td>
+<td>1 core</td>
+<td>2 cores</td>
+</tr>
+<tr>
+<td>Disk (data volume)</td>
+<td>500 MB</td>
+<td>2+ GB (grows with sessions/skills)</td>
+</tr>
+</tbody>
+</table>
+<p>Browser automation (Playwright/Chromium) is the most memory-hungry feature. If you don't need browser tools, 1 GB is sufficient. With browser tools active, allocate at least 2 GB.</p>
+<p>Set limits in Docker:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hermes<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--restart<span class="w"> </span>unless-stopped<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--memory<span class="o">=</span>4g<span class="w"> </span>--cpus<span class="o">=</span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<h2 id="what-the-dockerfile-does">What the Dockerfile does</h2>
+<p>The official image is based on <code>debian:13.4</code> and includes:</p>
+<ul>
+<li>Python 3.13 with dependencies synced from the lockfile via <code>uv sync --frozen --no-install-project</code> for the baked extras (<code>all</code>, <code>messaging</code>, Anthropic/Bedrock/Azure identity, Hindsight, Matrix), followed by a no-dependency editable install of Hermes itself.</li>
+<li>Node.js 26 + npm (for browser automation, WhatsApp bridge, TUI/Desktop bundles, and workspace build tooling)</li>
+<li>Playwright with Chromium (<code>npx playwright install --with-deps chromium --only-shell</code>)</li>
+<li>ripgrep, ffmpeg, git, and <code>xz-utils</code> as system utilities</li>
+<li><strong><code>docker-cli</code></strong> — so agents running inside the container can drive the host's Docker daemon (bind-mount <code>/var/run/docker.sock</code> to opt in) for <code>docker build</code>, <code>docker run</code>, container inspection, etc.</li>
+<li><strong><code>openssh-client</code></strong> — enables the <a href="configuration.html#ssh-backend">SSH terminal backend</a> from inside the container. The SSH backend shells out to the system <code>ssh</code> binary; without this, it failed silently in containerized installs.</li>
+<li>The WhatsApp bridge (<code>scripts/whatsapp-bridge/</code>)</li>
+<li><strong><a href="https://github.com/just-containers/s6-overlay" class="ext" target="_blank" rel="noopener"><code>s6-overlay</code></a> v3</strong> as PID 1 (replaces the older <code>tini</code>) — supervises the dashboard and per-profile gateways with auto-restart on crash, reaps zombie subprocesses, and forwards signals.</li>
+</ul>
+<p>The image treats <code>/opt/hermes</code> as an immutable install tree at runtime. Optional Python extras, Node workspaces, and TUI assets that must be available inside Docker need to be baked during the image build; runtime lazy installs are disabled so supervised gateways and <code>docker exec hermes …</code> commands do not try to write dependency artifacts back into the read-only source tree.</p>
+<p>The container's <code>ENTRYPOINT</code> is a small dispatcher (<code>docker/entrypoint-dispatch.sh</code>). When the container owns PID 1 (normal Docker / Podman), it exec's s6-overlay's <code>/init</code> and you get the full supervision tree described below. When a platform wraps the image entrypoint under its own PID-1 init (Fly.io Machines, <code>docker run --init</code>, some Nomad/Kubernetes setups), <code>/init</code> would abort with <code>s6-overlay-suexec: fatal: can only run as pid 1</code> — so the dispatcher instead runs the stage2 bootstrap directly and exec's the main wrapper without s6. On that fallback path the requested command still runs, but supervised services (dashboard, per-profile gateways) are unavailable.</p>
+<p>On the PID-1 path, <code>/init</code>:
+1. Runs <code>/etc/cont-init.d/01-hermes-setup</code> (= <code>docker/stage2-hook.sh</code>) as root: optional UID/GID remap, fixes volume ownership, seeds <code>.env</code> / <code>config.yaml</code> / <code>SOUL.md</code> on first boot, runs non-interactive config-schema migrations unless <code>HERMES_SKIP_CONFIG_MIGRATION=1</code>, syncs bundled skills.
+2. Runs <code>/etc/cont-init.d/02-reconcile-profiles</code> (= <code>hermes_cli.container_boot</code>): walks <code>$HERMES_HOME/profiles/&lt;name&gt;/</code>, recreates the per-profile gateway s6 service slot under <code>/run/service/gateway-&lt;profile&gt;/</code>, and auto-starts only those whose last recorded state was <code>running</code> (see <a href="#per-profile-gateway-supervision">Per-profile gateway supervision</a>).
+3. Starts the static <code>main-hermes</code> and <code>dashboard</code> s6-rc services.
+4. Exec's the container's CMD as the main program (<code>/opt/hermes/docker/main-wrapper.sh</code>), which routes the arguments the user passed to <code>docker run</code>:
+   - no args → <code>hermes</code> (the default)
+   - first arg is an executable on PATH (e.g. <code>sleep</code>, <code>bash</code>) → exec it directly
+   - anything else → <code>hermes &lt;args&gt;</code> (subcommand passthrough)
+   The container exits when this main program exits, with its exit code.</p>
+<div class="admonition adm-warning"><p class="adm-title">Breaking change vs. pre-s6 images</p>
+<p>The container ENTRYPOINT is now the <code>entrypoint-dispatch.sh</code> dispatcher (which delegates to s6-overlay's <code>/init</code> under PID 1), not <code>/usr/bin/tini</code>. All five documented <code>docker run</code> invocation patterns (no args, <code>chat -q "…"</code>, <code>sleep infinity</code>, <code>bash</code>, <code>--tui</code>) behave identically to the tini-based image. If you have a downstream wrapper that depended on tini-specific signal behavior or hard-coded <code>/usr/bin/tini --</code> invocation, pin to the previous image tag.</p>
+</div>
+<div class="admonition adm-warning"><p class="adm-title">Privilege model</p>
+<p>Do not override the image entrypoint unless you keep <code>/init</code> (or, equivalently, the legacy <code>docker/entrypoint.sh</code> shim that forwards to the stage2 hook) in the command chain. s6-overlay's <code>/init</code> runs as root so it can chown the volume on first boot, then drops to the <code>hermes</code> user via <code>s6-setuidgid</code> for every supervised service AND for the main program. Starting <code>hermes gateway run</code> as root inside the official image is refused by default because it can leave root-owned files in <code>/opt/data</code> and break later dashboard or gateway starts. Set <code>HERMES_ALLOW_ROOT_GATEWAY=1</code> only when you intentionally accept that risk.</p>
+</div>
+<div class="admonition adm-warning"><p class="adm-title">Overriding `entrypoint:` also removes the zombie reaper</p>
+<p><code>/init</code> is what reaps orphaned grandchildren (headless browsers, MCP servers, <code>git</code>/<code>npm</code> helpers spawned by tools). A Compose service that overrides <code>entrypoint:</code> to call <code>hermes</code> directly — for example to run the dashboard as a non-root user — makes the hermes process itself PID 1, and nothing above it ever calls <code>wait()</code>: every orphan stays a <code>&lt;defunct&gt;</code> entry forever (one deployment reached 284 zombies in under three hours). Hermes prints <code>[hermes] WARNING: this process is PID 1 with no init above it</code> at startup in that configuration.</p>
+<p>If you must override the entrypoint, add Docker's init as PID 1 so orphans are reaped:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes-dashboard</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nousresearch/hermes-agent:latest</span>
+<span class="w">    </span><span class="nt">init</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">                                      </span><span class="c1"># docker-init becomes PID 1 and reaps orphans</span>
+<span class="w">    </span><span class="nt">entrypoint</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;/opt/hermes/.venv/bin/hermes&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;dashboard&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--host&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;0.0.0.0&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--port&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;9119&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--no-open&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--skip-build&quot;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<p>(<code>docker run --init …</code> is the equivalent flag.) This fixes the zombie accumulation only — with <code>/init</code> out of the chain, the s6 supervision tree is still gone: the dashboard, <code>hermes gateway run</code> and per-profile gateways are unsupervised, exactly as the dispatcher's own non-PID-1 warning says. Keep the default <code>ENTRYPOINT</code> whenever you can.</p>
+</div>
+<h3 id="docker-exec-automatically-drops-to-the-hermes-user"><code>docker exec</code> automatically drops to the <code>hermes</code> user</h3>
+<p><code>docker exec hermes &lt;cmd&gt;</code> defaults to running as root inside the container, but the image ships a thin shim at <code>/opt/hermes/bin/hermes</code> (earliest on PATH) that detects root callers and transparently re-execs through <code>s6-setuidgid hermes</code>. So <code>docker exec hermes login</code>, <code>docker exec hermes profile create …</code>, <code>docker exec hermes setup</code>, etc. all write files owned by UID 10000 — i.e. readable by the supervised gateway — with no extra <code>--user</code> flag needed. Non-root callers (the supervised processes themselves, <code>docker exec --user hermes</code>, kanban subagents inside the container) hit a short-circuit that exec's the venv binary directly, so there's no overhead on the hot paths.</p>
+<p>If you specifically need a <code>docker exec</code> that retains root semantics (diagnostic sessions, inspecting root-only state, files outside <code>/opt/data</code> that root happens to own), opt out per invocation:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-e<span class="w"> </span><span class="nv">HERMES_DOCKER_EXEC_AS_ROOT</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>hermes<span class="w"> </span>&lt;cmd&gt;
+</code></pre></div>
+
+<p>The shim accepts <code>1</code> / <code>true</code> / <code>yes</code> (case-insensitive). Anything else — including typos like <code>=0</code> — falls through to the drop, so silent opt-outs aren't possible. If <code>s6-setuidgid</code> isn't available (custom builds that stripped s6-overlay), the shim refuses to run as root and exits 126 instead, surfacing the broken privilege model loudly rather than regressing to the historical footgun where <code>docker exec hermes login</code> would write <code>auth.json</code> as <code>root:root</code> and break the supervised gateway's auth on every chat platform message.</p>
+<h3 id="per-profile-gateway-supervision">Per-profile gateway supervision</h3>
+<p>Each profile created with <code>hermes profile create &lt;name&gt;</code> automatically gets an s6-supervised gateway service registered at <code>/run/service/gateway-&lt;name&gt;/</code>, with state-persistent auto-restart across container restarts. See <a href="#multi-profile-support">Multi-profile support</a> above for the user-facing workflow and the lifecycle commands.</p>
+<p><strong>Supervision benefits over the pre-s6 image:</strong></p>
+<ul>
+<li>Gateway crashes are auto-restarted by <code>s6-supervise</code> after a ~1s backoff.</li>
+<li>Dashboard, when enabled with <code>HERMES_DASHBOARD=1</code>, is supervised on the same supervision tree and gets the same auto-restart treatment.</li>
+<li><code>docker restart</code>, image upgrades (<code>docker compose up -d --force-recreate</code>), and unexpected exits preserve running gateways: the cont-init reconciler reads <code>$HERMES_HOME/profiles/&lt;name&gt;/gateway_state.json</code> and brings the slot back up if the last recorded state was <code>running</code>. Only an explicit <code>hermes gateway stop</code> records <code>stopped</code> and keeps the gateway down across the restart; the container/s6 SIGTERM sent on a restart or upgrade is treated as "still running" and auto-starts.</li>
+<li>Per-profile gateway logs persist under <code>$HERMES_HOME/logs/gateways/&lt;profile&gt;/current</code> (rotated by <code>s6-log</code>), and the reconciler's actions are appended to <code>$HERMES_HOME/logs/container-boot.log</code> per boot. See <a href="#where-the-logs-go">Where the logs go</a> for the full routing map.</li>
+</ul>
+<p><code>hermes status</code> inside the container reports <code>Manager: s6 (container supervisor)</code>. Use <code>/command/s6-svstat /run/service/gateway-&lt;name&gt;</code> for the raw supervisor view (note <code>/command/</code> is on PATH for supervision-tree processes only; pass the absolute path when calling from <code>docker exec</code>).</p>
+<h2 id="upgrading">Upgrading</h2>
+<p>Pull the latest image and recreate the container. Your data directory is
+preserved, and the container runs non-interactive config-schema migrations
+against the mounted <code>$HERMES_HOME/config.yaml</code> before starting the gateway.
+When a migration is needed, Hermes writes timestamped backups next to
+<code>config.yaml</code> and <code>.env</code> first.</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>pull<span class="w"> </span>nousresearch/hermes-agent:latest
+docker<span class="w"> </span>rm<span class="w"> </span>-f<span class="w"> </span>hermes
+docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hermes<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--restart<span class="w"> </span>unless-stopped<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<p>Or with Docker Compose:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>pull
+docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
+</code></pre></div>
+
+<p>Set <code>HERMES_SKIP_CONFIG_MIGRATION=1</code> only if you need to inspect or migrate the
+persisted config manually before letting the new image rewrite it.</p>
+<h2 id="skills-and-credential-files">Skills and credential files</h2>
+<p>When using Docker as the execution environment (not the methods above, but when the agent runs commands inside a Docker sandbox — see <a href="configuration.html#docker-backend">Configuration → Docker Backend</a>), Hermes reuses a single long-lived container for all tool calls and automatically bind-mounts the skills directory (<code>~/.hermes/skills/</code>) and any credential files declared by skills into that container as read-only volumes. Skill scripts, templates, and references are available inside the sandbox without manual configuration, and because the container persists for the life of the Hermes process, any dependencies you install or files you write stay around for the next tool call.</p>
+<p>The same syncing happens for SSH and Modal backends — skills and credential files are uploaded via rsync or the Modal mount API before each command.</p>
+<h2 id="installing-more-tools-in-the-container">Installing more tools in the container</h2>
+<p>The official image ships with a curated set of utilities (see <a href="#what-the-dockerfile-does">What the Dockerfile does</a>), but not every tool an agent might want is preinstalled. There are five recommended approaches, in increasing order of effort and durability.</p>
+<h3 id="npm-or-python-tools--use-npx-or-uvx">npm or Python tools — use <code>npx</code> or <code>uvx</code></h3>
+<p>For any tool published to npm or PyPI, instruct Hermes to run it via <code>npx</code> (npm) or <code>uvx</code> (Python) and to remember that command in its persistent memory. If the tool needs a config file or credentials, instruct it to drop those under <code>/opt/data</code> (e.g. <code>/opt/data/&lt;tool&gt;/config.yaml</code>).</p>
+<p>Dependencies are fetched on demand and cached for the life of the container. Configuration written under <code>/opt/data</code> survives container restarts because it lives on the bind-mounted host directory. The package cache itself is rebuilt after a <code>docker rm</code>, but <code>npx</code> and <code>uvx</code> re-fetch transparently the next time the tool runs.</p>
+<h3 id="other-tools-apt-packages-binaries--install-and-remember">Other tools (apt packages, binaries) — install and remember</h3>
+<p>For anything outside npm or PyPI — <code>apt</code> packages, prebuilt binaries, language runtimes not already in the image — instruct Hermes how to install it (e.g. <code>apt-get update &amp;&amp; apt-get install -y &lt;package&gt;</code>) and tell it to remember the install command. The tool persists for the rest of the container's lifetime, and Hermes will re-run the install command after a container restart when it next needs the tool.</p>
+<p>This is a good fit for tools that are quick to install and used occasionally. For tools used constantly, prefer the next approach.</p>
+<h3 id="durable-installs--build-a-derived-image">Durable installs — build a derived image</h3>
+<p>When a tool must be available immediately on every container start with no re-install delay, build a new image that inherits from <code>nousresearch/hermes-agent</code> and installs the tool in a layer:</p>
+<div class="highlight"><pre><span></span><code><span class="k">FROM</span><span class="w"> </span><span class="s">nousresearch/hermes-agent:latest</span>
+
+<span class="k">USER</span><span class="w"> </span><span class="s">root</span>
+<span class="k">RUN</span><span class="w"> </span>apt-get<span class="w"> </span>update<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="o">&amp;&amp;</span><span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>--no-install-recommends<span class="w"> </span>&lt;your-package&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="o">&amp;&amp;</span><span class="w"> </span>rm<span class="w"> </span>-rf<span class="w"> </span>/var/lib/apt/lists/*
+<span class="k">USER</span><span class="w"> </span><span class="s">hermes</span>
+</code></pre></div>
+
+<p>Build it and use it in place of the official image:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>build<span class="w"> </span>-t<span class="w"> </span>my-hermes:latest<span class="w"> </span>.
+docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hermes<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--restart<span class="w"> </span>unless-stopped<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-p<span class="w"> </span><span class="m">8642</span>:8642<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>my-hermes:latest<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<p>The entrypoint script and <code>/opt/data</code> semantics are inherited unchanged, so the rest of this page still applies. Remember to rebuild the image when pulling a newer upstream <code>nousresearch/hermes-agent</code>.</p>
+<h3 id="complex-tools-or-multi-service-stacks--run-a-sidecar-container">Complex tools or multi-service stacks — run a sidecar container</h3>
+<p>For tools that bring their own service (a database, a web server, a queue, a headless browser farm) or that are too heavy to live inside the Hermes container, run them as a separate container on a shared Docker network. Hermes reaches the sidecar by container name, the same way it reaches a local inference server (see <a href="#connecting-to-local-inference-servers-vllm-ollama-etc">Connecting to local inference servers</a>).</p>
+<div class="highlight"><pre><span></span><code><span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nousresearch/hermes-agent:latest</span>
+<span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hermes</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gateway run</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8642:8642&quot;</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.hermes:/opt/data</span>
+<span class="w">    </span><span class="nt">networks</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hermes-net</span>
+
+<span class="w">  </span><span class="nt">my-tool</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">example/my-tool:latest</span>
+<span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-tool</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+<span class="w">    </span><span class="nt">networks</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hermes-net</span>
+
+<span class="nt">networks</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes-net</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">driver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">bridge</span>
+</code></pre></div>
+
+<p>From inside the Hermes container, the sidecar is reachable at <code>http://my-tool:&lt;port&gt;</code> (or whatever protocol it serves). This pattern keeps each service's lifecycle, resource limits, and upgrade cadence independent, and avoids bloating the Hermes image with dependencies that are only needed by one tool.</p>
+<h3 id="broadly-useful-tools--open-an-issue-or-pull-request">Broadly useful tools — open an issue or pull request</h3>
+<p>If a tool is likely to be useful to most Hermes Agent users, consider contributing it upstream rather than carrying it in a private derived image. Open an issue or pull request on the <a href="https://github.com/NousResearch/hermes-agent" class="ext" target="_blank" rel="noopener">hermes-agent repository</a> describing the tool and its use case. Tools that get bundled into the official image benefit every user and avoid the maintenance overhead of a downstream fork.</p>
+<h2 id="connecting-to-local-inference-servers-vllm-ollama-etc">Connecting to local inference servers (vLLM, Ollama, etc.)</h2>
+<p>When running Hermes in Docker and your inference server (vLLM, Ollama, text-generation-inference, etc.) is also running on the host or in another container, networking requires extra attention.</p>
+<h3 id="docker-compose-recommended">Docker Compose (recommended)</h3>
+<p>Put both services on the same Docker network. This is the most reliable approach:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">vllm</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vllm/vllm-openai:latest</span>
+<span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vllm</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">&gt;</span>
+<span class="w">      </span><span class="no">--model Qwen/Qwen2.5-7B-Instruct</span>
+<span class="w">      </span><span class="no">--served-model-name my-model</span>
+<span class="w">      </span><span class="no">--host 0.0.0.0</span>
+<span class="w">      </span><span class="no">--port 8000</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8000:8000&quot;</span>
+<span class="w">    </span><span class="nt">networks</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hermes-net</span>
+<span class="w">    </span><span class="nt">deploy</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">resources</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">reservations</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">devices</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">capabilities</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">gpu</span><span class="p p-Indicator">]</span>
+
+<span class="w">  </span><span class="nt">hermes</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nousresearch/hermes-agent:latest</span>
+<span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hermes</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gateway run</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8642:8642&quot;</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/.hermes:/opt/data</span>
+<span class="w">    </span><span class="nt">networks</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hermes-net</span>
+
+<span class="nt">networks</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hermes-net</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">driver</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">bridge</span>
+</code></pre></div>
+
+<p>Then in your <code>~/.hermes/config.yaml</code>, use the <strong>container name</strong> as the hostname:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">custom</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-model</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http://vllm:8000/v1</span>
+<span class="w">  </span><span class="nt">api_key</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;none&quot;</span>
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">Key points</p>
+<ul>
+<li>Use the <strong>container name</strong> (<code>vllm</code>) as the hostname — not <code>localhost</code> or <code>127.0.0.1</code>, which refer to the Hermes container itself.</li>
+<li>The <code>model</code> value must match the <code>--served-model-name</code> you passed to vLLM.</li>
+<li>Set <code>api_key</code> to any non-empty string (vLLM requires the header but doesn't validate it by default).</li>
+<li>Do <strong>not</strong> include a trailing slash in <code>base_url</code>.</li>
+</ul>
+</div>
+<h3 id="standalone-docker-run-no-compose">Standalone Docker run (no Compose)</h3>
+<p>If your inference server runs directly on the host (not in Docker), use <code>host.docker.internal</code> on macOS/Windows, or <code>--network host</code> on Linux:</p>
+<p><strong>macOS / Windows:</strong></p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hermes<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-p<span class="w"> </span><span class="m">8642</span>:8642<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">custom</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-model</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http://host.docker.internal:8000/v1</span>
+<span class="w">  </span><span class="nt">api_key</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;none&quot;</span>
+</code></pre></div>
+
+<p><strong>Linux (host networking):</strong></p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hermes<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--network<span class="w"> </span>host<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">custom</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-model</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http://127.0.0.1:8000/v1</span>
+<span class="w">  </span><span class="nt">api_key</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;none&quot;</span>
+</code></pre></div>
+
+<div class="admonition adm-warning"><p class="adm-title">With `--network host`, the `-p` flag is ignored — all container ports are directly exposed on the host.</p>
+
+</div>
+<h3 id="verifying-connectivity">Verifying connectivity</h3>
+<p>From inside the Hermes container, confirm the inference server is reachable:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>hermes<span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>http://vllm:8000/v1/models
+</code></pre></div>
+
+<p>You should see a JSON response listing your served model. If this fails, check:</p>
+<ol>
+<li>Both containers are on the same Docker network (<code>docker network inspect hermes-net</code>)</li>
+<li>The inference server is listening on <code>0.0.0.0</code>, not <code>127.0.0.1</code></li>
+<li>The port number matches</li>
+</ol>
+<h3 id="ollama">Ollama</h3>
+<p>Ollama works the same way. If Ollama runs on the host, use <code>host.docker.internal:11434</code> (macOS/Windows) or <code>127.0.0.1:11434</code> (Linux with <code>--network host</code>). If Ollama runs in its own container on the same Docker network:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">custom</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">llama3</span>
+<span class="w">  </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http://ollama:11434/v1</span>
+<span class="w">  </span><span class="nt">api_key</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;none&quot;</span>
+</code></pre></div>
+
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="container-exits-immediately">Container exits immediately</h3>
+<p>Check logs: <code>docker logs hermes</code>. Common causes:
+- Missing or invalid <code>.env</code> file — run interactively first to complete setup
+- Port conflicts if running with exposed ports</p>
+<h3 id="permission-denied-errors">"Permission denied" errors</h3>
+<p>The container's stage2 hook drops privileges to the non-root <code>hermes</code> user (UID 10000) via <code>s6-setuidgid</code> inside each supervised service. If your host <code>~/.hermes/</code> is owned by a different UID, set <code>HERMES_UID</code>/<code>HERMES_GID</code> — or their <code>PUID</code>/<code>PGID</code> aliases, for parity with LinuxServer.io and NAS images — to match your host user, or ensure the data directory is writable:</p>
+<div class="highlight"><pre><span></span><code>chmod<span class="w"> </span>-R<span class="w"> </span><span class="m">755</span><span class="w"> </span>~/.hermes
+</code></pre></div>
+
+<p>On a NAS (UGOS, Synology, unRAID) the data directory is typically a <strong>bind mount</strong> owned by a host UID the container cannot <code>chown</code>. Set <code>PUID</code>/<code>PGID</code> (or <code>HERMES_UID</code>/<code>HERMES_GID</code>) to that host user so the runtime runs as the owner of the mount rather than UID 10000:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hermes<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">PUID</span><span class="o">=</span><span class="m">1000</span><span class="w"> </span>-e<span class="w"> </span><span class="nv">PGID</span><span class="o">=</span><span class="m">10</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>/volume1/docker/hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<p><code>docker exec hermes &lt;cmd&gt;</code> automatically drops to UID 10000 too — see <a href="#docker-exec-automatically-drops-to-the-hermes-user"><code>docker exec</code> automatically drops to the <code>hermes</code> user</a> for details and the per-invocation opt-out.</p>
+<h3 id="shared-data-directory-keeps-resetting-to-0700">Shared data directory keeps resetting to <code>0700</code></h3>
+<p>Outside a container Hermes locks <code>HERMES_HOME</code> (and its <code>cron/</code>, <code>sessions/</code>, <code>logs/</code>, <code>memories/</code> subdirectories) to owner-only <code>0700</code> on every start. Inside a container it leaves directory modes alone, so a bind mount shared with a sibling container running as a different UID (a web UI, a permissions fixer) keeps whatever mode and ACLs you set on the host. To force a specific directory mode anyway, set <code>HERMES_HOME_MODE</code> (octal, e.g. <code>HERMES_HOME_MODE=0755</code>); it is applied in containers too.</p>
+<h3 id="permission-denied-on-every-docker-exec-install-dir-locked-to-0700">"Permission denied" on every <code>docker exec</code> (install dir locked to 0700)</h3>
+<p>Images built before late August 2026 had a bug where writing a credential file directly under <code>/opt/hermes</code> restricted that directory to <code>0700</code>, locking the <code>hermes</code> user (UID 10000) out of the install tree. Every new <code>docker exec</code> then fails with <code>Permission denied</code>.</p>
+<p>Pulling a newer image and recreating the container fixes it permanently (the install dir ships as <code>0755</code> and current releases no longer restrict it). If you need to recover a running container in place without recreating it:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-u<span class="w"> </span>root<span class="w"> </span>hermes<span class="w"> </span>chmod<span class="w"> </span><span class="m">0755</span><span class="w"> </span>/opt/hermes
+</code></pre></div>
+
+<h3 id="zombie-defunct-processes-piling-up-under-pid-1">Zombie (<code>&lt;defunct&gt;</code>) processes piling up under PID 1</h3>
+<p><code>ps -eo stat,ppid,comm | awk '$1 ~ /^Z/'</code> inside the container lists dead children that were never reaped. This happens when hermes itself is PID 1 — almost always because a Compose service overrides <code>entrypoint:</code> and so skips <code>docker/entrypoint-dispatch.sh</code> → <code>/init</code>. Hermes also warns about it at startup (<code>this process is PID 1 with no init above it</code>). Restore the default entrypoint, or add <code>init: true</code> (Compose) / <code>docker run --init</code> so <code>docker-init</code> reaps orphans; see <a href="#what-the-dockerfile-does">What the Dockerfile does</a>. Recreating the container clears the existing zombies.</p>
+<h3 id="browser-tools-not-working">Browser tools not working</h3>
+<p>Playwright needs shared memory. Add <code>--shm-size=1g</code> to your Docker run command:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>hermes<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--shm-size<span class="o">=</span>1g<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span>~/.hermes:/opt/data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>nousresearch/hermes-agent<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<h3 id="gateway-not-reconnecting-after-network-issues">Gateway not reconnecting after network issues</h3>
+<p>The <code>--restart unless-stopped</code> flag handles most transient failures. If the gateway is stuck, restart the container:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>restart<span class="w"> </span>hermes
+</code></pre></div>
+
+<h3 id="checking-container-health">Checking container health</h3>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>logs<span class="w"> </span>--tail<span class="w"> </span><span class="m">50</span><span class="w"> </span>hermes<span class="w">          </span><span class="c1"># Recent logs</span>
+docker<span class="w"> </span>run<span class="w"> </span>-it<span class="w"> </span>--rm<span class="w"> </span>nousresearch/hermes-agent:latest<span class="w"> </span>version<span class="w">     </span><span class="c1"># Verify version</span>
+docker<span class="w"> </span>stats<span class="w"> </span>hermes<span class="w">                    </span><span class="c1"># Resource usage</span>
+</code></pre></div>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/docker</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#quick-start">Quick start</a></li>
+<li class="lvl2"><a href="#running-in-gateway-mode">Running in gateway mode</a></li>
+<li class="lvl2"><a href="#running-the-dashboard">Running the dashboard</a></li>
+<li class="lvl2"><a href="#running-interactively-cli-chat">Running interactively (CLI chat)</a></li>
+<li class="lvl2"><a href="#persistent-volumes">Persistent volumes</a></li>
+<li class="lvl3"><a href="#filesystem-requirements-for-statedb-in-containers">Filesystem requirements for state.db in containers</a></li>
+<li class="lvl3"><a href="#immutable-install-tree">Immutable install tree</a></li>
+<li class="lvl2"><a href="#multi-profile-support">Multi-profile support</a></li>
+<li class="lvl3"><a href="#reaching-more-than-one-profile-from-outside-the-container">Reaching more than one profile from outside the container</a></li>
+<li class="lvl3"><a href="#why-one-container-with-many-profiles-not-many-containers">Why one container with many profiles, not many containers</a></li>
+<li class="lvl3"><a href="#when-you-do-want-a-separate-container">When you DO want a separate container</a></li>
+<li class="lvl2"><a href="#where-the-logs-go">Where the logs go</a></li>
+<li class="lvl2"><a href="#environment-variable-forwarding">Environment variable forwarding</a></li>
+<li class="lvl2"><a href="#docker-compose-example">Docker Compose example</a></li>
+<li class="lvl2"><a href="#optional-linux-desktop-audio-bridge">Optional: Linux desktop audio bridge</a></li>
+<li class="lvl2"><a href="#resource-limits">Resource limits</a></li>
+<li class="lvl2"><a href="#what-the-dockerfile-does">What the Dockerfile does</a></li>
+<li class="lvl3"><a href="#docker-exec-automatically-drops-to-the-hermes-user">docker exec automatically drops to the hermes user</a></li>
+<li class="lvl3"><a href="#per-profile-gateway-supervision">Per-profile gateway supervision</a></li>
+<li class="lvl2"><a href="#upgrading">Upgrading</a></li>
+<li class="lvl2"><a href="#skills-and-credential-files">Skills and credential files</a></li>
+<li class="lvl2"><a href="#installing-more-tools-in-the-container">Installing more tools in the container</a></li>
+<li class="lvl3"><a href="#npm-or-python-tools--use-npx-or-uvx">npm or Python tools — use npx or uvx</a></li>
+<li class="lvl3"><a href="#other-tools-apt-packages-binaries--install-and-remember">Other tools (apt packages, binaries) — install and remember</a></li>
+<li class="lvl3"><a href="#durable-installs--build-a-derived-image">Durable installs — build a derived image</a></li>
+<li class="lvl3"><a href="#complex-tools-or-multi-service-stacks--run-a-sidecar-container">Complex tools or multi-service stacks — run a sidecar container</a></li>
+<li class="lvl3"><a href="#broadly-useful-tools--open-an-issue-or-pull-request">Broadly useful tools — open an issue or pull request</a></li>
+<li class="lvl2"><a href="#connecting-to-local-inference-servers-vllm-ollama-etc">Connecting to local inference servers (vLLM, Ollama, etc.)</a></li>
+<li class="lvl3"><a href="#docker-compose-recommended">Docker Compose (recommended)</a></li>
+<li class="lvl3"><a href="#standalone-docker-run-no-compose">Standalone Docker run (no Compose)</a></li>
+<li class="lvl3"><a href="#verifying-connectivity">Verifying connectivity</a></li>
+<li class="lvl3"><a href="#ollama">Ollama</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl3"><a href="#container-exits-immediately">Container exits immediately</a></li>
+<li class="lvl3"><a href="#permission-denied-errors">&quot;Permission denied&quot; errors</a></li>
+<li class="lvl3"><a href="#shared-data-directory-keeps-resetting-to-0700">Shared data directory keeps resetting to 0700</a></li>
+<li class="lvl3"><a href="#permission-denied-on-every-docker-exec-install-dir-locked-to-0700">&quot;Permission denied&quot; on every docker exec (install dir locked to 0700)</a></li>
+<li class="lvl3"><a href="#zombie-defunct-processes-piling-up-under-pid-1">Zombie (&amp;lt;defunct&amp;gt;) processes piling up under PID 1</a></li>
+<li class="lvl3"><a href="#browser-tools-not-working">Browser tools not working</a></li>
+<li class="lvl3"><a href="#gateway-not-reconnecting-after-network-issues">Gateway not reconnecting after network issues</a></li>
+<li class="lvl3"><a href="#checking-container-health">Checking container health</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

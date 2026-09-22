@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes Relay · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/messaging/relay</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="hermes-relay-connector">Hermes Relay (Connector)</h1>
+<div class="admonition adm-warning"><p class="adm-title">Experimental</p>
+<p>Relay is <strong>experimental</strong>. The wire contract, auth scheme, and configuration
+may change without a deprecation cycle while the system is being validated.</p>
+</div>
+<p>Hermes Relay is not a chat platform itself — it is a <strong>connector system</strong> that
+lets your gateway front one or more real messaging platforms (Discord,
+Telegram, Slack, WhatsApp, …) <strong>without holding any platform credentials</strong>. A
+separate service, the <em>connector</em>, owns the platform bot tokens and sockets.
+Your gateway dials <strong>out</strong> to the connector over a single authenticated
+WebSocket, receives a capability descriptor at handshake, and then exchanges
+normalized message events (inbound) and actions (outbound) over that socket.</p>
+<p>Key properties:</p>
+<ul>
+<li><strong>Outbound-only networking.</strong> The gateway never opens an inbound port.
+  Inbound messages ride back down the same WebSocket the gateway dialed, so
+  relay works behind NAT and on hosts with no public IP.</li>
+<li><strong>No platform secrets on the gateway.</strong> Bot tokens live on the connector.
+  Auth-gated platform media URLs are re-hosted connector-side, so platform
+  credentials never cross the wire.</li>
+<li><strong>Platform-agnostic.</strong> The gateway learns what the fronted platform can do
+  (message length limits, markdown dialect, edit/thread/streaming support, and
+  the exact set of supported operations) from the handshake descriptor, not
+  from hardcoded platform logic.</li>
+</ul>
+<p>The formal gateway ⇄ connector interface lives in the repository at
+<code>docs/relay-connector-contract.md</code>.</p>
+<h2 id="when-to-use-relay">When to use Relay</h2>
+<p>Relay is for deployments where a hosted or shared connector service manages
+the platform side — for example multi-tenant hosting where one shared bot
+fronts many users' agents, or setups where you don't want bot tokens on the
+gateway machine. If you run your own bots directly, use the native platform
+adapters (<a href="telegram.html">Telegram</a>,
+<a href="discord.html">Discord</a>, etc.) instead.</p>
+<h2 id="enrollment">Enrollment</h2>
+<p>A self-hosted gateway authenticates to the connector with a per-gateway
+secret. <code>hermes gateway enroll</code> redeems a <strong>single-use enrollment token</strong>
+(minted by the connector when your tenant's route is provisioned and delivered
+with your gateway config) for that secret:</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>enroll<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--token<span class="w"> </span>&lt;enrollment-token&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--connector-url<span class="w"> </span>wss://connector.example.com/relay
+</code></pre></div>
+
+<p>What it does:</p>
+<ol>
+<li>Resolves a fresh Nous Portal access token from your existing login
+   (<code>~/.hermes/auth.json</code>) — this proves which Nous org (tenant) you own. If
+   <code>gateway.idp.token_url</code> is configured, your own IdP is used instead (the
+   air-gapped / self-hosted-IdP path, no Nous Portal involved): with
+   <code>client_id</code>/<code>client_secret</code> configured it performs a generic OAuth2
+   client-credentials grant; with neither configured the URL is treated as an
+   ambient token endpoint (plain GET whose response body is the token — the
+   metadata-server pattern, e.g. Domino's <code>$DOMINO_API_PROXY/access-token</code>).
+   Configuring only one of the two credentials is an error.</li>
+<li>POSTs the enrollment token and a gateway id to the connector's
+   <code>/relay/enroll</code> endpoint over TLS.</li>
+<li>The connector verifies the token (signature, single-use, tenant match),
+   mints a per-gateway secret plus a per-tenant delivery key, and returns them
+   once.</li>
+<li>Persists the credentials into <code>~/.hermes/.env</code>:
+   <code>GATEWAY_RELAY_ID</code>, <code>GATEWAY_RELAY_SECRET</code>, <code>GATEWAY_RELAY_DELIVERY_KEY</code>
+   (plus <code>GATEWAY_RELAY_URL</code> / <code>GATEWAY_RELAY_WAKE_URL</code> when supplied).</li>
+</ol>
+<p>Restart the gateway afterwards to pick up the new environment.</p>
+<p>Flags:</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--token</code></td>
+<td>The single-use enrollment token. Also settable via <code>GATEWAY_RELAY_ENROLL_TOKEN</code>.</td>
+</tr>
+<tr>
+<td><code>--connector-url</code></td>
+<td>Connector base or relay URL (<code>wss://…/relay</code> or <code>https://…</code>). Also settable via <code>GATEWAY_RELAY_URL</code> or <code>gateway.relay_url</code> in <code>config.yaml</code>.</td>
+</tr>
+<tr>
+<td><code>--gateway-id</code></td>
+<td>Stable id for this gateway instance (used for kill-switch granularity). Defaults to <code>gw-&lt;hostname&gt;</code>.</td>
+</tr>
+<tr>
+<td><code>--wake-url</code></td>
+<td>Optional reachable URL the connector pokes (payload-free GET) to wake this gateway when buffered work arrives while it is idle. Persisted as <code>GATEWAY_RELAY_WAKE_URL</code>. Without it the gateway still drains buffered messages whenever it next reconnects.</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition adm-note"><p class="adm-title">Managed installs</p>
+<p><code>hermes gateway enroll</code> refuses to run in managed/hosted installs — there the
+hosting platform provisions the relay secret directly into the container
+environment.</p>
+</div>
+<h2 id="configuration">Configuration</h2>
+<p>Relay activates when a connector relay URL is configured. To keep a profile off
+the relay even when the deployment injects a URL, disable the platform in
+<code>config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">relay</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<ul>
+<li><strong>Explicit disable wins.</strong> With <code>enabled: false</code> the gateway does not resolve
+  an identity token, provision or rewrite <code>GATEWAY_RELAY_*</code> credentials, register
+  the relay adapter or send the relevance policy — even with <code>gateway.relay_url</code>
+  or <code>GATEWAY_RELAY_URL</code> set. Native messaging adapters connect as if no relay
+  URL were present, and cron delivery treats no platform as relay-fronted.</li>
+<li><strong>Omitting <code>enabled</code> keeps URL-based activation.</strong> <code>enabled: true</code> still needs
+  a connector URL. A <code>gateway.json</code> <code>enabled: false</code> is advisory, as for every
+  other platform; put the opt-out in <code>config.yaml</code> (user or managed).</li>
+</ul>
+<p>The verdict comes from the same files and merge the gateway loader uses (top-level
+or <code>gateway.platforms</code> block, managed overlay) and is applied at activation time.
+Restart the gateway after changing it; an open relay socket is not torn down.
+<code>hermes gateway enroll</code> remains available while runtime relay is disabled.</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Where</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GATEWAY_RELAY_URL</code></td>
+<td>env (<code>~/.hermes/.env</code>)</td>
+<td>Connector relay WebSocket URL. Enables relay unless explicitly disabled in platform configuration.</td>
+</tr>
+<tr>
+<td><code>gateway.relay_url</code></td>
+<td><code>config.yaml</code></td>
+<td>Same as above, config-file form (env takes precedence).</td>
+</tr>
+<tr>
+<td><code>GATEWAY_RELAY_ID</code></td>
+<td>env</td>
+<td>This gateway instance's id (written by <code>enroll</code>).</td>
+</tr>
+<tr>
+<td><code>GATEWAY_RELAY_SECRET</code></td>
+<td>env</td>
+<td>Per-gateway secret authenticating the WebSocket upgrade (written by <code>enroll</code>).</td>
+</tr>
+<tr>
+<td><code>GATEWAY_RELAY_DELIVERY_KEY</code></td>
+<td>env</td>
+<td>Per-tenant delivery key (written by <code>enroll</code>; retained for forward-compat).</td>
+</tr>
+<tr>
+<td><code>GATEWAY_RELAY_WAKE_URL</code> / <code>gateway.relay_wake_url</code></td>
+<td>env / <code>config.yaml</code></td>
+<td>Optional wake-poke target for idle/suspended gateways.</td>
+</tr>
+<tr>
+<td><code>GATEWAY_RELAY_PLATFORMS</code></td>
+<td>env</td>
+<td>Comma-separated list of platforms this gateway fronts over one connection (e.g. <code>discord,telegram</code>). Usually stamped by the deployment/orchestrator.</td>
+</tr>
+<tr>
+<td><code>GATEWAY_RELAY_BOT_IDS</code></td>
+<td>env</td>
+<td>JSON map of per-platform bot identities, e.g. <code>{"discord": {"botId": "…"}}</code>. Paired with <code>GATEWAY_RELAY_PLATFORMS</code>.</td>
+</tr>
+<tr>
+<td><code>gateway.idp.token_url</code></td>
+<td><code>config.yaml</code></td>
+<td>When set, enrollment/provisioning authenticates against your own IdP instead of Nous Portal: OAuth2 client-credentials when <code>gateway.idp.client_id</code>/<code>client_secret</code> are also set; otherwise an ambient token endpoint (plain GET returning the token, raw or <code>{"access_token": …}</code>).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="supported-capabilities">Supported capabilities</h2>
+<p>What actually works over a relay connection is negotiated at handshake: the
+connector advertises a <code>supported_ops</code> list, and the gateway only uses an
+operation the connector explicitly advertises (older connectors fall back to a
+legacy <code>send</code>/<code>edit</code>/<code>typing</code>/<code>follow_up</code> set). Per-platform capability flags
+(edit-based streaming, threads, draft streaming, markdown dialect, message
+length limit) also come from the handshake descriptor. Subject to that
+negotiation, the relay supports:</p>
+<ul>
+<li><strong>Text messages and streaming</strong> — sends, replies, and progressive
+  edit-based streaming when the fronted platform supports message editing;
+  otherwise output degrades to one message per segment.</li>
+<li><strong>Media, both directions</strong> — outbound images, voice, audio, video, and
+  documents are uploaded to the connector (or referenced by public URL) and
+  delivered through each platform's native upload lane, with captions.
+  Inbound attachments are localized to files for the agent; auth-gated
+  platform URLs are re-hosted connector-side so platform credentials never
+  reach the gateway. Media re-hosts are capped at 25 MB and expire (~1 hour).</li>
+<li><strong>Native interactive prompts</strong> — exec approvals, confirmations, and clarify
+  questions render with <strong>native platform controls</strong> (Discord buttons,
+  Telegram inline keyboards, Slack Block Kit actions, WhatsApp button/list
+  messages) instead of numbered-text fallbacks. Button presses come back as
+  authenticated prompt responses from the actual clicking user, so the
+  gateway's authorization gates apply exactly as to a typed reply. Prompt
+  expiry is enforced gateway-side.</li>
+<li><strong>Reaction ack lifecycle</strong> — the bot's processing-status reactions
+  (👀 while working, ✅/❌ on completion) work over the relay. Reactions are
+  best-effort: a failed reaction never fails a turn.</li>
+<li><strong>Thread lifecycle</strong> — creating handoff threads and renaming threads
+  (including LLM-titled semantic renames) through platform-abstract
+  <code>thread_create</code> / <code>thread_rename</code> operations, with a no-clobber guard so a
+  human's manual rename wins. Availability depends on the platform (e.g.
+  Slack threads can't be renamed; WhatsApp has no threads).</li>
+<li><strong>Typing indicators</strong> — the gateway egresses typing (and stop-typing) through
+  the connector while processing.</li>
+<li><strong>Chat metadata</strong> — <code>get_chat_info</code> lookups are proxied to the connector
+  when advertised.</li>
+<li><strong>Buffered delivery and wake</strong> — when the gateway goes idle or disconnects,
+  the connector buffers inbound messages durably and replays them in order on
+  reconnect (ack-gated, no loss or duplication). If a wake URL is registered,
+  the connector pokes it when buffered work arrives for a sleeping gateway.</li>
+</ul>
+<p>Multi-platform fronting is supported: one gateway can front several platforms
+(e.g. Discord <em>and</em> Telegram) over a single relay connection, with each
+outbound message tagged for the platform it targets.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p><strong>Enrollment fails with 401</strong> — the connector could not verify your identity
+token. Re-login with <code>hermes auth add nous</code> (or <code>hermes setup</code>) and retry.</p>
+<p><strong>Enrollment fails with 403</strong> — the enrollment token is invalid, expired,
+already used, or belongs to a different tenant. Enrollment tokens are
+single-use; request a fresh one from whoever provisioned your tenant route.</p>
+<p><strong>"Could not reach the connector"</strong> — check the connector URL. You can paste
+either the <code>wss://…/relay</code> dial URL or the <code>https://…</code> base URL; the CLI maps
+between them automatically.</p>
+<p><strong><code>enroll</code> refuses to run</strong> — you are in a managed/hosted install, where the
+relay secret is provisioned by the hosting platform. Self-enrollment is only
+for self-hosted gateways.</p>
+<p><strong>Relay platform shows as disabled after it previously worked</strong> — a WebSocket
+close with code 4401 <em>after</em> a successful handshake means the gateway's secret
+was revoked (e.g. the instance was deprovisioned). The gateway deliberately
+stops reconnecting and reports relay as disabled rather than retrying. A 4401
+<em>before</em> any successful handshake is treated as a transient
+not-yet-provisioned race and retried normally.</p>
+<p><strong>Nothing changed after enrolling</strong> — the gateway reads <code>GATEWAY_RELAY_*</code> at
+startup. Restart it (<code>hermes gateway restart</code>).</p>
+<p><strong>A feature (buttons, media, threads…) silently degrades to plain text</strong> — the
+connector for your platform did not advertise that operation in its handshake
+<code>supported_ops</code>. The gateway intentionally falls back to the text behavior
+rather than sending an op the connector can't handle.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/messaging/relay</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#when-to-use-relay">When to use Relay</a></li>
+<li class="lvl2"><a href="#enrollment">Enrollment</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl2"><a href="#supported-capabilities">Supported capabilities</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Google Vertex AI · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / guides/google-vertex</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="google-vertex-ai">Google Vertex AI</h1>
+<p>Hermes Agent supports <strong>Gemini models on Google Cloud Vertex AI</strong> through Vertex's OpenAI-compatible endpoint. Unlike the <a href="google-gemini.html">Google AI Studio provider</a> (which uses a static API key against <code>generativelanguage.googleapis.com</code>), Vertex gives you <strong>enterprise-grade rate limits and GCP billing/credits</strong>, and is the right choice when you want Gemini usage to draw on your Google Cloud account rather than an AI Studio key.</p>
+<div class="admonition adm-info"><p class="adm-title">Vertex authenticates with OAuth2, not an API key</p>
+<p>Vertex has <strong>no static API key</strong> for the standard endpoint. Every request needs a short-lived <strong>OAuth2 access token</strong> (≈1 hour TTL) minted from either a service-account JSON or Application Default Credentials (ADC). Hermes mints and <strong>auto-refreshes</strong> these tokens for you — you never paste a token by hand. This is why pasting a temporary token into a custom provider's <code>api_key</code> field does not work: it expires mid-session.</p>
+</div>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li><strong>A Google Cloud project</strong> with the <strong>Vertex AI API enabled</strong> and billing active.</li>
+<li><strong>Credentials</strong>, one of:</li>
+<li>a <strong>service-account JSON</strong> key file with the <code>roles/aiplatform.user</code> role, or</li>
+<li><strong>Application Default Credentials</strong> via <code>gcloud auth application-default login</code> (or the metadata server when running on a GCP VM).</li>
+<li><strong><code>google-auth</code></strong> — installed automatically the first time you select Vertex (lazy install). Run <code>hermes setup</code> to repair a managed install if that fails.</li>
+</ul>
+<h2 id="quick-start">Quick Start</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># Option A — service account JSON (recommended for servers / gateways)</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;VERTEX_CREDENTIALS_PATH=/path/to/service-account.json&quot;</span><span class="w"> </span>&gt;&gt;<span class="w"> </span>~/.hermes/.env
+
+<span class="c1"># Option B — Application Default Credentials (good for local dev)</span>
+gcloud<span class="w"> </span>auth<span class="w"> </span>application-default<span class="w"> </span>login
+
+<span class="c1"># Select Vertex as your provider</span>
+hermes<span class="w"> </span>model
+<span class="c1"># → Choose &quot;More providers...&quot; → &quot;Google Vertex AI&quot;</span>
+<span class="c1"># → Enter your GCP project ID (or leave blank to use the one in your credentials)</span>
+<span class="c1"># → Choose a region (default: global)</span>
+<span class="c1"># → Select a Gemini model</span>
+
+<span class="c1"># Start chatting</span>
+hermes<span class="w"> </span>chat
+</code></pre></div>
+
+<h2 id="configuration">Configuration</h2>
+<p>Vertex splits its settings by sensitivity:</p>
+<ul>
+<li>The <strong>credential path</strong> is a pointer to a secret and lives in <code>~/.hermes/.env</code>.</li>
+<li><strong>Project ID and region</strong> are non-secret routing settings and live in <code>~/.hermes/config.yaml</code>.</li>
+</ul>
+<p><code>~/.hermes/.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># One of these (checked in this order); omit both to use ADC:</span>
+<span class="nv">VERTEX_CREDENTIALS_PATH</span><span class="o">=</span>/path/to/service-account.json
+<span class="nv">GOOGLE_APPLICATION_CREDENTIALS</span><span class="o">=</span>/path/to/service-account.json
+</code></pre></div>
+
+<p><code>~/.hermes/config.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">model</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">google/gemini-3-flash-preview</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vertex</span>
+
+<span class="nt">vertex</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">project_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-gcp-project</span><span class="w">   </span><span class="c1"># blank → use the project embedded in the credentials</span>
+<span class="w">  </span><span class="nt">region</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">global</span><span class="w">               </span><span class="c1"># &quot;global&quot; is required for the Gemini 3.x previews</span>
+</code></pre></div>
+
+<div class="admonition adm-tip"><p class="adm-title">Environment variables win over config.yaml</p>
+<p><code>VERTEX_PROJECT_ID</code> and <code>VERTEX_REGION</code> override the <code>vertex.project_id</code> / <code>vertex.region</code> values in <code>config.yaml</code>. Use them for per-shell overrides; keep the durable settings in <code>config.yaml</code>.</p>
+</div>
+<h3 id="how-authentication-works">How authentication works</h3>
+<ol>
+<li>Hermes resolves credentials in this order: <code>VERTEX_CREDENTIALS_PATH</code> → <code>GOOGLE_APPLICATION_CREDENTIALS</code> → ADC.</li>
+<li>It mints an OAuth2 access token (<code>cloud-platform</code> scope) and caches it, refreshing when the token is within 5 minutes of expiry.</li>
+<li>The token is handed to a standard OpenAI client pointed at the Vertex endpoint:
+   <code>text
+   https://aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{region}/endpoints/openapi</code>
+   Regional locations use a <code>{region}-aiplatform.googleapis.com</code> host instead.</li>
+<li>If a session runs longer than the token lifetime and a request returns <code>401</code>, Hermes re-mints the token and retries automatically. On a long-running gateway, if ADC's refresh token has itself expired, Hermes falls back to the service-account JSON when one is configured.</li>
+</ol>
+<h2 id="available-models">Available Models</h2>
+<p>Vertex requires the <code>google/</code> vendor prefix on model IDs. The <code>hermes model</code> picker offers:</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>ID</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gemini 3.8 Flash</td>
+<td><code>google/gemini-3.8-flash</code></td>
+</tr>
+<tr>
+<td>Gemini 3.7 Flash</td>
+<td><code>google/gemini-3.7-flash</code></td>
+</tr>
+<tr>
+<td>Gemini 3.1 Pro Preview</td>
+<td><code>google/gemini-3.1-pro-preview</code></td>
+</tr>
+<tr>
+<td>Gemini 3 Pro Preview</td>
+<td><code>google/gemini-3-pro-preview</code></td>
+</tr>
+<tr>
+<td>Gemini 3 Flash Preview</td>
+<td><code>google/gemini-3-flash-preview</code></td>
+</tr>
+<tr>
+<td>Gemini 3.1 Flash Lite Preview</td>
+<td><code>google/gemini-3.1-flash-lite-preview</code></td>
+</tr>
+<tr>
+<td>Gemini 2.5 Pro</td>
+<td><code>google/gemini-2.5-pro</code></td>
+</tr>
+<tr>
+<td>Gemini 2.5 Flash</td>
+<td><code>google/gemini-2.5-flash</code></td>
+</tr>
+</tbody>
+</table>
+<div class="admonition adm-note"><p class="adm-title">`global` region for Gemini 3.x</p>
+<p>The Gemini 3.x preview models are served through the <code>global</code> endpoint. Regional endpoints (<code>us-central1</code>, etc.) may 404 them. Leave <code>region: global</code> unless you have a specific reason to pin a region.</p>
+</div>
+<h2 id="switching-models-mid-session">Switching Models Mid-Session</h2>
+<div class="highlight"><pre><span></span><code>/model google/gemini-3-pro-preview
+/model google/gemini-3-flash-preview
+</code></pre></div>
+
+<p><code>/model</code> switches among already-configured providers and models; it does not collect new credentials. Configure Vertex with <code>hermes model</code> first.</p>
+<h2 id="reasoning--thinking">Reasoning / Thinking</h2>
+<p>Vertex exposes Gemini's thinking budget through the OpenAI-compatible surface. Hermes maps its reasoning-effort setting onto <code>extra_body.google.thinking_config</code> automatically, so <code>reasoning_effort</code> works the same way it does on other Gemini surfaces.</p>
+<h2 id="diagnostics">Diagnostics</h2>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>doctor
+</code></pre></div>
+
+<p>The doctor reports whether Vertex credentials can be resolved (service-account path or ADC) and whether the provider is configured.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="vertex-ai-credentials-could-not-be-resolved">"Vertex AI credentials could not be resolved"</h3>
+<p>Hermes found neither a service-account JSON nor working ADC. Either set <code>VERTEX_CREDENTIALS_PATH</code> in <code>~/.hermes/.env</code>, or run <code>gcloud auth application-default login</code>. If your project isn't embedded in the credentials, set <code>vertex.project_id</code> in <code>config.yaml</code>.</p>
+<h3 id="google-auth-not-installed"><code>google-auth</code> not installed</h3>
+<p>Hermes lazy-installs it the first time you select the Vertex provider. If that fails, run <code>hermes setup</code> to repair the managed install.</p>
+<h3 id="404-on-gemini-3x-models">404 on Gemini 3.x models</h3>
+<p>You are probably on a regional endpoint. Set <code>region: global</code> in the <code>vertex:</code> section of <code>config.yaml</code> (or unset <code>VERTEX_REGION</code>).</p>
+<h3 id="403--permission-denied">403 / permission denied</h3>
+<p>The service account (or your ADC identity) needs the <code>roles/aiplatform.user</code> role on the project, and the Vertex AI API must be enabled for that project.</p>
+<h2 id="related">Related</h2>
+<ul>
+<li><a href="google-gemini.html">Google Gemini (AI Studio)</a> — static-API-key Gemini without GCP</li>
+<li><a href="aws-bedrock.html">AWS Bedrock</a> — another native cloud-provider integration</li>
+<li><a href="../integrations/providers.html">AI Providers</a></li>
+<li><a href="../user-guide/configuration.html">Configuration</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/guides/google-vertex</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="lvl2"><a href="#quick-start">Quick Start</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl3"><a href="#how-authentication-works">How authentication works</a></li>
+<li class="lvl2"><a href="#available-models">Available Models</a></li>
+<li class="lvl2"><a href="#switching-models-mid-session">Switching Models Mid-Session</a></li>
+<li class="lvl2"><a href="#reasoning--thinking">Reasoning / Thinking</a></li>
+<li class="lvl2"><a href="#diagnostics">Diagnostics</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+<li class="lvl3"><a href="#vertex-ai-credentials-could-not-be-resolved">&quot;Vertex AI credentials could not be resolved&quot;</a></li>
+<li class="lvl3"><a href="#google-auth-not-installed">google-auth not installed</a></li>
+<li class="lvl3"><a href="#404-on-gemini-3x-models">404 on Gemini 3.x models</a></li>
+<li class="lvl3"><a href="#403--permission-denied">403 / permission denied</a></li>
+<li class="lvl2"><a href="#related">Related</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSP — Semantic Diagnostics · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / user-guide/features/lsp</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="language-server-protocol-lsp">Language Server Protocol (LSP)</h1>
+<p>Hermes runs full language servers — pyright, gopls, rust-analyzer,
+typescript-language-server, clangd, and ~20 more — as background
+subprocesses and feeds their semantic diagnostics into the post-write
+lint check used by <code>write_file</code> and <code>patch</code>. When the agent edits a
+file, it sees exactly the errors that edit introduced — not just
+syntax errors, but <strong>type errors, undefined names, missing imports,
+and project-wide semantic issues</strong> the language server detects.</p>
+<p>This is the same architecture top-tier coding agents use. Hermes
+ships it self-contained: no editor host required, no plugins to
+install, no separate daemon to manage.</p>
+<h2 id="when-lsp-runs">When LSP runs</h2>
+<p>LSP is gated on <strong>git workspace detection</strong>. When the agent's working
+directory (or the file being edited) is inside a git repository, LSP
+runs against that workspace. When neither is in a git repo, LSP
+stays dormant — useful for messaging gateways where the cwd is the
+user's home directory and there's no project to diagnose.</p>
+<p>The check is layered: in-process syntax check first (microseconds),
+then LSP diagnostics second when syntax is clean. A flaky or missing
+language server can never break a write — every LSP failure path
+falls back silently to the syntax-only result.</p>
+<p>Concretely, on every successful <code>write_file</code> or <code>patch</code>:</p>
+<ol>
+<li>Hermes captures a baseline of current diagnostics for the file.</li>
+<li>Performs the write.</li>
+<li>Re-queries the language server, filters out diagnostics that were
+   already in the baseline, and surfaces only the new ones.</li>
+</ol>
+<p>The agent sees output like:</p>
+<div class="highlight"><pre><span></span><code>{
+  &quot;bytes_written&quot;: 42,
+  &quot;dirs_created&quot;: false,
+  &quot;lint&quot;: {&quot;status&quot;: &quot;ok&quot;, &quot;output&quot;: &quot;&quot;},
+  &quot;lsp_diagnostics&quot;: &quot;LSP diagnostics introduced by this edit:\n&lt;diagnostics file=\&quot;/path/to/foo.py\&quot;&gt;\nERROR [42:5] Cannot find name &#39;foo&#39; [reportUndefinedVariable] (Pyright)\nERROR [50:1] Argument of type \&quot;str\&quot; is not assignable to \&quot;int\&quot; [reportArgumentType] (Pyright)\n&lt;/diagnostics&gt;&quot;
+}
+</code></pre></div>
+
+<p>The <code>lint</code> field carries the syntax-check result (microsecond
+in-process parse via <code>ast.parse</code>, <code>json.loads</code>, etc.); the
+<code>lsp_diagnostics</code> field carries the semantic diagnostics from the
+real language server. Two channels, independent signals — the
+agent sees a syntax-clean file with semantic problems as
+<code>lint: ok</code> plus a populated <code>lsp_diagnostics</code>.</p>
+<h2 id="supported-languages">Supported languages</h2>
+<table>
+<thead>
+<tr>
+<th>Language</th>
+<th>Server</th>
+<th>Auto-install</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Python</td>
+<td><code>pyright-langserver</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>TypeScript / JavaScript / JSX / TSX</td>
+<td><code>typescript-language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Vue</td>
+<td><code>@vue/language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Svelte</td>
+<td><code>svelte-language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Astro</td>
+<td><code>@astrojs/language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Go</td>
+<td><code>gopls</code></td>
+<td><code>go install</code></td>
+</tr>
+<tr>
+<td>Rust</td>
+<td><code>rust-analyzer</code></td>
+<td>manual (rustup)</td>
+</tr>
+<tr>
+<td>C / C++</td>
+<td><code>clangd</code></td>
+<td>manual (LLVM)</td>
+</tr>
+<tr>
+<td>Bash / Zsh</td>
+<td><code>bash-language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>YAML</td>
+<td><code>yaml-language-server</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Lua</td>
+<td><code>lua-language-server</code></td>
+<td>manual (GitHub releases)</td>
+</tr>
+<tr>
+<td>PHP</td>
+<td><code>intelephense</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Laravel Blade (<code>.blade.php</code>)</td>
+<td><code>laravel-lsp</code></td>
+<td>manual (composer)</td>
+</tr>
+<tr>
+<td>OCaml</td>
+<td><code>ocaml-lsp</code></td>
+<td>manual (opam)</td>
+</tr>
+<tr>
+<td>Dockerfile</td>
+<td><code>dockerfile-language-server-nodejs</code></td>
+<td>npm</td>
+</tr>
+<tr>
+<td>Terraform</td>
+<td><code>terraform-ls</code></td>
+<td>manual</td>
+</tr>
+<tr>
+<td>Dart</td>
+<td><code>dart language-server</code></td>
+<td>manual (dart sdk)</td>
+</tr>
+<tr>
+<td>Haskell</td>
+<td><code>haskell-language-server</code></td>
+<td>manual (ghcup)</td>
+</tr>
+<tr>
+<td>Julia</td>
+<td><code>julia</code> + LanguageServer.jl</td>
+<td>manual</td>
+</tr>
+<tr>
+<td>Clojure</td>
+<td><code>clojure-lsp</code></td>
+<td>manual</td>
+</tr>
+<tr>
+<td>Nix</td>
+<td><code>nixd</code></td>
+<td>manual</td>
+</tr>
+<tr>
+<td>Zig</td>
+<td><code>zls</code></td>
+<td>manual</td>
+</tr>
+<tr>
+<td>Gleam</td>
+<td><code>gleam lsp</code></td>
+<td>manual (gleam install)</td>
+</tr>
+<tr>
+<td>Elixir</td>
+<td><code>elixir-ls</code></td>
+<td>manual</td>
+</tr>
+<tr>
+<td>Prisma</td>
+<td><code>prisma language-server</code></td>
+<td>manual</td>
+</tr>
+<tr>
+<td>Kotlin</td>
+<td><code>kotlin-language-server</code></td>
+<td>manual</td>
+</tr>
+<tr>
+<td>Java</td>
+<td><code>jdtls</code></td>
+<td>manual</td>
+</tr>
+<tr>
+<td>PowerShell</td>
+<td><code>PowerShellEditorServices</code> (<code>pwsh</code> host)</td>
+<td>manual (release zip)</td>
+</tr>
+</tbody>
+</table>
+<p>For "manual" entries, install the server through whatever toolchain
+manager makes sense for that language (rustup, ghcup, opam, brew,
+…). Hermes auto-detects the binary on PATH or in
+<code>&lt;HERMES_HOME&gt;/lsp/bin/</code>.</p>
+<h3 id="powershell">PowerShell</h3>
+<p>PowerShellEditorServices isn't a single binary — it's a PowerShell
+module bundle launched by a <code>pwsh</code> (PowerShell 7+) or <code>powershell</code>
+host. Setup:</p>
+<ol>
+<li>Install <a href="https://github.com/PowerShell/PowerShell" class="ext" target="_blank" rel="noopener">PowerShell</a> so
+   <code>pwsh</code> (or Windows <code>powershell</code>) is on PATH.</li>
+<li>Download the latest release zip from
+   <a href="https://github.com/PowerShell/PowerShellEditorServices/releases" class="ext" target="_blank" rel="noopener">PowerShellEditorServices releases</a>
+   and extract it.</li>
+<li>Point Hermes at the extracted bundle — the directory that contains
+   <code>PowerShellEditorServices/Start-EditorServices.ps1</code>. Either:</li>
+<li>set <code>lsp.servers.powershell.command: ["/path/to/bundle"]</code> in
+     <code>config.yaml</code>, or</li>
+<li>extract it to <code>&lt;HERMES_HOME&gt;/lsp/PowerShellEditorServices</code>, or</li>
+<li>export <code>PSES_BUNDLE_PATH=/path/to/bundle</code>.</li>
+</ol>
+<p><code>hermes lsp status</code> reports <code>installed</code> once <code>pwsh</code> is found; if the
+bundle is missing you'll see a one-time warning in the logs with the
+download link.</p>
+<h3 id="laravel-blade">Laravel Blade</h3>
+<p><code>.blade.php</code> templates go to <a href="https://github.com/laravel/lsp" class="ext" target="_blank" rel="noopener">laravel-lsp</a>
+(Blade, Eloquent, Facades) while plain <code>.php</code> files stay with
+intelephense. Install it once with Composer and make sure the binary
+is on PATH (or pin it with <code>lsp.servers.laravel-lsp.command</code>):</p>
+<div class="highlight"><pre><span></span><code>composer<span class="w"> </span>global<span class="w"> </span>require<span class="w"> </span>laravel/lsp
+<span class="nb">export</span><span class="w"> </span><span class="nv">PATH</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/composer/vendor/bin:</span><span class="nv">$PATH</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>Hermes launches it as <code>laravel-lsp lsp</code> (stdio). There is no
+auto-install recipe; <code>hermes lsp status</code> shows <code>manual-only</code> until the
+binary is found.</p>
+<p>A few servers are installed alongside a peer dependency that npm
+won't auto-pull. <code>typescript-language-server</code> and <code>@vue/language-server</code>
+require the <code>typescript</code> SDK importable from the same <code>node_modules</code>
+tree — Hermes installs <code>typescript@6</code> (the last JavaScript-based line;
+TypeScript 7 is the Go port and ships no <code>tsserver.js</code>) together with
+the server when you run <code>hermes lsp install typescript</code> /
+<code>hermes lsp install vue-language-server</code> or auto-install fires on first use.</p>
+<p>Vue is pinned to <code>@vue/language-server@2</code>, started with
+<code>vue.hybridMode: false</code> so it hosts its own TypeScript service. The 3.x
+line only works behind a client-hosted <code>tsserver</code> tunnel (the VS Code /
+Neovim setup) that Hermes's generic client does not run, so it never
+publishes diagnostics. If an earlier Hermes installed 3.x, the log shows a
+one-time <code>vue-language-server: ... 3.x</code> warning; delete
+<code>&lt;HERMES_HOME&gt;/lsp/node_modules/@vue</code> and <code>&lt;HERMES_HOME&gt;/lsp/bin/vue-language-server*</code>,
+then run <code>hermes lsp install vue-language-server</code> (the recipe co-installs the
+TypeScript SDK).</p>
+<h2 id="cli">CLI</h2>
+<div class="highlight"><pre><span></span><code>hermes lsp status          # service state + per-server install status
+hermes lsp list            # registry, optionally --installed-only
+hermes lsp install &lt;id&gt;    # eagerly install one server
+hermes lsp install-all     # try every server with a known recipe
+hermes lsp restart         # tear down running clients
+hermes lsp which &lt;id&gt;      # print resolved binary path
+</code></pre></div>
+
+<p><code>hermes lsp status</code> is the best starting point — it shows which
+languages will get semantic diagnostics today and which need a
+binary installed.</p>
+<h2 id="configuration">Configuration</h2>
+<p>The defaults work for typical setups; nothing to set if the binaries
+are on PATH.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># config.yaml</span>
+<span class="nt">lsp</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># Master toggle. Disabling skips the entire subsystem — no servers</span>
+<span class="w">  </span><span class="c1"># spawn, no background event loop runs.</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+
+<span class="w">  </span><span class="c1"># How long to wait for diagnostics after each write.</span>
+<span class="w">  </span><span class="nt">wait_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">document</span><span class="w">      </span><span class="c1"># &quot;document&quot; or &quot;full&quot;</span>
+<span class="w">  </span><span class="c1"># Max seconds to wait for the server on each of the two waits an</span>
+<span class="w">  </span><span class="c1"># edit makes: the pre-edit baseline snapshot and the post-edit</span>
+<span class="w">  </span><span class="c1"># re-check. Only *fresh* diagnostics (produced for the post-edit</span>
+<span class="w">  </span><span class="c1"># content) are ever reported; if the server doesn&#39;t finish within</span>
+<span class="w">  </span><span class="c1"># this budget, the edit reports &quot;no LSP data&quot; rather than stale</span>
+<span class="w">  </span><span class="c1"># errors from before the edit. Raise this for slow servers on big</span>
+<span class="w">  </span><span class="c1"># projects (tsserver, rust-analyzer mid-indexing).</span>
+<span class="w">  </span><span class="nt">wait_timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5.0</span>
+
+<span class="w">  </span><span class="c1"># How to handle missing server binaries.</span>
+<span class="w">  </span><span class="c1">#   auto    — install via npm/pip/go install into &lt;HERMES_HOME&gt;/lsp/bin</span>
+<span class="w">  </span><span class="c1">#   manual  — only use binaries already on PATH</span>
+<span class="w">  </span><span class="nt">install_strategy</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">auto</span>
+
+<span class="w">  </span><span class="c1"># Node package manager for the npm-based servers: npm (default), pnpm</span>
+<span class="w">  </span><span class="c1"># or yarn. Installs still land in &lt;HERMES_HOME&gt;/lsp/node_modules; a</span>
+<span class="w">  </span><span class="c1"># manager that is configured but not installed — or a value outside</span>
+<span class="w">  </span><span class="c1"># npm|pnpm|yarn — skips the install with a warning instead of silently</span>
+<span class="w">  </span><span class="c1"># using npm, so a pnpm/yarn supply-chain policy (minimumReleaseAge,</span>
+<span class="w">  </span><span class="c1"># allowBuilds, …) is never bypassed. Yarn Berry (2+): its default PnP</span>
+<span class="w">  </span><span class="c1"># linker writes no node_modules/.bin, so set `nodeLinker: node-modules`</span>
+<span class="w">  </span><span class="c1"># in &lt;HERMES_HOME&gt;/lsp/.yarnrc.yml. pnpm 11 blocks git-hosted transitive</span>
+<span class="w">  </span><span class="c1"># deps by default (ERR_PNPM_EXOTIC_SUBDEP); @vue/language-server 2.x pulls</span>
+<span class="w">  </span><span class="c1"># one in, so under pnpm that server is skipped with the pnpm error in the</span>
+<span class="w">  </span><span class="c1"># log — install it once with npm, or relax block-exotic-subdeps in</span>
+<span class="w">  </span><span class="c1"># &lt;HERMES_HOME&gt;/lsp/.npmrc if your policy allows it.</span>
+<span class="w">  </span><span class="nt">package_manager</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">npm</span>
+
+<span class="w">  </span><span class="c1"># How long an unused language-server client stays alive (seconds).</span>
+<span class="w">  </span><span class="c1"># Idle servers are shut down automatically and respawned on the next</span>
+<span class="w">  </span><span class="c1"># relevant file operation. Set to 0 to disable idle reaping and keep</span>
+<span class="w">  </span><span class="c1"># servers alive for the life of the process. Values below 30s are</span>
+<span class="w">  </span><span class="c1"># clamped to 30 so a sweep can never reap a client mid-operation.</span>
+<span class="w">  </span><span class="nt">idle_timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">600</span>
+
+<span class="w">  </span><span class="c1"># Per-server overrides (all optional).</span>
+<span class="w">  </span><span class="nt">servers</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">pyright</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">disabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">      </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;/abs/path/to/pyright-langserver&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--stdio&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">env</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> PYRIGHT_LOG_LEVEL</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;info&quot;</span><span class="w"> </span><span class="p p-Indicator">}</span>
+<span class="w">      </span><span class="nt">initialization_options</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">python</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">analysis</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">typeCheckingMode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;strict&quot;</span>
+<span class="w">    </span><span class="nt">typescript</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">disabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">       </span><span class="c1"># skip TS even when its extensions match</span>
+</code></pre></div>
+
+<h3 id="per-server-keys">Per-server keys</h3>
+<ul>
+<li><code>disabled: true</code> — skip this server entirely even when its
+  extensions match a file.</li>
+<li><code>command: [bin, ...args]</code> — pin a custom binary path. Bypasses
+  auto-install.</li>
+<li><code>env: {KEY: value}</code> — extra env vars passed to the spawned process.</li>
+<li><code>initialization_options: {...}</code> — merged into the LSP
+  <code>initializationOptions</code> payload sent in the <code>initialize</code>
+  handshake. Server-specific; consult the language server's docs.</li>
+</ul>
+<h3 id="custom-servers">Custom servers</h3>
+<p>Any <code>lsp.servers</code> key that is <strong>not</strong> a built-in server id declares
+your own language server. It needs <code>command</code> and <code>extensions</code>; the
+other keys are optional. Custom servers are matched <em>before</em> the
+built-ins, so they can also take over an extension Hermes already
+handles.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">lsp</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">servers</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">panache</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;panache-lsp&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--stdio&quot;</span><span class="p p-Indicator">]</span><span class="w">   </span><span class="c1"># PATH lookup or an absolute/~ path</span>
+<span class="w">      </span><span class="nt">extensions</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;.pnch&quot;</span><span class="p p-Indicator">]</span><span class="w">                 </span><span class="c1"># or basenames like &quot;Justfile&quot;</span>
+<span class="w">      </span><span class="nt">root_markers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;panache.toml&quot;</span><span class="p p-Indicator">]</span><span class="w">        </span><span class="c1"># nearest dir with one of these; default: workspace root</span>
+<span class="w">      </span><span class="nt">language_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;panache&quot;</span><span class="w">                </span><span class="c1"># didOpen languageId; default: derived from the extension</span>
+<span class="w">      </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Panache</span><span class="nv"> </span><span class="s">markdown&quot;</span>
+<span class="w">      </span><span class="nt">env</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> PANACHE_LOG</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;warn&quot;</span><span class="w"> </span><span class="p p-Indicator">}</span><span class="w">          </span><span class="c1"># same optional keys as built-ins</span>
+<span class="w">      </span><span class="nt">initialization_options</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{}</span>
+</code></pre></div>
+
+<p>Custom servers are never auto-installed: put the binary on PATH (or
+give an absolute path) and <code>hermes lsp status</code> lists it as
+<code>installed</code>. A malformed entry is logged and skipped without
+affecting the other servers.</p>
+<h2 id="installation-locations">Installation locations</h2>
+<p>When <code>install_strategy: auto</code>, Hermes installs binaries into
+<code>&lt;HERMES_HOME&gt;/lsp/bin/</code>. NPM packages land in
+<code>&lt;HERMES_HOME&gt;/lsp/node_modules/</code> with bin symlinks one level up.
+Go binaries come from <code>go install</code> with <code>GOBIN</code> pointed at the
+staging dir.</p>
+<p>Nothing is ever installed to <code>/usr/local/</code>, <code>~/.local/</code>, or any other
+shared location — the staging dir is fully Hermes-owned and is
+removed when you reset the profile.</p>
+<h2 id="performance-characteristics">Performance characteristics</h2>
+<p>LSP servers are <strong>lazy-spawned</strong> on first use. Editing a Python file
+in a project that's never seen <code>.py</code> traffic spawns pyright; the
+spawn takes 1-3 seconds for most servers (rust-analyzer can take 10+
+on a cold project). Subsequent edits in the same workspace re-use
+the running server.</p>
+<p>The LSP layer adds a few milliseconds to clean writes when no
+diagnostics are emitted. When diagnostics are emitted, the wait
+budget is <code>wait_timeout</code> seconds — typically the server responds in
+tens of milliseconds for pyright/tsserver and a few seconds for
+rust-analyzer mid-indexing. Each edit waits twice (a pre-edit
+baseline snapshot for the delta, then the post-edit re-check), so a
+server that never answers costs at most <code>2 × wait_timeout</code> per edit.</p>
+<p>Diagnostics are <strong>freshness-gated</strong>: a result only counts when the
+server produced it for the content of the current edit (a
+<code>publishDiagnostics</code> push at/after the change, or a pull request
+answered after it). Slow servers that haven't re-checked yet result
+in "no data" for that edit — never in yesterday's errors being
+re-reported as current.</p>
+<p>Servers are kept alive while they're being used and shut down after
+<code>lsp.idle_timeout</code> seconds (default 600) with no file activity — a
+long-running gateway that touches many worktrees no longer accumulates
+one language-server process per workspace forever. A reaped server is
+respawned automatically on the next relevant file operation. Set
+<code>idle_timeout: 0</code> to disable reaping and hold every server's index warm
+for the life of the process.</p>
+<p>Servers are also released when their workspace goes away, even if they
+are not idle: removing a Hermes-managed worktree (<code>hermes -w</code> session
+end, Kanban task cleanup, a delegated subagent's pruned worktree) shuts
+down that tree's language servers before <code>git worktree remove</code> runs, and
+the periodic sweep shuts down any server whose project root no longer
+exists on disk (deleted outside Hermes). The sweep is part of the idle
+reaper, so <code>idle_timeout: 0</code> also disables deleted-root reaping; the
+worktree-removal release always runs. A multi-root server only drops the
+vanished folder and keeps serving its sibling roots.</p>
+<p>Servers that support multi-root workspaces (currently pyright) run as a
+<strong>single process</strong> per Hermes process: the first Python project spawns
+it, and every further project root — for example sibling git worktrees
+edited by parallel subagents — is attached to that same server as an
+additional workspace folder instead of starting another copy.</p>
+<h2 id="disabling">Disabling</h2>
+<p>Set <code>lsp.enabled: false</code> in <code>config.yaml</code> to disable the entire
+subsystem. The post-write check falls back to the in-process syntax
+check (<code>ast.parse</code> for Python, <code>json.loads</code> for JSON, etc.) which
+ships unchanged from earlier versions.</p>
+<p>To disable a single language without disabling the whole layer:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">lsp</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">servers</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">rust-analyzer</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">disabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p><strong><code>hermes lsp status</code> shows a server as "missing"</strong></p>
+<p>The binary isn't on PATH and isn't in <code>&lt;HERMES_HOME&gt;/lsp/bin/</code>. Run
+<code>hermes lsp install &lt;server_id&gt;</code> to attempt an auto-install, or
+install the binary manually through the language's normal toolchain.</p>
+<p><strong><code>Backend warnings</code> section in <code>hermes lsp status</code></strong></p>
+<p>Some servers ship as thin wrappers around an external CLI for actual
+diagnostics — they spawn cleanly and accept requests but never emit
+errors when the sidecar binary is missing. The most common case is
+<code>bash-language-server</code>, which delegates diagnostics to <code>shellcheck</code>.
+When <code>hermes lsp status</code> shows a <code>Backend warnings</code> section, install
+the named tool through your OS package manager:</p>
+<div class="highlight"><pre><span></span><code>apt install shellcheck      # Debian / Ubuntu
+brew install shellcheck     # macOS
+scoop install shellcheck    # Windows
+</code></pre></div>
+
+<p>The same warning is logged once at server spawn time in
+<code>~/.hermes/logs/agent.log</code>.</p>
+<p><strong>Server starts but never returns diagnostics</strong></p>
+<p>Check <code>~/.hermes/logs/agent.log</code> for <code>[agent.lsp.client]</code> entries —
+both stderr from the language server and protocol errors land
+there. Some servers (rust-analyzer especially) need to finish a
+project-wide index before they emit per-file diagnostics; the first
+edit after server start may complete with no diagnostics, with
+subsequent edits picking them up.</p>
+<p><strong>Server crashed</strong></p>
+<p>A crashed server is added to the broken-set and won't be retried for
+the rest of the session. Run <code>hermes lsp restart</code> to clear the set;
+the next edit re-spawns.</p>
+<p><strong>Editing a file outside any git repo</strong></p>
+<p>By design, LSP only runs inside a git repository. If the project isn't
+yet initialized, run <code>git init</code> to enable LSP diagnostics. Otherwise the
+in-process syntax-only fallback applies.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/user-guide/features/lsp</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#when-lsp-runs">When LSP runs</a></li>
+<li class="lvl2"><a href="#supported-languages">Supported languages</a></li>
+<li class="lvl3"><a href="#powershell">PowerShell</a></li>
+<li class="lvl3"><a href="#laravel-blade">Laravel Blade</a></li>
+<li class="lvl2"><a href="#cli">CLI</a></li>
+<li class="lvl2"><a href="#configuration">Configuration</a></li>
+<li class="lvl3"><a href="#per-server-keys">Per-server keys</a></li>
+<li class="lvl3"><a href="#custom-servers">Custom servers</a></li>
+<li class="lvl2"><a href="#installation-locations">Installation locations</a></li>
+<li class="lvl2"><a href="#performance-characteristics">Performance characteristics</a></li>
+<li class="lvl2"><a href="#disabling">Disabling</a></li>
+<li class="lvl2"><a href="#troubleshooting">Troubleshooting</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

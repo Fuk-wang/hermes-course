@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Generation Provider Plugins · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">English Docs / developer-guide/video-gen-provider-plugin</span>
+  <span class="langtag">English</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="building-a-video-generation-provider-plugin">Building a Video Generation Provider Plugin</h1>
+<p>Video-gen provider plugins register a backend that services every <code>video_generate</code> tool call. Built-in providers (xAI, FAL, OpenRouter, DeepInfra) ship as plugins. Add a new one, or override a bundled one, by dropping a directory into <code>plugins/video_gen/&lt;name&gt;/</code>.</p>
+<div class="admonition adm-tip"><p class="adm-title">Tip</p>
+<p>Video-gen mirrors <a href="image-gen-provider-plugin.html">Image Generation Provider Plugins</a> almost line-for-line — if you've built an image-gen backend, you already know the shape. The main differences: a <code>capabilities()</code> method advertising modalities/aspect-ratios/durations, and a routing convention (pass <code>image_url</code> to use image-to-video, omit it to use text-to-video — the provider picks the right endpoint internally).</p>
+</div>
+<h2 id="the-unified-surface-one-tool-two-modalities">The unified surface (one tool, two modalities)</h2>
+<p>The <code>video_generate</code> tool exposes two modalities through one parameter:</p>
+<ul>
+<li><strong>Text-to-video</strong> — call with <code>prompt</code> only. The provider routes to its text-to-video endpoint.</li>
+<li><strong>Image-to-video</strong> — call with <code>prompt</code> + <code>image_url</code>. The provider routes to its image-to-video endpoint.</li>
+</ul>
+<p>Edit and extend are intentionally out of scope. Most backends don't support them and the inconsistency would force per-backend prose into the agent's tool description.</p>
+<h2 id="how-discovery-works">How discovery works</h2>
+<p>Hermes scans for video-gen backends in three places:</p>
+<ol>
+<li><strong>Bundled</strong> — <code>&lt;repo&gt;/plugins/video_gen/&lt;name&gt;/</code> (auto-loaded with <code>kind: backend</code>)</li>
+<li><strong>User</strong> — <code>~/.hermes/plugins/video_gen/&lt;name&gt;/</code> (opt-in via <code>plugins.enabled</code>)</li>
+<li><strong>Pip</strong> — packages declaring a <code>hermes_agent.plugins</code> entry point</li>
+</ol>
+<p>Each plugin's <code>register(ctx)</code> function calls <code>ctx.register_video_gen_provider(...)</code>. The active provider is picked by <code>video_gen.provider</code> in <code>config.yaml</code>; <code>hermes tools</code> → Video Generation walks users through selection. Unlike <code>image_generate</code>, there is no in-tree legacy backend — every provider is a plugin.</p>
+<h2 id="directory-structure">Directory structure</h2>
+<div class="highlight"><pre><span></span><code>plugins/video_gen/my-backend/
+├── __init__.py      # VideoGenProvider subclass + register()
+└── plugin.yaml      # Manifest with kind: backend
+</code></pre></div>
+
+<h2 id="the-videogenprovider-abc">The VideoGenProvider ABC</h2>
+<p>Subclass <code>agent.video_gen_provider.VideoGenProvider</code>. Required: <code>name</code> property and <code>generate()</code> method.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/video_gen/my-backend/__init__.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.video_gen_provider</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">VideoGenProvider</span><span class="p">,</span>
+    <span class="n">error_response</span><span class="p">,</span>
+    <span class="n">success_response</span><span class="p">,</span>
+<span class="p">)</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyVideoGenProvider</span><span class="p">(</span><span class="n">VideoGenProvider</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;my-backend&quot;</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">display_name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;My Backend&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_available</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MY_API_KEY&quot;</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">list_models</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]:</span>
+        <span class="c1"># Each entry is a model FAMILY — a name the user picks once.</span>
+        <span class="c1"># Your provider&#39;s generate() routes within the family based on</span>
+        <span class="c1"># whether image_url was passed.</span>
+        <span class="k">return</span> <span class="p">[</span>
+            <span class="p">{</span>
+                <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;fast&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;display&quot;</span><span class="p">:</span> <span class="s2">&quot;Fast&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;speed&quot;</span><span class="p">:</span> <span class="s2">&quot;~30s&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;strengths&quot;</span><span class="p">:</span> <span class="s2">&quot;Cheapest tier&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;price&quot;</span><span class="p">:</span> <span class="s2">&quot;$0.05/s&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;modalities&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="s2">&quot;image&quot;</span><span class="p">],</span>  <span class="c1"># advisory</span>
+            <span class="p">},</span>
+        <span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">default_model</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="s2">&quot;fast&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">capabilities</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">&quot;modalities&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="s2">&quot;image&quot;</span><span class="p">],</span>
+            <span class="s2">&quot;aspect_ratios&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;16:9&quot;</span><span class="p">,</span> <span class="s2">&quot;9:16&quot;</span><span class="p">],</span>
+            <span class="s2">&quot;resolutions&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;720p&quot;</span><span class="p">,</span> <span class="s2">&quot;1080p&quot;</span><span class="p">],</span>
+            <span class="s2">&quot;min_duration&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+            <span class="s2">&quot;max_duration&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+            <span class="s2">&quot;supports_audio&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span>
+            <span class="s2">&quot;supports_negative_prompt&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+            <span class="s2">&quot;max_reference_images&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_setup_schema</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;My Backend&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;badge&quot;</span><span class="p">:</span> <span class="s2">&quot;paid&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;tag&quot;</span><span class="p">:</span> <span class="s2">&quot;Short description shown in `hermes tools`&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;env_vars&quot;</span><span class="p">:</span> <span class="p">[</span>
+                <span class="p">{</span>
+                    <span class="s2">&quot;key&quot;</span><span class="p">:</span> <span class="s2">&quot;MY_API_KEY&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;prompt&quot;</span><span class="p">:</span> <span class="s2">&quot;My Backend API key&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;url&quot;</span><span class="p">:</span> <span class="s2">&quot;https://mybackend.example.com/keys&quot;</span><span class="p">,</span>
+                <span class="p">},</span>
+            <span class="p">],</span>
+        <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">generate</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">prompt</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">model</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">image_url</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">reference_image_urls</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">duration</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">aspect_ratio</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;16:9&quot;</span><span class="p">,</span>
+        <span class="n">resolution</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;720p&quot;</span><span class="p">,</span>
+        <span class="n">negative_prompt</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">audio</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">bool</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">seed</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>  <span class="c1"># always ignore unknown kwargs for forward-compat</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="c1"># ROUTE: image_url presence picks the endpoint.</span>
+        <span class="k">if</span> <span class="n">image_url</span><span class="p">:</span>
+            <span class="n">endpoint</span> <span class="o">=</span> <span class="s2">&quot;my-backend/image-to-video&quot;</span>
+            <span class="n">modality_used</span> <span class="o">=</span> <span class="s2">&quot;image&quot;</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">endpoint</span> <span class="o">=</span> <span class="s2">&quot;my-backend/text-to-video&quot;</span>
+            <span class="n">modality_used</span> <span class="o">=</span> <span class="s2">&quot;text&quot;</span>
+
+        <span class="c1"># ... call your API ...</span>
+
+        <span class="k">return</span> <span class="n">success_response</span><span class="p">(</span>
+            <span class="n">video</span><span class="o">=</span><span class="s2">&quot;https://your-cdn/output.mp4&quot;</span><span class="p">,</span>
+            <span class="n">model</span><span class="o">=</span><span class="n">model</span> <span class="ow">or</span> <span class="s2">&quot;fast&quot;</span><span class="p">,</span>
+            <span class="n">prompt</span><span class="o">=</span><span class="n">prompt</span><span class="p">,</span>
+            <span class="n">modality</span><span class="o">=</span><span class="n">modality_used</span><span class="p">,</span>
+            <span class="n">aspect_ratio</span><span class="o">=</span><span class="n">aspect_ratio</span><span class="p">,</span>
+            <span class="n">duration</span><span class="o">=</span><span class="n">duration</span> <span class="ow">or</span> <span class="mi">5</span><span class="p">,</span>
+            <span class="n">provider</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+        <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">register_video_gen_provider</span><span class="p">(</span><span class="n">MyVideoGenProvider</span><span class="p">())</span>
+</code></pre></div>
+
+<h2 id="the-plugin-manifest">The plugin manifest</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># plugins/video_gen/my-backend/plugin.yaml</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-backend</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.0.0</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;My</span><span class="nv"> </span><span class="s">video</span><span class="nv"> </span><span class="s">generation</span><span class="nv"> </span><span class="s">backend&quot;</span>
+<span class="nt">author</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Your Name</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backend</span>
+<span class="nt">requires_env</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MY_API_KEY</span>
+</code></pre></div>
+
+<h2 id="the-video_generate-schema">The <code>video_generate</code> schema</h2>
+<p>The tool exposes one schema across every backend. Providers ignore parameters they don't support.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>prompt</code></td>
+<td>Text instruction (required)</td>
+</tr>
+<tr>
+<td><code>image_url</code></td>
+<td>When set → image-to-video; when omitted → text-to-video</td>
+</tr>
+<tr>
+<td><code>reference_image_urls</code></td>
+<td>Style/character refs (provider-dependent)</td>
+</tr>
+<tr>
+<td><code>duration</code></td>
+<td>Seconds — provider clamps</td>
+</tr>
+<tr>
+<td><code>aspect_ratio</code></td>
+<td><code>"16:9"</code>, <code>"9:16"</code>, <code>"1:1"</code>, ... — provider clamps</td>
+</tr>
+<tr>
+<td><code>resolution</code></td>
+<td><code>"480p"</code> / <code>"540p"</code> / <code>"720p"</code> / <code>"1080p"</code> — provider clamps</td>
+</tr>
+<tr>
+<td><code>negative_prompt</code></td>
+<td>Content to avoid (Pixverse/Kling only)</td>
+</tr>
+<tr>
+<td><code>audio</code></td>
+<td>Native audio (Veo3 / Pixverse pricing tier)</td>
+</tr>
+<tr>
+<td><code>seed</code></td>
+<td>Reproducibility</td>
+</tr>
+</tbody>
+</table>
+<p>There is deliberately no <code>model</code> parameter: the backend and model are user configuration (<code>video_gen.provider</code> / <code>video_gen.model</code>), never an agent choice. Your <code>generate()</code> still receives <code>model=</code> — it is the configured model, resolved by the tool layer.</p>
+<p>The provider's <code>capabilities()</code> advertises which of these are honored. The agent sees the active backend's capabilities in the tool description, dynamically rebuilt when the user changes backend via <code>hermes tools</code>.</p>
+<h2 id="model-families-and-endpoint-routing-the-fal-pattern">Model families and endpoint routing (the FAL pattern)</h2>
+<p>When your backend has multiple endpoints per "model" — like FAL, where every family (Veo 3.1, Pixverse v6, Kling O3) has both a <code>/text-to-video</code> and an <code>/image-to-video</code> URL — represent each <strong>family</strong> as one catalog entry. Your <code>generate()</code> picks the right endpoint based on whether <code>image_url</code> was passed:</p>
+<div class="highlight"><pre><span></span><code><span class="n">FAMILIES</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;veo3.1&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;text_endpoint&quot;</span><span class="p">:</span> <span class="s2">&quot;fal-ai/veo3.1&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;image_endpoint&quot;</span><span class="p">:</span> <span class="s2">&quot;fal-ai/veo3.1/image-to-video&quot;</span><span class="p">,</span>
+        <span class="c1"># ... family-specific capability flags ...</span>
+    <span class="p">},</span>
+<span class="p">}</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">generate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">prompt</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">image_url</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">family_id</span><span class="p">,</span> <span class="n">family</span> <span class="o">=</span> <span class="n">_resolve_family</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+    <span class="n">endpoint</span> <span class="o">=</span> <span class="n">family</span><span class="p">[</span><span class="s2">&quot;image_endpoint&quot;</span><span class="p">]</span> <span class="k">if</span> <span class="n">image_url</span> <span class="k">else</span> <span class="n">family</span><span class="p">[</span><span class="s2">&quot;text_endpoint&quot;</span><span class="p">]</span>
+    <span class="c1"># ... build payload from family&#39;s declared capability flags, call endpoint ...</span>
+</code></pre></div>
+
+<p>The user picks <code>veo3.1</code> once in <code>hermes tools</code>. The agent never thinks about endpoints — it just passes (or doesn't pass) <code>image_url</code>.</p>
+<h2 id="selection-precedence">Selection precedence</h2>
+<p>For per-instance model knobs (see <code>plugins/video_gen/fal/__init__.py</code>):</p>
+<ol>
+<li><code>&lt;PROVIDER&gt;_VIDEO_MODEL</code> env var</li>
+<li><code>video_gen.&lt;provider&gt;.model</code> in <code>config.yaml</code></li>
+<li><code>video_gen.model</code> in <code>config.yaml</code> (when it's one of your IDs)</li>
+<li>Provider's <code>default_model()</code></li>
+</ol>
+<p>The <code>model=</code> keyword your <code>generate()</code> receives is the outcome of this resolution — a <code>model</code> in the agent's tool call is ignored, so the LLM cannot switch backends or billing tiers on its own.</p>
+<h2 id="response-shape">Response shape</h2>
+<p><code>success_response()</code> and <code>error_response()</code> produce the dict shape every backend returns. Use them — don't hand-roll the dict.</p>
+<p>Success keys: <code>success</code>, <code>video</code> (URL or absolute path), <code>model</code>, <code>prompt</code>, <code>modality</code> (<code>"text"</code> or <code>"image"</code>), <code>aspect_ratio</code>, <code>duration</code>, <code>provider</code>, plus <code>extra</code>.</p>
+<p>Error keys: <code>success</code>, <code>video</code> (None), <code>error</code>, <code>error_type</code>, <code>model</code>, <code>prompt</code>, <code>aspect_ratio</code>, <code>provider</code>.</p>
+<h2 id="where-to-save-artifacts">Where to save artifacts</h2>
+<p>If your backend returns base64, use <code>save_b64_video()</code> to write under <code>$HERMES_HOME/cache/videos/</code>. For raw bytes from a follow-up HTTP fetch, use <code>save_bytes_video()</code>. Otherwise return the upstream URL directly — the gateway resolves remote URLs on delivery.</p>
+<h2 id="testing">Testing</h2>
+<p>Drop a smoke test under <code>tests/plugins/video_gen/test_&lt;name&gt;_plugin.py</code>. The xAI and FAL tests show the pattern — register, verify catalog, exercise routing both with and without <code>image_url</code>, assert clean error responses on missing auth.</p>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/developer-guide/video-gen-provider-plugin</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#the-unified-surface-one-tool-two-modalities">The unified surface (one tool, two modalities)</a></li>
+<li class="lvl2"><a href="#how-discovery-works">How discovery works</a></li>
+<li class="lvl2"><a href="#directory-structure">Directory structure</a></li>
+<li class="lvl2"><a href="#the-videogenprovider-abc">The VideoGenProvider ABC</a></li>
+<li class="lvl2"><a href="#the-plugin-manifest">The plugin manifest</a></li>
+<li class="lvl2"><a href="#the-video_generate-schema">The video_generate schema</a></li>
+<li class="lvl2"><a href="#model-families-and-endpoint-routing-the-fal-pattern">Model families and endpoint routing (the FAL pattern)</a></li>
+<li class="lvl2"><a href="#selection-precedence">Selection precedence</a></li>
+<li class="lvl2"><a href="#response-shape">Response shape</a></li>
+<li class="lvl2"><a href="#where-to-save-artifacts">Where to save artifacts</a></li>
+<li class="lvl2"><a href="#testing">Testing</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>

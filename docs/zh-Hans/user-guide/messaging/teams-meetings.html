@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teams 会议 · Hermes Agent 文档</title>
+<link rel="stylesheet" href="../../../../assets/style.css">
+</head>
+<body class="doc-body">
+<header class="topbar">
+  <a class="brand" href="../../../../index.html">Hermes Agent 课程</a>
+  <span class="crumb">中文文档 / user-guide/messaging/teams-meetings</span>
+  <span class="langtag">中文</span>
+</header>
+<div class="docwrap">
+  <main class="docmain">
+    <article class="doccontent">
+<h1 id="microsoft-teams-会议">Microsoft Teams 会议</h1>
+<p>当你希望 Hermes 接收 Microsoft Graph 会议事件、优先获取转录文本、在无可用转录时回退到录音加 STT（语音转文字），并将结构化摘要输出到下游 sink 时，请使用 Teams 会议流水线。</p>
+<p>本页重点介绍配置与启用：
+- Graph 凭据
+- webhook 监听器配置
+- Teams 投递模式
+- 流水线配置结构</p>
+<p>关于上线后的日常运维、上线检查及运维工作表，请参阅专项指南：<a href="../../guides/operate-teams-meeting-pipeline.html">运维 Teams 会议流水线</a>。</p>
+<h2 id="功能说明">功能说明</h2>
+<p>该流水线：
+1. 接收 Microsoft Graph webhook 事件
+2. 解析会议并优先使用转录文件
+3. 在无可用转录时回退到录音下载加 STT
+4. 在本地存储持久化任务状态和 sink 记录
+5. 可将摘要写入 Notion、Linear 和 Microsoft Teams</p>
+<p>运维操作通过 CLI 完成（<code>teams-pipeline</code> 子命令由 <code>teams_pipeline</code> 插件注册——通过 <code>hermes plugins enable teams_pipeline</code> 启用，或在 <code>config.yaml</code> 中设置 <code>plugins.enabled: [teams_pipeline]</code>）：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>validate
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>list
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>maintain-subscriptions
+</code></pre></div>
+
+<h2 id="前提条件">前提条件</h2>
+<p>启用会议流水线前，请确保已具备：</p>
+<ul>
+<li>可正常运行的 Hermes 安装</li>
+<li>若需要 Teams 出站投递，需完成现有的 <a href="teams.html">Microsoft Teams bot 配置</a></li>
+<li>具备订阅所需会议资源权限的 Microsoft Graph 应用凭据</li>
+<li>Microsoft Graph 可调用的公网 HTTPS URL，用于 webhook 投递</li>
+<li>若需要录音加 STT 回退，需安装 <code>ffmpeg</code></li>
+</ul>
+<h2 id="第一步添加-microsoft-graph-凭据">第一步：添加 Microsoft Graph 凭据</h2>
+<p>将 Graph 应用凭据添加到 <code>~/.hermes/.env</code>：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MSGRAPH_TENANT_ID</span><span class="o">=</span>&lt;tenant-id&gt;
+<span class="nv">MSGRAPH_CLIENT_ID</span><span class="o">=</span>&lt;client-id&gt;
+<span class="nv">MSGRAPH_CLIENT_SECRET</span><span class="o">=</span>&lt;client-secret&gt;
+</code></pre></div>
+
+<p>这些凭据用于：
+- Graph 客户端基础层
+- 订阅维护命令
+- 会议解析和文件获取
+- 未提供专用 Teams 访问令牌时，通过 Graph 进行 Teams 出站投递</p>
+<h2 id="第二步启用-graph-webhook-监听器">第二步：启用 Graph Webhook 监听器</h2>
+<p>webhook 监听器是一个名为 <code>msgraph_webhook</code> 的 gateway 平台。至少需要启用它并设置一个 client state 值：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MSGRAPH_WEBHOOK_ENABLED</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">MSGRAPH_WEBHOOK_PORT</span><span class="o">=</span><span class="m">8646</span>
+<span class="nv">MSGRAPH_WEBHOOK_CLIENT_STATE</span><span class="o">=</span>&lt;random-shared-secret&gt;
+<span class="nv">MSGRAPH_WEBHOOK_ACCEPTED_RESOURCES</span><span class="o">=</span>communications/onlineMeetings
+</code></pre></div>
+
+<p>监听器暴露以下端点：
+- <code>/msgraph/webhook</code> 用于接收 Graph 通知
+- <code>/health</code> 用于简单健康检查</p>
+<p>你需要将公网 HTTPS 端点路由到该监听器。例如，若你的公网域名为 <code>https://ops.example.com</code>，Graph 通知 URL 通常为：</p>
+<div class="highlight"><pre><span></span><code>https://ops.example.com/msgraph/webhook
+</code></pre></div>
+
+<h2 id="第三步配置-teams-投递与流水线行为">第三步：配置 Teams 投递与流水线行为</h2>
+<p>会议流水线从现有的 <code>teams</code> 平台条目读取运行时配置。流水线专属参数位于 <code>teams.extra.meeting_pipeline</code> 下。Teams 出站投递仍使用常规 Teams 平台配置。</p>
+<p><code>~/.hermes/config.yaml</code> 示例：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">msgraph_webhook</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8646</span>
+<span class="w">      </span><span class="nt">client_state</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;replace-me&quot;</span>
+<span class="w">      </span><span class="nt">accepted_resources</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;communications/onlineMeetings&quot;</span>
+
+<span class="w">  </span><span class="nt">teams</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">client_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-teams-client-id&quot;</span>
+<span class="w">      </span><span class="nt">client_secret</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-teams-client-secret&quot;</span>
+<span class="w">      </span><span class="nt">tenant_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-teams-tenant-id&quot;</span>
+
+<span class="w">      </span><span class="c1"># outbound summary delivery</span>
+<span class="w">      </span><span class="nt">delivery_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;graph&quot;</span><span class="w"> </span><span class="c1"># or incoming_webhook</span>
+<span class="w">      </span><span class="nt">team_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;team-id&quot;</span>
+<span class="w">      </span><span class="nt">channel_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;channel-id&quot;</span>
+<span class="w">      </span><span class="c1"># incoming_webhook_url: &quot;https://...&quot;</span>
+
+<span class="w">      </span><span class="nt">meeting_pipeline</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">transcript_min_chars</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">80</span>
+<span class="w">        </span><span class="nt">transcript_required</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">        </span><span class="nt">transcription_fallback</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">        </span><span class="nt">ffmpeg_extract_audio</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">        </span><span class="nt">notion</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">        </span><span class="nt">linear</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+
+<h2 id="teams-投递模式">Teams 投递模式</h2>
+<p>流水线在现有 Teams 插件内支持两种 Teams 摘要投递模式。</p>
+<h3 id="incoming_webhook"><code>incoming_webhook</code></h3>
+<p>当你希望通过简单的 webhook 将消息发送到 Teams，而无需通过 Graph 创建频道消息时，使用此模式。</p>
+<p>所需配置：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">teams</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">delivery_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;incoming_webhook&quot;</span>
+<span class="w">      </span><span class="nt">incoming_webhook_url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://...&quot;</span>
+</code></pre></div>
+
+<h3 id="graph"><code>graph</code></h3>
+<p>当你希望 Hermes 通过 Microsoft Graph 将摘要发送到 Teams 聊天或频道时，使用此模式。</p>
+<p>支持的目标：
+- <code>chat_id</code>
+- <code>team_id</code> + <code>channel_id</code>
+- 现有 Teams 平台的 <code>team_id</code> + <code>home_channel</code> 回退</p>
+<p>示例：</p>
+<div class="highlight"><pre><span></span><code><span class="nt">platforms</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">teams</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">extra</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">delivery_mode</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;graph&quot;</span>
+<span class="w">      </span><span class="nt">team_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;team-id&quot;</span>
+<span class="w">      </span><span class="nt">channel_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;channel-id&quot;</span>
+</code></pre></div>
+
+<h2 id="第四步启动-gateway">第四步：启动 Gateway</h2>
+<p>更新配置后正常启动 Hermes：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>gateway<span class="w"> </span>run
+</code></pre></div>
+
+<p>若你在 Docker 中运行 Hermes，按现有部署方式启动 gateway 即可。</p>
+<p>检查监听器：</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8646/health
+</code></pre></div>
+
+<h2 id="第五步创建-graph-订阅">第五步：创建 Graph 订阅</h2>
+<p>使用插件 CLI 创建和查看订阅。</p>
+<p>示例：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>subscribe<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--resource<span class="w"> </span>communications/onlineMeetings/getAllTranscripts<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--notification-url<span class="w"> </span>https://ops.example.com/msgraph/webhook<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--client-state<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$MSGRAPH_WEBHOOK_CLIENT_STATE</span><span class="s2">&quot;</span>
+
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>subscribe<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--resource<span class="w"> </span>communications/onlineMeetings/getAllRecordings<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--notification-url<span class="w"> </span>https://ops.example.com/msgraph/webhook<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--client-state<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$MSGRAPH_WEBHOOK_CLIENT_STATE</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<div class="admonition adm-warning"><p class="adm-title">Graph 订阅在 72 小时后过期</p>
+<p>Microsoft Graph 将 webhook 订阅上限设为 72 小时，且不会自动续期。你<strong>必须</strong>在上线前调度 <code>hermes teams-pipeline maintain-subscriptions</code>，否则通知将在手动创建订阅三天后静默停止。请参阅运维手册中的<a href="../../../guides/operate-teams-meeting-pipeline.html#automating-subscription-renewal-required-for-production" class="enfallback" title="中文页尚无此小节，指向英文原页对应位置">自动化订阅续期</a>——提供三种方案（Hermes cron、systemd timer、普通 crontab）。</p>
+</div>
+<p>关于订阅维护和上线后的运维流程，请继续阅读指南：<a href="../../guides/operate-teams-meeting-pipeline.html">运维 Teams 会议流水线</a>。</p>
+<h2 id="验证">验证</h2>
+<p>运行内置验证快照：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>validate
+</code></pre></div>
+
+<p>常用辅助检查：</p>
+<div class="highlight"><pre><span></span><code>hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>token-health
+hermes<span class="w"> </span>teams-pipeline<span class="w"> </span>subscriptions
+</code></pre></div>
+
+<h2 id="故障排查">故障排查</h2>
+<table>
+<thead>
+<tr>
+<th>问题</th>
+<th>检查项</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Graph webhook 验证失败</td>
+<td>确认公网 URL 正确且可访问，并确认 Graph 调用的路径为 <code>/msgraph/webhook</code></td>
+</tr>
+<tr>
+<td><code>hermes teams-pipeline list</code> 中未出现任务</td>
+<td>确认 <code>msgraph_webhook</code> 已启用，且订阅指向正确的通知 URL</td>
+</tr>
+<tr>
+<td>转录优先从未成功</td>
+<td>检查转录资源的 Graph 权限，以及该会议是否存在转录文件</td>
+</tr>
+<tr>
+<td>录音回退失败</td>
+<td>确认已安装 <code>ffmpeg</code>，且 Graph 应用可访问录音文件</td>
+</tr>
+<tr>
+<td>Teams 摘要投递失败</td>
+<td>重新检查 <code>delivery_mode</code>、目标 ID 及 Teams 认证配置</td>
+</tr>
+</tbody>
+</table>
+<h2 id="相关文档">相关文档</h2>
+<ul>
+<li><a href="teams.html">Microsoft Teams bot 配置</a></li>
+<li><a href="../../guides/operate-teams-meeting-pipeline.html">运维 Teams 会议流水线</a></li>
+</ul>
+    </article>
+    <footer class="docfoot">
+      <p>本页为<b>本地离线镜像</b>，内容来自 Hermes Agent 官方文档源码（Hermes Agent v0.21.3 (2026.9.14) · upstream b5251aa4）。</p>
+      <p>原始地址：<code>https://hermes-agent.nousresearch.com/docs/zh-Hans/user-guide/messaging/teams-meetings</code></p>
+    </footer>
+  </main>
+  <aside class="doctoc">
+    <p class="tochead">本页目录</p>
+<ul class="toclist">
+<li class="lvl2"><a href="#功能说明">功能说明</a></li>
+<li class="lvl2"><a href="#前提条件">前提条件</a></li>
+<li class="lvl2"><a href="#第一步添加-microsoft-graph-凭据">第一步：添加 Microsoft Graph 凭据</a></li>
+<li class="lvl2"><a href="#第二步启用-graph-webhook-监听器">第二步：启用 Graph Webhook 监听器</a></li>
+<li class="lvl2"><a href="#第三步配置-teams-投递与流水线行为">第三步：配置 Teams 投递与流水线行为</a></li>
+<li class="lvl2"><a href="#teams-投递模式">Teams 投递模式</a></li>
+<li class="lvl3"><a href="#incoming_webhook">incoming_webhook</a></li>
+<li class="lvl3"><a href="#graph">graph</a></li>
+<li class="lvl2"><a href="#第四步启动-gateway">第四步：启动 Gateway</a></li>
+<li class="lvl2"><a href="#第五步创建-graph-订阅">第五步：创建 Graph 订阅</a></li>
+<li class="lvl2"><a href="#验证">验证</a></li>
+<li class="lvl2"><a href="#故障排查">故障排查</a></li>
+<li class="lvl2"><a href="#相关文档">相关文档</a></li>
+</ul>
+  </aside>
+</div>
+</body>
+</html>
