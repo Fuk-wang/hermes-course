@@ -475,12 +475,10 @@
       var fw = document.createElement('span');
       fw.className = 'pvline mono';
       fw.style.display = 'none';
-      fw.title = '不蒜子计数：site_pv / site_uv 按域名 fuk-wang.github.io 汇总，与同域名的 lmapi 站共享';
+      fw.title = '不蒜子计数：site_pv / site_uv 按域名 fuk-wang.github.io 汇总，与同域名的 lmapi 站共享；首页自身的 page_pv 会因 /hermes-course/ 与 /hermes-course/index.html 两个 URL 变体被拆开，故不在页脚显示';
       fw.innerHTML =
-        '<span id="busuanzi_container_page_pv" style="display:none">本页 <b id="busuanzi_value_page_pv">–</b> 次</span>' +
         '<span id="busuanzi_container_site_pv" style="display:none">全站累计 <b id="busuanzi_value_site_pv">–</b> 次 / <b id="busuanzi_value_site_uv">–</b> 人</span>';
       foot.appendChild(fw);
-      reveal(fw, $('#busuanzi_container_page_pv', fw));
       reveal(fw, $('#busuanzi_container_site_pv', fw));
     }
 
