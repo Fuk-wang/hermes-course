@@ -446,6 +446,62 @@
     bar.appendChild(b);
   }
 
+  /* --------------------------------------------- 浏览量（不蒜子计数器 2.3）--
+     数据来源：向 busuanzi.ibruce.info 发一次 JSONP（只在 http/https 下请求）。
+     · 按域名汇总：site_pv / site_uv 是整个 fuk-wang.github.io 的累计值（与同域名的
+       lmapi 站共享），page_pv 才是当前页面自己的浏览量。
+     · 断网或 file:// 直接打开时：不请求、不显示，页面其余功能不受影响——
+       统计行默认隐藏，只有计数返回后才由 busuanzi 摘掉内层的 display:none。
+     · 想撤掉统计：删掉本函数和 boot() 里的 initPv() 调用即可，不动任何 HTML。   */
+  function initPv() {
+    if (!/^https?:$/.test(location.protocol)) { return; }
+    var foot = $('.sitefoot .in');
+    var docfoot = $('.docfoot');
+    if (!foot && !docfoot) { return; }
+
+    /* 计数回来（busuanzi 把内层容器设成 inline）时，再把外层统计行露出来 */
+    function reveal(outer, inner) {
+      if (!outer || !inner) { return; }
+      var mo = new MutationObserver(function () {
+        if (inner.style.display !== 'none' && inner.style.display !== '') {
+          outer.style.display = ''; mo.disconnect();
+        }
+      });
+      mo.observe(inner, { attributes: true, childList: true, subtree: true });
+      setTimeout(function () { mo.disconnect(); }, 20000);
+    }
+
+    if (foot) {
+      var fw = document.createElement('span');
+      fw.className = 'pvline mono';
+      fw.style.display = 'none';
+      fw.title = '不蒜子计数：site_pv / site_uv 按域名 fuk-wang.github.io 汇总，与同域名的 lmapi 站共享';
+      fw.innerHTML =
+        '<span id="busuanzi_container_page_pv" style="display:none">本页 <b id="busuanzi_value_page_pv">–</b> 次</span>' +
+        '<span id="busuanzi_container_site_pv" style="display:none">全站累计 <b id="busuanzi_value_site_pv">–</b> 次 / <b id="busuanzi_value_site_uv">–</b> 人</span>';
+      foot.appendChild(fw);
+      reveal(fw, $('#busuanzi_container_page_pv', fw));
+      reveal(fw, $('#busuanzi_container_site_pv', fw));
+    }
+
+    if (docfoot) {
+      var dw = document.createElement('span');
+      dw.className = 'pvline';
+      dw.style.display = 'none';
+      dw.title = '不蒜子计数：本页浏览量（按 URL 逐页统计）';
+      dw.innerHTML = '<span id="busuanzi_container_page_pv" style="display:none">本页浏览 <b id="busuanzi_value_page_pv">–</b> 次</span>';
+      docfoot.appendChild(dw);
+      reveal(dw, $('#busuanzi_container_page_pv', dw));
+    }
+
+    var s = document.createElement('script');
+    s.async = true;
+    s.defer = true;
+    s.src = 'https://busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js';
+    s.referrerPolicy = 'no-referrer-when-downgrade';
+    document.head.appendChild(s);
+  }
+
   /* ------------------------------------------------------------------- 启动 */
   function boot() {
     enhanceDocPages();
@@ -458,6 +514,7 @@
     initToc();
     initReadbar();
     initPalette();
+    initPv();
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
