@@ -3,6 +3,10 @@
 单页产品展示站，整个站点就是根目录这一个 `index.html`：样式、图标（内联 SVG）、
 交互脚本全部写在里面，不引用 CDN、外部字体和外部图片。双击就能离线打开。
 
+线上地址：https://fuk-wang.github.io/hermes-course/workbuddy/
+（当前由 hermes-course 仓库的 Pages 托管这个子目录；独立仓库 workbuddy-homes
+的本地仓库已就绪，建好远端后 push 即可搬到 https://fuk-wang.github.io/workbuddy-homes/）
+
 本地打开
 -----------------------------------------------------
 - 直接双击 index.html（file:// 打开也完全正常，这是设计场景）
